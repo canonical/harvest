@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "knowledge-harvester",
+    "knowledge-server",
+]
+resolver = "2"
