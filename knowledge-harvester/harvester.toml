@@ -1,0 +1,13 @@
+[neo4j]
+uri      = "bolt://localhost:7687"
+user     = "neo4j"
+password = "devpassword"
+
+[storage]
+# Directory where repos are cloned. Created automatically if absent.
+clone_root = "/tmp/harvest-repos"
+
+# Add one [[repositories]] block per repo you want to harvest.
+[[repositories]]
+name = "example-repo"
+url  = "https://github.com/rust-lang/regex.git"
