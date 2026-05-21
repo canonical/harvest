@@ -4,11 +4,11 @@ Harvest is a two-component system for extracting, storing, and querying structur
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     knowledge-harvester                      │
+│                     knowledge-harvester                     │
 │                                                             │
-│  config.toml ──► repo list ──► git clone / fetch           │
+│  config.toml ──► repo list ──► git clone / fetch            │
 │                                    │                        │
-│                               list git tags                  │
+│                               list git tags                 │
 │                                    │                        │
 │                          for each tag (version):            │
 │                            checkout ──► tree-sitter parse   │
@@ -19,13 +19,13 @@ Harvest is a two-component system for extracting, storing, and querying structur
                            Neo4j DB
                                 │
 ┌─────────────────────────────────────────────────────────────┐
-│                      knowledge-server                        │
+│                      knowledge-server                       │
 │                                                             │
 │  HTTP POST /query                                           │
 │       │                                                     │
 │       ▼                                                     │
 │  agentic loop:                                              │
-│    LLM ◄──► graph query tools (Cypher over Neo4j)          │
+│    LLM ◄──► graph query tools (Cypher over Neo4j)           │
 │       │                                                     │
 │       ▼                                                     │
 │  structured answer + sources [repo:version:file:line]       │
