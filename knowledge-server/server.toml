@@ -1,0 +1,25 @@
+[server]
+host = "127.0.0.1"
+port = 8080
+
+[neo4j]
+uri      = "bolt://localhost:7687"
+user     = "neo4j"
+password = "devpassword"
+
+# --- Pick ONE [llm] block and delete the other ---
+
+# Option A: Anthropic (Claude)
+[llm]
+provider       = "anthropic"
+model          = "claude-sonnet-4-6"
+api_key        = "sk-ant-..."   # or set ANTHROPIC_API_KEY and read it in code
+max_iterations = 20
+
+# Option B: OpenAI-compatible (Groq, Ollama, etc.)
+# [llm]
+# provider  = "openai-compat"
+# base_url  = "https://api.groq.com/openai/v1"
+# api_key   = "gsk_..."
+# model     = "llama-3.3-70b-versatile"
+# max_iterations = 20
