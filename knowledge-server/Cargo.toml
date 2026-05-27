@@ -39,3 +39,9 @@ async-trait  = "0.1"
 # Logging
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+http-body-util = "0.1.3"
+httpmock = "0.8.3"
+neo4j_testcontainers = "0.3"
+testcontainers = "0.16"
