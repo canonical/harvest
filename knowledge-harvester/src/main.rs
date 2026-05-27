@@ -1,8 +1,4 @@
-mod config;
-mod git;
-mod graph;
-mod parser;
-mod pipeline;
+use knowledge_harvester::{config, pipeline};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
