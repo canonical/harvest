@@ -65,7 +65,7 @@ pub struct CallEdge {
     pub line: u32,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ParsedFile {
     pub path: String,
     pub language: String,

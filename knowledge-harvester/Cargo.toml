@@ -45,3 +45,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Async trait support
 async-trait  = "0.1"
+
+[dev-dependencies]
+neo4j_testcontainers = "0.3"
+tempfile = "3.27.0"
+testcontainers = "0.16"
