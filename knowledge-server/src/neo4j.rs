@@ -38,16 +38,5 @@ impl Neo4jClient {
 }
 
 fn row_to_json(row: &Row) -> Value {
-    let mut map = serde_json::Map::new();
-    for key in row.keys() {
-        let val = row
-            .get::<String>(key)
-            .map(Value::String)
-            .or_else(|_| row.get::<i64>(key).map(|n| Value::from(n)))
-            .or_else(|_| row.get::<f64>(key).map(|n| Value::from(n)))
-            .or_else(|_| row.get::<bool>(key).map(Value::Bool))
-            .unwrap_or(Value::Null);
-        map.insert(key.to_string(), val);
-    }
-    Value::Object(map)
+    row.to::<Value>().unwrap_or(Value::Null)
 }
