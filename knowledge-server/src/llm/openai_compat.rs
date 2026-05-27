@@ -139,3 +139,260 @@ fn parse_openai_response(json: Value) -> Result<LlmResponse> {
     let text = message["content"].as_str().unwrap_or("").to_string();
     Ok(LlmResponse::Message { text })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use httpmock::prelude::*;
+    use serde_json::json;
+
+    fn make_provider(base_url: &str) -> OpenAiCompatProvider {
+        OpenAiCompatProvider::new(base_url.into(), "test-key".into(), "test-model".into())
+    }
+
+    // ── parse_openai_response ─────────────────────────────────────────────────
+
+    #[test]
+    fn parse_stop_returns_message() {
+        let json = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": { "role": "assistant", "content": "Hello!" }
+            }]
+        });
+        match parse_openai_response(json).unwrap() {
+            LlmResponse::Message { text } => assert_eq!(text, "Hello!"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_calls_finish_reason_returns_tool_calls() {
+        let json = json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "search_symbols",
+                            "arguments": "{\"query\":\"alpha\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        match parse_openai_response(json).unwrap() {
+            LlmResponse::ToolCalls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, "call_1");
+                assert_eq!(calls[0].name, "search_symbols");
+                assert_eq!(calls[0].input["query"], "alpha");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_two_tool_calls() {
+        let json = json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "tool_calls": [
+                        { "id": "a", "function": { "name": "tool_a", "arguments": "{}" } },
+                        { "id": "b", "function": { "name": "tool_b", "arguments": "{}" } }
+                    ]
+                }
+            }]
+        });
+        match parse_openai_response(json).unwrap() {
+            LlmResponse::ToolCalls(calls) => assert_eq!(calls.len(), 2),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_malformed_arguments_defaults_to_null() {
+        let json = json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "tool_calls": [{
+                        "id": "x",
+                        "function": { "name": "t", "arguments": "NOT JSON" }
+                    }]
+                }
+            }]
+        });
+        match parse_openai_response(json).unwrap() {
+            LlmResponse::ToolCalls(calls) => assert_eq!(calls[0].input, serde_json::Value::Null),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // ── to_openai_message ─────────────────────────────────────────────────────
+
+    #[test]
+    fn system_message_maps_to_system_role() {
+        let msg = Message::system("be helpful");
+        let v = to_openai_message(&msg);
+        assert_eq!(v["role"], "system");
+        assert_eq!(v["content"], "be helpful");
+    }
+
+    #[test]
+    fn user_text_message_maps_to_user_role() {
+        let msg = Message::user("hello");
+        let v = to_openai_message(&msg);
+        assert_eq!(v["role"], "user");
+        assert_eq!(v["content"], "hello");
+    }
+
+    #[test]
+    fn assistant_tool_use_parts_produce_tool_calls_array() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: MessageContent::Parts(vec![ContentPart::ToolUse {
+                id: "call_1".into(),
+                name: "my_tool".into(),
+                input: json!({ "k": "v" }),
+            }]),
+        };
+        let v = to_openai_message(&msg);
+        assert_eq!(v["role"], "assistant");
+        let tool_calls = v["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls[0]["id"], "call_1");
+        assert_eq!(tool_calls[0]["type"], "function");
+        assert_eq!(tool_calls[0]["function"]["name"], "my_tool");
+    }
+
+    #[test]
+    fn tool_result_part_maps_to_tool_role() {
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                tool_use_id: "call_1".into(),
+                content: "result text".into(),
+                is_error: false,
+            }]),
+        };
+        let v = to_openai_message(&msg);
+        assert_eq!(v["role"], "tool");
+        assert_eq!(v["tool_call_id"], "call_1");
+        assert_eq!(v["content"], "result text");
+    }
+
+    // ── to_openai_function ────────────────────────────────────────────────────
+
+    #[test]
+    fn tool_definition_has_function_type_wrapper() {
+        let def = ToolDefinition {
+            name: "my_tool".into(),
+            description: "does stuff".into(),
+            parameters: json!({ "type": "object" }),
+        };
+        let v = to_openai_function(&def);
+        assert_eq!(v["type"], "function");
+        assert_eq!(v["function"]["name"], "my_tool");
+        assert_eq!(v["function"]["description"], "does stuff");
+        assert!(v["function"].get("parameters").is_some());
+        assert!(v.get("name").is_none(), "name must be nested, not top-level");
+    }
+
+    // ── HTTP round-trip via httpmock ──────────────────────────────────────────
+
+    fn text_response() -> serde_json::Value {
+        json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": { "role": "assistant", "content": "done" }
+            }]
+        })
+    }
+
+    fn tool_response() -> serde_json::Value {
+        json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "tool_calls": [{
+                        "id": "c1",
+                        "function": { "name": "list_repositories", "arguments": "{}" }
+                    }]
+                }
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn http_200_stop_returns_message() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/chat/completions");
+            then.status(200).json_body(text_response());
+        });
+
+        let provider = make_provider(&server.base_url());
+        match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
+            LlmResponse::Message { text } => assert_eq!(text, "done"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_200_tool_calls_returns_tool_calls() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/chat/completions");
+            then.status(200).json_body(tool_response());
+        });
+
+        let provider = make_provider(&server.base_url());
+        match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
+            LlmResponse::ToolCalls(calls) => assert_eq!(calls[0].name, "list_repositories"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_4xx_returns_error() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/chat/completions");
+            then.status(403).json_body(json!({ "error": "forbidden" }));
+        });
+
+        let provider = make_provider(&server.base_url());
+        assert!(provider.chat(&[Message::user("hi")], &[]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn http_request_carries_bearer_auth() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/chat/completions")
+                .header("authorization", "Bearer test-key");
+            then.status(200).json_body(text_response());
+        });
+
+        let provider = make_provider(&server.base_url());
+        provider.chat(&[Message::user("hi")], &[]).await.unwrap();
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn url_appends_chat_completions_path() {
+        let server = MockServer::start();
+        // Only registers a mock on exactly /chat/completions —
+        // if the URL is wrong the request won't match and we'll get a 404 → Err.
+        server.mock(|when, then| {
+            when.method("POST").path("/chat/completions");
+            then.status(200).json_body(text_response());
+        });
+
+        let provider = make_provider(&server.base_url());
+        assert!(provider.chat(&[Message::user("hi")], &[]).await.is_ok());
+    }
+}
