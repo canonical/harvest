@@ -184,3 +184,141 @@ fn first_line(text: &str) -> String {
         .trim()
         .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use super::*;
+    use crate::parser::LanguageParser;
+
+    fn parse_rust(source: &str) -> crate::graph::model::ParsedFile {
+        RustParser.parse(source, Path::new("src/lib.rs"), "myrepo", "v1.0")
+    }
+
+    // ── Rust parser ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn rust_single_function() {
+        let src = r#"fn hello() { println!("hi"); }"#;
+        let pf = parse_rust(src);
+        assert_eq!(pf.functions.len(), 1);
+        let f = &pf.functions[0];
+        assert_eq!(f.name, "hello");
+        assert_eq!(f.start_line, 1);
+        assert_eq!(f.end_line, 1);
+        assert!(f.source.contains("println"));
+        assert_eq!(f.repo, "myrepo");
+        assert_eq!(f.version, "v1.0");
+    }
+
+    #[test]
+    fn rust_two_functions() {
+        let src = "fn foo() {}\nfn bar() {}";
+        let pf = parse_rust(src);
+        assert_eq!(pf.functions.len(), 2);
+        let names: Vec<&str> = pf.functions.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"foo"));
+        assert!(names.contains(&"bar"));
+    }
+
+    #[test]
+    fn rust_function_line_numbers() {
+        let src = "struct S;\n\nfn third_line() {}";
+        let pf = parse_rust(src);
+        assert_eq!(pf.functions.len(), 1);
+        assert_eq!(pf.functions[0].start_line, 3);
+        assert_eq!(pf.functions[0].end_line, 3);
+    }
+
+    #[test]
+    fn rust_function_with_return_type_signature() {
+        let src = "fn add(a: i32, b: i32) -> i32 { a + b }";
+        let pf = parse_rust(src);
+        assert_eq!(pf.functions.len(), 1);
+        let sig = &pf.functions[0].signature;
+        assert!(sig.contains("fn add"), "signature was: {sig}");
+        assert!(sig.contains("->"), "signature missing return type: {sig}");
+    }
+
+    #[test]
+    fn rust_struct_only_no_functions() {
+        let src = "pub struct Foo { x: i32 }";
+        let pf = parse_rust(src);
+        assert_eq!(pf.functions.len(), 0);
+    }
+
+    #[test]
+    fn rust_empty_file() {
+        let pf = parse_rust("");
+        assert_eq!(pf.functions.len(), 0);
+        assert_eq!(pf.classes.len(), 0);
+        assert_eq!(pf.imports.len(), 0);
+    }
+
+    #[test]
+    fn rust_parsed_file_metadata() {
+        let pf = parse_rust("fn f() {}");
+        assert_eq!(pf.language, "rust");
+        assert_eq!(pf.path, "src/lib.rs");
+    }
+
+    #[test]
+    fn rust_multiline_function_end_line() {
+        let src = "fn multi() {\n    let x = 1;\n    let y = 2;\n}";
+        let pf = parse_rust(src);
+        assert_eq!(pf.functions.len(), 1);
+        assert_eq!(pf.functions[0].start_line, 1);
+        assert_eq!(pf.functions[0].end_line, 4);
+    }
+
+    #[test]
+    fn rust_source_text_captured() {
+        let src = "fn greet() { \"hello\" }";
+        let pf = parse_rust(src);
+        assert_eq!(pf.functions[0].source, src);
+    }
+
+    // ── Stub parsers return empty ParsedFile ─────────────────────────────────
+
+    #[test]
+    fn python_stub_returns_empty() {
+        let pf = PythonParser.parse("def foo(): pass", Path::new("a.py"), "r", "v1");
+        assert!(pf.functions.is_empty(), "Python parser is still a stub");
+        assert_eq!(pf.language, "python");
+    }
+
+    #[test]
+    fn typescript_stub_returns_empty() {
+        let pf = TypeScriptParser.parse("function foo() {}", Path::new("a.ts"), "r", "v1");
+        assert!(pf.functions.is_empty(), "TypeScript parser is still a stub");
+        assert_eq!(pf.language, "typescript");
+    }
+
+    #[test]
+    fn javascript_stub_returns_empty() {
+        let pf = JavaScriptParser.parse("function foo() {}", Path::new("a.js"), "r", "v1");
+        assert!(pf.functions.is_empty(), "JavaScript parser is still a stub");
+        assert_eq!(pf.language, "javascript");
+    }
+
+    #[test]
+    fn go_stub_returns_empty() {
+        let pf = GoParser.parse("func foo() {}", Path::new("a.go"), "r", "v1");
+        assert!(pf.functions.is_empty(), "Go parser is still a stub");
+        assert_eq!(pf.language, "go");
+    }
+
+    #[test]
+    fn c_stub_returns_empty() {
+        let pf = CParser.parse("void foo() {}", Path::new("a.c"), "r", "v1");
+        assert!(pf.functions.is_empty(), "C parser is still a stub");
+        assert_eq!(pf.language, "c");
+    }
+
+    #[test]
+    fn cpp_stub_returns_empty() {
+        let pf = CppParser.parse("void foo() {}", Path::new("a.cpp"), "r", "v1");
+        assert!(pf.functions.is_empty(), "C++ parser is still a stub");
+        assert_eq!(pf.language, "cpp");
+    }
+}
