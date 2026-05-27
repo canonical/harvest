@@ -1,0 +1,312 @@
+/// HTTP API integration tests.
+///
+/// Query and health tests run without any external services.
+/// Repository tests require Docker — run with:
+///   cargo test --test api -- --include-ignored
+use std::sync::Arc;
+
+use anyhow::Result;
+use async_trait::async_trait;
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+    routing::{get, post},
+    Json, Router,
+};
+use http_body_util::BodyExt as _;
+use serde_json::{json, Value};
+use tower::ServiceExt as _;
+
+use knowledge_server::{
+    agent::{Agent, tool::Tool},
+    api::{query::handle_query, repositories::handle_list_repositories},
+    llm::{
+        LlmProvider,
+        types::{LlmResponse, Message, ToolDefinition},
+    },
+    neo4j::Neo4jClient,
+};
+
+// ── mock LLM infrastructure ───────────────────────────────────────────────────
+
+struct FixedTextLlm(String);
+
+impl FixedTextLlm {
+    fn new(text: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self(text.into()))
+    }
+}
+
+#[async_trait]
+impl LlmProvider for FixedTextLlm {
+    async fn chat(&self, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
+        Ok(LlmResponse::Message { text: self.0.clone() })
+    }
+}
+
+struct ErrorLlm;
+
+#[async_trait]
+impl LlmProvider for ErrorLlm {
+    async fn chat(&self, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
+        Err(anyhow::anyhow!("simulated LLM failure"))
+    }
+}
+
+// ── router builders ───────────────────────────────────────────────────────────
+
+fn query_app(agent: Arc<Agent>) -> Router {
+    Router::new()
+        .route("/query", post(handle_query))
+        .route("/health", get(|| async { Json(json!({ "status": "ok" })) }))
+        .with_state(agent)
+}
+
+fn repos_app(neo4j: Arc<Neo4jClient>) -> Router {
+    Router::new()
+        .route("/repositories", get(handle_list_repositories))
+        .with_state(neo4j)
+}
+
+fn make_agent(text: &str) -> Arc<Agent> {
+    Arc::new(Agent::new(FixedTextLlm::new(text), vec![], 5))
+}
+
+fn make_error_agent() -> Arc<Agent> {
+    Arc::new(Agent::new(Arc::new(ErrorLlm), vec![], 5))
+}
+
+// ── response helpers ──────────────────────────────────────────────────────────
+
+async fn body_json(resp: axum::response::Response) -> Value {
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+async fn body_status_json(app: Router, req: Request<Body>) -> (StatusCode, Value) {
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    (status, json)
+}
+
+fn post_query(body: Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/query")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap()
+}
+
+fn get_req(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
+}
+
+// ── GET /health ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn health_returns_200() {
+    let app = query_app(make_agent("irrelevant"));
+    let resp = app.oneshot(get_req("/health")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn health_body_is_ok_json() {
+    let app = query_app(make_agent("irrelevant"));
+    let resp = app.oneshot(get_req("/health")).await.unwrap();
+    let json = body_json(resp).await;
+    assert_eq!(json["status"], "ok");
+}
+
+// ── POST /query — happy paths ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn query_valid_request_returns_200() {
+    let app = query_app(make_agent("all good"));
+    let (status, _) = body_status_json(app, post_query(json!({ "query": "what is main?" }))).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn query_response_contains_answer_field() {
+    let app = query_app(make_agent("here is the answer"));
+    let (_, body) = body_status_json(app, post_query(json!({ "query": "describe alpha" }))).await;
+    assert_eq!(body["answer"], "here is the answer");
+}
+
+#[tokio::test]
+async fn query_response_contains_tool_calls_made_field() {
+    let app = query_app(make_agent("done"));
+    let (_, body) = body_status_json(app, post_query(json!({ "query": "hi" }))).await;
+    assert!(body.get("tool_calls_made").is_some(), "missing tool_calls_made field");
+    assert_eq!(body["tool_calls_made"], 0);
+}
+
+#[tokio::test]
+async fn query_response_contains_sources_field() {
+    let app = query_app(make_agent("done"));
+    let (_, body) = body_status_json(app, post_query(json!({ "query": "hi" }))).await;
+    assert!(body["sources"].is_array(), "sources should be an array");
+}
+
+#[tokio::test]
+async fn query_sources_populated_from_citations_in_answer() {
+    let answer = "See [myrepo:v1.0:src/lib.rs:42] for details.";
+    let app = query_app(make_agent(answer));
+    let (_, body) = body_status_json(app, post_query(json!({ "query": "hi" }))).await;
+    let sources = body["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0]["repo"], "myrepo");
+    assert_eq!(sources[0]["version"], "v1.0");
+    assert_eq!(sources[0]["file"], "src/lib.rs");
+    assert_eq!(sources[0]["line"], 42);
+}
+
+#[tokio::test]
+async fn query_with_optional_repositories_field_returns_200() {
+    let app = query_app(make_agent("ok"));
+    let req = post_query(json!({
+        "query": "hi",
+        "repositories": ["myrepo"],
+        "versions": ["v1.0"]
+    }));
+    let (status, _) = body_status_json(app, req).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+// ── POST /query — error / bad input paths ─────────────────────────────────────
+
+#[tokio::test]
+async fn query_missing_query_field_returns_422() {
+    let app = query_app(make_agent("irrelevant"));
+    let req = post_query(json!({ "not_query": "oops" }));
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn query_empty_body_returns_4xx() {
+    let app = query_app(make_agent("irrelevant"));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query")
+        .header("content-type", "application/json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    // Axum returns 400 Bad Request for an empty JSON body.
+    assert!(
+        resp.status().is_client_error(),
+        "expected a 4xx status, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn query_non_json_content_type_returns_415_or_422() {
+    let app = query_app(make_agent("irrelevant"));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/query")
+        .header("content-type", "text/plain")
+        .body(Body::from(r#"{"query":"hi"}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status() == StatusCode::UNSUPPORTED_MEDIA_TYPE
+            || resp.status() == StatusCode::UNPROCESSABLE_ENTITY,
+        "expected 415 or 422, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn query_agent_error_returns_500() {
+    let app = query_app(make_error_agent());
+    let resp = app
+        .oneshot(post_query(json!({ "query": "hi" })))
+        .await
+        .unwrap();
+    // Error response body is plain text, not JSON.
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = std::str::from_utf8(&bytes).unwrap();
+    assert!(body.contains("simulated LLM failure"), "body: {body}");
+}
+
+// ── GET /repositories (Docker-gated) ─────────────────────────────────────────
+
+use neo4j_testcontainers::{prelude::*, runners::AsyncRunner as _, Neo4j, Neo4jImageExt as _};
+use neo4rs::{query, Graph};
+
+async fn seed_one_repo(graph: &Graph) {
+    let stmts = [
+        "CREATE (:Repository {name: 'testrepo', url: 'https://example.com/t.git'})",
+        "CREATE (:Version   {repo: 'testrepo', tag: 'v1.0', timestamp: 1000, ingested: true})",
+        "MATCH  (r:Repository {name:'testrepo'}),(v:Version {repo:'testrepo',tag:'v1.0'}) \
+         CREATE (r)-[:HAS_VERSION]->(v)",
+    ];
+    for stmt in stmts {
+        graph.run(query(stmt)).await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn repositories_empty_graph_returns_empty_array() {
+    let container = Neo4j::default().start().await;
+    let uri  = container.image().bolt_uri_ipv4();
+    let user = container.image().user().unwrap_or("neo4j");
+    let pass = container.image().password().unwrap_or("neo");
+    let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+    let app = repos_app(neo4j);
+    let (status, body) = body_status_json(app, get_req("/repositories")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn repositories_returns_ingested_repos() {
+    let container = Neo4j::default().start().await;
+    let uri  = container.image().bolt_uri_ipv4();
+    let user = container.image().user().unwrap_or("neo4j");
+    let pass = container.image().password().unwrap_or("neo");
+    let graph = Graph::new(&uri, user, pass).await.unwrap();
+    seed_one_repo(&graph).await;
+    let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+    let app = repos_app(neo4j);
+    let (status, body) = body_status_json(app, get_req("/repositories")).await;
+    assert_eq!(status, StatusCode::OK);
+    let repos = body.as_array().unwrap();
+    assert_eq!(repos.len(), 1);
+    assert_eq!(repos[0]["name"], "testrepo");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn repositories_returns_versions_for_repo() {
+    let container = Neo4j::default().start().await;
+    let uri  = container.image().bolt_uri_ipv4();
+    let user = container.image().user().unwrap_or("neo4j");
+    let pass = container.image().password().unwrap_or("neo");
+    let graph = Graph::new(&uri, user, pass).await.unwrap();
+    seed_one_repo(&graph).await;
+    let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+    let app = repos_app(neo4j);
+    let (_, body) = body_status_json(app, get_req("/repositories")).await;
+    let versions = body[0]["versions"].as_array().unwrap();
+    assert!(
+        versions.iter().any(|v| v.as_str() == Some("v1.0")),
+        "versions: {versions:?}"
+    );
+}
