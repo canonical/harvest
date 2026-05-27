@@ -1,18 +1,13 @@
-mod agent;
-mod api;
-mod config;
-mod llm;
-mod neo4j;
-
 use anyhow::Result;
 use clap::Parser as ClapParser;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::agent::Agent;
-use crate::api::AppState;
-use crate::config::Config;
-use crate::neo4j::Neo4jClient;
+use knowledge_server::agent::{graph_tools, Agent};
+use knowledge_server::api::AppState;
+use knowledge_server::config::Config;
+use knowledge_server::llm;
+use knowledge_server::neo4j::Neo4jClient;
 
 #[derive(ClapParser)]
 #[command(name = "knowledge-server", about = "Query code knowledge graphs via HTTP")]
@@ -36,11 +31,11 @@ async fn main() -> Result<()> {
 
     let llm_provider = llm::from_config(&config.llm);
     let max_iterations = config.llm.max_iterations();
-    let tools = agent::graph_tools::all_tools(Arc::clone(&neo4j));
+    let tools = graph_tools::all_tools(Arc::clone(&neo4j));
     let agent = Arc::new(Agent::new(llm_provider, tools, max_iterations));
 
     let state = AppState { agent, neo4j };
-    let app = api::router(state);
+    let app = knowledge_server::api::router(state);
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     tracing::info!("listening on {addr}");
