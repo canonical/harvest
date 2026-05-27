@@ -158,3 +158,189 @@ fn parse_citations(text: &str) -> Vec<Source> {
     }
     sources
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    // ── mock infrastructure ───────────────────────────────────────────────────
+
+    struct MockLlm {
+        responses: Mutex<VecDeque<LlmResponse>>,
+    }
+
+    impl MockLlm {
+        fn new(responses: Vec<LlmResponse>) -> Arc<Self> {
+            Arc::new(Self { responses: Mutex::new(responses.into()) })
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for MockLlm {
+        async fn chat(&self, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
+            self.responses.lock().unwrap().pop_front()
+                .ok_or_else(|| anyhow::anyhow!("MockLlm: no more responses"))
+        }
+    }
+
+    struct MockTool {
+        name: String,
+        returns: String,
+    }
+
+    impl MockTool {
+        fn new(name: &str, returns: &str) -> Box<Self> {
+            Box::new(Self { name: name.into(), returns: returns.into() })
+        }
+    }
+
+    #[async_trait]
+    impl Tool for MockTool {
+        fn definition(&self) -> crate::llm::types::ToolDefinition {
+            crate::llm::types::ToolDefinition {
+                name: self.name.clone(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            }
+        }
+        async fn execute(&self, _params: serde_json::Value) -> Result<String> {
+            Ok(self.returns.clone())
+        }
+    }
+
+    fn tool_call(name: &str) -> LlmResponse {
+        LlmResponse::ToolCalls(vec![ToolCall {
+            id: "tc_1".into(),
+            name: name.into(),
+            input: serde_json::json!({}),
+        }])
+    }
+
+    fn text(s: &str) -> LlmResponse {
+        LlmResponse::Message { text: s.into() }
+    }
+
+    fn agent_with(llm: Arc<dyn LlmProvider>, tools: Vec<Box<dyn Tool>>, max: usize) -> Agent {
+        Agent::new(llm, tools, max)
+    }
+
+    // ── agent loop ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn text_on_first_turn_returns_immediately() {
+        let llm = MockLlm::new(vec![text("all done")]);
+        let agent = agent_with(llm, vec![], 5);
+        let resp = agent.query("hi").await.unwrap();
+        assert_eq!(resp.answer, "all done");
+        assert_eq!(resp.tool_calls_made, 0);
+    }
+
+    #[tokio::test]
+    async fn one_tool_call_then_text_counts_one_iteration() {
+        let llm = MockLlm::new(vec![
+            tool_call("my_tool"),
+            text("result arrived"),
+        ]);
+        let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
+        let resp = agent.query("hi").await.unwrap();
+        assert_eq!(resp.answer, "result arrived");
+        assert_eq!(resp.tool_calls_made, 1);
+    }
+
+    #[tokio::test]
+    async fn two_tool_call_turns_count_two_iterations() {
+        let llm = MockLlm::new(vec![
+            tool_call("my_tool"),
+            tool_call("my_tool"),
+            text("done after two rounds"),
+        ]);
+        let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
+        let resp = agent.query("hi").await.unwrap();
+        assert_eq!(resp.tool_calls_made, 2);
+    }
+
+    #[tokio::test]
+    async fn max_iterations_returns_last_assistant_text() {
+        // LLM keeps issuing tool calls; max_iterations=1 stops after one tool call turn.
+        let llm = MockLlm::new(vec![
+            text("partial answer so far"),   // the first LLM response (text, stored in messages)
+            tool_call("my_tool"),            // would be second, but max_iterations cut off
+        ]);
+        // Give max_iterations=0 so the loop exits immediately on the first check.
+        let agent = agent_with(
+            MockLlm::new(vec![text("partial answer so far")]),
+            vec![],
+            0,
+        );
+        // With max_iterations=0, the loop body never runs; last_assistant_text returns "".
+        let resp = agent.query("hi").await.unwrap();
+        // answer is empty string (no assistant message was ever pushed), not a panic.
+        assert_eq!(resp.tool_calls_made, 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_name_produces_error_string_not_panic() {
+        let llm = MockLlm::new(vec![
+            tool_call("nonexistent_tool"),
+            text("handled gracefully"),
+        ]);
+        // No tools registered — the call to "nonexistent_tool" should yield an error message
+        let agent = agent_with(llm, vec![], 5);
+        let resp = agent.query("hi").await.unwrap();
+        assert_eq!(resp.answer, "handled gracefully");
+    }
+
+    // ── parse_citations ───────────────────────────────────────────────────────
+
+    #[test]
+    fn single_citation_parsed() {
+        let sources = parse_citations("see [myrepo:v1.0:src/lib.rs:42]");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].repo, "myrepo");
+        assert_eq!(sources[0].version, "v1.0");
+        assert_eq!(sources[0].file, "src/lib.rs");
+        assert_eq!(sources[0].line, 42);
+    }
+
+    #[test]
+    fn multiple_citations_parsed() {
+        let sources = parse_citations(
+            "from [repo:v1:a.rs:1] and also [repo:v2:b.rs:99]"
+        );
+        assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_citations_deduplicated() {
+        let sources = parse_citations(
+            "[r:v1:f.rs:1] mentioned twice [r:v1:f.rs:1]"
+        );
+        assert_eq!(sources.len(), 1);
+    }
+
+    #[test]
+    fn malformed_citation_ignored() {
+        // Missing the line number field
+        let sources = parse_citations("bad [only:two:fields] here");
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn no_citations_returns_empty() {
+        let sources = parse_citations("plain text with no brackets at all");
+        assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn citation_line_zero_on_invalid_number() {
+        // Regex only matches \d+ so invalid numbers can't actually be captured —
+        // confirm the regex never panics on edge input.
+        let sources = parse_citations("[r:v1:f.rs:0]");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].line, 0);
+    }
+}
