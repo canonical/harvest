@@ -92,6 +92,7 @@ impl GitClient {
         let files = WalkBuilder::new(root)
             .hidden(false)
             .git_ignore(true)
+            .filter_entry(|e| e.file_name() != ".git")
             .build()
             .filter_map(|entry| entry.ok())
             .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
