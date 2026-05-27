@@ -109,7 +109,7 @@ impl Agent {
     async fn execute_tool_call(
         &self,
         call: &ToolCall,
-        tool_map: &HashMap<&str, &dyn Tool>,
+        tool_map: &HashMap<String, &dyn Tool>,
     ) -> String {
         tracing::info!(tool = call.name, "executing tool call");
         match tool_map.get(call.name.as_str()) {
