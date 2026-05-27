@@ -21,11 +21,11 @@ clap         = { version = "4", features = ["derive"] }
 
 # HTTP server
 axum         = { version = "0.7", features = ["json", "macros"] }
-tower        = "0.4"
+tower        = { version = "0.4", features = ["util"] }
 tower-http   = { version = "0.5", features = ["cors", "trace"] }
 
 # HTTP client (LLM API calls)
-reqwest      = { version = "0.12", features = ["json"] }
+reqwest      = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Graph database
 neo4rs       = "0.7"
