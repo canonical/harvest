@@ -173,6 +173,65 @@ describe('renderPreviewToHtml', () => {
   });
 });
 
+// ── source code preview ───────────────────────────────────────────────────────
+
+describe('renderPreviewToHtml — source code', () => {
+  const sourceResult = JSON.stringify([{
+    name: 'my_func',
+    start_line: 10,
+    end_line: 20,
+    signature: 'fn my_func()',
+    source: 'fn my_func() {\n    42\n}',
+  }]);
+
+  it('renders a code block instead of a table when all items have a source field', () => {
+    const html = renderPreviewToHtml(sourceResult);
+    expect(html).toContain('<pre');
+    expect(html).not.toContain('<table');
+  });
+
+  it('includes the source text in the output', () => {
+    const html = renderPreviewToHtml(sourceResult);
+    expect(html).toContain('my_func');
+  });
+
+  it('shows name and line range in the meta header', () => {
+    const html = renderPreviewToHtml(sourceResult);
+    expect(html).toContain('my_func');
+    expect(html).toContain('L10');
+    expect(html).toContain('20');
+  });
+
+  it('sets the language class from the filePath extension', () => {
+    const html = renderPreviewToHtml(sourceResult, 'src/lib.rs');
+    expect(html).toContain('language-rust');
+  });
+
+  it('falls back to plaintext when extension is unknown', () => {
+    const html = renderPreviewToHtml(sourceResult, 'src/file.xyz');
+    expect(html).toContain('language-plaintext');
+  });
+
+  it('renders multiple items as separate blocks (e.g. diff view)', () => {
+    const diff = JSON.stringify([
+      { version: 'v1.0', start_line: 1, end_line: 3, source: 'old code' },
+      { version: 'v2.0', start_line: 1, end_line: 4, source: 'new code' },
+    ]);
+    const html = renderPreviewToHtml(diff);
+    expect(html).toContain('v1.0');
+    expect(html).toContain('v2.0');
+    expect(html).toContain('old code');
+    expect(html).toContain('new code');
+  });
+
+  it('falls back to table rendering when not all items have a source field', () => {
+    const mixed = JSON.stringify([{ name: 'foo', score: 0.9 }]);
+    const html = renderPreviewToHtml(mixed);
+    expect(html).toContain('<table');
+    expect(html).not.toContain('<pre');
+  });
+});
+
 // ── path shortening in table cells ───────────────────────────────────────────
 
 describe('path shortening', () => {

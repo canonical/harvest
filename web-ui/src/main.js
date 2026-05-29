@@ -187,7 +187,7 @@ function renderToolCall(tc) {
     : `<span class="tool-call__name--bare">${escapeHtml(tc.name)}</span>`;
   const previewHtml = tc.preview ? `
     <div class="tool-call__label">Result preview</div>
-    <div class="tool-data">${renderPreviewToHtml(tc.preview)}</div>
+    <div class="tool-data">${renderPreviewToHtml(tc.preview, tc.input?.file ?? null)}</div>
   ` : '';
 
   return `

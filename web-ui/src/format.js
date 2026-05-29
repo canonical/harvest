@@ -1,3 +1,11 @@
+import hljs from 'highlight.js';
+
+const EXT_TO_LANG = {
+  rs: 'rust', py: 'python', js: 'javascript', ts: 'typescript',
+  go: 'go', java: 'java', cpp: 'cpp', cc: 'cpp', c: 'c',
+  rb: 'ruby', sh: 'bash', toml: 'toml', yaml: 'yaml', yml: 'yaml',
+};
+
 /**
  * Render a parsed JSON value as a Vanilla-Framework-styled HTML string.
  * Arrays of objects become full tables with headers.
@@ -18,14 +26,17 @@ export function renderJsonToHtml(value) {
 
 /**
  * Try to parse a preview string as JSON and render it nicely.
+ * If the result is an array of objects that all carry a `source` field,
+ * renders syntax-highlighted code instead of a table.
  * If the string is a truncated JSON array, recover the complete objects
  * that appear before the cut and render them with a truncation notice.
  * Falls back to escaped plain text for anything else.
  *
  * @param {string|null} text
+ * @param {string|null} [filePath] — source file path, used to infer language
  * @returns {string} HTML string
  */
-export function renderPreviewToHtml(text) {
+export function renderPreviewToHtml(text, filePath = null) {
   if (!text) return '';
 
   // 1. Try a full parse first.
@@ -34,12 +45,18 @@ export function renderPreviewToHtml(text) {
     if (Array.isArray(parsed) && parsed.length === 0) {
       return '<span class="tool-data__empty">No results returned</span>';
     }
+    const sourceHtml = tryRenderAsSource(parsed, filePath);
+    if (sourceHtml !== null) return sourceHtml;
     return renderJsonToHtml(parsed);
   } catch { /* fall through */ }
 
   // 2. Try to recover complete objects from a truncated JSON array.
   const partial = tryParsePartialArray(text);
   if (partial) {
+    const sourceHtml = tryRenderAsSource(partial, filePath);
+    if (sourceHtml !== null) {
+      return sourceHtml + '<span class="tool-data__truncated">… preview truncated</span>';
+    }
     return renderJsonToHtml(partial)
       + '<span class="tool-data__truncated">… preview truncated</span>';
   }
@@ -100,6 +117,39 @@ function shortenAbsPath(str) {
   const parts = str.split('/').filter(Boolean);
   if (parts.length <= 4) return null;
   return parts.slice(-4).join('/');
+}
+
+/**
+ * If `parsed` is an array of objects where every item has a `source` string,
+ * render each item as a syntax-highlighted code block with a compact meta
+ * header (version · name · line range). Returns null otherwise.
+ */
+function tryRenderAsSource(parsed, filePath) {
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  if (!parsed.every(item => isPlainObject(item) && typeof item.source === 'string')) return null;
+
+  const lang = langFromPath(filePath);
+  const blocks = parsed.map(item => {
+    const parts = [];
+    if (item.version) parts.push(item.version);
+    if (item.name) parts.push(item.name);
+    if (item.start_line != null && item.end_line != null) {
+      parts.push(`L${item.start_line}–${item.end_line}`);
+    }
+    const meta = parts.length > 0
+      ? `<div class="tool-source__meta">${esc(parts.join(' · '))}</div>`
+      : '';
+    const highlighted = hljs.highlight(item.source, { language: lang, ignoreIllegals: true }).value;
+    return `${meta}<pre class="tool-source__pre"><code class="hljs language-${esc(lang)}">${highlighted}</code></pre>`;
+  });
+  return `<div class="tool-source">${blocks.join('')}</div>`;
+}
+
+function langFromPath(filePath) {
+  if (!filePath) return 'plaintext';
+  const ext = filePath.split('.').pop().toLowerCase();
+  const lang = EXT_TO_LANG[ext] ?? ext;
+  return hljs.getLanguage(lang) ? lang : 'plaintext';
 }
 
 /**
