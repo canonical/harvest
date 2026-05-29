@@ -217,52 +217,14 @@ html, body {
   pointer-events: none;
 }
 
-/* ── Repository sidebar ───────────────────────────────────────────────────── */
+/* ── Chat area ────────────────────────────────────────────────────────────── */
 
 .layout {
   display: flex;
   flex: 1;
-  gap: 1.5rem;
   overflow: hidden;
   padding: 1rem 0;
 }
-
-.sidebar {
-  width: 220px;
-  flex-shrink: 0;
-  overflow-y: auto;
-}
-
-.sidebar h2 {
-  font-size: 0.85rem;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-secondary);
-  margin-bottom: 0.5rem;
-}
-
-.repo-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.repo-list li {
-  margin-bottom: 0.25rem;
-}
-
-.repo-name {
-  font-size: 0.85rem;
-  font-weight: 500;
-  color: var(--text-primary);
-}
-
-.repo-versions {
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-}
-
-/* ── Chat area ────────────────────────────────────────────────────────────── */
 
 .chat-area {
   flex: 1;
