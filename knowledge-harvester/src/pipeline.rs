@@ -90,6 +90,9 @@ impl Pipeline {
         let tag_owned = tag.to_owned();
         let repo_clone = repo_owned.clone();
         let tag_clone = tag_owned.clone();
+        // Capture repo_path as PathBuf so paths stored in the graph are
+        // relative to the repo root rather than absolute clone paths.
+        let repo_root = repo_path.to_path_buf();
 
         let parsed = tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
@@ -99,8 +102,9 @@ impl Pipeline {
                     .and_then(|e| e.to_str())
                     .unwrap_or("");
                 if let Some(parser) = parsers.get(ext) {
+                    let relative = file_path.strip_prefix(&repo_root).unwrap_or(file_path);
                     match std::fs::read_to_string(file_path) {
-                        Ok(source) => out.push(parser.parse(&source, file_path, &repo_clone, &tag_clone)),
+                        Ok(source) => out.push(parser.parse(&source, relative, &repo_clone, &tag_clone)),
                         Err(e) => tracing::warn!(path = %file_path.display(), error = %e, "skipping unreadable file"),
                     }
                 }
