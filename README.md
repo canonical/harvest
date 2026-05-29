@@ -4,9 +4,9 @@ Harvest turns versioned source code repositories into a queryable knowledge grap
 
 ```
 ┌─────────────────────┐     ┌──────────────────────┐     ┌──────────────┐
-│ knowledge-harvester │────▶│      Neo4j graph      │────▶│ knowledge-   │
-│  (Rust CLI / daemon)│     │  functions, classes,  │     │ server       │
-│  git + tree-sitter  │     │  calls, imports, …    │     │ (HTTP + SSE) │
+│ knowledge-harvester │────▶│      Neo4j graph     │────▶│ knowledge-   │
+│  (Rust CLI / daemon)│     │  functions, classes, │     │ server       │
+│  git + tree-sitter  │     │  calls, imports, …   │     │ (HTTP + SSE) │
 └─────────────────────┘     └──────────────────────┘     └──────┬───────┘
                                                                   │
                                                          ┌────────▼───────┐
