@@ -19,7 +19,7 @@ use tower::ServiceExt as _;
 
 use knowledge_server::{
     agent::{Agent, tool::Tool},
-    api::{query::{handle_query, handle_query_stream}, repositories::handle_list_repositories},
+    api::{query::{handle_query, handle_query_stream}, repositories::handle_list_repositories, tool_description::handle_tool_description},
     llm::{
         LlmProvider,
         types::{LlmResponse, Message, ToolDefinition},
@@ -59,6 +59,7 @@ fn query_app(agent: Arc<Agent>) -> Router {
     Router::new()
         .route("/query", post(handle_query))
         .route("/query/stream", post(handle_query_stream))
+        .route("/tool-description", post(handle_tool_description))
         .route("/health", get(|| async { Json(json!({ "status": "ok" })) }))
         .with_state(agent)
 }
@@ -239,6 +240,49 @@ async fn query_agent_error_returns_500() {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body = std::str::from_utf8(&bytes).unwrap();
     assert!(body.contains("simulated LLM failure"), "body: {body}");
+}
+
+// ── POST /tool-description ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn tool_description_returns_200_with_description_field() {
+    let app = query_app(make_agent("searching for authenticate"));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tool-description")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"name":"search_symbols","input":{"query":"authenticate"}}"#))
+        .unwrap();
+    let (status, body) = body_status_json(app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.get("description").is_some(), "missing description field");
+    assert_eq!(body["description"], "searching for authenticate");
+}
+
+#[tokio::test]
+async fn tool_description_missing_body_returns_4xx() {
+    let app = query_app(make_agent("irrelevant"));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tool-description")
+        .header("content-type", "application/json")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(resp.status().is_client_error());
+}
+
+#[tokio::test]
+async fn tool_description_missing_name_returns_4xx() {
+    let app = query_app(make_agent("irrelevant"));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/tool-description")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"input":{}}"#))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(resp.status().is_client_error());
 }
 
 // ── POST /query/stream — SSE endpoint ────────────────────────────────────────

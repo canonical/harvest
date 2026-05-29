@@ -1,6 +1,7 @@
 const QUERY_STREAM_URL = '/query/stream';
 const QUERY_URL = '/query';
 const REPOSITORIES_URL = '/repositories';
+const TOOL_DESCRIPTION_URL = '/tool-description';
 
 /**
  * Send a query to the knowledge server using SSE streaming.
@@ -68,6 +69,29 @@ export async function queryOnce(query) {
   }
 
   return response.json();
+}
+
+/**
+ * Ask the server's LLM for a short description of what a specific tool call
+ * is doing. Returns null on any error so callers can fall back gracefully.
+ *
+ * @param {string} name  Tool name
+ * @param {object} input Tool input parameters
+ * @returns {Promise<string|null>}
+ */
+export async function fetchToolDescription(name, input) {
+  try {
+    const response = await fetch(TOOL_DESCRIPTION_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, input }),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return data.description ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -3,6 +3,8 @@
  * All functions return a new state object — original is never mutated.
  */
 
+let _nextToolCallId = 1;
+
 export function createChatState() {
   return { messages: [], loading: false };
 }
@@ -32,10 +34,22 @@ export function startAssistantMessage(state) {
 }
 
 export function addToolCall(state, { name, input }) {
+  const id = _nextToolCallId++;
   return updateLastAssistant(state, (msg) => ({
     ...msg,
-    tool_calls: [...msg.tool_calls, { name, input, status: 'running', preview: null }],
+    tool_calls: [...msg.tool_calls, { id, name, input, status: 'running', preview: null, description: null }],
   }));
+}
+
+export function updateToolCallDescription(state, { id, description }) {
+  const messages = state.messages.map((msg) => {
+    if (msg.role !== 'assistant') return msg;
+    const tool_calls = msg.tool_calls.map((tc) =>
+      tc.id === id ? { ...tc, description } : tc,
+    );
+    return { ...msg, tool_calls };
+  });
+  return { ...state, messages };
 }
 
 export function completeToolCall(state, { name, preview }) {

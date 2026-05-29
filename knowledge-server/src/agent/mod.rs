@@ -123,6 +123,19 @@ impl Agent {
         })
     }
 
+    pub async fn describe_tool_call(&self, name: &str, input: &serde_json::Value) -> String {
+        let prompt = format!(
+            "In 8 words or fewer, describe what this specific tool call is doing. \
+             Be concrete and mention key input values.\n\
+             Tool: {name}\nInput: {input}\n\
+             Reply with only the description, no trailing punctuation.",
+        );
+        match self.llm.chat(&[Message::user(prompt)], &[]).await {
+            Ok(LlmResponse::Message { text }) => text.trim().to_string(),
+            _ => name.to_string(),
+        }
+    }
+
     pub async fn query_streaming(&self, user_query: &str, tx: mpsc::Sender<AgentEvent>) {
         let tool_defs: Vec<ToolDefinition> =
             self.tools.iter().map(|t| t.definition()).collect();
