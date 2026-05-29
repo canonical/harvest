@@ -135,7 +135,32 @@ describe('renderPreviewToHtml', () => {
     expect(html).toContain('harvest');
   });
 
-  it('falls back to plain text for truncated/invalid JSON', () => {
+  it('shows a no-results message for an empty array', () => {
+    const html = renderPreviewToHtml('[]');
+    expect(html).not.toContain('<table');
+    expect(html.toLowerCase()).toContain('no result');
+  });
+
+  it('recovers complete rows from a truncated JSON array', () => {
+    const full = JSON.stringify([
+      { name: 'alpha', score: 0.9 },
+      { name: 'beta',  score: 0.7 },
+      { name: 'gamma', score: 0.5 },
+    ]);
+    const truncated = full.slice(0, full.lastIndexOf('{') - 1); // drop last object
+    const html = renderPreviewToHtml(truncated);
+    expect(html).toContain('<table');
+    expect(html).toContain('alpha');
+  });
+
+  it('includes a truncation notice when recovering a partial array', () => {
+    const full = JSON.stringify([{ name: 'alpha' }, { name: 'beta' }, { name: 'gamma' }]);
+    const truncated = full.slice(0, full.lastIndexOf('{') - 1);
+    const html = renderPreviewToHtml(truncated);
+    expect(html.toLowerCase()).toContain('truncat');
+  });
+
+  it('falls back to plain text for truncated non-array JSON', () => {
     const html = renderPreviewToHtml('{"incomplete":');
     expect(html).not.toContain('<table');
     expect(html).toContain('incomplete');
@@ -145,5 +170,40 @@ describe('renderPreviewToHtml', () => {
     const html = renderPreviewToHtml('<not json>');
     expect(html).not.toContain('<not json>');
     expect(html).toContain('&lt;not json&gt;');
+  });
+});
+
+// ── path shortening in table cells ───────────────────────────────────────────
+
+describe('path shortening', () => {
+  it('shortens long absolute paths in table cells', () => {
+    const full = '/tmp/harvest-repos/my-repo/subdir/module/submodule/file.py';
+    const html = renderJsonToHtml([{ path: full }]);
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    const span = div.querySelector('.tool-data__path');
+    expect(span).not.toBeNull();
+    // visible text is the shortened tail — no /tmp prefix
+    expect(span.textContent).not.toContain('/tmp/harvest-repos');
+    expect(span.textContent).toContain('file.py');
+  });
+
+  it('adds the full path as a title tooltip', () => {
+    const full = '/tmp/harvest-repos/my-repo/subdir/module/submodule/file.py';
+    const html = renderJsonToHtml([{ path: full }]);
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    const span = div.querySelector('.tool-data__path');
+    expect(span.title).toBe(full);
+  });
+
+  it('leaves short absolute paths unchanged', () => {
+    const html = renderJsonToHtml({ path: '/etc/hosts' });
+    expect(html).toContain('/etc/hosts');
+  });
+
+  it('leaves relative paths unchanged', () => {
+    const html = renderJsonToHtml([{ file: 'src/lib/module.py' }]);
+    expect(html).toContain('src/lib/module.py');
   });
 });

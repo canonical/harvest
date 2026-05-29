@@ -17,19 +17,35 @@ export function renderJsonToHtml(value) {
 }
 
 /**
- * Try to parse a preview string as JSON and render it; fall back to escaped
- * plain text when the string is truncated or not JSON.
+ * Try to parse a preview string as JSON and render it nicely.
+ * If the string is a truncated JSON array, recover the complete objects
+ * that appear before the cut and render them with a truncation notice.
+ * Falls back to escaped plain text for anything else.
  *
  * @param {string|null} text
  * @returns {string} HTML string
  */
 export function renderPreviewToHtml(text) {
   if (!text) return '';
+
+  // 1. Try a full parse first.
   try {
-    return renderJsonToHtml(JSON.parse(text));
-  } catch {
-    return `<span class="tool-data__fallback">${esc(text)}</span>`;
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed) && parsed.length === 0) {
+      return '<span class="tool-data__empty">No results returned</span>';
+    }
+    return renderJsonToHtml(parsed);
+  } catch { /* fall through */ }
+
+  // 2. Try to recover complete objects from a truncated JSON array.
+  const partial = tryParsePartialArray(text);
+  if (partial) {
+    return renderJsonToHtml(partial)
+      + '<span class="tool-data__truncated">… preview truncated</span>';
   }
+
+  // 3. Plain-text fallback.
+  return `<span class="tool-data__fallback">${esc(text)}</span>`;
 }
 
 // ── internal ──────────────────────────────────────────────────────────────────
@@ -66,7 +82,66 @@ function leaf(v) {
   if (v === null || v === undefined) return '<em>—</em>';
   if (typeof v === 'object') return `<code>${esc(JSON.stringify(v))}</code>`;
   if (typeof v === 'number' || typeof v === 'boolean') return `<code>${esc(String(v))}</code>`;
-  return esc(String(v));
+  const s = String(v);
+  // Shorten long absolute paths — keep the last 4 components, full path as tooltip.
+  const shortened = shortenAbsPath(s);
+  if (shortened) {
+    return `<span class="tool-data__path" title="${esc(s)}">${esc(shortened)}</span>`;
+  }
+  return esc(s);
+}
+
+/**
+ * If `str` is an absolute path with more than 4 components, return a
+ * shortened version showing only the last 4 components. Otherwise null.
+ */
+function shortenAbsPath(str) {
+  if (!str.startsWith('/')) return null;
+  const parts = str.split('/').filter(Boolean);
+  if (parts.length <= 4) return null;
+  return parts.slice(-4).join('/');
+}
+
+/**
+ * Recover the complete array elements from a truncated JSON array string.
+ * Walks the string character-by-character tracking depth and string state,
+ * identifies the end of each top-level array element, then tries to parse
+ * the prefix up to the last complete element.
+ * Returns the parsed array or null if recovery is not possible.
+ */
+function tryParsePartialArray(text) {
+  const t = text.trimStart();
+  if (!t.startsWith('[')) return null;
+
+  let depth = 0;
+  let inStr = false;
+  let esc_ = false;
+  let lastTopLevelClose = -1;
+
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (esc_) { esc_ = false; continue; }
+    if (inStr) {
+      if (c === '\\') esc_ = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{' || c === '[') depth++;
+    else if (c === '}' || c === ']') {
+      depth--;
+      // depth === 1 means we just closed a top-level array element
+      if (depth === 1) lastTopLevelClose = i;
+    }
+  }
+
+  if (lastTopLevelClose < 0) return null;
+
+  try {
+    return JSON.parse(t.slice(0, lastTopLevelClose + 1) + ']');
+  } catch {
+    return null;
+  }
 }
 
 function isPlainObject(v) {
