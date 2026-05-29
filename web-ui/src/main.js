@@ -1,4 +1,5 @@
 import './style.css';
+import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
 import { queryStream } from './api.js';
 import { fetchRepositories } from './api.js';
 import { renderMarkdown, formatCitation } from './markdown.js';
@@ -36,6 +37,7 @@ const inputEl      = document.getElementById('query-input');
 const sendBtn      = document.getElementById('send-btn');
 const statusDot    = document.getElementById('status-dot');
 const repoListEl   = document.getElementById('repo-list');
+const themeBtnEl   = document.getElementById('theme-btn');
 
 // ── Repository sidebar ────────────────────────────────────────────────────────
 
@@ -233,8 +235,24 @@ inputEl.addEventListener('keydown', (e) => {
 
 inputEl.addEventListener('input', autoResize);
 
+// ── Theme ─────────────────────────────────────────────────────────────────────
+
+function updateThemeButton() {
+  const t = getTheme();
+  themeBtnEl.innerHTML = getThemeIcon(t);
+  themeBtnEl.title = getThemeLabel(t);
+  themeBtnEl.setAttribute('aria-label', `Switch theme (current: ${getThemeLabel(t)})`);
+}
+
+themeBtnEl.addEventListener('click', () => {
+  nextTheme();
+  updateThemeButton();
+});
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
+applyStoredTheme();
+updateThemeButton();
 checkHealth();
 loadRepositories();
 render();
