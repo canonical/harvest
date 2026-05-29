@@ -16,11 +16,16 @@ pub struct AnthropicProvider {
     api_key: String,
     client: Client,
     base_url: String,
+    max_retries: u32,
 }
 
 impl AnthropicProvider {
-    pub fn new(model: String, api_key: String) -> Self {
-        Self { model, api_key, client: Client::new(), base_url: API_URL.to_string() }
+    pub fn new(model: String, api_key: String, timeout_secs: u64, max_retries: u32) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .build()
+            .expect("failed to build HTTP client");
+        Self { model, api_key, client, base_url: API_URL.to_string(), max_retries }
     }
 
     #[cfg(test)]
@@ -58,24 +63,64 @@ impl LlmProvider for AnthropicProvider {
             "max_tokens": 8192,
         });
 
-        let resp = self
-            .client
-            .post(&self.base_url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+        let mut attempt = 0u32;
+        loop {
+            let resp = match self
+                .client
+                .post(&self.base_url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("content-type", "application/json")
+                .json(&body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) if e.is_timeout() && attempt < self.max_retries => {
+                    attempt += 1;
+                    let delay = 2u64 * (1u64 << attempt.min(4));
+                    tracing::warn!(attempt, delay_secs = delay, "Anthropic request timed out — retrying");
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
 
-        let status = resp.status();
-        let json: Value = resp.json().await?;
+            let status = resp.status();
 
-        if !status.is_success() {
-            bail!("Anthropic API error {status}: {json}");
+            match status.as_u16() {
+                429 if attempt < self.max_retries => {
+                    let delay = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(30u64 * (1u64 << attempt.min(4)));
+                    attempt += 1;
+                    tracing::warn!(attempt, delay_secs = delay, "Anthropic rate limited — retrying");
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    continue;
+                }
+                529 | 503 if attempt < self.max_retries => {
+                    // 529 = Anthropic overloaded
+                    attempt += 1;
+                    tracing::warn!(attempt, status = %status, "Anthropic overloaded — retrying in 5s");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+                _ => {}
+            }
+
+            let body_text = resp.text().await?;
+            let json: Value = serde_json::from_str(&body_text)
+                .map_err(|e| anyhow::anyhow!("Anthropic API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+
+            if !status.is_success() {
+                bail!("Anthropic API error {status}: {json}");
+            }
+
+            return parse_anthropic_response(json);
         }
-
-        parse_anthropic_response(json)
     }
 }
 
@@ -305,7 +350,7 @@ mod tests {
             then.status(200).json_body(text_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "key".into())
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0)
             .with_base_url(server.url("/v1/messages"));
         match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
             LlmResponse::Message { text } => assert_eq!(text, "all good"),
@@ -321,7 +366,7 @@ mod tests {
             then.status(200).json_body(tool_use_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "key".into())
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0)
             .with_base_url(server.url("/v1/messages"));
         match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
             LlmResponse::ToolCalls(calls) => {
@@ -340,7 +385,7 @@ mod tests {
             then.status(401).json_body(json!({ "error": "unauthorized" }));
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "bad-key".into())
+        let provider = AnthropicProvider::new("claude-test".into(), "bad-key".into(), 30, 0)
             .with_base_url(server.url("/v1/messages"));
         assert!(provider.chat(&[Message::user("hi")], &[]).await.is_err());
     }
@@ -356,7 +401,7 @@ mod tests {
             then.status(200).json_body(text_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "test-key".into())
+        let provider = AnthropicProvider::new("claude-test".into(), "test-key".into(), 30, 0)
             .with_base_url(server.url("/v1/messages"));
         provider.chat(&[Message::user("hi")], &[]).await.unwrap();
         mock.assert();
@@ -374,7 +419,7 @@ mod tests {
             then.status(200).json_body(text_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "k".into())
+        let provider = AnthropicProvider::new("claude-test".into(), "k".into(), 30, 0)
             .with_base_url(server.url("/v1/messages"));
         let result = provider
             .chat(&[Message::system("be helpful"), Message::user("hi")], &[])

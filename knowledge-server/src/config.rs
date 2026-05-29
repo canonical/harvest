@@ -35,6 +35,10 @@ pub enum LlmConfig {
         api_key: String,
         #[serde(default = "default_max_iterations")]
         max_iterations: usize,
+        #[serde(default = "default_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(default = "default_max_retries")]
+        max_retries: u32,
     },
     OpenAiCompat {
         base_url: String,
@@ -42,16 +46,36 @@ pub enum LlmConfig {
         model: String,
         #[serde(default = "default_max_iterations")]
         max_iterations: usize,
+        #[serde(default = "default_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(default = "default_max_retries")]
+        max_retries: u32,
     },
 }
 
 fn default_max_iterations() -> usize { 20 }
+fn default_timeout_secs() -> u64 { 120 }
+fn default_max_retries() -> u32 { 3 }
 
 impl LlmConfig {
     pub fn max_iterations(&self) -> usize {
         match self {
             Self::Anthropic    { max_iterations, .. } => *max_iterations,
             Self::OpenAiCompat { max_iterations, .. } => *max_iterations,
+        }
+    }
+
+    pub fn timeout_secs(&self) -> u64 {
+        match self {
+            Self::Anthropic    { timeout_secs, .. } => *timeout_secs,
+            Self::OpenAiCompat { timeout_secs, .. } => *timeout_secs,
+        }
+    }
+
+    pub fn max_retries(&self) -> u32 {
+        match self {
+            Self::Anthropic    { max_retries, .. } => *max_retries,
+            Self::OpenAiCompat { max_retries, .. } => *max_retries,
         }
     }
 }
