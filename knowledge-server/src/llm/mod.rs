@@ -20,14 +20,21 @@ pub trait LlmProvider: Send + Sync {
 
 pub fn from_config(config: &LlmConfig) -> Arc<dyn LlmProvider> {
     match config {
-        LlmConfig::Anthropic { model, api_key, .. } => Arc::new(
-            anthropic::AnthropicProvider::new(model.clone(), api_key.clone()),
+        LlmConfig::Anthropic { model, api_key, timeout_secs, max_retries, .. } => Arc::new(
+            anthropic::AnthropicProvider::new(
+                model.clone(),
+                api_key.clone(),
+                *timeout_secs,
+                *max_retries,
+            ),
         ),
-        LlmConfig::OpenAiCompat { base_url, api_key, model, .. } => Arc::new(
+        LlmConfig::OpenAiCompat { base_url, api_key, model, timeout_secs, max_retries, .. } => Arc::new(
             openai_compat::OpenAiCompatProvider::new(
                 base_url.clone(),
                 api_key.clone(),
                 model.clone(),
+                *timeout_secs,
+                *max_retries,
             ),
         ),
     }

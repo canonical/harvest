@@ -13,11 +13,16 @@ pub struct OpenAiCompatProvider {
     api_key: String,
     model: String,
     client: Client,
+    max_retries: u32,
 }
 
 impl OpenAiCompatProvider {
-    pub fn new(base_url: String, api_key: String, model: String) -> Self {
-        Self { base_url, api_key, model, client: Client::new() }
+    pub fn new(base_url: String, api_key: String, model: String, timeout_secs: u64, max_retries: u32) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .build()
+            .expect("failed to build HTTP client");
+        Self { base_url, api_key, model, client, max_retries }
     }
 }
 
@@ -36,22 +41,60 @@ impl LlmProvider for OpenAiCompatProvider {
         }
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await?;
 
-        let status = resp.status();
-        let json: Value = resp.json().await?;
+        let mut attempt = 0u32;
+        loop {
+            let mut req = self.client.post(&url).json(&body);
+            if !self.api_key.is_empty() {
+                req = req.bearer_auth(&self.api_key);
+            }
 
-        if !status.is_success() {
-            bail!("OpenAI-compat API error {status}: {json}");
+            let resp = match req.send().await {
+                Ok(r) => r,
+                Err(e) if e.is_timeout() && attempt < self.max_retries => {
+                    attempt += 1;
+                    let delay = 2u64 * (1u64 << attempt.min(4));
+                    tracing::warn!(attempt, delay_secs = delay, "LLM request timed out — retrying");
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+
+            let status = resp.status();
+
+            match status.as_u16() {
+                429 if attempt < self.max_retries => {
+                    let delay = resp
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(30u64 * (1u64 << attempt.min(4)));
+                    attempt += 1;
+                    tracing::warn!(attempt, delay_secs = delay, "rate limited — retrying");
+                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                    continue;
+                }
+                502 | 503 if attempt < self.max_retries => {
+                    attempt += 1;
+                    tracing::warn!(attempt, status = %status, "transient server error — retrying in 5s");
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    continue;
+                }
+                _ => {}
+            }
+
+            let body_text = resp.text().await?;
+            let json: Value = serde_json::from_str(&body_text)
+                .map_err(|e| anyhow::anyhow!("OpenAI-compat API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+
+            if !status.is_success() {
+                bail!("OpenAI-compat API error {status}: {json}");
+            }
+
+            return parse_openai_response(json);
         }
-
-        parse_openai_response(json)
     }
 }
 
@@ -115,6 +158,9 @@ fn to_openai_function(t: &ToolDefinition) -> Value {
 }
 
 fn parse_openai_response(json: Value) -> Result<LlmResponse> {
+    if let Some(err) = json.get("error") {
+        bail!("LLM API error: {err}");
+    }
     let choice = &json["choices"][0];
     let message = &choice["message"];
     let finish_reason = choice["finish_reason"].as_str().unwrap_or("");
@@ -147,7 +193,7 @@ mod tests {
     use serde_json::json;
 
     fn make_provider(base_url: &str) -> OpenAiCompatProvider {
-        OpenAiCompatProvider::new(base_url.into(), "test-key".into(), "test-model".into())
+        OpenAiCompatProvider::new(base_url.into(), "test-key".into(), "test-model".into(), 30, 0)
     }
 
     // ── parse_openai_response ─────────────────────────────────────────────────
