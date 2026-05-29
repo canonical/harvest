@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { queryStream, queryOnce, fetchRepositories } from '../src/api.js';
+import { queryStream, queryOnce, fetchRepositories, fetchToolDescription } from '../src/api.js';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -144,6 +144,41 @@ describe('queryOnce', () => {
   it('throws on non-OK response', async () => {
     global.fetch = mockFetch(500, 'error');
     await expect(queryOnce('q')).rejects.toThrow(/500/);
+  });
+});
+
+// ── fetchToolDescription ──────────────────────────────────────────────────────
+
+describe('fetchToolDescription', () => {
+  beforeEach(() => { vi.restoreAllMocks(); });
+
+  it('POSTs to /tool-description with name and input', async () => {
+    global.fetch = mockFetch(200, JSON.stringify({ description: 'Searching for foo' }));
+    await fetchToolDescription('search_symbols', { query: 'foo' });
+    const [url, init] = fetch.mock.calls[0];
+    expect(url).toBe('/tool-description');
+    expect(init.method).toBe('POST');
+    const body = JSON.parse(init.body);
+    expect(body.name).toBe('search_symbols');
+    expect(body.input).toEqual({ query: 'foo' });
+  });
+
+  it('returns the description string from the response', async () => {
+    global.fetch = mockFetch(200, JSON.stringify({ description: 'Listing all repositories' }));
+    const result = await fetchToolDescription('list_repositories', {});
+    expect(result).toBe('Listing all repositories');
+  });
+
+  it('returns null on non-OK response instead of throwing', async () => {
+    global.fetch = mockFetch(500, 'error');
+    const result = await fetchToolDescription('search_symbols', {});
+    expect(result).toBeNull();
+  });
+
+  it('returns null on network error instead of throwing', async () => {
+    global.fetch = vi.fn().mockRejectedValue(new Error('network failure'));
+    const result = await fetchToolDescription('search_symbols', {});
+    expect(result).toBeNull();
   });
 });
 

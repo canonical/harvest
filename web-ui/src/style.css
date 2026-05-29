@@ -377,7 +377,8 @@ html, body {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.tool-call__name   { font-weight: 500; color: var(--text-primary); }
+.tool-call__name            { font-weight: 500; color: var(--text-primary); }
+.tool-call__name--bare      { font-family: monospace; font-weight: 400; color: var(--text-secondary); }
 .tool-call__status { margin-left: auto; font-size: 0.75rem; color: var(--text-muted); }
 
 .tool-call__body {
