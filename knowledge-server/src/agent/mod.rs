@@ -7,6 +7,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 use crate::llm::{
     types::{ContentPart, LlmResponse, Message, MessageContent, ToolCall, ToolDefinition},
@@ -27,6 +28,15 @@ pub struct QueryResponse {
     pub answer: String,
     pub sources: Vec<Source>,
     pub tool_calls_made: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentEvent {
+    ToolCall { name: String, input: serde_json::Value },
+    ToolResult { name: String, preview: String },
+    Done { answer: String, sources: Vec<Source>, tool_calls_made: usize },
+    Error { message: String },
 }
 
 pub struct Agent {
@@ -111,6 +121,95 @@ impl Agent {
             sources,
             tool_calls_made: iterations,
         })
+    }
+
+    pub async fn query_streaming(&self, user_query: &str, tx: mpsc::Sender<AgentEvent>) {
+        let tool_defs: Vec<ToolDefinition> =
+            self.tools.iter().map(|t| t.definition()).collect();
+
+        let tool_map: HashMap<String, &dyn Tool> =
+            self.tools.iter().map(|t| (t.definition().name, t.as_ref())).collect();
+
+        let mut messages = vec![
+            Message::system(prompt::system_prompt()),
+            Message::user(user_query),
+        ];
+
+        let mut iterations = 0;
+
+        let final_text = loop {
+            if iterations >= self.max_iterations {
+                tracing::warn!("agent hit max_iterations={} — requesting synthesis", self.max_iterations);
+                messages.push(Message::user(
+                    "You have used the maximum number of tool calls. \
+                     Synthesize what you have gathered so far into a final answer.",
+                ));
+                match self.llm.chat(&messages, &[]).await {
+                    Ok(LlmResponse::Message { text }) => break text,
+                    Ok(LlmResponse::ToolCalls(_)) | Err(_) => break self.last_assistant_text(&messages),
+                }
+            }
+
+            let response = match self.llm.chat(&messages, &tool_defs).await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx.send(AgentEvent::Error { message: e.to_string() }).await;
+                    return;
+                }
+            };
+
+            match response {
+                LlmResponse::Message { text } => break text,
+
+                LlmResponse::ToolCalls(calls) => {
+                    iterations += 1;
+
+                    let call_parts: Vec<ContentPart> = calls
+                        .iter()
+                        .map(|c| ContentPart::ToolUse {
+                            id: c.id.clone(),
+                            name: c.name.clone(),
+                            input: c.input.clone(),
+                        })
+                        .collect();
+                    messages.push(Message {
+                        role: crate::llm::types::Role::Assistant,
+                        content: MessageContent::Parts(call_parts),
+                    });
+
+                    for call in &calls {
+                        let _ = tx.send(AgentEvent::ToolCall {
+                            name: call.name.clone(),
+                            input: call.input.clone(),
+                        }).await;
+
+                        let result = self.execute_tool_call(call, &tool_map).await;
+
+                        let preview = result.chars().take(200).collect::<String>();
+                        let _ = tx.send(AgentEvent::ToolResult {
+                            name: call.name.clone(),
+                            preview,
+                        }).await;
+
+                        messages.push(Message {
+                            role: crate::llm::types::Role::User,
+                            content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                                tool_use_id: call.id.clone(),
+                                content: result,
+                                is_error: false,
+                            }]),
+                        });
+                    }
+                }
+            }
+        };
+
+        let sources = parse_citations(&final_text);
+        let _ = tx.send(AgentEvent::Done {
+            answer: final_text,
+            sources,
+            tool_calls_made: iterations,
+        }).await;
     }
 
     async fn execute_tool_call(

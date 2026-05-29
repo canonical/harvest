@@ -19,7 +19,7 @@ use tower::ServiceExt as _;
 
 use knowledge_server::{
     agent::{Agent, tool::Tool},
-    api::{query::handle_query, repositories::handle_list_repositories},
+    api::{query::{handle_query, handle_query_stream}, repositories::handle_list_repositories},
     llm::{
         LlmProvider,
         types::{LlmResponse, Message, ToolDefinition},
@@ -58,6 +58,7 @@ impl LlmProvider for ErrorLlm {
 fn query_app(agent: Arc<Agent>) -> Router {
     Router::new()
         .route("/query", post(handle_query))
+        .route("/query/stream", post(handle_query_stream))
         .route("/health", get(|| async { Json(json!({ "status": "ok" })) }))
         .with_state(agent)
 }
@@ -238,6 +239,66 @@ async fn query_agent_error_returns_500() {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body = std::str::from_utf8(&bytes).unwrap();
     assert!(body.contains("simulated LLM failure"), "body: {body}");
+}
+
+// ── POST /query/stream — SSE endpoint ────────────────────────────────────────
+
+fn post_query_stream(body: Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/query/stream")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap()
+}
+
+fn parse_sse_events(body: &str) -> Vec<Value> {
+    body.split("\n\n")
+        .filter_map(|block| {
+            let line = block.lines().find(|l| l.starts_with("data: "))?;
+            serde_json::from_str(&line["data: ".len()..]).ok()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn stream_returns_200_with_event_stream_content_type() {
+    let app = query_app(make_agent("all done"));
+    let resp = app.oneshot(post_query_stream(json!({ "query": "hi" }))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(ct.contains("text/event-stream"), "content-type: {ct}");
+}
+
+#[tokio::test]
+async fn stream_emits_done_event_with_answer() {
+    let app = query_app(make_agent("the answer is 42"));
+    let resp = app.oneshot(post_query_stream(json!({ "query": "what is the answer?" }))).await.unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = std::str::from_utf8(&bytes).unwrap();
+    let events = parse_sse_events(body);
+    let done = events.iter().find(|e| e["type"] == "done").expect("expected a done event");
+    assert_eq!(done["answer"], "the answer is 42");
+}
+
+#[tokio::test]
+async fn stream_done_event_contains_sources_and_tool_count() {
+    let answer = "See [repo:v1:src/lib.rs:10] here.";
+    let app = query_app(make_agent(answer));
+    let resp = app.oneshot(post_query_stream(json!({ "query": "q" }))).await.unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = std::str::from_utf8(&bytes).unwrap();
+    let events = parse_sse_events(body);
+    let done = events.iter().find(|e| e["type"] == "done").expect("expected done");
+    assert!(done["sources"].as_array().unwrap().len() >= 1);
+    assert_eq!(done["tool_calls_made"], 0);
+}
+
+#[tokio::test]
+async fn stream_missing_query_field_returns_422() {
+    let app = query_app(make_agent("irrelevant"));
+    let resp = app.oneshot(post_query_stream(json!({ "not_query": "oops" }))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
 // ── GET /repositories (Docker-gated) ─────────────────────────────────────────
