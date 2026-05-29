@@ -25,8 +25,26 @@
     </header>
 
     <div class="layout">
-      <!-- Main chat area -->
-      <section class="chat-area">
+
+      <!-- Sidebar navigation -->
+      <aside class="app-sidebar">
+        <nav aria-label="Main navigation">
+          <ul class="p-side-navigation__list">
+            <li class="p-side-navigation__item">
+              <a href="#" class="p-side-navigation__link" data-page="chat" aria-current="page">Chat</a>
+            </li>
+            <li class="p-side-navigation__item">
+              <a href="#" class="p-side-navigation__link" data-page="repositories">Code repositories</a>
+            </li>
+            <li class="p-side-navigation__item">
+              <a href="#" class="p-side-navigation__link" data-page="documentation">Documentation</a>
+            </li>
+          </ul>
+        </nav>
+      </aside>
+
+      <!-- Chat page (default) -->
+      <section class="chat-area page" id="page-chat">
         <div class="messages" id="messages" role="log" aria-live="polite" aria-label="Chat messages">
           <!-- Welcome placeholder -->
           <div class="message message--assistant">
@@ -60,6 +78,21 @@
           >Send</button>
         </div>
       </section>
+
+      <!-- Code repositories page -->
+      <section class="page page--placeholder" id="page-repositories" hidden>
+        <p class="page--placeholder__icon">🗄</p>
+        <h2 class="page--placeholder__title">Code repositories</h2>
+        <p class="page--placeholder__body">Nothing to see here yet.</p>
+      </section>
+
+      <!-- Documentation page -->
+      <section class="page page--placeholder" id="page-documentation" hidden>
+        <p class="page--placeholder__icon">📖</p>
+        <h2 class="page--placeholder__title">Documentation</h2>
+        <p class="page--placeholder__body">Nothing to see here yet.</p>
+      </section>
+
     </div>
   </div>
 

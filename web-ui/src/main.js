@@ -335,6 +335,23 @@ themeBtnEl.addEventListener('click', () => {
   updateThemeButton();
 });
 
+// ── Sidebar navigation ────────────────────────────────────────────────────────
+
+document.querySelectorAll('.app-sidebar .p-side-navigation__link').forEach(link => {
+  link.addEventListener('click', (e) => {
+    e.preventDefault();
+    const page = link.dataset.page;
+
+    document.querySelectorAll('.app-sidebar .p-side-navigation__link').forEach(l => {
+      l.removeAttribute('aria-current');
+    });
+    link.setAttribute('aria-current', 'page');
+
+    document.querySelectorAll('.page').forEach(p => { p.hidden = true; });
+    document.getElementById(`page-${page}`).hidden = false;
+  });
+});
+
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 applyStoredTheme();
