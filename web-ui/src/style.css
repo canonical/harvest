@@ -1,12 +1,150 @@
 /* ── Vanilla Framework base ────────────────────────────────────────────────── */
 @import "https://assets.ubuntu.com/v1/vanilla-framework-version-4.11.0.min.css";
 
-/* ── Layout ───────────────────────────────────────────────────────────────── */
+/* ── Design tokens (light defaults) ──────────────────────────────────────── */
+
+:root {
+  --bg-page:              #ffffff;
+  --bg-surface:           #f5f5f5;
+  --bg-surface-alt:       #f8f8f8;
+  --bg-surface-hover:     #f0f0f0;
+  --bg-input:             #ffffff;
+  --bg-code:              #1a1a1a;
+  --bg-code-inline:       #ececec;
+  --bg-tool-card:         #ffffff;
+  --bg-tool-header:       #f8f8f8;
+  --bg-tool-mono:         #f5f5f5;
+  --bg-source-chip:       #f0f0f0;
+  --bg-error:             #fff0f0;
+
+  --text-primary:         #111111;
+  --text-secondary:       #666666;
+  --text-muted:           #888888;
+  --text-code-inline:     #c7162b;
+  --text-source-chip:     #333333;
+  --text-label:           #666666;
+
+  --border-color:         #d9d9d9;
+  --border-subtle:        #e5e5e5;
+  --border-source-chip:   #d9d9d9;
+  --border-error:         #f5c6cb;
+
+  --citation-bg:          #fff3cd;
+  --citation-color:       #856404;
+  --citation-border:      #ffc107;
+
+  --user-bubble-bg:       #0066cc;
+  --user-bubble-text:     #ffffff;
+  --loading-dot-color:    #0066cc;
+  --error-text:           #721c24;
+
+  --theme-btn-bg:         #ffffff;
+  --theme-btn-border:     #d9d9d9;
+  --theme-btn-color:      #333333;
+  --theme-btn-hover-bg:   #f0f0f0;
+  --theme-btn-shadow:     0 2px 8px rgba(0,0,0,0.12);
+}
+
+/* ── Dark theme tokens ────────────────────────────────────────────────────── */
+
+[data-theme="dark"] {
+  --bg-page:              #111111;
+  --bg-surface:           #1e1e1e;
+  --bg-surface-alt:       #252525;
+  --bg-surface-hover:     #2e2e2e;
+  --bg-input:             #1e1e1e;
+  --bg-code:              #0d0d0d;
+  --bg-code-inline:       #2a2a2a;
+  --bg-tool-card:         #1e1e1e;
+  --bg-tool-header:       #252525;
+  --bg-tool-mono:         #2a2a2a;
+  --bg-source-chip:       #252525;
+  --bg-error:             #2a1515;
+
+  --text-primary:         #e8e8e8;
+  --text-secondary:       #aaaaaa;
+  --text-muted:           #777777;
+  --text-code-inline:     #ff7b7b;
+  --text-source-chip:     #cccccc;
+  --text-label:           #999999;
+
+  --border-color:         #383838;
+  --border-subtle:        #2e2e2e;
+  --border-source-chip:   #444444;
+  --border-error:         #6b2f2f;
+
+  --citation-bg:          #3a2e00;
+  --citation-color:       #ffd166;
+  --citation-border:      #997a00;
+
+  --user-bubble-bg:       #1a6bc2;
+  --user-bubble-text:     #ffffff;
+  --loading-dot-color:    #4d9fff;
+  --error-text:           #f08080;
+
+  --theme-btn-bg:         #252525;
+  --theme-btn-border:     #444444;
+  --theme-btn-color:      #cccccc;
+  --theme-btn-hover-bg:   #333333;
+  --theme-btn-shadow:     0 2px 8px rgba(0,0,0,0.5);
+}
+
+/* Auto mode: follow OS preference when no explicit theme is set */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg-page:              #111111;
+    --bg-surface:           #1e1e1e;
+    --bg-surface-alt:       #252525;
+    --bg-surface-hover:     #2e2e2e;
+    --bg-input:             #1e1e1e;
+    --bg-code:              #0d0d0d;
+    --bg-code-inline:       #2a2a2a;
+    --bg-tool-card:         #1e1e1e;
+    --bg-tool-header:       #252525;
+    --bg-tool-mono:         #2a2a2a;
+    --bg-source-chip:       #252525;
+    --bg-error:             #2a1515;
+
+    --text-primary:         #e8e8e8;
+    --text-secondary:       #aaaaaa;
+    --text-muted:           #777777;
+    --text-code-inline:     #ff7b7b;
+    --text-source-chip:     #cccccc;
+    --text-label:           #999999;
+
+    --border-color:         #383838;
+    --border-subtle:        #2e2e2e;
+    --border-source-chip:   #444444;
+    --border-error:         #6b2f2f;
+
+    --citation-bg:          #3a2e00;
+    --citation-color:       #ffd166;
+    --citation-border:      #997a00;
+
+    --user-bubble-bg:       #1a6bc2;
+    --user-bubble-text:     #ffffff;
+    --loading-dot-color:    #4d9fff;
+    --error-text:           #f08080;
+
+    --theme-btn-bg:         #252525;
+    --theme-btn-border:     #444444;
+    --theme-btn-color:      #cccccc;
+    --theme-btn-hover-bg:   #333333;
+    --theme-btn-shadow:     0 2px 8px rgba(0,0,0,0.5);
+  }
+}
+
+/* ── Base ─────────────────────────────────────────────────────────────────── */
 
 html, body {
   height: 100%;
   margin: 0;
+  background: var(--bg-page);
+  color: var(--text-primary);
+  transition: background 0.2s, color 0.2s;
 }
+
+/* ── Layout ───────────────────────────────────────────────────────────────── */
 
 #app {
   display: flex;
@@ -24,13 +162,14 @@ html, body {
   align-items: center;
   gap: 1rem;
   padding: 0.75rem 0;
-  border-bottom: 1px solid #d9d9d9;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .app-header h1 {
   margin: 0;
   font-size: 1.25rem;
   font-weight: 500;
+  color: var(--text-primary);
 }
 
 .status-dot {
@@ -39,11 +178,46 @@ html, body {
   border-radius: 50%;
   background: #aaa;
   transition: background 0.3s;
+  flex-shrink: 0;
 }
 .status-dot.connected { background: #0e8420; }
 .status-dot.error     { background: #c7162b; }
 
-/* ── Repository sidebar (optional) ───────────────────────────────────────── */
+/* ── Theme toggle button ──────────────────────────────────────────────────── */
+
+.theme-btn {
+  position: fixed;
+  bottom: 1.25rem;
+  right: 1.25rem;
+  z-index: 100;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 50%;
+
+  background: var(--theme-btn-bg);
+  border: 1px solid var(--theme-btn-border);
+  color: var(--theme-btn-color);
+  box-shadow: var(--theme-btn-shadow);
+  cursor: pointer;
+  transition: background 0.15s, box-shadow 0.15s, color 0.15s;
+}
+
+.theme-btn:hover {
+  background: var(--theme-btn-hover-bg);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+.theme-btn svg {
+  width: 1.2rem;
+  height: 1.2rem;
+  pointer-events: none;
+}
+
+/* ── Repository sidebar ───────────────────────────────────────────────────── */
 
 .layout {
   display: flex;
@@ -63,7 +237,7 @@ html, body {
   font-size: 0.85rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #666;
+  color: var(--text-secondary);
   margin-bottom: 0.5rem;
 }
 
@@ -80,11 +254,12 @@ html, body {
 .repo-name {
   font-size: 0.85rem;
   font-weight: 500;
+  color: var(--text-primary);
 }
 
 .repo-versions {
   font-size: 0.75rem;
-  color: #666;
+  color: var(--text-secondary);
 }
 
 /* ── Chat area ────────────────────────────────────────────────────────────── */
@@ -105,7 +280,7 @@ html, body {
   gap: 1.25rem;
 }
 
-/* ── Individual messages ──────────────────────────────────────────────────── */
+/* ── Message bubbles ──────────────────────────────────────────────────────── */
 
 .message {
   display: flex;
@@ -113,13 +288,8 @@ html, body {
   gap: 0.5rem;
 }
 
-.message--user {
-  align-items: flex-end;
-}
-
-.message--assistant {
-  align-items: flex-start;
-}
+.message--user    { align-items: flex-end; }
+.message--assistant { align-items: flex-start; }
 
 .message__bubble {
   max-width: 80%;
@@ -129,25 +299,26 @@ html, body {
 }
 
 .message--user .message__bubble {
-  background: #0066cc;
-  color: #fff;
+  background: var(--user-bubble-bg);
+  color: var(--user-bubble-text);
   border-bottom-right-radius: 0.25rem;
 }
 
 .message--assistant .message__bubble {
-  background: #f5f5f5;
+  background: var(--bg-surface);
+  color: var(--text-primary);
   border-bottom-left-radius: 0.25rem;
   min-width: 200px;
 }
 
-/* ── Markdown content inside assistant bubbles ────────────────────────────── */
+/* ── Markdown content ─────────────────────────────────────────────────────── */
 
 .message__body h1,
 .message__body h2,
-.message__body h3 { margin-top: 1rem; }
+.message__body h3 { margin-top: 1rem; color: var(--text-primary); }
 
 .message__body pre {
-  background: #1a1a1a;
+  background: var(--bg-code);
   color: #f0f0f0;
   border-radius: 0.5rem;
   padding: 1rem;
@@ -157,31 +328,31 @@ html, body {
 }
 
 .message__body code:not(pre code) {
-  background: #ececec;
-  color: #c7162b;
+  background: var(--bg-code-inline);
+  color: var(--text-code-inline);
   padding: 0.1em 0.3em;
   border-radius: 0.25rem;
   font-size: 0.875em;
 }
 
 .message__body ul,
-.message__body ol {
-  padding-left: 1.5rem;
-}
+.message__body ol { padding-left: 1.5rem; }
 
 .message__body p:last-child { margin-bottom: 0; }
+
+.message__body a { color: #4d9fff; }
 
 /* ── Citation spans ───────────────────────────────────────────────────────── */
 
 .citation {
-  background: #fff3cd;
-  color: #856404;
+  background: var(--citation-bg);
+  color: var(--citation-color);
+  border: 1px solid var(--citation-border);
   border-radius: 0.2em;
   padding: 0.05em 0.3em;
   font-size: 0.8em;
   font-family: monospace;
   cursor: help;
-  border: 1px solid #ffc107;
 }
 
 /* ── Tool call cards ──────────────────────────────────────────────────────── */
@@ -194,11 +365,11 @@ html, body {
 }
 
 .tool-call {
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--border-color);
   border-radius: 0.5rem;
   overflow: hidden;
   font-size: 0.85rem;
-  background: #fff;
+  background: var(--bg-tool-card);
 }
 
 .tool-call__header {
@@ -208,28 +379,25 @@ html, body {
   padding: 0.4rem 0.75rem;
   cursor: pointer;
   user-select: none;
-  background: #f8f8f8;
+  background: var(--bg-tool-header);
   border-bottom: 1px solid transparent;
 }
 
-.tool-call__header:hover {
-  background: #f0f0f0;
-}
+.tool-call__header:hover { background: var(--bg-surface-hover); }
 
-.tool-call.open .tool-call__header {
-  border-bottom-color: #d9d9d9;
-}
+.tool-call.open .tool-call__header { border-bottom-color: var(--border-color); }
 
 .tool-call__icon {
   width: 1rem;
   height: 1rem;
   border-radius: 50%;
-  border: 2px solid #aaa;
+  border: 2px solid var(--text-muted);
   flex-shrink: 0;
+  transition: border-color 0.2s, background 0.2s;
 }
 
 .tool-call.running .tool-call__icon {
-  border-color: #0066cc;
+  border-color: #4d9fff;
   animation: spin 0.8s linear infinite;
 }
 
@@ -238,35 +406,24 @@ html, body {
   background: #0e8420;
 }
 
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
+@keyframes spin { to { transform: rotate(360deg); } }
 
-.tool-call__name {
-  font-weight: 500;
-  color: #333;
-}
-
-.tool-call__status {
-  margin-left: auto;
-  font-size: 0.75rem;
-  color: #888;
-}
+.tool-call__name   { font-weight: 500; color: var(--text-primary); }
+.tool-call__status { margin-left: auto; font-size: 0.75rem; color: var(--text-muted); }
 
 .tool-call__body {
   display: none;
   padding: 0.5rem 0.75rem;
 }
 
-.tool-call.open .tool-call__body {
-  display: block;
-}
+.tool-call.open .tool-call__body { display: block; }
 
 .tool-call__input,
 .tool-call__preview {
   font-family: monospace;
   font-size: 0.8rem;
-  background: #f5f5f5;
+  background: var(--bg-tool-mono);
+  color: var(--text-primary);
   border-radius: 0.25rem;
   padding: 0.5rem;
   overflow-x: auto;
@@ -275,17 +432,13 @@ html, body {
   margin: 0.25rem 0 0;
 }
 
-.tool-call__label {
-  font-size: 0.75rem;
-  color: #666;
-  margin-top: 0.5rem;
-}
+.tool-call__label { font-size: 0.75rem; color: var(--text-label); margin-top: 0.5rem; }
 
-/* ── Sources list ─────────────────────────────────────────────────────────── */
+/* ── Sources ──────────────────────────────────────────────────────────────── */
 
 .sources {
   margin-top: 0.75rem;
-  border-top: 1px solid #e5e5e5;
+  border-top: 1px solid var(--border-subtle);
   padding-top: 0.5rem;
 }
 
@@ -293,28 +446,24 @@ html, body {
   font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #888;
+  color: var(--text-muted);
   margin-bottom: 0.4rem;
 }
 
-.source-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-}
+.source-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 
 .source-chip {
   font-family: monospace;
   font-size: 0.75rem;
-  background: #f0f0f0;
-  border: 1px solid #d9d9d9;
+  background: var(--bg-source-chip);
+  border: 1px solid var(--border-source-chip);
+  color: var(--text-source-chip);
   border-radius: 1rem;
   padding: 0.15rem 0.6rem;
   white-space: nowrap;
-  color: #333;
 }
 
-/* ── Loading shimmer ──────────────────────────────────────────────────────── */
+/* ── Loading dots ─────────────────────────────────────────────────────────── */
 
 .loading-dots {
   display: inline-flex;
@@ -326,7 +475,7 @@ html, body {
   width: 0.4rem;
   height: 0.4rem;
   border-radius: 50%;
-  background: #0066cc;
+  background: var(--loading-dot-color);
   animation: bounce 1.2s ease-in-out infinite;
 }
 
@@ -335,15 +484,15 @@ html, body {
 
 @keyframes bounce {
   0%, 80%, 100% { transform: scale(0.7); opacity: 0.4; }
-  40%            { transform: scale(1.0); opacity: 1.0; }
+  40%           { transform: scale(1.0); opacity: 1.0; }
 }
 
-/* ── Error message ────────────────────────────────────────────────────────── */
+/* ── Error ────────────────────────────────────────────────────────────────── */
 
 .message--error .message__bubble {
-  background: #fff0f0;
-  border: 1px solid #f5c6cb;
-  color: #721c24;
+  background: var(--bg-error);
+  border: 1px solid var(--border-error);
+  color: var(--error-text);
 }
 
 /* ── Input area ───────────────────────────────────────────────────────────── */
@@ -352,13 +501,13 @@ html, body {
   display: flex;
   gap: 0.5rem;
   padding: 0.75rem 0 1rem;
-  border-top: 1px solid #d9d9d9;
+  border-top: 1px solid var(--border-color);
 }
 
 .input-area textarea {
   flex: 1;
   resize: none;
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--border-color);
   border-radius: 0.5rem;
   padding: 0.6rem 0.75rem;
   font-size: 0.95rem;
@@ -367,26 +516,26 @@ html, body {
   min-height: 2.5rem;
   max-height: 8rem;
   outline: none;
-  transition: border-color 0.2s;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  transition: border-color 0.2s, background 0.2s, color 0.2s;
 }
 
-.input-area textarea:focus {
-  border-color: #0066cc;
-}
+.input-area textarea:focus { border-color: #0066cc; }
 
-.input-area button {
-  align-self: flex-end;
-  white-space: nowrap;
-}
+.input-area textarea::placeholder { color: var(--text-muted); }
 
-/* ── hljs theme (atom one dark) ───────────────────────────────────────────── */
+.input-area button { align-self: flex-end; white-space: nowrap; }
 
-.hljs { color: #abb2bf; }
-.hljs-keyword, .hljs-built_in { color: #c678dd; }
-.hljs-string { color: #98c379; }
-.hljs-number { color: #d19a66; }
-.hljs-comment { color: #5c6370; font-style: italic; }
-.hljs-function { color: #61afef; }
+/* ── hljs theme (atom one dark — always dark for code blocks) ─────────────── */
+
+.hljs            { color: #abb2bf; }
+.hljs-keyword,
+.hljs-built_in   { color: #c678dd; }
+.hljs-string     { color: #98c379; }
+.hljs-number     { color: #d19a66; }
+.hljs-comment    { color: #5c6370; font-style: italic; }
+.hljs-function   { color: #61afef; }
 .hljs-title.function_ { color: #61afef; }
-.hljs-type { color: #e5c07b; }
-.hljs-attr { color: #e06c75; }
+.hljs-type       { color: #e5c07b; }
+.hljs-attr       { color: #e06c75; }
