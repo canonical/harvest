@@ -518,6 +518,38 @@ html, body {
   border-bottom: 1px dashed var(--border-color);
 }
 
+/* ── Source code preview blocks ───────────────────────────────────────────── */
+
+.tool-source {
+  border: 1px solid var(--border-color);
+  border-radius: 0.4rem;
+  overflow: hidden;
+}
+
+.tool-source__meta {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.72rem;
+  font-family: monospace;
+  color: var(--text-secondary);
+  background: var(--bg-surface-alt);
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* separator between multiple blocks (e.g. diff view) */
+.tool-source__pre + .tool-source__meta {
+  border-top: 1px solid var(--border-color);
+}
+
+.tool-source__pre {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  overflow-x: auto;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  background: var(--bg-code);
+  color: #f0f0f0;
+}
+
 /* ── Sources ──────────────────────────────────────────────────────────────── */
 
 .sources {
