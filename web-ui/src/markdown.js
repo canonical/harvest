@@ -29,20 +29,72 @@ marked.use({
 
 /**
  * Render a markdown string to an HTML string.
- * Citation brackets like [repo:v1:file.rs:42] are converted to
- * highlighted <span data-citation> elements before parsing.
+ * Citation brackets like [repo:v1:file.rs:42] are converted to links
+ * when a URL can be resolved from repoUrlMap, otherwise to spans.
  *
  * @param {string} text
+ * @param {Object.<string, string>} [repoUrlMap] — map of repo name → clone URL
  * @returns {string} HTML
  */
-export function renderMarkdown(text) {
-  // Replace citations with a highlighted span before markdown parsing
+export function renderMarkdown(text, repoUrlMap = {}) {
   const withCitations = text.replace(CITATION_RE, (match, repo, version, file, line) => {
-    const escaped = match.replace(/[<>"&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '"': '&quot;', '&': '&amp;' }[c]));
-    return `<span class="citation" data-citation="${escaped}" title="${repo}:${version}:${file}:${line}">[${repo}:${version}:${file}:${line}]</span>`;
+    const repoUrl = repoUrlMap[repo];
+    const fileUrl = repoUrl ? buildFileUrl(repoUrl, version, file, parseInt(line, 10)) : null;
+    const title = `${repo}:${version}:${file}:${line}`;
+    const label = `[${repo}:${version}:${file}:${line}]`;
+    if (fileUrl) {
+      return `<a href="${esc(fileUrl)}" class="citation" target="_blank" rel="noopener noreferrer" title="${esc(title)}">${esc(label)}</a>`;
+    }
+    const escapedMatch = match.replace(/[<>"&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '"': '&quot;', '&': '&amp;' }[c]));
+    return `<span class="citation" data-citation="${escapedMatch}" title="${esc(title)}">${esc(label)}</span>`;
   });
 
   return marked.parse(withCitations, { async: false });
+}
+
+/**
+ * Build a URL pointing to a specific file and line in an upstream repository.
+ * Handles GitHub, GitLab, and Bitbucket. SSH clone URLs are converted to HTTPS.
+ * Returns null if the URL cannot be determined.
+ *
+ * @param {string} repoUrl  — clone URL (https or ssh)
+ * @param {string} version  — tag or branch name
+ * @param {string} file     — relative file path
+ * @param {number} line
+ * @returns {string|null}
+ */
+export function buildFileUrl(repoUrl, version, file, line) {
+  const base = normalizeRepoUrl(repoUrl);
+  if (!base) return null;
+  if (base.includes('github.com')) {
+    return `${base}/blob/${version}/${file}#L${line}`;
+  }
+  if (base.includes('gitlab.com') || base.includes('gitlab.')) {
+    return `${base}/-/blob/${version}/${file}#L${line}`;
+  }
+  if (base.includes('bitbucket.org')) {
+    return `${base}/src/${version}/${file}#lines-${line}`;
+  }
+  // Generic fallback — works for most Gitea/Forgejo/cgit instances
+  return `${base}/blob/${version}/${file}#L${line}`;
+}
+
+function normalizeRepoUrl(url) {
+  if (!url) return null;
+  // Convert SSH format: git@github.com:owner/repo.git → https://github.com/owner/repo
+  let normalized = url.replace(/^git@([^:]+):/, 'https://$1/');
+  // Strip .git suffix
+  normalized = normalized.replace(/\.git$/, '');
+  return normalized;
+}
+
+function esc(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /**
