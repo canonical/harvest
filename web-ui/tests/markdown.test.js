@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderMarkdown, formatCitation, parseCitations } from '../src/markdown.js';
+import { renderMarkdown, buildFileUrl, formatCitation, parseCitations } from '../src/markdown.js';
 
 // ── renderMarkdown ────────────────────────────────────────────────────────────
 
@@ -42,14 +42,64 @@ describe('renderMarkdown', () => {
     expect(html).not.toContain('<script>');
   });
 
-  it('converts citation brackets to highlighted spans', () => {
+  it('converts citation brackets to spans when no URL is available', () => {
     const html = renderMarkdown('See [myrepo:v1.0:src/lib.rs:42] for details.');
     expect(html).toContain('data-citation');
     expect(html).toContain('myrepo');
+    expect(html).not.toContain('<a ');
+  });
+
+  it('converts citation brackets to links when repoUrlMap provides a URL', () => {
+    const html = renderMarkdown(
+      'See [myrepo:v1.0:src/lib.rs:42] for details.',
+      { myrepo: 'https://github.com/owner/myrepo.git' },
+    );
+    expect(html).toContain('<a ');
+    expect(html).toContain('href=');
+    expect(html).toContain('github.com/owner/myrepo/blob/v1.0/src/lib.rs#L42');
+    expect(html).toContain('class="citation"');
+    expect(html).toContain('target="_blank"');
   });
 
   it('returns a string for empty input', () => {
     expect(typeof renderMarkdown('')).toBe('string');
+  });
+});
+
+// ── buildFileUrl ──────────────────────────────────────────────────────────────
+
+describe('buildFileUrl', () => {
+  it('builds a GitHub blob URL', () => {
+    const url = buildFileUrl('https://github.com/owner/repo.git', 'v1.0', 'src/lib.rs', 42);
+    expect(url).toBe('https://github.com/owner/repo/blob/v1.0/src/lib.rs#L42');
+  });
+
+  it('strips .git suffix', () => {
+    const url = buildFileUrl('https://github.com/owner/repo.git', 'main', 'README.md', 1);
+    expect(url).not.toContain('.git');
+  });
+
+  it('converts SSH clone URL to HTTPS', () => {
+    const url = buildFileUrl('git@github.com:owner/repo.git', 'v2.0', 'src/main.rs', 10);
+    expect(url).toBe('https://github.com/owner/repo/blob/v2.0/src/main.rs#L10');
+  });
+
+  it('builds a GitLab URL with /-/blob/ path', () => {
+    const url = buildFileUrl('https://gitlab.com/owner/repo.git', 'v1.0', 'lib/foo.py', 5);
+    expect(url).toBe('https://gitlab.com/owner/repo/-/blob/v1.0/lib/foo.py#L5');
+  });
+
+  it('builds a Bitbucket URL', () => {
+    const url = buildFileUrl('https://bitbucket.org/owner/repo.git', 'v1.0', 'src/foo.py', 7);
+    expect(url).toBe('https://bitbucket.org/owner/repo/src/v1.0/src/foo.py#lines-7');
+  });
+
+  it('returns null for a null URL', () => {
+    expect(buildFileUrl(null, 'v1', 'file.rs', 1)).toBeNull();
+  });
+
+  it('returns null for an empty URL', () => {
+    expect(buildFileUrl('', 'v1', 'file.rs', 1)).toBeNull();
   });
 });
 
