@@ -5,6 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Harvest — Code Knowledge Chat</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌾</text></svg>" />
+  <!-- Apply persisted theme before first paint to avoid flash -->
+  <script>
+    (function () {
+      var t = localStorage.getItem('theme');
+      if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+    })();
+  </script>
 </head>
 <body>
   <div id="app">
@@ -61,6 +68,15 @@
       </section>
     </div>
   </div>
+
+  <!-- Theme toggle: fixed in bottom-right corner -->
+  <button
+    id="theme-btn"
+    class="theme-btn"
+    type="button"
+    aria-label="Switch colour theme"
+    title="Switch theme"
+  ></button>
 
   <script type="module" src="/src/main.js"></script>
 </body>
