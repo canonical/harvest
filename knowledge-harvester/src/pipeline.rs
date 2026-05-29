@@ -59,7 +59,10 @@ impl Pipeline {
 
     async fn process_repo(&self, repo: &RepoConfig) -> Result<()> {
         let repo_path = self.git.ensure_cloned(repo)?;
-        let tags = self.git.list_tags(&repo_path)?;
+        let tags = match &repo.refs {
+            Some(wanted) => self.git.resolve_refs(&repo_path, wanted)?,
+            None => self.git.list_tags(&repo_path)?,
+        };
 
         for tag in tags {
             if self.writer.is_ingested(&repo.name, &tag.name).await? {

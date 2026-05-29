@@ -190,7 +190,7 @@ fn checkout_unknown_tag_returns_error() {
 fn ensure_cloned_creates_repo_directory() {
     let fixture = FixtureRepo::new();
     let (client, _clone_root) = make_client();
-    let cfg = RepoConfig { name: "myrepo".into(), url: fixture.url() };
+    let cfg = RepoConfig { name: "myrepo".into(), url: fixture.url(), refs: None };
 
     let path = client.ensure_cloned(&cfg).unwrap();
     assert!(path.exists(), "clone directory should exist");
@@ -201,7 +201,7 @@ fn ensure_cloned_creates_repo_directory() {
 fn ensure_cloned_twice_does_not_error() {
     let fixture = FixtureRepo::new();
     let (client, _clone_root) = make_client();
-    let cfg = RepoConfig { name: "myrepo".into(), url: fixture.url() };
+    let cfg = RepoConfig { name: "myrepo".into(), url: fixture.url(), refs: None };
 
     client.ensure_cloned(&cfg).unwrap();
     // Second call should fetch, not re-clone, and succeed
@@ -212,7 +212,7 @@ fn ensure_cloned_twice_does_not_error() {
 fn ensure_cloned_returns_correct_path() {
     let fixture = FixtureRepo::new();
     let (client, clone_root) = make_client();
-    let cfg = RepoConfig { name: "testrepo".into(), url: fixture.url() };
+    let cfg = RepoConfig { name: "testrepo".into(), url: fixture.url(), refs: None };
 
     let path = client.ensure_cloned(&cfg).unwrap();
     assert_eq!(path, clone_root.path().join("testrepo"));
@@ -222,7 +222,7 @@ fn ensure_cloned_returns_correct_path() {
 fn ensure_cloned_repo_has_expected_tags() {
     let fixture = FixtureRepo::new();
     let (client, _clone_root) = make_client();
-    let cfg = RepoConfig { name: "myrepo".into(), url: fixture.url() };
+    let cfg = RepoConfig { name: "myrepo".into(), url: fixture.url(), refs: None };
 
     let path = client.ensure_cloned(&cfg).unwrap();
     let tags = client.list_tags(&path).unwrap();

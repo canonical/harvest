@@ -45,6 +45,17 @@ url  = "https://github.com/owner/repo.git"
 
 Add more `[[repositories]]` blocks for each repo you want to index.
 
+To ingest only specific refs instead of all tags, add a `refs` list:
+
+```toml
+[[repositories]]
+name = "my-repo"
+url  = "https://github.com/owner/repo.git"
+refs = ["v2.0.0", "v2.1.0", "main"]   # tags, branches, or commit SHAs
+```
+
+Omit `refs` (or remove the field entirely) to harvest all git tags as before.
+
 ---
 
 ## Step 3 — Run the harvester
