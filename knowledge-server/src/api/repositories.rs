@@ -8,6 +8,7 @@ use crate::neo4j::Neo4jClient;
 #[derive(Serialize)]
 pub struct RepositoryInfo {
     pub name: String,
+    pub url: Option<String>,
     pub versions: Vec<String>,
 }
 
@@ -17,7 +18,7 @@ pub async fn handle_list_repositories(
     let result = neo4j
         .query_read(
             "MATCH (r:Repository)-[:HAS_VERSION]->(v:Version {ingested: true})
-             RETURN r.name AS name, collect(v.tag) AS versions
+             RETURN r.name AS name, r.url AS url, collect(v.tag) AS versions
              ORDER BY r.name",
             json!({}),
         )
@@ -29,6 +30,7 @@ pub async fn handle_list_repositories(
                 .into_iter()
                 .map(|row| RepositoryInfo {
                     name: row["name"].as_str().unwrap_or("").to_string(),
+                    url: row["url"].as_str().map(String::from),
                     versions: row["versions"]
                         .as_array()
                         .cloned()

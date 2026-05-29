@@ -64,6 +64,17 @@ impl GraphWriter {
         Ok(tags)
     }
 
+    pub async fn upsert_repository(&self, name: &str, url: &str) -> Result<()> {
+        self.graph
+            .run(
+                query("MERGE (r:Repository {name: $name}) SET r.url = $url")
+                    .param("name", name)
+                    .param("url", url),
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn upsert_version(
         &self,
         repo: &str,
