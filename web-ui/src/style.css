@@ -172,23 +172,28 @@ html, body {
   flex-shrink: 0;
 }
 
-.app-header h1 {
+.app-title {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
   margin: 0;
-  font-size: 1.25rem;
-  font-weight: 500;
+  line-height: 1;
+}
+
+.app-title__brand {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
   color: var(--text-primary);
 }
 
-.status-dot {
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
-  background: #aaa;
-  transition: background 0.3s;
-  flex-shrink: 0;
+.app-title__sub {
+  font-size: 0.6rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
 }
-.status-dot.connected { background: #0e8420; }
-.status-dot.error     { background: #c7162b; }
 
 /* ── Theme toggle button ──────────────────────────────────────────────────── */
 
