@@ -317,11 +317,15 @@ html, body {
   background: var(--citation-bg);
   color: var(--citation-color);
   border: 1px solid var(--citation-border);
-  border-radius: 0.2em;
-  padding: 0.05em 0.3em;
-  font-size: 0.8em;
+  border-radius: 0.25em;
+  padding: 0.05em 0.2em;
+  font-size: 0.72em;
   font-family: monospace;
+  font-weight: 600;
+  line-height: 1;
+  vertical-align: super;
   cursor: help;
+  text-decoration: none;
 }
 
 /* ── Tool call cards ──────────────────────────────────────────────────────── */
@@ -569,22 +573,26 @@ html, body {
 .source-chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 
 .source-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font-family: monospace;
   font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
   background: var(--bg-source-chip);
   border: 1px solid var(--border-source-chip);
   color: var(--text-source-chip);
   border-radius: 1rem;
-  padding: 0.15rem 0.6rem;
-  white-space: nowrap;
+  min-width: 1.5rem;
+  height: 1.5rem;
+  padding: 0 0.35rem;
   cursor: default;
   text-decoration: none;
 }
 
 a.source-chip {
   cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 2px;
 }
 
 a.source-chip:hover {

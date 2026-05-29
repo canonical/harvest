@@ -29,19 +29,23 @@ marked.use({
 
 /**
  * Render a markdown string to an HTML string.
- * Citation brackets like [repo:v1:file.rs:42] are converted to links
- * when a URL can be resolved from repoUrlMap, otherwise to spans.
+ * Citation brackets like [repo:v1:file.rs:42] are replaced with numbered
+ * superscripts ([1], [2], …) when citationIndex provides a mapping, and
+ * linked when repoUrlMap provides a clone URL.
  *
  * @param {string} text
- * @param {Object.<string, string>} [repoUrlMap] — map of repo name → clone URL
+ * @param {Object.<string, string>} [repoUrlMap]    — repo name → clone URL
+ * @param {Object.<string, number>} [citationIndex] — "repo:ver:file:line" → 1-based index
  * @returns {string} HTML
  */
-export function renderMarkdown(text, repoUrlMap = {}) {
+export function renderMarkdown(text, repoUrlMap = {}, citationIndex = {}) {
   const withCitations = text.replace(CITATION_RE, (match, repo, version, file, line) => {
+    const key = `${repo}:${version}:${file}:${line}`;
+    const n = citationIndex[key];
+    const label = n != null ? `[${n}]` : `[${repo}:${version}:${file}:${line}]`;
+    const title = `${repo} ${version} · ${file}:${line}`;
     const repoUrl = repoUrlMap[repo];
     const fileUrl = repoUrl ? buildFileUrl(repoUrl, version, file, parseInt(line, 10)) : null;
-    const title = `${repo}:${version}:${file}:${line}`;
-    const label = `[${repo}:${version}:${file}:${line}]`;
     if (fileUrl) {
       return `<a href="${esc(fileUrl)}" class="citation" target="_blank" rel="noopener noreferrer" title="${esc(title)}">${esc(label)}</a>`;
     }

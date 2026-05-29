@@ -61,6 +61,23 @@ describe('renderMarkdown', () => {
     expect(html).toContain('target="_blank"');
   });
 
+  it('replaces citation label with index number when citationIndex is provided', () => {
+    const key = 'myrepo:v1.0:src/lib.rs:42';
+    const html = renderMarkdown(
+      'See [myrepo:v1.0:src/lib.rs:42] for details.',
+      {},
+      { [key]: 3 },
+    );
+    // The visible label should be [3], not the full citation string
+    expect(html).toContain('[3]');
+    expect(html).not.toContain('>[myrepo:');
+  });
+
+  it('falls back to full citation label when key is absent from citationIndex', () => {
+    const html = renderMarkdown('See [myrepo:v1.0:src/lib.rs:42] for details.', {}, {});
+    expect(html).toContain('[myrepo:v1.0:src/lib.rs:42]');
+  });
+
   it('returns a string for empty input', () => {
     expect(typeof renderMarkdown('')).toBe('string');
   });
