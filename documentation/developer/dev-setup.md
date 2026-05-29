@@ -154,13 +154,47 @@ Optional filters (not yet wired to the agent, reserved for future use):
 
 ---
 
-## Running both together (split terminals)
+## Step 6 — Run the web UI
+
+The web UI is a Vite application that proxies API calls to the knowledge-server.
+
+### Prerequisites
+
+```bash
+# Install Node.js if not already present (use nvm or your system package manager)
+curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+source ~/.nvm/nvm.sh
+nvm install 22
+```
+
+### Start the dev server
+
+```bash
+cd web-ui
+npm install
+npm run dev
+# Open http://localhost:5173
+```
+
+The Vite proxy routes `/query`, `/query/stream`, `/repositories`, and `/health` to `http://localhost:8080` automatically. The knowledge-server (Step 5) must be running first.
+
+### Run the UI tests
+
+```bash
+cd web-ui
+npm test            # run once (CI mode)
+npm run test:watch  # interactive watch mode
+```
+
+---
+
+## Running everything together (split terminals)
 
 ```
-Terminal 1:  docker compose up          # Neo4j logs
-Terminal 2:  cd knowledge-harvester && RUST_LOG=info cargo run -- run
-Terminal 3:  cd knowledge-server    && RUST_LOG=info cargo run
-Terminal 4:  curl / httpie / Postman
+Terminal 1:  docker compose up                                                           # Neo4j
+Terminal 2:  cd knowledge-harvester && RUST_LOG=info cargo run -- --config harvester.toml run
+Terminal 3:  cd knowledge-server    && RUST_LOG=info cargo run -- --config server.toml
+Terminal 4:  cd web-ui && npm run dev                                                    # http://localhost:5173
 ```
 
 Or with `tmux`:
@@ -172,6 +206,8 @@ tmux split-window -h -t harvest
 tmux send-keys -t harvest 'cd knowledge-harvester && RUST_LOG=info cargo run -- --config harvester.toml run' Enter
 tmux split-window -v -t harvest
 tmux send-keys -t harvest 'cd knowledge-server && RUST_LOG=info cargo run -- --config server.toml' Enter
+tmux split-window -h -t harvest
+tmux send-keys -t harvest 'cd web-ui && npm run dev' Enter
 tmux attach -t harvest
 ```
 
