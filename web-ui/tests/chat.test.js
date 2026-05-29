@@ -5,6 +5,7 @@ import {
   startAssistantMessage,
   addToolCall,
   completeToolCall,
+  updateToolCallDescription,
   finalizeAssistantMessage,
   setError,
   getMessages,
@@ -116,6 +117,63 @@ describe('completeToolCall', () => {
     expect(calls[0].preview).toBe('first result');
     expect(calls[1].status).toBe('done');
     expect(calls[1].preview).toBe('second result');
+  });
+});
+
+// ── updateToolCallDescription ─────────────────────────────────────────────────
+
+describe('updateToolCallDescription', () => {
+  it('sets the description on the matching tool call by id', () => {
+    const s = pipe(
+      startAssistantMessage(createChatState()),
+      s => addToolCall(s, { name: 'search_symbols', input: {} }),
+    );
+    const tc = getMessages(s).at(-1).tool_calls[0];
+    const s2 = updateToolCallDescription(s, { id: tc.id, description: 'Searching for auth symbols' });
+    expect(getMessages(s2).at(-1).tool_calls[0].description).toBe('Searching for auth symbols');
+  });
+
+  it('does not affect other tool calls', () => {
+    const s = pipe(
+      startAssistantMessage(createChatState()),
+      s => addToolCall(s, { name: 'list_repositories', input: {} }),
+      s => addToolCall(s, { name: 'search_symbols', input: {} }),
+    );
+    const calls = getMessages(s).at(-1).tool_calls;
+    const s2 = updateToolCallDescription(s, { id: calls[1].id, description: 'Searching' });
+    const updated = getMessages(s2).at(-1).tool_calls;
+    expect(updated[0].description).toBeNull();
+    expect(updated[1].description).toBe('Searching');
+  });
+
+  it('works on a finalized (done) assistant message', () => {
+    const s = pipe(
+      startAssistantMessage(createChatState()),
+      s => addToolCall(s, { name: 'search_symbols', input: {} }),
+      s => finalizeAssistantMessage(s, { answer: 'ok', sources: [], tool_calls_made: 1 }),
+    );
+    const tc = getMessages(s).at(-1).tool_calls[0];
+    const s2 = updateToolCallDescription(s, { id: tc.id, description: 'Late arrival' });
+    expect(getMessages(s2).at(-1).tool_calls[0].description).toBe('Late arrival');
+  });
+
+  it('each tool call gets a unique id', () => {
+    const s = pipe(
+      startAssistantMessage(createChatState()),
+      s => addToolCall(s, { name: 'a', input: {} }),
+      s => addToolCall(s, { name: 'b', input: {} }),
+    );
+    const [tc1, tc2] = getMessages(s).at(-1).tool_calls;
+    expect(tc1.id).not.toBe(tc2.id);
+  });
+
+  it('is a no-op for an unknown id', () => {
+    const s = pipe(
+      startAssistantMessage(createChatState()),
+      s => addToolCall(s, { name: 'search_symbols', input: {} }),
+    );
+    const s2 = updateToolCallDescription(s, { id: 999999, description: 'ghost' });
+    expect(getMessages(s2).at(-1).tool_calls[0].description).toBeNull();
   });
 });
 

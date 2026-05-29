@@ -1,5 +1,6 @@
 pub mod query;
 pub mod repositories;
+pub mod tool_description;
 
 use axum::{
     routing::{get, post},
@@ -21,6 +22,7 @@ pub fn router(state: AppState) -> Router {
     let agent_router = Router::new()
         .route("/query", post(query::handle_query))
         .route("/query/stream", post(query::handle_query_stream))
+        .route("/tool-description", post(tool_description::handle_tool_description))
         .with_state(Arc::clone(&state.agent));
 
     let neo4j_router = Router::new()

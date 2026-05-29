@@ -1,6 +1,6 @@
 import './style.css';
 import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
-import { queryStream } from './api.js';
+import { queryStream, fetchToolDescription } from './api.js';
 import { renderMarkdown, formatCitation } from './markdown.js';
 import {
   createChatState,
@@ -8,6 +8,7 @@ import {
   startAssistantMessage,
   addToolCall,
   completeToolCall,
+  updateToolCallDescription,
   finalizeAssistantMessage,
   setError,
   getMessages,
@@ -123,6 +124,9 @@ function renderMessage(msg) {
 function renderToolCall(tc) {
   const statusLabel = tc.status === 'running' ? 'Running…' : 'Done';
   const inputJson = JSON.stringify(tc.input, null, 2);
+  const label = tc.description
+    ? escapeHtml(tc.description)
+    : `<span class="tool-call__name--bare">${escapeHtml(tc.name)}</span>`;
   const previewHtml = tc.preview ? `
     <div class="tool-call__label">Result preview</div>
     <pre class="tool-call__preview">${escapeHtml(tc.preview)}</pre>
@@ -132,10 +136,11 @@ function renderToolCall(tc) {
     <div class="tool-call ${tc.status}">
       <div class="tool-call__header">
         <div class="tool-call__icon"></div>
-        <span class="tool-call__name">${escapeHtml(tc.name)}</span>
+        <span class="tool-call__name">${label}</span>
         <span class="tool-call__status">${statusLabel}</span>
       </div>
       <div class="tool-call__body">
+        <div class="tool-call__label">Tool: ${escapeHtml(tc.name)}</div>
         <div class="tool-call__label">Input</div>
         <pre class="tool-call__input">${escapeHtml(inputJson)}</pre>
         ${previewHtml}
@@ -161,6 +166,13 @@ async function sendQuery() {
     await queryStream(query, (event) => {
       if (event.type === 'tool_call') {
         state = addToolCall(state, { name: event.name, input: event.input });
+        const tc = getMessages(state).at(-1).tool_calls.at(-1);
+        fetchToolDescription(event.name, event.input).then((description) => {
+          if (description) {
+            state = updateToolCallDescription(state, { id: tc.id, description });
+            render();
+          }
+        });
       } else if (event.type === 'tool_result') {
         state = completeToolCall(state, { name: event.name, preview: event.preview });
       } else if (event.type === 'done') {

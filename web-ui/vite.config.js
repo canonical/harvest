@@ -15,6 +15,7 @@ export default defineConfig({
       '/query': 'http://localhost:8080',
       '/repositories': 'http://localhost:8080',
       '/health': 'http://localhost:8080',
+      '/tool-description': 'http://localhost:8080',
     },
   },
 });
