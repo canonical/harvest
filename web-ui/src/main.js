@@ -38,7 +38,6 @@ let repoUrlMap = {};
 const messagesEl   = document.getElementById('messages');
 const inputEl      = document.getElementById('query-input');
 const sendBtn      = document.getElementById('send-btn');
-const statusDot    = document.getElementById('status-dot');
 const themeBtnEl   = document.getElementById('theme-btn');
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -309,23 +308,6 @@ function autoResize() {
   inputEl.style.height = `${Math.min(inputEl.scrollHeight, 128)}px`;
 }
 
-// ── Health check ──────────────────────────────────────────────────────────────
-
-async function checkHealth() {
-  try {
-    const resp = await fetch('/health');
-    if (resp.ok) {
-      statusDot.className = 'status-dot connected';
-      statusDot.title = 'Server connected';
-    } else {
-      throw new Error('not ok');
-    }
-  } catch {
-    statusDot.className = 'status-dot error';
-    statusDot.title = 'Server unreachable';
-  }
-}
-
 // ── Event listeners ───────────────────────────────────────────────────────────
 
 sendBtn.addEventListener('click', sendQuery);
@@ -357,7 +339,6 @@ themeBtnEl.addEventListener('click', () => {
 
 applyStoredTheme();
 updateThemeButton();
-checkHealth();
 fetchRepositories().then((repos) => {
   repoUrlMap = Object.fromEntries(
     repos.filter(r => r.url).map(r => [r.name, r.url])
