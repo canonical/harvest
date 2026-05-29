@@ -455,6 +455,25 @@ html, body {
   display: block;
 }
 
+.tool-data__empty {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.tool-data__truncated {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: 0.25rem;
+  font-style: italic;
+}
+
+.tool-data__path {
+  cursor: help;
+  border-bottom: 1px dashed var(--border-color);
+}
+
 /* ── Sources ──────────────────────────────────────────────────────────────── */
 
 .sources {
