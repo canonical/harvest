@@ -1,0 +1,28 @@
+#!/bin/bash
+# Runs once when the snap is first installed.
+# Sets snap config defaults, then the configure hook fires automatically
+# (triggered by snapctl set) to generate the config files.
+set -eu
+
+snapctl set \
+  neo4j.host=localhost \
+  neo4j.port=7687 \
+  neo4j.user=neo4j \
+  neo4j.password="" \
+  storage.clone-root="" \
+  server.host=127.0.0.1 \
+  server.port=8080 \
+  ui.host=127.0.0.1 \
+  ui.port=3000 \
+  llm.provider=anthropic \
+  llm.api-key="" \
+  llm.model=claude-sonnet-4-6 \
+  llm.base-url=https://api.anthropic.com/v1 \
+  llm.max-iterations=20 \
+  llm.timeout-secs=120
+
+# Seed the user-managed repositories file from the bundled example.
+if [ ! -f "$SNAP_COMMON/repositories.toml" ]; then
+  cp "$SNAP/share/harvest/repositories.toml.example" \
+     "$SNAP_COMMON/repositories.toml"
+fi

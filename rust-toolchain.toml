@@ -1,0 +1,5 @@
+[toolchain]
+# Rust 2024 edition requires 1.85+. Pin to stable so snapcraft's rust
+# plugin downloads a compatible toolchain automatically.
+channel = "stable"
+profile = "minimal"
