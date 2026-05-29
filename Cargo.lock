@@ -1392,6 +1392,7 @@ dependencies = [
  "async-trait",
  "axum",
  "clap",
+ "futures",
  "http-body-util",
  "httpmock",
  "neo4j_testcontainers",

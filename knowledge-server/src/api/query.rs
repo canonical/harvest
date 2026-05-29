@@ -1,8 +1,18 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
+    Json,
+};
+use futures::StreamExt as _;
 use serde::Deserialize;
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc};
+use tokio::sync::mpsc;
 
-use crate::agent::Agent;
+use crate::agent::{Agent, AgentEvent};
 
 #[derive(Deserialize)]
 pub struct QueryRequest {
@@ -22,4 +32,22 @@ pub async fn handle_query(
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
     }
+}
+
+pub async fn handle_query_stream(
+    State(agent): State<Arc<Agent>>,
+    Json(req): Json<QueryRequest>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let (tx, rx) = mpsc::channel::<AgentEvent>(64);
+
+    tokio::spawn(async move {
+        agent.query_streaming(&req.query, tx).await;
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(|event| {
+        let data = serde_json::to_string(&event).unwrap_or_default();
+        Ok::<Event, Infallible>(Event::default().data(data))
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }

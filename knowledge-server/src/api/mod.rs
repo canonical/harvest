@@ -20,6 +20,7 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     let agent_router = Router::new()
         .route("/query", post(query::handle_query))
+        .route("/query/stream", post(query::handle_query_stream))
         .with_state(Arc::clone(&state.agent));
 
     let neo4j_router = Router::new()
