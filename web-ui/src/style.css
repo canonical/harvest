@@ -577,6 +577,19 @@ html, body {
   border-radius: 1rem;
   padding: 0.15rem 0.6rem;
   white-space: nowrap;
+  cursor: default;
+  text-decoration: none;
+}
+
+a.source-chip {
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+a.source-chip:hover {
+  background: var(--bg-surface-hover);
+  border-color: var(--text-secondary);
 }
 
 /* ── Loading dots ─────────────────────────────────────────────────────────── */
