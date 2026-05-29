@@ -1,7 +1,7 @@
 import './style.css';
 import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
-import { queryStream, fetchToolDescription } from './api.js';
-import { renderMarkdown, formatCitation } from './markdown.js';
+import { queryStream, fetchToolDescription, fetchRepositories } from './api.js';
+import { renderMarkdown, buildFileUrl, formatCitation } from './markdown.js';
 import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
 import {
   createChatState,
@@ -30,6 +30,8 @@ function escapeHtml(str) {
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let state = createChatState();
+/** @type {Object.<string, string>} repo name → clone URL */
+let repoUrlMap = {};
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 
@@ -97,7 +99,7 @@ function renderMessage(msg) {
   ` : '';
 
   const bodyHtml = msg.answer ? `
-    <div class="message__body">${renderMarkdown(msg.answer)}</div>
+    <div class="message__body">${renderMarkdown(msg.answer, repoUrlMap)}</div>
   ` : (msg.status === 'loading' ? `
     <div class="loading-dots"><span></span><span></span><span></span></div>
   ` : '');
@@ -106,7 +108,15 @@ function renderMessage(msg) {
     <div class="sources">
       <div class="sources__title">Sources (${msg.sources.length})</div>
       <div class="source-chips">
-        ${msg.sources.map(s => `<span class="source-chip" title="${escapeHtml(`${s.repo}:${s.version}:${s.file}:${s.line}`)}">${escapeHtml(formatCitation(s))}</span>`).join('')}
+        ${msg.sources.map(s => {
+          const repoUrl = repoUrlMap[s.repo];
+          const fileUrl = repoUrl ? buildFileUrl(repoUrl, s.version, s.file, s.line) : null;
+          const title = escapeHtml(`${s.repo}:${s.version}:${s.file}:${s.line}`);
+          const label = escapeHtml(formatCitation(s));
+          return fileUrl
+            ? `<a href="${escapeHtml(fileUrl)}" class="source-chip" target="_blank" rel="noopener noreferrer" title="${title}">${label}</a>`
+            : `<span class="source-chip" title="${title}">${label}</span>`;
+        }).join('')}
       </div>
     </div>
   ` : '';
@@ -248,4 +258,9 @@ themeBtnEl.addEventListener('click', () => {
 applyStoredTheme();
 updateThemeButton();
 checkHealth();
+fetchRepositories().then((repos) => {
+  repoUrlMap = Object.fromEntries(
+    repos.filter(r => r.url).map(r => [r.name, r.url])
+  );
+});
 render();
