@@ -214,9 +214,13 @@ html, body {
 }
 
 .theme-btn svg {
-  width: 1.2rem;
-  height: 1.2rem;
+  display: block;
+  width: 1.1rem;
+  height: 1.1rem;
   pointer-events: none;
+  fill: none;
+  stroke: currentColor;
+  flex-shrink: 0;
 }
 
 /* ── Chat area ────────────────────────────────────────────────────────────── */
