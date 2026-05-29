@@ -1,0 +1,45 @@
+#!/bin/bash
+# Wrapper for the web UI.
+# Generates an nginx config from the snap config values and starts nginx in
+# the foreground.  nginx serves the static Vite build and reverse-proxies the
+# API paths (/query, /repositories, /health, /tool-description) to the
+# knowledge-server, so the browser talks to a single origin.
+set -eu
+
+case "${1:-start}" in
+  start)
+    UI_HOST=$(snapctl get ui.host)
+    UI_PORT=$(snapctl get ui.port)
+    SERVER_HOST=$(snapctl get server.host)
+    SERVER_PORT=$(snapctl get server.port)
+
+    : "${UI_HOST:=127.0.0.1}"
+    : "${UI_PORT:=3000}"
+    : "${SERVER_HOST:=127.0.0.1}"
+    : "${SERVER_PORT:=8080}"
+
+    # nginx requires writable temp directories.
+    mkdir -p \
+      "$SNAP_COMMON/nginx-tmp/client_body" \
+      "$SNAP_COMMON/nginx-tmp/proxy" \
+      "$SNAP_COMMON/nginx-tmp/fastcgi" \
+      "$SNAP_COMMON/nginx-tmp/uwsgi" \
+      "$SNAP_COMMON/nginx-tmp/scgi"
+
+    # Substitute runtime values into the config template.
+    # The explicit variable list prevents envsubst from touching nginx's own
+    # $-variables such as $uri and $host.
+    export SNAP SNAP_COMMON UI_HOST UI_PORT SERVER_HOST SERVER_PORT
+    envsubst '${SNAP} ${SNAP_COMMON} ${UI_HOST} ${UI_PORT} ${SERVER_HOST} ${SERVER_PORT}' \
+      < "$SNAP/etc/harvest/nginx.conf.template" \
+      > "$SNAP_COMMON/nginx.conf"
+
+    echo "Harvest UI  →  http://${UI_HOST}:${UI_PORT}"
+    echo "API proxy   →  http://${SERVER_HOST}:${SERVER_PORT}"
+    exec "$SNAP/usr/sbin/nginx" -c "$SNAP_COMMON/nginx.conf"
+    ;;
+  *)
+    echo "Usage: harvest.ui start" >&2
+    exit 1
+    ;;
+esac

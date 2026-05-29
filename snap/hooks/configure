@@ -1,0 +1,69 @@
+#!/bin/bash
+# Runs after every `snap set harvest ...` invocation.
+# Regenerates the config files that the wrapper scripts pass to the binaries.
+set -eu
+
+# ── Read current snap config ──────────────────────────────────────────────────
+NEO4J_HOST=$(snapctl get neo4j.host)
+NEO4J_PORT=$(snapctl get neo4j.port)
+NEO4J_USER=$(snapctl get neo4j.user)
+NEO4J_PASSWORD=$(snapctl get neo4j.password)
+CLONE_ROOT=$(snapctl get storage.clone-root)
+SERVER_HOST=$(snapctl get server.host)
+SERVER_PORT=$(snapctl get server.port)
+LLM_PROVIDER=$(snapctl get llm.provider)
+LLM_API_KEY=$(snapctl get llm.api-key)
+LLM_MODEL=$(snapctl get llm.model)
+LLM_BASE_URL=$(snapctl get llm.base-url)
+LLM_MAX_ITER=$(snapctl get llm.max-iterations)
+LLM_TIMEOUT=$(snapctl get llm.timeout-secs)
+
+# ── Defaults for any key left empty ──────────────────────────────────────────
+: "${NEO4J_HOST:=localhost}"
+: "${NEO4J_PORT:=7687}"
+: "${NEO4J_USER:=neo4j}"
+: "${CLONE_ROOT:=$SNAP_COMMON/repos}"
+: "${SERVER_HOST:=127.0.0.1}"
+: "${SERVER_PORT:=8080}"
+: "${LLM_PROVIDER:=anthropic}"
+: "${LLM_MODEL:=claude-sonnet-4-6}"
+: "${LLM_BASE_URL:=https://api.anthropic.com/v1}"
+: "${LLM_MAX_ITER:=20}"
+: "${LLM_TIMEOUT:=120}"
+
+mkdir -p "$SNAP_COMMON"
+
+# ── Harvester connection config ───────────────────────────────────────────────
+# Contains only [neo4j] and [storage].  The [[repositories]] blocks live in
+# the user-managed $SNAP_COMMON/repositories.toml and are concatenated at
+# runtime by wrapper-harvest before the binary is invoked.
+cat > "$SNAP_COMMON/harvester-connect.toml" << TOML
+[neo4j]
+uri      = "bolt://${NEO4J_HOST}:${NEO4J_PORT}"
+user     = "${NEO4J_USER}"
+password = "${NEO4J_PASSWORD}"
+
+[storage]
+clone_root = "${CLONE_ROOT}"
+TOML
+
+# ── Server config ─────────────────────────────────────────────────────────────
+cat > "$SNAP_COMMON/server.toml" << TOML
+[server]
+host = "${SERVER_HOST}"
+port = ${SERVER_PORT}
+
+[neo4j]
+uri      = "bolt://${NEO4J_HOST}:${NEO4J_PORT}"
+user     = "${NEO4J_USER}"
+password = "${NEO4J_PASSWORD}"
+
+[llm]
+provider       = "${LLM_PROVIDER}"
+base_url       = "${LLM_BASE_URL}"
+api_key        = "${LLM_API_KEY}"
+model          = "${LLM_MODEL}"
+max_iterations = ${LLM_MAX_ITER}
+timeout_secs   = ${LLM_TIMEOUT}
+max_retries    = 3
+TOML
