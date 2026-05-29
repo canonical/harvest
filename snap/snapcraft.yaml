@@ -1,0 +1,127 @@
+name: harvest
+base: core22
+version: '0.1.0'
+summary: AI-powered code knowledge harvester and chat interface
+description: |
+  Harvest indexes your git repositories into a Neo4j knowledge graph
+  and exposes an AI-powered chat interface for exploring your codebase.
+
+  Prerequisites
+  ─────────────
+  A running Neo4j instance (not bundled in this snap).
+
+  Quick start
+  ───────────
+  1. Configure connections and credentials:
+       snap set harvest \
+         neo4j.password=<neo4j-password> \
+         llm.api-key=<llm-api-key>
+
+  2. Declare repositories to harvest:
+       $EDITOR /var/snap/harvest/common/repositories.toml
+
+  3. Start the API server:
+       harvest.serve
+
+  4. Start the web UI (proxies API calls to the server):
+       harvest.ui start
+
+  5. Harvest your code:
+       harvest run
+
+  Snap configuration keys
+  ───────────────────────
+  neo4j.host          Neo4j hostname          (default: localhost)
+  neo4j.port          Neo4j bolt port         (default: 7687)
+  neo4j.user          Neo4j username          (default: neo4j)
+  neo4j.password      Neo4j password          (required)
+  storage.clone-root  Git clone directory     (default: $SNAP_COMMON/repos)
+  server.host         API server bind address (default: 127.0.0.1)
+  server.port         API server port         (default: 8080)
+  ui.host             Web UI bind address     (default: 127.0.0.1)
+  ui.port             Web UI port             (default: 3000)
+  llm.provider        LLM provider            (default: anthropic)
+  llm.api-key         LLM API key             (required)
+  llm.model           LLM model name          (default: claude-sonnet-4-6)
+  llm.base-url        LLM base URL            (default: https://api.anthropic.com/v1)
+  llm.max-iterations  Agent iteration limit   (default: 20)
+  llm.timeout-secs    Request timeout         (default: 120)
+
+grade: devel
+confinement: strict
+
+apps:
+  harvest:
+    command: bin/wrapper-harvest
+    plugs:
+      - network          # clone git repos; reach Neo4j
+      - home             # access repos under $HOME
+      - removable-media  # access repos on external media
+
+  serve:
+    command: bin/wrapper-serve
+    plugs:
+      - network          # reach Neo4j and the LLM API
+      - network-bind     # bind to server.port
+
+  ui:
+    command: bin/wrapper-ui
+    plugs:
+      - network          # nginx proxy to knowledge-server
+      - network-bind     # bind to ui.port
+
+parts:
+  # ── Rust binaries ───────────────────────────────────────────────────────────
+  # Build both workspace members in one cargo invocation so they share the
+  # Cargo.lock and dependency cache.
+  rust-binaries:
+    plugin: rust
+    source: .
+    build-packages:
+      - libssl-dev
+      - pkg-config
+    stage-packages:
+      - libssl3
+      - ca-certificates
+    override-build: |
+      cargo build --release --workspace
+      install -Dm755 target/release/knowledge-harvester \
+        "$SNAPCRAFT_PART_INSTALL/bin/knowledge-harvester"
+      install -Dm755 target/release/knowledge-server \
+        "$SNAPCRAFT_PART_INSTALL/bin/knowledge-server"
+
+  # ── Web UI static assets ────────────────────────────────────────────────────
+  # Vite produces a self-contained dist/ bundle; no Node runtime is needed in
+  # the snap — nginx serves the files and proxies the API calls.
+  web-ui:
+    plugin: nil
+    source: web-ui/
+    build-snaps:
+      - node/20/stable
+    override-build: |
+      cd "$SNAPCRAFT_PART_SRC"
+      npm ci
+      npm run build
+      mkdir -p "$SNAPCRAFT_PART_INSTALL/share/harvest-ui"
+      cp -r dist/. "$SNAPCRAFT_PART_INSTALL/share/harvest-ui/"
+
+  # ── nginx + envsubst ────────────────────────────────────────────────────────
+  # nginx serves the web UI and proxies /query, /repositories, /health, and
+  # /tool-description to the knowledge-server.  envsubst (gettext-base) fills
+  # in the runtime config template.
+  nginx:
+    plugin: nil
+    stage-packages:
+      - nginx
+      - gettext-base
+
+  # ── Wrapper scripts and static config ───────────────────────────────────────
+  wrappers:
+    plugin: dump
+    source: snap/local/
+    organize:
+      wrapper-harvest:            bin/wrapper-harvest
+      wrapper-serve:              bin/wrapper-serve
+      wrapper-ui:                 bin/wrapper-ui
+      nginx.conf.template:        etc/harvest/nginx.conf.template
+      repositories.toml.example:  share/harvest/repositories.toml.example

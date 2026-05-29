@@ -1,0 +1,57 @@
+# nginx config template for the Harvest web UI.
+# Variables in ${...} are substituted by wrapper-ui via envsubst.
+# nginx's own $uri / $host variables are left untouched because only the
+# explicitly listed variables are passed to envsubst.
+
+daemon off;
+worker_processes 1;
+
+pid        ${SNAP_COMMON}/nginx.pid;
+error_log  ${SNAP_COMMON}/nginx-error.log  warn;
+
+events {
+    worker_connections 128;
+}
+
+http {
+    include       ${SNAP}/etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    access_log  ${SNAP_COMMON}/nginx-access.log;
+
+    # Redirect all nginx state/temp paths to the writable snap area.
+    client_body_temp_path  ${SNAP_COMMON}/nginx-tmp/client_body;
+    proxy_temp_path        ${SNAP_COMMON}/nginx-tmp/proxy;
+    fastcgi_temp_path      ${SNAP_COMMON}/nginx-tmp/fastcgi;
+    uwsgi_temp_path        ${SNAP_COMMON}/nginx-tmp/uwsgi;
+    scgi_temp_path         ${SNAP_COMMON}/nginx-tmp/scgi;
+
+    sendfile        on;
+    keepalive_timeout  65;
+
+    server {
+        listen  ${UI_HOST}:${UI_PORT};
+
+        root   ${SNAP}/share/harvest-ui;
+        index  index.html;
+
+        # Reverse-proxy API endpoints to the knowledge-server.
+        # proxy_buffering off is required for the Server-Sent Events stream
+        # used by the /query endpoint.
+        location ~ ^/(query|repositories|health|tool-description) {
+            proxy_pass         http://${SERVER_HOST}:${SERVER_PORT};
+            proxy_http_version 1.1;
+            proxy_set_header   Connection '';
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+            proxy_buffering    off;
+            proxy_cache        off;
+        }
+
+        # Serve static assets; fall back to index.html for any unmatched path
+        # so that client-side navigation works correctly.
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+    }
+}

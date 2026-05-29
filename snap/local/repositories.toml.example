@@ -1,0 +1,15 @@
+# Repositories for Harvest to index.
+# This file is managed by you — snap set harvest ... will not touch it.
+# After editing, run:  harvest run
+#
+# Add one [[repositories]] block per repository.
+#
+# [[repositories]]
+# name = "my-repo"
+# url  = "https://github.com/my-org/my-repo.git"
+# refs = ["main", "v1.0", "v2.0"]
+#
+# [[repositories]]
+# name = "another-repo"
+# url  = "git@github.com:my-org/another-repo.git"
+# refs = ["stable"]
