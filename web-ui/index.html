@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Harvest — Code Knowledge Chat</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌾</text></svg>" />
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="status-dot" id="status-dot" title="Checking server…"></div>
+      <h1>Harvest · Code Knowledge</h1>
+    </header>
+
+    <!-- Two-column layout -->
+    <div class="layout">
+      <!-- Sidebar: ingested repositories -->
+      <aside class="sidebar">
+        <h2>Repositories</h2>
+        <ul class="repo-list" id="repo-list">
+          <li style="color:#aaa;font-size:.85rem">Loading…</li>
+        </ul>
+      </aside>
+
+      <!-- Main chat area -->
+      <section class="chat-area">
+        <div class="messages" id="messages" role="log" aria-live="polite" aria-label="Chat messages">
+          <!-- Welcome placeholder -->
+          <div class="message message--assistant">
+            <div class="message__bubble">
+              <div class="message__body">
+                <p>Ask anything about your ingested codebases. For example:</p>
+                <ul>
+                  <li>How does authentication work in <code>my-repo</code>?</li>
+                  <li>Who calls <code>parse_query</code> in version v2.0?</li>
+                  <li>What changed in <code>Agent::query</code> between v1 and v2?</li>
+                </ul>
+                <p>Tool calls are shown as they happen. Answers are rendered as Markdown with source citations.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Input bar -->
+        <div class="input-area">
+          <textarea
+            id="query-input"
+            placeholder="Ask a question about your code… (Enter to send, Shift+Enter for newline)"
+            rows="1"
+            aria-label="Query input"
+          ></textarea>
+          <button
+            id="send-btn"
+            class="p-button--positive"
+            type="button"
+            aria-label="Send query"
+          >Send</button>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
