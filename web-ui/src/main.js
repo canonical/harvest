@@ -2,6 +2,7 @@ import './style.css';
 import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
 import { queryStream, fetchToolDescription } from './api.js';
 import { renderMarkdown, formatCitation } from './markdown.js';
+import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
 import {
   createChatState,
   addUserMessage,
@@ -123,13 +124,12 @@ function renderMessage(msg) {
 
 function renderToolCall(tc) {
   const statusLabel = tc.status === 'running' ? 'Running…' : 'Done';
-  const inputJson = JSON.stringify(tc.input, null, 2);
   const label = tc.description
     ? escapeHtml(tc.description)
     : `<span class="tool-call__name--bare">${escapeHtml(tc.name)}</span>`;
   const previewHtml = tc.preview ? `
     <div class="tool-call__label">Result preview</div>
-    <pre class="tool-call__preview">${escapeHtml(tc.preview)}</pre>
+    <div class="tool-data">${renderPreviewToHtml(tc.preview)}</div>
   ` : '';
 
   return `
@@ -142,7 +142,7 @@ function renderToolCall(tc) {
       <div class="tool-call__body">
         <div class="tool-call__label">Tool: ${escapeHtml(tc.name)}</div>
         <div class="tool-call__label">Input</div>
-        <pre class="tool-call__input">${escapeHtml(inputJson)}</pre>
+        <div class="tool-data">${renderJsonToHtml(tc.input)}</div>
         ${previewHtml}
       </div>
     </div>
