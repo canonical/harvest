@@ -198,7 +198,9 @@ impl Agent {
 
                         let result = self.execute_tool_call(call, &tool_map).await;
 
-                        let preview = result.chars().take(3000).collect::<String>();
+                        let preview = tool_map.get(call.name.as_str())
+                            .map(|t| t.preview(&result))
+                            .unwrap_or_else(|| result.chars().take(3000).collect());
                         let _ = tx.send(AgentEvent::ToolResult {
                             name: call.name.clone(),
                             preview,

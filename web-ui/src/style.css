@@ -582,6 +582,8 @@ html, body {
   margin: 0;
   padding: 0.5rem 0.75rem;
   overflow-x: auto;
+  overflow-y: auto;
+  max-height: 22rem;
   font-size: 0.78rem;
   line-height: 1.45;
   background: var(--bg-code);

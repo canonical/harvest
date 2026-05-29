@@ -111,6 +111,10 @@ impl Tool for GetSymbolSourceTool {
         ).await?;
         Ok(serde_json::to_string_pretty(&rows)?)
     }
+
+    fn preview(&self, result: &str) -> String {
+        result.to_string()
+    }
 }
 
 pub struct GetFileSymbolsTool(pub Arc<Neo4jClient>);
@@ -279,6 +283,10 @@ impl Tool for CompareSymbolAcrossVersionsTool {
             params,
         ).await?;
         Ok(serde_json::to_string_pretty(&rows)?)
+    }
+
+    fn preview(&self, result: &str) -> String {
+        result.to_string()
     }
 }
 
