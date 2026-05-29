@@ -165,10 +165,12 @@ function renderMessage(msg) {
           const repoUrl = repoUrlMap[s.repo];
           const fileUrl = repoUrl ? buildFileUrl(repoUrl, s.version, s.file, s.line) : null;
           const title = escapeHtml(`${s.repo} ${s.version} · ${s.file}:${s.line}`);
-          const label = i + 1;
+          const filename = escapeHtml(s.file.split('/').pop());
+          const desc = escapeHtml(`${s.repo} · L${s.line}`);
+          const inner = `<span class="source-chip__num">${i + 1}</span><strong class="source-chip__name">${filename}</strong><span class="source-chip__desc">${desc}</span>`;
           return fileUrl
-            ? `<a href="${escapeHtml(fileUrl)}" class="source-chip" target="_blank" rel="noopener noreferrer" title="${title}">${label}</a>`
-            : `<span class="source-chip" title="${title}">${label}</span>`;
+            ? `<a href="${escapeHtml(fileUrl)}" class="source-chip" target="_blank" rel="noopener noreferrer" title="${title}">${inner}</a>`
+            : `<span class="source-chip" title="${title}">${inner}</span>`;
         }).join('')}
       </div>
     </div>
