@@ -60,8 +60,15 @@ impl Agent {
 
         let final_text = loop {
             if iterations >= self.max_iterations {
-                tracing::warn!("agent hit max_iterations={} — returning partial answer", self.max_iterations);
-                break self.last_assistant_text(&messages);
+                tracing::warn!("agent hit max_iterations={} — requesting synthesis", self.max_iterations);
+                messages.push(Message::user(
+                    "You have used the maximum number of tool calls. \
+                     Synthesize what you have gathered so far into a final answer.",
+                ));
+                match self.llm.chat(&messages, &[]).await {
+                    Ok(LlmResponse::Message { text }) => break text,
+                    Ok(LlmResponse::ToolCalls(_)) | Err(_) => break self.last_assistant_text(&messages),
+                }
             }
 
             match self.llm.chat(&messages, &tool_defs).await? {
