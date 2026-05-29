@@ -326,12 +326,56 @@ html, body {
 
 /* ── Tool call cards ──────────────────────────────────────────────────────── */
 
+.tool-calls-wrap {
+  margin-bottom: 0.5rem;
+}
+
 .tool-calls {
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
-  margin-bottom: 0.5rem;
 }
+
+/* Collapsed state: fixed height with a fade hint */
+.tool-calls-clip {
+  position: relative;
+}
+
+.tool-calls-wrap:not(.expanded) .tool-calls-clip {
+  max-height: 9rem;
+  overflow: hidden;
+}
+
+.tool-calls-wrap:not(.expanded) .tool-calls-clip::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2.5rem;
+  background: linear-gradient(transparent, var(--bg-surface));
+  pointer-events: none;
+}
+
+.tool-calls-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  width: 100%;
+  padding: 0.3rem 0.75rem;
+  margin-top: 0.25rem;
+  border: 1px solid var(--border-color);
+  border-radius: 0.4rem;
+  background: var(--bg-tool-header);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tool-calls-toggle:hover { background: var(--bg-surface-hover); }
+
+.tool-calls-toggle__chevron { font-size: 0.65rem; }
 
 .tool-call {
   border: 1px solid var(--border-color);

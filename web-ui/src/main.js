@@ -44,6 +44,19 @@ const themeBtnEl   = document.getElementById('theme-btn');
 // ── Render ────────────────────────────────────────────────────────────────────
 
 function render() {
+  // Snapshot expand/open state before replacing the DOM
+  const prevAssistantEls = [...messagesEl.querySelectorAll('.message--assistant')];
+  const expandedWraps = new Set(
+    prevAssistantEls.flatMap((el, i) =>
+      el.querySelector('.tool-calls-wrap.expanded') ? [i] : []
+    )
+  );
+  const openToolCalls = new Set(
+    prevAssistantEls.flatMap((el, i) =>
+      [...el.querySelectorAll('.tool-call.open')].map((_, j) => `${i}:${j}`)
+    )
+  );
+
   const messages = getMessages(state);
   messagesEl.innerHTML = messages.map(renderMessage).join('');
 
@@ -54,10 +67,37 @@ function render() {
   // Scroll to bottom
   messagesEl.scrollTop = messagesEl.scrollHeight;
 
+  // Restore expand/open state
+  [...messagesEl.querySelectorAll('.message--assistant')].forEach((el, i) => {
+    if (expandedWraps.has(i)) {
+      const wrap = el.querySelector('.tool-calls-wrap');
+      if (wrap) {
+        wrap.classList.add('expanded');
+        const chevron = wrap.querySelector('.tool-calls-toggle__chevron');
+        if (chevron) chevron.textContent = '▴';
+        const btn = wrap.querySelector('.tool-calls-toggle');
+        if (btn) btn.setAttribute('aria-expanded', 'true');
+      }
+    }
+    el.querySelectorAll('.tool-call').forEach((tc, j) => {
+      if (openToolCalls.has(`${i}:${j}`)) tc.classList.add('open');
+    });
+  });
+
   // Attach tool call toggle listeners
   messagesEl.querySelectorAll('.tool-call__header').forEach(header => {
     header.addEventListener('click', () => {
       header.closest('.tool-call').classList.toggle('open');
+    });
+  });
+
+  // Attach tool-calls section expand/collapse listeners
+  messagesEl.querySelectorAll('.tool-calls-toggle').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const wrap = btn.closest('.tool-calls-wrap');
+      const expanded = wrap.classList.toggle('expanded');
+      btn.setAttribute('aria-expanded', String(expanded));
+      btn.querySelector('.tool-calls-toggle__chevron').textContent = expanded ? '▴' : '▾';
     });
   });
 }
@@ -92,9 +132,17 @@ function renderMessage(msg) {
   }
 
   // Assistant message (loading with tool calls or fully done)
-  const toolCallsHtml = msg.tool_calls.length > 0 ? `
-    <div class="tool-calls">
-      ${msg.tool_calls.map(renderToolCall).join('')}
+  const n = msg.tool_calls.length;
+  const toolCallsHtml = n > 0 ? `
+    <div class="tool-calls-wrap">
+      <div class="tool-calls-clip">
+        <div class="tool-calls">
+          ${msg.tool_calls.map(renderToolCall).join('')}
+        </div>
+      </div>
+      <button class="tool-calls-toggle" type="button" aria-expanded="false">
+        <span class="tool-calls-toggle__chevron">▾</span> ${n} tool call${n === 1 ? '' : 's'}
+      </button>
     </div>
   ` : '';
 
