@@ -171,6 +171,28 @@ describe('renderPreviewToHtml', () => {
     expect(html).not.toContain('<not json>');
     expect(html).toContain('&lt;not json&gt;');
   });
+
+  it('extracts and highlights source from a truncated first element', () => {
+    const full = JSON.stringify([{
+      name: 'my_func',
+      start_line: 10,
+      end_line: 50,
+      source: 'def my_func():\n    pass\n',
+    }]);
+    const truncated = full.slice(0, full.length - 5); // cut off closing }]
+    const html = renderPreviewToHtml(truncated, 'src/helpers.py');
+    expect(html).toContain('<pre');
+    expect(html).toContain('my_func');
+    expect(html).toContain('language-python');
+    expect(html.toLowerCase()).toContain('truncat');
+  });
+
+  it('does not apply truncated-source extraction to non-source arrays', () => {
+    const full = JSON.stringify([{ name: 'alpha', score: 0.9 }]);
+    const truncated = full.slice(0, full.length - 3);
+    const html = renderPreviewToHtml(truncated);
+    expect(html).not.toContain('<pre');
+  });
 });
 
 // ── source code preview ───────────────────────────────────────────────────────

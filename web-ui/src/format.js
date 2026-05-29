@@ -61,6 +61,11 @@ export function renderPreviewToHtml(text, filePath = null) {
       + '<span class="tool-data__truncated">… preview truncated</span>';
   }
 
+  // 2b. For truncated source results the whole first element may be incomplete.
+  //     Extract the source string directly from the partial text.
+  const truncatedSourceHtml = tryExtractTruncatedSource(text, filePath);
+  if (truncatedSourceHtml !== null) return truncatedSourceHtml;
+
   // 3. Plain-text fallback.
   return `<span class="tool-data__fallback">${esc(text)}</span>`;
 }
@@ -117,6 +122,68 @@ function shortenAbsPath(str) {
   const parts = str.split('/').filter(Boolean);
   if (parts.length <= 4) return null;
   return parts.slice(-4).join('/');
+}
+
+/**
+ * Last-resort extraction for a truncated source-result JSON array.
+ * Walks the "source" string value character by character so it handles
+ * JSON escape sequences even when the value (or the surrounding object)
+ * is cut off mid-way. Returns rendered HTML with a truncation notice,
+ * or null if the text doesn't look like a source result.
+ */
+function tryExtractTruncatedSource(text, filePath) {
+  const t = text.trimStart();
+  if (!t.startsWith('[') || !t.includes('"source"')) return null;
+
+  // Locate the opening quote of the "source" value
+  const keyIdx = t.indexOf('"source"');
+  let pos = keyIdx + 8;
+  while (pos < t.length && /[\s:]/.test(t[pos])) pos++;
+  if (pos >= t.length || t[pos] !== '"') return null;
+  pos++; // step past the opening quote
+
+  // Collect the string, respecting backslash escapes
+  let raw = '';
+  let closed = false;
+  while (pos < t.length) {
+    const c = t[pos];
+    if (c === '\\' && pos + 1 < t.length) {
+      raw += t[pos] + t[pos + 1];
+      pos += 2;
+    } else if (c === '"') {
+      closed = true;
+      break;
+    } else {
+      raw += c;
+      pos++;
+    }
+  }
+
+  // Unescape the collected JSON string fragment
+  let source;
+  try {
+    source = JSON.parse('"' + raw + '"');
+  } catch {
+    source = raw
+      .replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\r/g, '\r')
+      .replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+  }
+
+  // Pull metadata with simple regexes (order in the JSON doesn't matter)
+  const nameMatch  = t.match(/"name"\s*:\s*"([^"\\]+)"/);
+  const startMatch = t.match(/"start_line"\s*:\s*(\d+)/);
+  const endMatch   = t.match(/"end_line"\s*:\s*(\d+)/);
+
+  const items = [{
+    source,
+    name: nameMatch?.[1] ?? null,
+    start_line: startMatch ? parseInt(startMatch[1]) : null,
+    end_line:   endMatch   ? parseInt(endMatch[1])   : null,
+  }];
+
+  const html = tryRenderAsSource(items, filePath);
+  if (html === null) return null;
+  return html + (!closed ? '<span class="tool-data__truncated">… preview truncated</span>' : '');
 }
 
 /**
