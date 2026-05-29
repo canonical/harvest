@@ -27,7 +27,10 @@ impl Tool for ListRepositoriesTool {
     async fn execute(&self, _params: Value) -> Result<String> {
         let rows = self.0.query_read(
             "MATCH (r:Repository)-[:HAS_VERSION]->(v:Version {ingested: true})
-             RETURN r.name AS repo, collect(v.tag) AS versions
+             WITH r, collect(v.tag) AS all_versions
+             RETURN r.name AS repo,
+                    size(all_versions) AS version_count,
+                    all_versions[..10] AS versions
              ORDER BY r.name",
             json!({}),
         ).await?;
