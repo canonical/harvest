@@ -82,8 +82,7 @@ impl GitClient {
         let repo = Repository::open(repo_path)?;
         let mut out = Vec::with_capacity(refs.len());
         for refname in refs {
-            let obj = repo
-                .revparse_single(refname)
+            let obj = resolve_one(&repo, refname)
                 .with_context(|| format!("resolving ref '{refname}'"))?;
             let commit = obj
                 .peel_to_commit()
@@ -99,12 +98,7 @@ impl GitClient {
 
     pub fn checkout(&self, repo_path: &Path, refname: &str) -> Result<()> {
         let repo = Repository::open(repo_path)?;
-        // revparse_single follows git's DWIM rules:
-        //   "v1.0"  → refs/tags/v1.0
-        //   "main"  → refs/heads/main
-        //   "<sha>" → the commit directly
-        let obj = repo
-            .revparse_single(refname)
+        let obj = resolve_one(&repo, refname)
             .with_context(|| format!("resolving ref '{refname}'"))?;
         repo.checkout_tree(&obj, None)?;
         repo.set_head_detached(obj.peel_to_commit()?.id())?;
@@ -124,6 +118,23 @@ impl GitClient {
             .collect();
         Ok(files)
     }
+}
+
+/// Resolve a ref name to a git object using git's DWIM rules, with an
+/// additional fallback for remote-tracking branches on `origin`.
+///
+/// git2 DWIM tries (among others): refs/tags/<n>, refs/heads/<n>,
+/// refs/remotes/<n>. That last step treats the first path segment as the
+/// remote name, so a slashed branch like "stable/2023.1.1" would look for
+/// remote "stable", branch "2023.1.1" — which is wrong for an `origin`-
+/// cloned repo. We fall back to refs/remotes/origin/<n> explicitly.
+fn resolve_one<'r>(repo: &'r Repository, refname: &str) -> Result<git2::Object<'r>> {
+    if let Ok(obj) = repo.revparse_single(refname) {
+        return Ok(obj);
+    }
+    let origin_ref = format!("refs/remotes/origin/{refname}");
+    repo.revparse_single(&origin_ref)
+        .with_context(|| format!("resolving ref '{refname}'"))
 }
 
 #[cfg(test)]
@@ -226,5 +237,29 @@ mod tests {
         let client = GitClient::new(PathBuf::from("/tmp"));
         let refs = client.resolve_refs(&repo_path, &[]).unwrap();
         assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn resolve_refs_resolves_slashed_remote_tracking_branch() {
+        // Simulate a cloned repo where "stable/2023.1.1" only exists as
+        // refs/remotes/origin/stable/2023.1.1 (no local branch).
+        let (_dir, repo_path) = make_repo();
+        let repo = Repository::open(&repo_path).unwrap();
+        let head_oid = repo.head().unwrap().peel_to_commit().unwrap().id();
+        repo.reference(
+            "refs/remotes/origin/stable/2023.1.1",
+            head_oid,
+            false,
+            "remote tracking ref",
+        ).unwrap();
+        drop(repo);
+
+        let client = GitClient::new(PathBuf::from("/tmp"));
+        let refs = client
+            .resolve_refs(&repo_path, &["stable/2023.1.1".to_string()])
+            .unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "stable/2023.1.1");
+        assert!(!refs[0].commit_sha.is_empty());
     }
 }
