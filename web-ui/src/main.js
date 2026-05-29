@@ -100,6 +100,26 @@ function render() {
       btn.querySelector('.tool-calls-toggle__chevron').textContent = expanded ? '▴' : '▾';
     });
   });
+
+  // Wrap each code block in a container and inject a copy button
+  messagesEl.querySelectorAll('.message__body pre').forEach(pre => {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'code-block';
+    pre.parentNode.insertBefore(wrapper, pre);
+    wrapper.appendChild(pre);
+
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.textContent = 'Copy';
+    btn.addEventListener('click', () => {
+      const text = (pre.querySelector('code') ?? pre).innerText;
+      navigator.clipboard.writeText(text).then(() => {
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+      }).catch(() => {});
+    });
+    wrapper.appendChild(btn);
+  });
 }
 
 function renderMessage(msg) {
