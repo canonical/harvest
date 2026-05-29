@@ -1,7 +1,6 @@
 import './style.css';
 import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
 import { queryStream } from './api.js';
-import { fetchRepositories } from './api.js';
 import { renderMarkdown, formatCitation } from './markdown.js';
 import {
   createChatState,
@@ -36,24 +35,7 @@ const messagesEl   = document.getElementById('messages');
 const inputEl      = document.getElementById('query-input');
 const sendBtn      = document.getElementById('send-btn');
 const statusDot    = document.getElementById('status-dot');
-const repoListEl   = document.getElementById('repo-list');
 const themeBtnEl   = document.getElementById('theme-btn');
-
-// ── Repository sidebar ────────────────────────────────────────────────────────
-
-async function loadRepositories() {
-  const repos = await fetchRepositories();
-  if (repos.length === 0) {
-    repoListEl.innerHTML = '<li class="repo-name" style="color:#aaa">None yet</li>';
-    return;
-  }
-  repoListEl.innerHTML = repos.map(r => `
-    <li>
-      <div class="repo-name">${escapeHtml(r.name)}</div>
-      <div class="repo-versions">${r.versions.slice(0, 5).map(v => escapeHtml(v)).join(', ')}${r.versions.length > 5 ? '…' : ''}</div>
-    </li>
-  `).join('');
-}
 
 // ── Render ────────────────────────────────────────────────────────────────────
 
@@ -254,5 +236,4 @@ themeBtnEl.addEventListener('click', () => {
 applyStoredTheme();
 updateThemeButton();
 checkHealth();
-loadRepositories();
 render();
