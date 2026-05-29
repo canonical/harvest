@@ -48,7 +48,6 @@
 /* ── Dark theme tokens ────────────────────────────────────────────────────── */
 
 [data-theme="dark"] {
-  --logo-filter:          invert(1);
   --bg-page:              #111111;
   --bg-surface:           #1e1e1e;
   --bg-surface-alt:       #252525;
@@ -93,7 +92,6 @@
 /* Auto mode: follow OS preference when no explicit theme is set */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
-    --logo-filter:          invert(1);
     --bg-page:              #111111;
     --bg-surface:           #1e1e1e;
     --bg-surface-alt:       #252525;
@@ -172,8 +170,6 @@ html, body {
   width: auto;
   display: block;
   flex-shrink: 0;
-  /* keep the logo readable against both light and dark page backgrounds */
-  filter: var(--logo-filter, none);
 }
 
 .app-header h1 {
