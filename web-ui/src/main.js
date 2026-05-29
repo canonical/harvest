@@ -1,7 +1,7 @@
 import './style.css';
 import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
 import { queryStream, fetchToolDescription, fetchRepositories } from './api.js';
-import { renderMarkdown, buildFileUrl, formatCitation } from './markdown.js';
+import { renderMarkdown, buildFileUrl } from './markdown.js';
 import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
 import {
   createChatState,
@@ -146,21 +146,26 @@ function renderMessage(msg) {
     </div>
   ` : '';
 
+  // Map each unique source to a 1-based index so inline citations and chips share the same numbering
+  const citationIndex = Object.fromEntries(
+    (msg.sources || []).map((s, i) => [`${s.repo}:${s.version}:${s.file}:${s.line}`, i + 1])
+  );
+
   const bodyHtml = msg.answer ? `
-    <div class="message__body">${renderMarkdown(msg.answer, repoUrlMap)}</div>
+    <div class="message__body">${renderMarkdown(msg.answer, repoUrlMap, citationIndex)}</div>
   ` : (msg.status === 'loading' ? `
     <div class="loading-dots"><span></span><span></span><span></span></div>
   ` : '');
 
   const sourcesHtml = (msg.sources && msg.sources.length > 0) ? `
     <div class="sources">
-      <div class="sources__title">Sources (${msg.sources.length})</div>
+      <div class="sources__title">Sources</div>
       <div class="source-chips">
-        ${msg.sources.map(s => {
+        ${msg.sources.map((s, i) => {
           const repoUrl = repoUrlMap[s.repo];
           const fileUrl = repoUrl ? buildFileUrl(repoUrl, s.version, s.file, s.line) : null;
-          const title = escapeHtml(`${s.repo}:${s.version}:${s.file}:${s.line}`);
-          const label = escapeHtml(formatCitation(s));
+          const title = escapeHtml(`${s.repo} ${s.version} · ${s.file}:${s.line}`);
+          const label = i + 1;
           return fileUrl
             ? `<a href="${escapeHtml(fileUrl)}" class="source-chip" target="_blank" rel="noopener noreferrer" title="${title}">${label}</a>`
             : `<span class="source-chip" title="${title}">${label}</span>`;
