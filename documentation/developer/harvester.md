@@ -22,6 +22,21 @@ url  = "https://github.com/org/repo-b"
 name = "repo-b"
 ```
 
+### Limiting which versions are ingested
+
+By default the harvester ingests every git **tag** in a repository. To restrict ingestion to a specific set of git refs, add a `refs` list to the `[[repositories]]` block:
+
+```toml
+[[repositories]]
+name = "repo-a"
+url  = "https://github.com/org/repo-a"
+refs = ["v2.0.0", "v2.1.0", "main"]
+```
+
+Each entry in `refs` can be a **tag name**, a **branch name**, or a full **commit SHA** — anything that `git rev-parse` can resolve. When `refs` is present, only the listed refs are harvested; all other tags and branches are ignored. Omit `refs` entirely to revert to the default behaviour of harvesting all tags.
+
+> **Branches and re-ingestion**: a branch ref (e.g. `main`) is stored in the graph under that name. If the branch has moved forward since the last run, the harvester will not automatically re-ingest it because the `(repo, ref-name)` pair is already marked `ingested: true`. To force re-ingestion of an updated branch, delete the corresponding `Version` node in Neo4j and run the harvester again.
+
 ## Pipeline
 
 ```
