@@ -440,6 +440,31 @@ html, body {
   text-decoration: none;
 }
 
+/* ── p-icon--circle-of-friends ────────────────────────────────────────────── */
+/* Not present in VF 4.11.0; defined here following VF's exact icon pattern.  */
+/* Light theme: Ubuntu orange (#E95420).  Dark theme: white.                   */
+/* The icon is the Ubuntu three-circles mark (circle of friends).              */
+
+.p-icon--circle-of-friends {
+  background-image:
+    var(--vf-theme-light, url("data:image/svg+xml,%3Csvg width='16' height='16' xmlns='http://www.w3.org/2000/svg'%3E%3Ccircle cx='8' cy='3.5' r='3.4' fill='%23E95420' opacity='0.9'/%3E%3Ccircle cx='11.5' cy='10' r='3.4' fill='%23E95420' opacity='0.9'/%3E%3Ccircle cx='4.5' cy='10' r='3.4' fill='%23E95420' opacity='0.9'/%3E%3C/svg%3E"))
+    var(--vf-theme-dark,  url("data:image/svg+xml,%3Csvg width='16' height='16' xmlns='http://www.w3.org/2000/svg'%3E%3Ccircle cx='8' cy='3.5' r='3.4' fill='%23fff' opacity='0.9'/%3E%3Ccircle cx='11.5' cy='10' r='3.4' fill='%23fff' opacity='0.9'/%3E%3Ccircle cx='4.5' cy='10' r='3.4' fill='%23fff' opacity='0.9'/%3E%3C/svg%3E"));
+  background-size: contain;
+  background-position: center;
+  background-repeat: no-repeat;
+  display: inline-block;
+  height: 1rem;
+  width: 1rem;
+  overflow: hidden;
+  text-indent: 110vw;
+  white-space: nowrap;
+  font-size: inherit;
+  margin: 0;
+  padding: 0;
+  position: relative;
+  vertical-align: calc(.5px + .3465em - .5rem);
+}
+
 /* ── Tool call cards ──────────────────────────────────────────────────────── */
 
 .tool-calls-wrap {
