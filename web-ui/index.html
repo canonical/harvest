@@ -87,10 +87,73 @@
       </section>
 
       <!-- Code repositories page -->
-      <section class="page page--placeholder" id="page-repositories" hidden>
-        <p class="page--placeholder__icon">🗄</p>
-        <h2 class="page--placeholder__title">Code repositories</h2>
-        <p class="page--placeholder__body">Nothing to see here yet.</p>
+      <section class="page" id="page-repositories" hidden>
+
+        <!-- Toolbar -->
+        <div class="repo-toolbar">
+          <div class="repo-selectors">
+            <select id="repo-select" class="repo-select" aria-label="Select repository">
+              <option value="">Repository…</option>
+            </select>
+            <select id="version-select" class="repo-select" aria-label="Select version" disabled>
+              <option value="">Version…</option>
+            </select>
+          </div>
+          <div class="repo-search-bar">
+            <input type="search" id="graph-search" placeholder="Smart search with AI…" autocomplete="off" disabled />
+            <button id="graph-search-btn" type="button" disabled>Search</button>
+            <button id="graph-search-clear" type="button" aria-label="Clear search" hidden>✕</button>
+          </div>
+          <div class="repo-toolbar__actions">
+            <button id="graph-fit-btn" type="button" title="Fit graph to view" disabled>Fit</button>
+          </div>
+        </div>
+
+        <!-- Status bar (search results / truncation notice) -->
+        <div class="repo-search-status" id="repo-search-status" hidden></div>
+
+        <!-- Main area: graph + sliding source panel -->
+        <div class="repo-main">
+
+          <!-- Graph canvas area -->
+          <div class="repo-graph-wrap">
+            <div id="cy" class="repo-graph"></div>
+            <div id="repo-loading" class="repo-loading" hidden>
+              <div class="loading-dots"><span></span><span></span><span></span></div>
+              <span>Loading graph…</span>
+            </div>
+            <div id="repo-empty" class="repo-empty">
+              <div class="repo-empty__icon">⬡</div>
+              <p class="repo-empty__text">Select a repository and version<br>to explore its symbol graph</p>
+            </div>
+          </div>
+
+          <!-- Source panel — slides in from the right when a node is selected -->
+          <aside id="repo-source-panel" class="repo-source-panel" aria-label="Symbol source code">
+            <div class="repo-source-panel__head">
+              <div class="repo-source-panel__title">
+                <span id="source-kind-badge" class="source-kind-badge"></span>
+                <span id="source-symbol-name" class="source-symbol-name"></span>
+              </div>
+              <button id="source-panel-close" class="source-panel-close" type="button" aria-label="Close source panel">✕</button>
+            </div>
+            <p id="source-symbol-file" class="source-symbol-file"></p>
+            <div class="source-code-block">
+              <pre id="source-pre"><code id="source-code"></code></pre>
+            </div>
+            <div id="source-relations" class="source-relations">
+              <div id="source-callers-section" class="source-relations__section" hidden>
+                <div class="source-relations__label">Callers</div>
+                <div id="source-callers-list" class="source-relations__chips"></div>
+              </div>
+              <div id="source-callees-section" class="source-relations__section" hidden>
+                <div class="source-relations__label">Callees</div>
+                <div id="source-callees-list" class="source-relations__chips"></div>
+              </div>
+            </div>
+          </aside>
+
+        </div>
       </section>
 
       <!-- Documentation page -->
