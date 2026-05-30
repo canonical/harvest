@@ -1,6 +1,9 @@
 import cytoscape from 'cytoscape';
+import fcose from 'cytoscape-fcose';
 import hljs from 'highlight.js';
 import { fetchGraph, fetchSymbolSource, queryStream } from './api.js';
+
+cytoscape.use(fcose);
 
 // ── File → color palette ──────────────────────────────────────────────────────
 
@@ -205,18 +208,33 @@ function mountCy(data) {
   cy.elements().style('opacity', 0);
 
   const layout = cy.layout({
-    name: 'cose',
-    animate: true,
-    animationDuration: 950,
-    animationEasing: 'ease-out',
-    nodeRepulsion: 12000,
-    idealEdgeLength: 100,
-    nodeOverlap: 20,
-    nestingFactor: 0.9,
-    gravity: 0.35,
-    padding: 48,
+    name: 'fcose',
+    quality: 'default',
     randomize: true,
+    animate: true,
+    animationDuration: 1000,
+    animationEasing: 'ease-out',
     fit: true,
+    padding: 60,
+    // Include label extents so nodes never overlap their own text
+    nodeDimensionsIncludeLabels: true,
+    uniformNodeDimensions: false,
+    // Pack isolated components (files with no cross-file calls) tightly
+    packComponents: true,
+    tile: true,
+    tilingPaddingVertical: 16,
+    tilingPaddingHorizontal: 16,
+    // Edge and repulsion tuning
+    idealEdgeLength: 160,
+    edgeElasticity: 0.45,
+    nestingFactor: 0.1,
+    numIter: 2500,
+    // Gravity: pull disconnected clusters toward center without crushing them
+    gravity: 0.15,
+    gravityRange: 3.8,
+    gravityCompound: 1.0,
+    gravityRangeCompound: 1.5,
+    initialEnergyOnIncremental: 0.3,
   });
 
   // Use a one-shot guard that handles both the layout event and a fallback timer.
@@ -338,24 +356,24 @@ function cytoscapeStyle() {
       style: {
         'curve-style': 'bezier',
         'target-arrow-shape': 'triangle',
-        'target-arrow-color': 'rgba(140,140,140,0.45)',
-        'line-color': 'rgba(140,140,140,0.28)',
-        width: 1,
-        'arrow-scale': 0.65,
-        'transition-property': 'opacity, line-color, target-arrow-color',
+        'target-arrow-color': 'rgba(120,120,120,0.6)',
+        'line-color': 'rgba(120,120,120,0.45)',
+        width: 1.5,
+        'arrow-scale': 0.75,
+        'transition-property': 'opacity, line-color, target-arrow-color, width',
         'transition-duration': '150ms',
       },
     },
     {
       selector: 'edge.dimmed',
-      style: { opacity: 0.03 },
+      style: { opacity: 0.04 },
     },
     {
       selector: 'edge.active',
       style: {
         'line-color': '#3B82F6',
         'target-arrow-color': '#3B82F6',
-        width: 2,
+        width: 2.5,
         opacity: 1,
       },
     },
