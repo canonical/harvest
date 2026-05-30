@@ -26,6 +26,7 @@ pub struct GraphEdge {
     pub id: String,
     pub source: String,
     pub target: String,
+    pub relation: String, // "calls" | "contains"
 }
 
 #[derive(Serialize)]
@@ -117,10 +118,36 @@ pub async fn handle_get_graph(
         })
         .collect();
 
+    // Containment: a Function whose line range falls inside a Class in the same file
+    // is a method of that class. When multiple classes nest, keep the innermost one.
+    let contains_rows = match neo4j
+        .query_read(
+            "MATCH (fn:Function {repo: $repo, version: $version}),
+                   (cls:Class   {repo: $repo, version: $version})
+             WHERE fn.file = cls.file
+               AND cls.start_line <= fn.start_line
+               AND fn.end_line    <= cls.end_line
+             WITH fn, cls
+             ORDER BY (cls.end_line - cls.start_line) ASC
+             WITH fn, collect(cls)[0] AS innermost
+             RETURN fn.file   AS fn_file,  fn.name   AS fn_name,
+                    innermost.file AS cls_file, innermost.name AS cls_name
+             LIMIT 500",
+            json!({ "repo": repo, "version": version }),
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(error = %e, "graph: contains query failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+
     let node_ids: HashSet<String> = nodes.iter().map(|n| n.id.clone()).collect();
     let mut seen_edges = HashSet::new();
 
-    let edges: Vec<GraphEdge> = edge_rows
+    let mut edges: Vec<GraphEdge> = edge_rows
         .iter()
         .filter_map(|r| {
             let src = format!("{}:{}", r["src_file"].as_str()?, r["src_name"].as_str()?);
@@ -128,13 +155,30 @@ pub async fn handle_get_graph(
             if !node_ids.contains(&src) || !node_ids.contains(&tgt) || src == tgt {
                 return None;
             }
-            let key = format!("{}->{}", src, tgt);
+            let key = format!("calls:{}>{}", src, tgt);
             if !seen_edges.insert(key.clone()) {
                 return None;
             }
-            Some(GraphEdge { id: key, source: src, target: tgt })
+            Some(GraphEdge { id: key, source: src, target: tgt, relation: "calls".into() })
         })
         .collect();
+
+    for r in &contains_rows {
+        let Some(cls_file) = r["cls_file"].as_str() else { continue };
+        let Some(cls_name) = r["cls_name"].as_str() else { continue };
+        let Some(fn_file)  = r["fn_file"].as_str()  else { continue };
+        let Some(fn_name)  = r["fn_name"].as_str()  else { continue };
+        let src = format!("{}:{}", cls_file, cls_name);
+        let tgt = format!("{}:{}", fn_file,  fn_name);
+        if !node_ids.contains(&src) || !node_ids.contains(&tgt) {
+            continue;
+        }
+        let key = format!("contains:{}>{}", src, tgt);
+        if !seen_edges.insert(key.clone()) {
+            continue;
+        }
+        edges.push(GraphEdge { id: key, source: src, target: tgt, relation: "contains".into() });
+    }
 
     Json(GraphData { nodes, edges, truncated }).into_response()
 }
