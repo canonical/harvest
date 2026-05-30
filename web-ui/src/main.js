@@ -2,6 +2,7 @@ import './vanilla.scss';
 import './style.css';
 import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
 import { queryStream, fetchToolDescription, fetchRepositories } from './api.js';
+import { initRepositoriesPage, onRepositoriesPageShow, onRepositoriesPageHide } from './repositories.js';
 import { renderMarkdown, buildFileUrl } from './markdown.js';
 import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
 import {
@@ -348,8 +349,13 @@ document.querySelectorAll('.app-sidebar .p-side-navigation__link').forEach(link 
     });
     link.setAttribute('aria-current', 'page');
 
+    const prevPage = document.querySelector('.page:not([hidden])');
+    if (prevPage?.id === 'page-repositories') onRepositoriesPageHide();
+
     document.querySelectorAll('.page').forEach(p => { p.hidden = true; });
     document.getElementById(`page-${page}`).hidden = false;
+
+    if (page === 'repositories') onRepositoriesPageShow();
   });
 });
 
@@ -361,5 +367,6 @@ fetchRepositories().then((repos) => {
   repoUrlMap = Object.fromEntries(
     repos.filter(r => r.url).map(r => [r.name, r.url])
   );
+  initRepositoriesPage(repos);
 });
 render();

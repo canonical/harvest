@@ -14,6 +14,7 @@ export default defineConfig({
     proxy: {
       '/query': 'http://localhost:8080',
       '/repositories': 'http://localhost:8080',
+      '/graph': 'http://localhost:8080',
       '/health': 'http://localhost:8080',
       '/tool-description': 'http://localhost:8080',
     },
