@@ -1,3 +1,4 @@
+pub mod graph;
 pub mod query;
 pub mod repositories;
 pub mod tool_description;
@@ -27,6 +28,8 @@ pub fn router(state: AppState) -> Router {
 
     let neo4j_router = Router::new()
         .route("/repositories", get(repositories::handle_list_repositories))
+        .route("/graph/:repo/:version", get(graph::handle_get_graph))
+        .route("/graph/:repo/:version/source", get(graph::handle_get_symbol_source))
         .with_state(Arc::clone(&state.neo4j));
 
     Router::new()
