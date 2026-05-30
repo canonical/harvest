@@ -143,6 +143,17 @@
               <div class="repo-empty__icon">⬡</div>
               <p class="repo-empty__text">Select a repository and version<br>to explore its symbol graph</p>
             </div>
+            <!-- Edge-type legend, shown once graph is loaded -->
+            <div id="graph-legend" class="graph-legend" hidden>
+              <div class="graph-legend__item">
+                <svg width="22" height="10" viewBox="0 0 22 10" aria-hidden="true"><line x1="0" y1="5" x2="18" y2="5" stroke="rgba(120,120,120,0.7)" stroke-width="1.5"/><polygon points="18,2 22,5 18,8" fill="rgba(120,120,120,0.7)"/></svg>
+                <span>calls</span>
+              </div>
+              <div class="graph-legend__item">
+                <svg width="22" height="10" viewBox="0 0 22 10" aria-hidden="true"><line x1="0" y1="5" x2="18" y2="5" stroke="rgba(139,92,246,0.8)" stroke-width="1.5" stroke-dasharray="4,2"/><polygon points="18,2 22,5 18,8" fill="rgba(139,92,246,0.8)"/></svg>
+                <span>contains</span>
+              </div>
+            </div>
           </div>
 
           <!-- Source panel — slides in from the right when a node is selected -->
@@ -159,6 +170,14 @@
               <pre id="source-pre"><code id="source-code"></code></pre>
             </div>
             <div id="source-relations" class="source-relations">
+              <div id="source-container-section" class="source-relations__section" hidden>
+                <div class="source-relations__label">Member of</div>
+                <div id="source-container-list" class="source-relations__chips"></div>
+              </div>
+              <div id="source-members-section" class="source-relations__section" hidden>
+                <div class="source-relations__label">Methods</div>
+                <div id="source-members-list" class="source-relations__chips"></div>
+              </div>
               <div id="source-callers-section" class="source-relations__section" hidden>
                 <div class="source-relations__label">Callers</div>
                 <div id="source-callers-list" class="source-relations__chips"></div>

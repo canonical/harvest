@@ -189,10 +189,10 @@ function mountCy(data) {
         shape: n.kind === 'Class' ? 'ellipse' : 'round-rectangle',
       },
     })),
-    // CALLS edges between symbol nodes
+    // Edges (calls + contains) — carry the relation type through to Cytoscape
     ...data.edges.map(e => ({
       group: 'edges',
-      data: { id: e.id, source: e.source, target: e.target },
+      data: { id: e.id, source: e.source, target: e.target, relation: e.relation },
     })),
   ];
 
@@ -247,7 +247,8 @@ function mountCy(data) {
     setOverlay('none');
     cy.nodes('.symbol-node').animate({ style: { opacity: 1 }, duration: 500, easing: 'ease-in-out' });
     cy.nodes('.file-node').animate({ style: { opacity: 0.95 }, duration: 400, easing: 'ease-in-out' });
-    cy.edges().animate({ style: { opacity: 0.55 }, duration: 700, easing: 'ease-in-out' });
+    cy.edges('[relation="calls"]').animate({ style: { opacity: 0.55 }, duration: 700, easing: 'ease-in-out' });
+    cy.edges('[relation="contains"]').animate({ style: { opacity: 0.75 }, duration: 700, easing: 'ease-in-out' });
   }
 
   layout.one('layoutstop', revealGraph);      // primary: fires on the layout object
@@ -350,18 +351,36 @@ function cytoscapeStyle() {
       selector: 'node.symbol-node.ring',
       style: { 'border-width': 3, 'border-color': '#FFD700' },
     },
-    // ── Edges ─────────────────────────────────────────────────────────────────
+    // ── Edges — shared base ───────────────────────────────────────────────────
     {
       selector: 'edge',
       style: {
         'curve-style': 'bezier',
         'target-arrow-shape': 'triangle',
-        'target-arrow-color': 'rgba(120,120,120,0.6)',
-        'line-color': 'rgba(120,120,120,0.45)',
-        width: 1.5,
         'arrow-scale': 0.75,
+        width: 1.5,
         'transition-property': 'opacity, line-color, target-arrow-color, width',
         'transition-duration': '150ms',
+      },
+    },
+    // calls: solid gray
+    {
+      selector: 'edge[relation="calls"]',
+      style: {
+        'line-color': 'rgba(120,120,120,0.45)',
+        'target-arrow-color': 'rgba(120,120,120,0.6)',
+        'line-style': 'solid',
+      },
+    },
+    // contains: dashed purple — class → method structural edge
+    {
+      selector: 'edge[relation="contains"]',
+      style: {
+        'line-color': 'rgba(139,92,246,0.55)',
+        'target-arrow-color': 'rgba(139,92,246,0.7)',
+        'line-style': 'dashed',
+        'line-dash-pattern': [6, 3],
+        width: 1.5,
       },
     },
     {
@@ -369,11 +388,20 @@ function cytoscapeStyle() {
       style: { opacity: 0.04 },
     },
     {
-      selector: 'edge.active',
+      selector: 'edge[relation="calls"].active',
       style: {
         'line-color': '#3B82F6',
         'target-arrow-color': '#3B82F6',
         width: 2.5,
+        opacity: 1,
+      },
+    },
+    {
+      selector: 'edge[relation="contains"].active',
+      style: {
+        'line-color': '#8B5CF6',
+        'target-arrow-color': '#8B5CF6',
+        width: 2,
         opacity: 1,
       },
     },
@@ -460,8 +488,17 @@ async function loadSymbolSource(data) {
 }
 
 function populateRelations(node) {
-  renderChips($('source-callers-list'), node.incomers('node.symbol-node'), $('source-callers-section'));
-  renderChips($('source-callees-list'), node.outgoers('node.symbol-node'), $('source-callees-section'));
+  // Structural: class → method containment
+  const container = node.incomers('edge[relation="contains"]').sources();
+  const methods   = node.outgoers('edge[relation="contains"]').targets();
+  renderChips($('source-container-list'), container, $('source-container-section'));
+  renderChips($('source-members-list'),   methods,   $('source-members-section'));
+
+  // Behavioural: function call graph
+  const callers = node.incomers('edge[relation="calls"]').sources();
+  const callees = node.outgoers('edge[relation="calls"]').targets();
+  renderChips($('source-callers-list'), callers, $('source-callers-section'));
+  renderChips($('source-callees-list'), callees, $('source-callees-section'));
 }
 
 function renderChips(listEl, nodes, sectionEl) {
@@ -568,13 +605,13 @@ function setOverlay(state, msg = '') {
   const empty = $('repo-empty');
   loading.hidden = state !== 'loading';
   empty.hidden = state === 'loading' || state === 'none';
+  $('graph-legend').hidden = state !== 'none';
   if (state === 'empty' || state === 'error') {
     empty.querySelector('.repo-empty__text').innerHTML =
       state === 'error'
         ? `<span class="repo-empty__error">${msg}</span>`
         : msg || 'Select a repository and version<br>to explore its symbol graph';
   } else if (state === 'none') {
-    // Ensure the initial empty-state text is restored for next fresh load
     empty.querySelector('.repo-empty__text').innerHTML =
       'Select a repository and version<br>to explore its symbol graph';
   }
