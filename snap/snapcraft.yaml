@@ -73,18 +73,12 @@ apps:
 parts:
   # ── Rust binaries ───────────────────────────────────────────────────────────
   # Build both workspace members in one cargo invocation so they share the
-  # Cargo.lock and dependency cache.
-  #
-  # We use the `rust` build snap rather than the `rust` snapcraft plugin so
-  # that the toolchain is fetched from the snap store CDN instead of
-  # static.rust-lang.org.  This matters in network-restricted build
-  # environments where the latter is blocked.  The snap provides a current
-  # stable toolchain (≥ 1.85) required by the Rust 2024 edition.
+  # Cargo.lock and dependency cache.  The rust plugin downloads a current
+  # stable toolchain via rustup from static.rust-lang.org; edition = "2024"
+  # requires ≥ 1.85 which Ubuntu 22.04 apt packages do not provide.
   rust-binaries:
-    plugin: nil
+    plugin: rust
     source: .
-    build-snaps:
-      - rust/latest/stable
     build-packages:
       - libssl-dev
       - pkg-config
