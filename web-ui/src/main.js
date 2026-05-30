@@ -1,3 +1,4 @@
+import './vanilla.scss';
 import './style.css';
 import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
 import { queryStream, fetchToolDescription, fetchRepositories } from './api.js';

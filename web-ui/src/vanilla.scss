@@ -1,0 +1,9 @@
+// Compile Vanilla Framework from the npm package so we can include icons that
+// are not in the pre-built CDN bundle.
+//
+// p-icon--circle-of-friends is defined in VF's Sass but excluded from the
+// default @include vanilla; call.  Building from source lets us add it here.
+
+@import 'vanilla-framework';
+@include vanilla;
+@include vf-p-icon-circle-of-friends;
