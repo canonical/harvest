@@ -17,6 +17,20 @@
   <div id="app">
     <!-- Header -->
     <header class="app-header">
+      <button
+        id="nav-toggle"
+        class="nav-toggle"
+        type="button"
+        aria-label="Open navigation"
+        aria-expanded="false"
+        aria-controls="app-sidebar"
+      >
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" aria-hidden="true">
+          <line x1="2" y1="4.5" x2="16" y2="4.5"/>
+          <line x1="2" y1="9"   x2="16" y2="9"/>
+          <line x1="2" y1="13.5" x2="16" y2="13.5"/>
+        </svg>
+      </button>
       <img src="/canonical-logo.png" alt="Canonical" class="app-header__logo" />
       <h1 class="app-title">
         <span class="app-title__brand">Harvest</span>
@@ -33,8 +47,11 @@
 
     <div class="layout">
 
+      <!-- Backdrop — covers content when sidebar is open on mobile -->
+      <div id="nav-backdrop" class="nav-backdrop" hidden aria-hidden="true"></div>
+
       <!-- Sidebar navigation -->
-      <aside class="app-sidebar">
+      <aside class="app-sidebar" id="app-sidebar">
         <nav aria-label="Main navigation">
           <ul class="p-side-navigation__list">
             <li class="p-side-navigation__item">
