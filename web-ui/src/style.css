@@ -276,6 +276,93 @@ html, body {
   font-weight: 600;
 }
 
+/* ── Mobile nav toggle button ─────────────────────────────────────────────── */
+
+.nav-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  flex-shrink: 0;
+  padding: 0;
+  border-radius: 0.4rem;
+  background: none;
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+
+.nav-toggle:hover { background: var(--bg-surface-hover); }
+
+.nav-toggle svg {
+  display: block;
+  pointer-events: none;
+}
+
+/* ── Mobile responsive layout ─────────────────────────────────────────────── */
+
+@media (max-width: 639px) {
+  #app {
+    padding: 0 0.75rem;
+  }
+
+  .app-header {
+    gap: 0.6rem;
+  }
+
+  .app-header__logo {
+    height: 2rem;
+  }
+
+  .nav-toggle {
+    display: flex;
+  }
+
+  .layout {
+    position: relative; /* containing block for absolute sidebar + backdrop */
+    padding: 0;
+    gap: 0;
+  }
+
+  /* Sidebar becomes a slide-in drawer */
+  .app-sidebar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 12.5rem;
+    z-index: 100;
+    background: var(--bg-page);
+    border-right: 1px solid var(--border-color);
+    padding: 0.5rem;
+    overflow-y: auto;
+    transform: translateX(-100%);
+    transition: transform 0.24s cubic-bezier(0.4, 0, 0.2, 1),
+                box-shadow 0.24s ease;
+  }
+
+  .app-sidebar.is-open {
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.18);
+  }
+
+  /* Backdrop covers the content area while the drawer is open */
+  .nav-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 99;
+    background: rgba(0, 0, 0, 0.45);
+    animation: backdropFadeIn 0.2s ease;
+  }
+}
+
+@keyframes backdropFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
 /* ── Pages ────────────────────────────────────────────────────────────────── */
 
 .page {
