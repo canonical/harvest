@@ -41,6 +41,9 @@ const messagesEl   = document.getElementById('messages');
 const inputEl      = document.getElementById('query-input');
 const sendBtn      = document.getElementById('send-btn');
 const themeBtnEl   = document.getElementById('theme-btn');
+const navToggleEl  = document.getElementById('nav-toggle');
+const navBackdropEl = document.getElementById('nav-backdrop');
+const sidebarEl    = document.getElementById('app-sidebar');
 
 // ── Render ────────────────────────────────────────────────────────────────────
 
@@ -337,6 +340,28 @@ themeBtnEl.addEventListener('click', () => {
   updateThemeButton();
 });
 
+// ── Mobile sidebar drawer ─────────────────────────────────────────────────────
+
+function openSidebar() {
+  sidebarEl.classList.add('is-open');
+  navBackdropEl.hidden = false;
+  navToggleEl.setAttribute('aria-expanded', 'true');
+  navToggleEl.setAttribute('aria-label', 'Close navigation');
+}
+
+function closeSidebar() {
+  sidebarEl.classList.remove('is-open');
+  navBackdropEl.hidden = true;
+  navToggleEl.setAttribute('aria-expanded', 'false');
+  navToggleEl.setAttribute('aria-label', 'Open navigation');
+}
+
+navToggleEl.addEventListener('click', () => {
+  sidebarEl.classList.contains('is-open') ? closeSidebar() : openSidebar();
+});
+
+navBackdropEl.addEventListener('click', closeSidebar);
+
 // ── Sidebar navigation ────────────────────────────────────────────────────────
 
 document.querySelectorAll('.app-sidebar .p-side-navigation__link').forEach(link => {
@@ -356,6 +381,9 @@ document.querySelectorAll('.app-sidebar .p-side-navigation__link').forEach(link 
     document.getElementById(`page-${page}`).hidden = false;
 
     if (page === 'repositories') onRepositoriesPageShow();
+
+    // Close drawer after navigation on mobile
+    if (window.innerWidth < 640) closeSidebar();
   });
 });
 
