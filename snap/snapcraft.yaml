@@ -73,19 +73,28 @@ apps:
 parts:
   # ── Rust binaries ───────────────────────────────────────────────────────────
   # Build both workspace members in one cargo invocation so they share the
-  # Cargo.lock and dependency cache.  The rust plugin downloads a current
-  # stable toolchain via rustup from static.rust-lang.org; edition = "2024"
-  # requires ≥ 1.85 which Ubuntu 22.04 apt packages do not provide.
+  # Cargo.lock and dependency cache.
+  #
+  # We use plugin: nil with rustc/cargo from apt rather than the rust plugin,
+  # because the rust plugin calls rustup which downloads from
+  # static.rust-lang.org — unreachable in this build environment.
+  # Ubuntu 22.04 apt ships Rust ≥ 1.75, sufficient for edition = "2021".
+  #
+  # rust-toolchain.toml is removed from the build tree before compiling:
+  # without rustup installed, cargo would abort when it finds that file.
   rust-binaries:
-    plugin: rust
+    plugin: nil
     source: .
     build-packages:
+      - rustc
+      - cargo
       - libssl-dev
       - pkg-config
     stage-packages:
       - libssl3
       - ca-certificates
     override-build: |
+      rm -f rust-toolchain.toml
       cargo build --release --workspace
       install -Dm755 target/release/knowledge-harvester \
         "$SNAPCRAFT_PART_INSTALL/bin/knowledge-harvester"
