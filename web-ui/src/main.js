@@ -244,7 +244,7 @@ function renderToolCall(tc) {
   return `
     <div class="tool-call ${tc.status}">
       <div class="tool-call__header">
-        <div class="tool-call__icon"></div>
+        <i class="p-icon--circle-of-friends tool-call__icon"></i>
         <span class="tool-call__name">${label}</span>
         <span class="tool-call__status">${statusLabel}</span>
       </div>
