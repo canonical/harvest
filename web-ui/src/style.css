@@ -519,20 +519,11 @@ html, body {
 .tool-call__icon {
   width: 1rem;
   height: 1rem;
-  border-radius: 50%;
-  border: 2px solid var(--text-muted);
   flex-shrink: 0;
-  transition: border-color 0.2s, background 0.2s;
 }
 
 .tool-call.running .tool-call__icon {
-  border-color: #4d9fff;
   animation: spin 0.8s linear infinite;
-}
-
-.tool-call.done .tool-call__icon {
-  border-color: #0e8420;
-  background: #0e8420;
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
