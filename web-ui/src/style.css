@@ -135,6 +135,15 @@
 
 /* ── Base ─────────────────────────────────────────────────────────────────── */
 
+/*
+ * Re-enforce the HTML `hidden` attribute. Author stylesheets always beat the
+ * browser's user-agent sheet in the cascade, so any element that has an
+ * explicit `display` value in a class rule (e.g. `display: flex`) will ignore
+ * the UA's `[hidden] { display: none }`. This rule restores the expected
+ * semantics with !important, which is the pattern endorsed by the HTML spec.
+ */
+[hidden] { display: none !important; }
+
 html, body {
   height: 100%;
   margin: 0;
