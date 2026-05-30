@@ -2,6 +2,7 @@ const QUERY_STREAM_URL = '/query/stream';
 const QUERY_URL = '/query';
 const REPOSITORIES_URL = '/repositories';
 const TOOL_DESCRIPTION_URL = '/tool-description';
+const GRAPH_URL = '/graph';
 
 /**
  * Send a query to the knowledge server using SSE streaming.
@@ -98,7 +99,7 @@ export async function fetchToolDescription(name, input) {
  * Fetch the list of ingested repositories.
  * Returns an empty array on failure instead of throwing.
  *
- * @returns {Promise<{name: string, versions: string[]}[]>}
+ * @returns {Promise<{name: string, url?: string, versions: string[]}[]>}
  */
 export async function fetchRepositories() {
   try {
@@ -108,4 +109,37 @@ export async function fetchRepositories() {
   } catch {
     return [];
   }
+}
+
+/**
+ * Fetch the symbol graph for a repository version.
+ *
+ * @param {string} repo
+ * @param {string} version
+ * @returns {Promise<{nodes: object[], edges: object[], truncated: boolean}>}
+ */
+export async function fetchGraph(repo, version) {
+  const url = `${GRAPH_URL}/${encodeURIComponent(repo)}/${encodeURIComponent(version)}`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Server error ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Fetch the source code for a specific symbol.
+ * Returns null when the symbol is not found.
+ *
+ * @param {string} repo
+ * @param {string} version
+ * @param {string} file
+ * @param {string} name
+ * @returns {Promise<{name, file, kind, start_line, end_line, signature, source}|null>}
+ */
+export async function fetchSymbolSource(repo, version, file, name) {
+  const params = new URLSearchParams({ file, name });
+  const url = `${GRAPH_URL}/${encodeURIComponent(repo)}/${encodeURIComponent(version)}/source?${params}`;
+  const response = await fetch(url);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Server error ${response.status}`);
+  return response.json();
 }

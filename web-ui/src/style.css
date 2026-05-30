@@ -793,6 +793,366 @@ a.source-chip:hover {
 
 .input-area button { align-self: flex-end; white-space: nowrap; }
 
+/* ── Repositories page ────────────────────────────────────────────────────── */
+
+.repo-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.5rem 0.875rem;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-surface);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  min-height: 3rem;
+}
+
+.repo-selectors {
+  display: flex;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.repo-select {
+  font-size: 0.8125rem;
+  padding: 0.28rem 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  cursor: pointer;
+  max-width: 175px;
+  transition: border-color 0.15s;
+}
+
+.repo-select:focus { border-color: #0066cc; outline: none; }
+.repo-select:disabled { opacity: 0.5; cursor: default; }
+
+.repo-search-bar {
+  display: flex;
+  flex: 1;
+  gap: 0.4rem;
+  min-width: 180px;
+}
+
+.repo-search-bar input {
+  flex: 1;
+  font-size: 0.8125rem;
+  padding: 0.28rem 0.6rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.repo-search-bar input:focus { border-color: #0066cc; }
+.repo-search-bar input::placeholder { color: var(--text-muted); }
+.repo-search-bar input:disabled { opacity: 0.5; }
+
+.repo-search-bar button,
+.repo-toolbar__actions button {
+  font-size: 0.8125rem;
+  padding: 0.28rem 0.7rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-surface-alt);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+
+.repo-search-bar button:hover:not(:disabled),
+.repo-toolbar__actions button:hover:not(:disabled) {
+  background: var(--bg-surface-hover);
+}
+
+.repo-search-bar button:disabled,
+.repo-toolbar__actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+#graph-search-btn {
+  background: #0066cc;
+  color: #ffffff;
+  border-color: #0066cc;
+  font-weight: 500;
+}
+
+#graph-search-btn:hover:not(:disabled) { background: #0057ad; border-color: #0057ad; }
+
+#graph-search-clear {
+  padding: 0.28rem 0.55rem;
+  font-size: 0.75rem;
+  border-radius: 4px;
+}
+
+.repo-search-status {
+  font-size: 0.75rem;
+  padding: 0.3rem 0.875rem;
+  background: var(--bg-surface-alt);
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+  animation: repoFadeSlide 0.2s ease-out;
+}
+
+.repo-main {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.repo-graph-wrap {
+  position: absolute;
+  inset: 0;
+}
+
+.repo-graph {
+  width: 100%;
+  height: 100%;
+}
+
+.repo-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  pointer-events: none;
+}
+
+.repo-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.625rem;
+  pointer-events: none;
+}
+
+.repo-empty__icon {
+  font-size: 3.5rem;
+  opacity: 0.12;
+  line-height: 1;
+  user-select: none;
+}
+
+.repo-empty__text {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  text-align: center;
+  margin: 0;
+  line-height: 1.6;
+}
+
+.repo-empty__error { color: var(--error-text); }
+
+/* ── Source panel ─────────────────────────────────────────────────────────── */
+
+.repo-source-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(400px, 42%);
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transform: translateX(100%);
+  transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.26s ease;
+  z-index: 10;
+}
+
+.repo-source-panel.is-open {
+  transform: translateX(0);
+  box-shadow: -8px 0 32px rgba(0, 0, 0, 0.14);
+}
+
+.repo-source-panel__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 0.75rem 0.875rem 0.5rem;
+  border-bottom: 1px solid var(--border-subtle);
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.repo-source-panel__title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.source-kind-badge {
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.12rem 0.38rem;
+  border-radius: 3px;
+  flex-shrink: 0;
+  line-height: 1.5;
+}
+
+.source-kind-badge--function {
+  background: rgba(37, 99, 235, 0.12);
+  color: #2563eb;
+}
+
+.source-kind-badge--class {
+  background: rgba(124, 58, 237, 0.12);
+  color: #7c3aed;
+}
+
+[data-theme="dark"] .source-kind-badge--function {
+  background: rgba(96, 165, 250, 0.18);
+  color: #60a5fa;
+}
+
+[data-theme="dark"] .source-kind-badge--class {
+  background: rgba(167, 139, 250, 0.18);
+  color: #a78bfa;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .source-kind-badge--function {
+    background: rgba(96, 165, 250, 0.18);
+    color: #60a5fa;
+  }
+  :root:not([data-theme]) .source-kind-badge--class {
+    background: rgba(167, 139, 250, 0.18);
+    color: #a78bfa;
+  }
+}
+
+.source-symbol-name {
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+  line-height: 1.3;
+}
+
+.source-panel-close {
+  background: none;
+  border: none;
+  padding: 0.2rem 0.3rem;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1;
+  flex-shrink: 0;
+  border-radius: 3px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.source-panel-close:hover {
+  color: var(--text-primary);
+  background: var(--bg-surface-hover);
+}
+
+.source-symbol-file {
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+  padding: 0.28rem 0.875rem;
+  margin: 0;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-code-block {
+  flex: 1;
+  overflow: auto;
+  background: var(--bg-code);
+}
+
+.source-code-block pre {
+  margin: 0;
+  padding: 0.875rem 1rem;
+  font-size: 0.75rem;
+  line-height: 1.55;
+  overflow-x: auto;
+  tab-size: 2;
+}
+
+.source-code-block code {
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+  white-space: pre;
+}
+
+.source-relations {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding: 0.5rem 0.625rem 0.625rem;
+  max-height: 170px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.source-relations__section { display: flex; flex-direction: column; gap: 0.35rem; }
+
+.source-relations__label {
+  font-size: 0.625rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.source-relations__chips { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+
+.relation-chip {
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+  font-size: 0.6875rem;
+  padding: 0.18rem 0.5rem;
+  border-radius: 3px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface-alt);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.13s, color 0.13s, border-color 0.13s;
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.relation-chip:hover {
+  background: #0066cc;
+  color: #ffffff;
+  border-color: #0066cc;
+}
+
+@keyframes repoFadeSlide {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 /* ── hljs theme (atom one dark — always dark for code blocks) ─────────────── */
 
 .hljs            { color: #abb2bf; }
