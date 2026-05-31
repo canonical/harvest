@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { queryStream, queryOnce, fetchRepositories, fetchToolDescription } from '../src/api.js';
+import { queryStream, queryOnce, fetchRepositories, fetchToolDescription, fetchDocIndex, fetchDocPage } from '../src/api.js';
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -200,5 +200,75 @@ describe('fetchRepositories', () => {
     global.fetch = mockFetch(503, 'unavailable');
     const result = await fetchRepositories();
     expect(result).toEqual([]);
+  });
+});
+
+// ── fetchDocIndex ─────────────────────────────────────────────────────────────
+
+describe('fetchDocIndex', () => {
+  beforeEach(() => { vi.restoreAllMocks(); });
+
+  it('GETs /docs/:repo/:version and returns parsed JSON', async () => {
+    const index = {
+      repo: 'testrepo', version: 'v1.0',
+      sections: { tutorials: [{ filename: 'getting-started.md', title: 'Getting Started' }], 'how-to-guides': [], explanations: [], reference: [] },
+    };
+    global.fetch = mockFetch(200, JSON.stringify(index));
+
+    const result = await fetchDocIndex('testrepo', 'v1.0');
+    expect(result.repo).toBe('testrepo');
+    expect(result.version).toBe('v1.0');
+    expect(result.sections.tutorials).toHaveLength(1);
+    expect(result.sections.tutorials[0].filename).toBe('getting-started.md');
+  });
+
+  it('returns null on 404', async () => {
+    global.fetch = mockFetch(404, JSON.stringify({ error: 'documentation not found' }));
+    const result = await fetchDocIndex('missing', 'v1.0');
+    expect(result).toBeNull();
+  });
+
+  it('throws on other non-OK responses', async () => {
+    global.fetch = mockFetch(500, 'error');
+    await expect(fetchDocIndex('repo', 'v1.0')).rejects.toThrow(/500/);
+  });
+
+  it('uses encoded repo and version in the URL', async () => {
+    global.fetch = mockFetch(404, '{}');
+    await fetchDocIndex('my repo', 'v1/0').catch(() => {});
+    const [url] = fetch.mock.calls[0];
+    expect(url).toBe('/docs/my%20repo/v1%2F0');
+  });
+});
+
+// ── fetchDocPage ──────────────────────────────────────────────────────────────
+
+describe('fetchDocPage', () => {
+  beforeEach(() => { vi.restoreAllMocks(); });
+
+  it('GETs /docs/:repo/:version/:section/:filename and returns markdown text', async () => {
+    const markdown = '# Getting Started\n\nHello!';
+    global.fetch = mockFetch(200, markdown, 'text/markdown');
+
+    const result = await fetchDocPage('testrepo', 'v1.0', 'tutorials', 'getting-started.md');
+    expect(result).toBe(markdown);
+  });
+
+  it('returns null on 404', async () => {
+    global.fetch = mockFetch(404, JSON.stringify({ error: 'page not found' }));
+    const result = await fetchDocPage('repo', 'v1.0', 'tutorials', 'missing.md');
+    expect(result).toBeNull();
+  });
+
+  it('throws on other non-OK responses', async () => {
+    global.fetch = mockFetch(500, 'error');
+    await expect(fetchDocPage('repo', 'v1.0', 'tutorials', 'page.md')).rejects.toThrow(/500/);
+  });
+
+  it('constructs the correct URL', async () => {
+    global.fetch = mockFetch(200, '# content', 'text/markdown');
+    await fetchDocPage('my-repo', 'v2.0', 'how-to-guides', 'install.md');
+    const [url] = fetch.mock.calls[0];
+    expect(url).toBe('/docs/my-repo/v2.0/how-to-guides/install.md');
   });
 });

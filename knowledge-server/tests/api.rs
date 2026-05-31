@@ -3,7 +3,7 @@
 /// Query and health tests run without any external services.
 /// Repository tests require Docker — run with:
 ///   cargo test --test api -- --include-ignored
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -19,7 +19,12 @@ use tower::ServiceExt as _;
 
 use knowledge_server::{
     agent::{Agent, tool::Tool},
-    api::{query::{handle_query, handle_query_stream}, repositories::handle_list_repositories, tool_description::handle_tool_description},
+    api::{
+        docs::{handle_get_index, handle_get_page},
+        query::{handle_query, handle_query_stream},
+        repositories::handle_list_repositories,
+        tool_description::handle_tool_description,
+    },
     llm::{
         LlmProvider,
         types::{LlmResponse, Message, ToolDefinition},
@@ -414,4 +419,175 @@ async fn repositories_returns_versions_for_repo() {
         versions.iter().any(|v| v.as_str() == Some("v1.0")),
         "versions: {versions:?}"
     );
+}
+
+// ── GET /docs/:repo/:version  and  GET /docs/:repo/:version/:section/*filename ─
+
+fn docs_app(docs_dir: PathBuf) -> Router {
+    Router::new()
+        .route("/docs/:repo/:version", get(handle_get_index))
+        .route("/docs/:repo/:version/:section/*filename", get(handle_get_page))
+        .with_state(Arc::new(docs_dir))
+}
+
+async fn body_text(resp: axum::response::Response) -> String {
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[tokio::test]
+async fn docs_index_missing_repo_returns_404() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = docs_app(dir.path().to_path_buf());
+    let resp = app.oneshot(get_req("/docs/missing-repo/v1.0")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn docs_index_returns_sections_json() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("testrepo").join("v1.0");
+    std::fs::create_dir_all(&path).unwrap();
+    let index = json!({
+        "repo": "testrepo",
+        "version": "v1.0",
+        "sections": {
+            "tutorials": [{"filename": "getting-started.md", "title": "Getting Started"}],
+            "how-to-guides": [],
+            "explanations": [],
+            "reference": [{"filename": "api.md", "title": "API Reference"}]
+        }
+    });
+    std::fs::write(path.join("index.json"), serde_json::to_string(&index).unwrap()).unwrap();
+
+    let app = docs_app(dir.path().to_path_buf());
+    let (status, body) = body_status_json(app, get_req("/docs/testrepo/v1.0")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["repo"], "testrepo");
+    assert_eq!(body["version"], "v1.0");
+    let tutorials = body["sections"]["tutorials"].as_array().unwrap();
+    assert_eq!(tutorials.len(), 1);
+    assert_eq!(tutorials[0]["filename"], "getting-started.md");
+    assert_eq!(tutorials[0]["title"], "Getting Started");
+}
+
+#[tokio::test]
+async fn docs_index_different_repo_version_returns_404() {
+    let dir = tempfile::tempdir().unwrap();
+    // Only create testrepo/v1.0, not testrepo/v2.0
+    let path = dir.path().join("testrepo").join("v1.0");
+    std::fs::create_dir_all(&path).unwrap();
+    let index = json!({"repo":"testrepo","version":"v1.0","sections":{"tutorials":[],"how-to-guides":[],"explanations":[],"reference":[]}});
+    std::fs::write(path.join("index.json"), serde_json::to_string(&index).unwrap()).unwrap();
+
+    let app = docs_app(dir.path().to_path_buf());
+    let resp = app.oneshot(get_req("/docs/testrepo/v2.0")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn docs_page_returns_markdown_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let section_path = dir.path().join("testrepo").join("v1.0").join("tutorials");
+    std::fs::create_dir_all(&section_path).unwrap();
+    std::fs::write(section_path.join("getting-started.md"), "# Getting Started\n\nHello!").unwrap();
+
+    let app = docs_app(dir.path().to_path_buf());
+    let resp = app
+        .oneshot(get_req("/docs/testrepo/v1.0/tutorials/getting-started.md"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(ct.contains("text/markdown"), "content-type: {ct}");
+    let body = body_text(resp).await;
+    assert!(body.contains("# Getting Started"));
+    assert!(body.contains("Hello!"));
+}
+
+#[tokio::test]
+async fn docs_page_missing_file_returns_404() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("testrepo").join("v1.0").join("tutorials")).unwrap();
+
+    let app = docs_app(dir.path().to_path_buf());
+    let resp = app
+        .oneshot(get_req("/docs/testrepo/v1.0/tutorials/nonexistent.md"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn docs_page_unknown_section_returns_404() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = docs_app(dir.path().to_path_buf());
+    let resp = app
+        .oneshot(get_req("/docs/testrepo/v1.0/unknown-section/file.md"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn docs_page_path_traversal_returns_400() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = docs_app(dir.path().to_path_buf());
+    let resp = app
+        .oneshot(get_req("/docs/testrepo/v1.0/tutorials/..%2F..%2Fetc%2Fpasswd"))
+        .await
+        .unwrap();
+    // Either 400 (bad request) or 404 is acceptable — must not be 200
+    assert!(
+        resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::NOT_FOUND,
+        "expected 400 or 404, got {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+async fn docs_page_reference_section_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let section_path = dir.path().join("myrepo").join("v2.0").join("reference");
+    std::fs::create_dir_all(&section_path).unwrap();
+    std::fs::write(section_path.join("api.md"), "# API Reference\n\nEndpoints here.").unwrap();
+
+    let app = docs_app(dir.path().to_path_buf());
+    let resp = app
+        .oneshot(get_req("/docs/myrepo/v2.0/reference/api.md"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_text(resp).await;
+    assert!(body.contains("# API Reference"));
+}
+
+#[tokio::test]
+async fn docs_page_howto_section_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let section_path = dir.path().join("myrepo").join("v1.0").join("how-to-guides");
+    std::fs::create_dir_all(&section_path).unwrap();
+    std::fs::write(section_path.join("install.md"), "# How to Install").unwrap();
+
+    let app = docs_app(dir.path().to_path_buf());
+    let resp = app
+        .oneshot(get_req("/docs/myrepo/v1.0/how-to-guides/install.md"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn docs_page_explanations_section_works() {
+    let dir = tempfile::tempdir().unwrap();
+    let section_path = dir.path().join("myrepo").join("v1.0").join("explanations");
+    std::fs::create_dir_all(&section_path).unwrap();
+    std::fs::write(section_path.join("architecture.md"), "# Architecture").unwrap();
+
+    let app = docs_app(dir.path().to_path_buf());
+    let resp = app
+        .oneshot(get_req("/docs/myrepo/v1.0/explanations/architecture.md"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }

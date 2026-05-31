@@ -3,6 +3,7 @@ import './style.css';
 import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
 import { queryStream, fetchToolDescription, fetchRepositories } from './api.js';
 import { initRepositoriesPage, onRepositoriesPageShow, onRepositoriesPageHide } from './repositories.js';
+import { initDocumentationPage } from './documentation.js';
 import { renderMarkdown, buildFileUrl } from './markdown.js';
 import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
 import {
@@ -391,10 +392,17 @@ document.querySelectorAll('.app-sidebar .p-side-navigation__link').forEach(link 
 
 applyStoredTheme();
 updateThemeButton();
+
+const docsPage = initDocumentationPage(
+  document.getElementById('page-documentation'),
+  [],
+);
+
 fetchRepositories().then((repos) => {
   repoUrlMap = Object.fromEntries(
     repos.filter(r => r.url).map(r => [r.name, r.url])
   );
   initRepositoriesPage(repos);
+  docsPage.update(repos);
 });
 render();

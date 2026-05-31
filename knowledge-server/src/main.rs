@@ -34,7 +34,8 @@ async fn main() -> Result<()> {
     let tools = graph_tools::all_tools(Arc::clone(&neo4j));
     let agent = Arc::new(Agent::new(llm_provider, tools, max_iterations));
 
-    let state = AppState { agent, neo4j };
+    let docs_dir = config.documentation.docs_dir.map(|p| Arc::new(p));
+    let state = AppState { agent, neo4j, docs_dir };
     let app = knowledge_server::api::router(state);
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
