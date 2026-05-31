@@ -3,6 +3,7 @@ const QUERY_URL = '/query';
 const REPOSITORIES_URL = '/repositories';
 const TOOL_DESCRIPTION_URL = '/tool-description';
 const GRAPH_URL = '/graph';
+const DOCS_URL = '/docs';
 
 /**
  * Send a query to the knowledge server using SSE streaming.
@@ -142,4 +143,38 @@ export async function fetchSymbolSource(repo, version, file, name) {
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`Server error ${response.status}`);
   return response.json();
+}
+
+/**
+ * Fetch the documentation index for a repository version.
+ * Returns null when documentation has not been generated yet.
+ *
+ * @param {string} repo
+ * @param {string} version
+ * @returns {Promise<{repo, version, sections: {tutorials, 'how-to-guides', explanations, reference}}|null>}
+ */
+export async function fetchDocIndex(repo, version) {
+  const url = `${DOCS_URL}/${encodeURIComponent(repo)}/${encodeURIComponent(version)}`;
+  const response = await fetch(url);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Server error ${response.status}`);
+  return response.json();
+}
+
+/**
+ * Fetch the markdown content of a documentation page.
+ * Returns null when the page is not found.
+ *
+ * @param {string} repo
+ * @param {string} version
+ * @param {string} section  One of: tutorials, how-to-guides, explanations, reference
+ * @param {string} filename Markdown filename (e.g. "getting-started.md")
+ * @returns {Promise<string|null>}
+ */
+export async function fetchDocPage(repo, version, section, filename) {
+  const url = `${DOCS_URL}/${encodeURIComponent(repo)}/${encodeURIComponent(version)}/${encodeURIComponent(section)}/${encodeURIComponent(filename)}`;
+  const response = await fetch(url);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Server error ${response.status}`);
+  return response.text();
 }

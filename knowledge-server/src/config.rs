@@ -7,6 +7,13 @@ pub struct Config {
     pub server: ServerConfig,
     pub neo4j: Neo4jConfig,
     pub llm: LlmConfig,
+    #[serde(default)]
+    pub documentation: DocumentationConfig,
+}
+
+#[derive(Deserialize, Default)]
+pub struct DocumentationConfig {
+    pub docs_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Deserialize)]
