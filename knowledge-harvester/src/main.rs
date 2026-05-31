@@ -1,6 +1,6 @@
-use knowledge_harvester::{config, pipeline};
+use knowledge_harvester::{config, documentation, pipeline};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -24,6 +24,11 @@ enum Command {
         interval_secs: u64,
     },
     Status,
+    #[command(about = "Generate Diataxis documentation for a repository version")]
+    Document {
+        #[arg(value_name = "REPOSITORY:VERSION", help = "e.g. my-repo:v1.0")]
+        repository_version: String,
+    },
 }
 
 #[tokio::main]
@@ -34,11 +39,78 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let config = config::Config::from_file(&cli.config)?;
-    let pipeline = pipeline::Pipeline::new(config).await?;
 
     match cli.command {
-        Command::Run => pipeline.run().await,
-        Command::Watch { interval_secs } => pipeline.watch(interval_secs).await,
-        Command::Status => pipeline.status().await,
+        Command::Document { repository_version } => {
+            let (repo, version) = parse_repo_version(&repository_version)?;
+            let llm_config = config.llm.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("document command requires [llm] configuration in harvester.toml")
+            })?;
+            let doc_config = config.documentation.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "document command requires [documentation] configuration in harvester.toml"
+                )
+            })?;
+            let pipeline =
+                documentation::DocumentationPipeline::new(
+                    &config.neo4j.uri,
+                    &config.neo4j.user,
+                    &config.neo4j.password,
+                    llm_config,
+                    doc_config,
+                )
+                .await?;
+            pipeline.document(repo, version).await
+        }
+        _ => {
+            let pipeline = pipeline::Pipeline::new(config).await?;
+            match cli.command {
+                Command::Run => pipeline.run().await,
+                Command::Watch { interval_secs } => pipeline.watch(interval_secs).await,
+                Command::Status => pipeline.status().await,
+                Command::Document { .. } => unreachable!(),
+            }
+        }
+    }
+}
+
+fn parse_repo_version(s: &str) -> Result<(&str, &str)> {
+    match s.split_once(':') {
+        Some((repo, version)) if !repo.is_empty() && !version.is_empty() => Ok((repo, version)),
+        _ => bail!("expected REPOSITORY:VERSION (e.g. my-repo:v1.0), got: {s}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_repo_version_valid() {
+        let (repo, ver) = parse_repo_version("my-repo:v1.0").unwrap();
+        assert_eq!(repo, "my-repo");
+        assert_eq!(ver, "v1.0");
+    }
+
+    #[test]
+    fn parse_repo_version_no_colon_errors() {
+        assert!(parse_repo_version("my-repo-only").is_err());
+    }
+
+    #[test]
+    fn parse_repo_version_empty_repo_errors() {
+        assert!(parse_repo_version(":v1.0").is_err());
+    }
+
+    #[test]
+    fn parse_repo_version_empty_version_errors() {
+        assert!(parse_repo_version("my-repo:").is_err());
+    }
+
+    #[test]
+    fn parse_repo_version_with_slash_in_version() {
+        let (repo, ver) = parse_repo_version("my-repo:stable/2023.1").unwrap();
+        assert_eq!(repo, "my-repo");
+        assert_eq!(ver, "stable/2023.1");
     }
 }

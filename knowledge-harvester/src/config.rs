@@ -7,6 +7,8 @@ pub struct Config {
     pub neo4j: Neo4jConfig,
     pub storage: StorageConfig,
     pub repositories: Vec<RepoConfig>,
+    pub llm: Option<LlmConfig>,
+    pub documentation: Option<DocumentationConfig>,
 }
 
 #[derive(Deserialize)]
@@ -29,6 +31,36 @@ pub struct RepoConfig {
     /// When absent, all git tags are ingested (original behaviour).
     pub refs: Option<Vec<String>>,
 }
+
+#[derive(Deserialize, Clone)]
+pub struct DocumentationConfig {
+    pub docs_dir: PathBuf,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(tag = "provider", rename_all = "kebab-case")]
+pub enum LlmConfig {
+    Anthropic {
+        model: String,
+        api_key: String,
+        #[serde(default = "default_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(default = "default_max_retries")]
+        max_retries: u32,
+    },
+    OpenAiCompat {
+        base_url: String,
+        api_key: String,
+        model: String,
+        #[serde(default = "default_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(default = "default_max_retries")]
+        max_retries: u32,
+    },
+}
+
+fn default_timeout_secs() -> u64 { 300 }
+fn default_max_retries() -> u32 { 3 }
 
 impl Config {
     pub fn from_file(path: &Path) -> Result<Self> {
@@ -112,5 +144,70 @@ url  = "https://github.com/b.git"
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.repositories[0].refs.is_some());
         assert!(config.repositories[1].refs.is_none());
+    }
+
+    #[test]
+    fn llm_and_documentation_are_optional() {
+        let config: Config = toml::from_str(&base_toml("")).unwrap();
+        assert!(config.llm.is_none());
+        assert!(config.documentation.is_none());
+    }
+
+    #[test]
+    fn anthropic_llm_config_parsed() {
+        let toml = r#"
+[neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password = "pass"
+
+[storage]
+clone_root = "/tmp/repos"
+
+[[repositories]]
+name = "my-repo"
+url  = "https://github.com/owner/repo.git"
+
+[llm]
+provider     = "anthropic"
+model        = "claude-sonnet-4-6"
+api_key      = "sk-ant-test"
+timeout_secs = 300
+max_retries  = 3
+
+[documentation]
+docs_dir = "/tmp/docs"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let llm = config.llm.as_ref().unwrap();
+        assert!(matches!(llm, LlmConfig::Anthropic { model, .. } if model == "claude-sonnet-4-6"));
+        let doc = config.documentation.as_ref().unwrap();
+        assert_eq!(doc.docs_dir, std::path::PathBuf::from("/tmp/docs"));
+    }
+
+    #[test]
+    fn openai_compat_llm_config_parsed() {
+        let toml = r#"
+[neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password = "pass"
+
+[storage]
+clone_root = "/tmp/repos"
+
+[[repositories]]
+name = "my-repo"
+url  = "https://github.com/owner/repo.git"
+
+[llm]
+provider = "open-ai-compat"
+base_url = "https://api.groq.com/openai/v1"
+api_key  = "gsk_test"
+model    = "llama-3.3-70b"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let llm = config.llm.as_ref().unwrap();
+        assert!(matches!(llm, LlmConfig::OpenAiCompat { model, .. } if model == "llama-3.3-70b"));
     }
 }

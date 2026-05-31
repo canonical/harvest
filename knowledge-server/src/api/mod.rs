@@ -1,3 +1,4 @@
+pub mod docs;
 pub mod graph;
 pub mod query;
 pub mod repositories;
@@ -7,7 +8,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::agent::Agent;
@@ -17,6 +18,7 @@ use crate::neo4j::Neo4jClient;
 pub struct AppState {
     pub agent: Arc<Agent>,
     pub neo4j: Arc<Neo4jClient>,
+    pub docs_dir: Option<Arc<PathBuf>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -32,10 +34,20 @@ pub fn router(state: AppState) -> Router {
         .route("/graph/:repo/:version/source", get(graph::handle_get_symbol_source))
         .with_state(Arc::clone(&state.neo4j));
 
-    Router::new()
+    let mut router = Router::new()
         .merge(agent_router)
         .merge(neo4j_router)
-        .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
+        .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }));
+
+    if let Some(docs_dir) = state.docs_dir {
+        let docs_router = Router::new()
+            .route("/docs/:repo/:version", get(docs::handle_get_index))
+            .route("/docs/:repo/:version/:section/*filename", get(docs::handle_get_page))
+            .with_state(docs_dir);
+        router = router.merge(docs_router);
+    }
+
+    router
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
 }

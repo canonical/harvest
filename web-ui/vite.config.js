@@ -17,6 +17,7 @@ export default defineConfig({
       '/graph': 'http://localhost:8080',
       '/health': 'http://localhost:8080',
       '/tool-description': 'http://localhost:8080',
+      '/docs': 'http://localhost:8080',
     },
   },
 });
