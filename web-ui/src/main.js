@@ -50,16 +50,16 @@ const navPinEl    = document.getElementById('nav-pin');
 // ── Render ────────────────────────────────────────────────────────────────────
 
 function render() {
-  // Snapshot expand/open state before replacing the DOM
+  // Snapshot open state before replacing the DOM
   const prevAssistantEls = [...messagesEl.querySelectorAll('.message--assistant')];
-  const expandedWraps = new Set(
+  const openGroups = new Set(
     prevAssistantEls.flatMap((el, i) =>
-      el.querySelector('.tool-calls-wrap.expanded') ? [i] : []
+      el.querySelector('details.tc-group[open]') ? [i] : []
     )
   );
-  const openToolCalls = new Set(
+  const openSteps = new Set(
     prevAssistantEls.flatMap((el, i) =>
-      [...el.querySelectorAll('.tool-call.open')].map((_, j) => `${i}:${j}`)
+      [...el.querySelectorAll('.tc-step--open')].map(s => `${i}:${s.dataset.tcIdx}`)
     )
   );
 
@@ -73,38 +73,33 @@ function render() {
   // Scroll to bottom
   messagesEl.scrollTop = messagesEl.scrollHeight;
 
-  // Restore expand/open state
+  // Restore open state
   [...messagesEl.querySelectorAll('.message--assistant')].forEach((el, i) => {
-    if (expandedWraps.has(i)) {
-      const wrap = el.querySelector('.tool-calls-wrap');
-      if (wrap) {
-        wrap.classList.add('expanded');
-        const chevron = wrap.querySelector('.tool-calls-toggle__chevron');
-        if (chevron) chevron.textContent = '▴';
-        const btn = wrap.querySelector('.tool-calls-toggle');
-        if (btn) btn.setAttribute('aria-expanded', 'true');
+    const group = el.querySelector('details.tc-group');
+    if (group && openGroups.has(i)) group.open = true;
+    el.querySelectorAll('.tc-step').forEach(step => {
+      if (openSteps.has(`${i}:${step.dataset.tcIdx}`)) {
+        step.classList.add('tc-step--open');
+        const detail = step.querySelector('.tc-step__detail');
+        if (detail) detail.hidden = false;
+        const row = step.querySelector('.tc-step__row--clickable');
+        if (row) row.setAttribute('aria-expanded', 'true');
       }
-    }
-    el.querySelectorAll('.tool-call').forEach((tc, j) => {
-      if (openToolCalls.has(`${i}:${j}`)) tc.classList.add('open');
     });
   });
 
-  // Attach tool call toggle listeners
-  messagesEl.querySelectorAll('.tool-call__header').forEach(header => {
-    header.addEventListener('click', () => {
-      header.closest('.tool-call').classList.toggle('open');
-    });
-  });
-
-  // Attach tool-calls section expand/collapse listeners
-  messagesEl.querySelectorAll('.tool-calls-toggle').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const wrap = btn.closest('.tool-calls-wrap');
-      const expanded = wrap.classList.toggle('expanded');
-      btn.setAttribute('aria-expanded', String(expanded));
-      btn.querySelector('.tool-calls-toggle__chevron').textContent = expanded ? '▴' : '▾';
-    });
+  // Attach step detail expand/collapse listeners (whole row is the trigger)
+  messagesEl.querySelectorAll('.tc-step__row--clickable').forEach(row => {
+    const toggle = () => {
+      const step = row.closest('.tc-step');
+      const detail = step.querySelector('.tc-step__detail');
+      const willExpand = detail.hidden;
+      detail.hidden = !willExpand;
+      row.setAttribute('aria-expanded', String(willExpand));
+      step.classList.toggle('tc-step--open', willExpand);
+    };
+    row.addEventListener('click', toggle);
+    row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
   });
 
   // Wrap each code block in a container and inject a copy button
@@ -184,17 +179,15 @@ function renderMessage(msg) {
 
   // Assistant message (loading with tool calls or fully done)
   const n = msg.tool_calls.length;
+  const anyRunning = msg.tool_calls.some(tc => tc.status === 'running');
   const toolCallsHtml = n > 0 ? `
-    <div class="tool-calls-wrap">
-      <div class="tool-calls-clip">
-        <div class="tool-calls">
-          ${msg.tool_calls.map(renderToolCall).join('')}
-        </div>
-      </div>
-      <button class="tool-calls-toggle" type="button" aria-expanded="false">
-        <span class="tool-calls-toggle__chevron">▾</span> ${n} tool call${n === 1 ? '' : 's'}
-      </button>
-    </div>
+    <details class="tc-group${anyRunning ? ' tc-group--running' : ''}">
+      <summary class="tc-group__summary">
+        <svg class="tc-group__summary-chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2,3 5,7 8,3"/></svg>
+        <span>${n} tool call${n === 1 ? '' : 's'}</span>
+      </summary>
+      ${msg.tool_calls.map((tc, i) => renderToolCall(tc, i)).join('')}
+    </details>
   ` : '';
 
   // Map each unique source to a 1-based index so inline citations and chips share the same numbering
@@ -238,29 +231,37 @@ function renderMessage(msg) {
   `;
 }
 
-function renderToolCall(tc) {
-  const statusLabel = tc.status === 'running' ? 'Running…' : 'Done';
+function renderToolCall(tc, i) {
   const label = tc.description
     ? escapeHtml(tc.description)
-    : `<span class="tool-call__name--bare">${escapeHtml(tc.name)}</span>`;
-  const previewHtml = tc.preview ? `
-    <div class="tool-call__label">Result preview</div>
-    <div class="tool-data">${renderPreviewToHtml(tc.preview, tc.input?.file ?? null)}</div>
+    : `<span class="tc-step__name-bare">${escapeHtml(tc.name.replace(/_/g, ' '))}</span>`;
+
+  const hasDetail = !!(tc.input || tc.preview);
+  const detailHtml = hasDetail ? `
+    <div class="tc-step__detail" hidden>
+      <span class="tc-step__tool-tag">${escapeHtml(tc.name)}</span>
+      ${tc.input ? `
+        <div class="tc-step__detail-section">
+          <div class="tc-step__detail-label">Input</div>
+          <div class="tool-data">${renderJsonToHtml(tc.input)}</div>
+        </div>` : ''}
+      ${tc.preview ? `
+        <div class="tc-step__detail-section">
+          <div class="tc-step__detail-label">Result</div>
+          <div class="tool-data">${renderPreviewToHtml(tc.preview, tc.input?.file ?? null)}</div>
+        </div>` : ''}
+    </div>
   ` : '';
 
   return `
-    <div class="tool-call ${tc.status}">
-      <div class="tool-call__header">
-        <i class="p-icon--circle-of-friends tool-call__icon"></i>
-        <span class="tool-call__name">${label}</span>
-        <span class="tool-call__status">${statusLabel}</span>
+    <div class="tc-step tc-step--${tc.status}" data-tc-idx="${i}">
+      <div class="tc-step__row${hasDetail ? ' tc-step__row--clickable' : ''}" ${hasDetail ? 'role="button" tabindex="0" aria-expanded="false"' : ''}>
+        <i class="p-icon--circle-of-friends tc-step__icon${tc.description ? '' : ' tc-step__icon--spinning'}" aria-hidden="true"></i>
+        <span class="tc-step__label">${label}</span>
+        ${hasDetail ? `
+          <svg class="tc-step__chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><polyline points="2,3 5,7 8,3"/></svg>` : ''}
       </div>
-      <div class="tool-call__body">
-        <div class="tool-call__label">Tool: ${escapeHtml(tc.name)}</div>
-        <div class="tool-call__label">Input</div>
-        <div class="tool-data">${renderJsonToHtml(tc.input)}</div>
-        ${previewHtml}
-      </div>
+      ${detailHtml}
     </div>
   `;
 }
