@@ -262,7 +262,7 @@ function mountCy(data) {
 
   // ── Worker path: compute fcose off the main thread ────────────────────────
   // The main thread stays responsive; Firefox will not show a slow-script warning.
-  setLoadingText(`Computing layout for ${nodeElements.length} symbols…`);
+  $('repo-loading-text').textContent = `Computing layout for ${nodeElements.length} symbols…`;
 
   const fcoseOptions = {
     quality: 'default',
