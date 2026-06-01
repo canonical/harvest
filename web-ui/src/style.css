@@ -534,106 +534,170 @@ html, body {
   text-decoration: none;
 }
 
-/* ── Tool call cards ──────────────────────────────────────────────────────── */
+/* ── Tool call timeline ───────────────────────────────────────────────────── */
 
-.tool-calls-wrap {
-  margin-bottom: 0.5rem;
+.tc-group {
+  margin-bottom: 0.625rem;
+  border-left: 2px solid var(--border-subtle);
+  transition: border-color 0.3s;
 }
 
-.tool-calls {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
+.tc-group--running {
+  border-left-color: #0066cc;
 }
 
-/* Collapsed state: fixed height with a fade hint */
-.tool-calls-clip {
-  position: relative;
-}
-
-.tool-calls-wrap:not(.expanded) .tool-calls-clip {
-  max-height: 9rem;
-  overflow: hidden;
-}
-
-.tool-calls-wrap:not(.expanded) .tool-calls-clip::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 2.5rem;
-  background: linear-gradient(transparent, var(--bg-surface));
-  pointer-events: none;
-}
-
-.tool-calls-toggle {
+/* Summary row — shown when collapsed (message done) */
+.tc-group__summary {
   display: flex;
   align-items: center;
-  gap: 0.3rem;
-  width: 100%;
-  padding: 0.3rem 0.75rem;
-  margin-top: 0.25rem;
-  border: 1px solid var(--border-color);
-  border-radius: 0.4rem;
-  background: var(--bg-tool-header);
-  color: var(--text-secondary);
+  gap: 0.375rem;
+  padding: 0.15rem 0.5rem;
   font-size: 0.75rem;
+  color: var(--text-muted);
   cursor: pointer;
+  list-style: none;
   user-select: none;
+  border-radius: 3px;
+  transition: background 0.12s;
 }
 
-.tool-calls-toggle:hover { background: var(--bg-surface-hover); }
+.tc-group__summary::-webkit-details-marker { display: none; }
 
-.tool-calls-toggle__chevron { font-size: 0.65rem; }
-
-.tool-call {
-  border: 1px solid var(--border-color);
-  border-radius: 0.5rem;
-  overflow: hidden;
-  font-size: 0.85rem;
-  background: var(--bg-tool-card);
+.tc-group__summary:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-secondary);
 }
 
-.tool-call__header {
+.tc-group__summary-chevron {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+
+details.tc-group[open] .tc-group__summary-chevron {
+  transform: rotate(180deg);
+}
+
+/* Steps sit inside the details, indented */
+details.tc-group[open] {
+  padding-left: 0.875rem;
+}
+
+/* ── Individual step ──────────────────────────────────────────────────────── */
+
+.tc-step {
+  font-size: 0.8125rem;
+}
+
+.tc-step__row {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.4rem 0.75rem;
-  cursor: pointer;
-  user-select: none;
-  background: var(--bg-tool-header);
-  border-bottom: 1px solid transparent;
+  padding: 0.2rem 0;
+  min-height: 1.625rem;
 }
 
-.tool-call__header:hover { background: var(--bg-surface-hover); }
-
-.tool-call.open .tool-call__header { border-bottom-color: var(--border-color); }
-
-.tool-call__icon {
+/* Status icon */
+.tc-step__icon {
   width: 1rem;
   height: 1rem;
   flex-shrink: 0;
 }
 
-.tool-call.running .tool-call__icon {
+.tc-step__icon--spinning {
   animation: spin 0.8s linear infinite;
 }
 
-@keyframes spin { to { transform: rotate(360deg); } }
-
-.tool-call__name            { font-weight: 500; color: var(--text-primary); }
-.tool-call__name--bare      { font-family: monospace; font-weight: 400; color: var(--text-secondary); }
-.tool-call__status { margin-left: auto; font-size: 0.75rem; color: var(--text-muted); }
-
-.tool-call__body {
-  display: none;
-  padding: 0.5rem 0.75rem;
+/* Step label */
+.tc-step__label {
+  flex: 1;
+  color: var(--text-muted);
+  line-height: 1.4;
+  transition: color 0.2s;
 }
 
-.tool-call.open .tool-call__body { display: block; }
+.tc-step--running .tc-step__label {
+  color: var(--text-primary);
+}
 
-.tool-call__label { font-size: 0.75rem; color: var(--text-label); margin-top: 0.5rem; }
+.tc-step--done .tc-step__label {
+  color: var(--text-secondary);
+}
+
+.tc-step__name-bare {
+  font-family: 'Ubuntu Mono', monospace;
+}
+
+/* Clickable row */
+.tc-step__row--clickable {
+  cursor: pointer;
+  border-radius: 3px;
+  margin: 0 -0.25rem;
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+  transition: background 0.12s;
+}
+
+.tc-step__row--clickable:hover {
+  background: var(--bg-surface-hover);
+}
+
+/* Expand chevron — hidden until hover or open */
+.tc-step__chevron {
+  width: 10px;
+  height: 10px;
+  display: block;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: transform 0.15s, opacity 0.15s;
+}
+
+.tc-step__row--clickable:hover .tc-step__chevron,
+.tc-step--open .tc-step__chevron {
+  opacity: 1;
+}
+
+.tc-step__row--clickable[aria-expanded="true"] .tc-step__chevron {
+  transform: rotate(180deg);
+}
+
+/* ── Step detail panel ────────────────────────────────────────────────────── */
+
+.tc-step__detail {
+  margin: 0.125rem 0 0.375rem 1rem;
+  padding: 0.5rem 0.625rem;
+  background: var(--bg-surface-alt);
+  border-radius: 0.375rem;
+  font-size: 0.78rem;
+}
+
+.tc-step__tool-tag {
+  display: inline-block;
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+  font-size: 0.69rem;
+  padding: 0.1rem 0.375rem;
+  border-radius: 3px;
+  background: var(--bg-code-inline);
+  color: var(--text-code-inline);
+  margin-bottom: 0.375rem;
+}
+
+.tc-step__detail-section {
+  margin-top: 0.375rem;
+}
+
+.tc-step__detail-label {
+  font-size: 0.69rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 0.25rem;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── tool-data: Vanilla table/list inside tool-call cards ─────────────────── */
 
