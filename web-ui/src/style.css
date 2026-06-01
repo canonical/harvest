@@ -87,6 +87,27 @@
   --theme-btn-border:     #444444;
   --theme-btn-color:      #cccccc;
   --theme-btn-hover-bg:   #333333;
+
+  /*
+   * VF theme flags + colour tokens for the main content area.
+   * Without these, VF components (icons, inputs, buttons) stay in light mode
+   * even when our page is in dark mode, producing invisible black icons and
+   * bright white inputs on a dark background.
+   * The nav panel overrides these locally via its .nav-panel class.
+   */
+  --vf-theme-light:               var(--vf-FLAG-OFF);
+  --vf-theme-dark:                var(--vf-FLAG-ON);
+  --vf-color-background-default:  #1e1e1e;
+  --vf-color-background-alt:      #252525;
+  --vf-color-background-inputs:   #1e1e1e;
+  --vf-color-background-hover:    #2e2e2e;
+  --vf-color-background-active:   #383838;
+  --vf-color-text-default:        #e8e8e8;
+  --vf-color-text-inactive:       rgba(232, 232, 232, 0.75);
+  --vf-color-text-muted:          rgba(232, 232, 232, 0.6);
+  --vf-color-border-default:      #383838;
+  --vf-color-border-high-contrast: #606060;
+  --vf-color-border-low-contrast: #2e2e2e;
 }
 
 /* Auto mode: follow OS preference when no explicit theme is set */
@@ -130,6 +151,20 @@
     --theme-btn-border:     #444444;
     --theme-btn-color:      #cccccc;
     --theme-btn-hover-bg:   #333333;
+
+    --vf-theme-light:               var(--vf-FLAG-OFF);
+    --vf-theme-dark:                var(--vf-FLAG-ON);
+    --vf-color-background-default:  #1e1e1e;
+    --vf-color-background-alt:      #252525;
+    --vf-color-background-inputs:   #1e1e1e;
+    --vf-color-background-hover:    #2e2e2e;
+    --vf-color-background-active:   #383838;
+    --vf-color-text-default:        #e8e8e8;
+    --vf-color-text-inactive:       rgba(232, 232, 232, 0.75);
+    --vf-color-text-muted:          rgba(232, 232, 232, 0.6);
+    --vf-color-border-default:      #383838;
+    --vf-color-border-high-contrast: #606060;
+    --vf-color-border-low-contrast: #2e2e2e;
     }
 }
 
