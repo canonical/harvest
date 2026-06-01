@@ -17,12 +17,17 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     #[command(about = "Ingest all configured repositories once and exit")]
-    Run,
+    Run {
+        #[arg(short, long, help = "Re-ingest versions that were already processed")]
+        force: bool,
+    },
     #[command(about = "Continuously poll repositories and ingest new versions on a fixed interval")]
     Watch {
         #[arg(short, long, default_value = "300", help = "Polling interval in seconds")]
         interval_secs: u64,
     },
+    #[command(about = "Mark all ingested versions as pending so the next run re-processes them")]
+    Reingest,
     Status,
     #[command(about = "Generate Diataxis documentation for a repository version")]
     Document {
@@ -65,8 +70,9 @@ async fn main() -> Result<()> {
         _ => {
             let pipeline = pipeline::Pipeline::new(config).await?;
             match cli.command {
-                Command::Run => pipeline.run().await,
+                Command::Run { force } => pipeline.run(force).await,
                 Command::Watch { interval_secs } => pipeline.watch(interval_secs).await,
+                Command::Reingest => pipeline.reingest().await,
                 Command::Status => pipeline.status().await,
                 Command::Document { .. } => unreachable!(),
             }
