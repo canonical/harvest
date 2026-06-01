@@ -335,45 +335,6 @@ html, body {
   padding-bottom: 0.5rem;
 }
 
-/* ── Sidebar pin (collapse) toggle ───────────────────────────────────────── */
-
-.sidenav-toggle-wrapper {
-  display: flex;
-  justify-content: flex-end;
-  padding: 0.375rem 0.75rem 0.25rem;
-}
-
-.sidenav-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.75rem;
-  height: 1.75rem;
-  padding: 0;
-  border: 1px solid var(--vf-color-border-default);
-  border-radius: 0.25rem;
-  background: none;
-  color: var(--vf-color-text-inactive);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.sidenav-toggle svg {
-  width: 1rem;
-  height: 1rem;
-  display: block;
-}
-
-.sidenav-toggle:hover {
-  background: var(--vf-color-background-hover);
-  color: var(--vf-color-text-default);
-}
-
-/* Highlight when the nav is pinned open */
-.l-navigation.is-pinned .sidenav-toggle {
-  background: var(--vf-color-background-active);
-  color: var(--vf-color-text-default);
-}
 
 /* ── Pages ────────────────────────────────────────────────────────────────── */
 
