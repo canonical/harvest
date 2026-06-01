@@ -210,12 +210,28 @@
             <!-- Edge-type legend, shown once graph is loaded -->
             <div id="graph-legend" class="graph-legend" hidden>
               <div class="graph-legend__item">
-                <svg width="22" height="10" viewBox="0 0 22 10" aria-hidden="true"><line x1="0" y1="5" x2="18" y2="5" stroke="rgba(120,120,120,0.7)" stroke-width="1.5"/><polygon points="18,2 22,5 18,8" fill="rgba(120,120,120,0.7)"/></svg>
-                <span>calls</span>
+                <svg width="26" height="10" viewBox="0 0 26 10" aria-hidden="true"><line x1="0" y1="5" x2="18" y2="5" stroke="rgba(124,58,237,0.9)" stroke-width="1.5"/><polygon points="18,1 26,5 18,9" fill="none" stroke="rgba(124,58,237,0.9)" stroke-width="1.5"/></svg>
+                <span>inherits</span>
               </div>
               <div class="graph-legend__item">
-                <svg width="22" height="10" viewBox="0 0 22 10" aria-hidden="true"><line x1="0" y1="5" x2="18" y2="5" stroke="rgba(139,92,246,0.8)" stroke-width="1.5" stroke-dasharray="4,2"/><polygon points="18,2 22,5 18,8" fill="rgba(139,92,246,0.8)"/></svg>
+                <svg width="26" height="10" viewBox="0 0 26 10" aria-hidden="true"><line x1="0" y1="5" x2="18" y2="5" stroke="rgba(8,145,178,0.9)" stroke-width="1.5" stroke-dasharray="5,2"/><polygon points="18,1 26,5 18,9" fill="none" stroke="rgba(8,145,178,0.9)" stroke-width="1.5"/></svg>
+                <span>implements</span>
+              </div>
+              <div class="graph-legend__item">
+                <svg width="26" height="10" viewBox="0 0 26 10" aria-hidden="true"><polygon points="0,5 5,2 10,5 5,8" fill="none" stroke="rgba(5,150,105,0.9)" stroke-width="1.5"/><line x1="10" y1="5" x2="26" y2="5" stroke="rgba(5,150,105,0.9)" stroke-width="1.5"/></svg>
+                <span>embeds</span>
+              </div>
+              <div class="graph-legend__item">
+                <svg width="26" height="10" viewBox="0 0 26 10" aria-hidden="true"><polygon points="0,5 5,2 10,5 5,8" fill="rgba(139,92,246,0.9)"/><line x1="10" y1="5" x2="26" y2="5" stroke="rgba(139,92,246,0.9)" stroke-width="1.5"/></svg>
                 <span>contains</span>
+              </div>
+              <div class="graph-legend__item">
+                <svg width="26" height="10" viewBox="0 0 26 10" aria-hidden="true"><line x1="0" y1="5" x2="18" y2="5" stroke="rgba(217,119,6,0.75)" stroke-width="1"/><polygon points="18,2 26,5 18,8" fill="rgba(217,119,6,0.75)"/></svg>
+                <span>uses</span>
+              </div>
+              <div class="graph-legend__item">
+                <svg width="26" height="10" viewBox="0 0 26 10" aria-hidden="true"><line x1="0" y1="5" x2="18" y2="5" stroke="rgba(120,120,120,0.7)" stroke-width="1.5" stroke-dasharray="4,2"/><polygon points="18,2 26,5 18,8" fill="rgba(120,120,120,0.7)"/></svg>
+                <span>calls</span>
               </div>
             </div>
           </div>
@@ -234,6 +250,38 @@
               <pre id="source-pre"><code id="source-code"></code></pre>
             </div>
             <div id="source-relations" class="source-relations">
+              <div id="source-parents-section" class="source-relations__section" hidden>
+                <div class="source-relations__label">Extends</div>
+                <div id="source-parents-list" class="source-relations__chips"></div>
+              </div>
+              <div id="source-children-section" class="source-relations__section" hidden>
+                <div class="source-relations__label">Subclasses</div>
+                <div id="source-children-list" class="source-relations__chips"></div>
+              </div>
+              <div id="source-implements-section" class="source-relations__section" hidden>
+                <div class="source-relations__label">Implements</div>
+                <div id="source-implements-list" class="source-relations__chips"></div>
+              </div>
+              <div id="source-implementors-section" class="source-relations__section" hidden>
+                <div class="source-relations__label">Implemented by</div>
+                <div id="source-implementors-list" class="source-relations__chips"></div>
+              </div>
+              <div id="source-embeds-section" class="source-relations__section" hidden>
+                <div class="source-relations__label">Embeds</div>
+                <div id="source-embeds-list" class="source-relations__chips"></div>
+              </div>
+              <div id="source-embedded-by-section" class="source-relations__section" hidden>
+                <div class="source-relations__label">Embedded by</div>
+                <div id="source-embedded-by-list" class="source-relations__chips"></div>
+              </div>
+              <div id="source-uses-section" class="source-relations__section" hidden>
+                <div class="source-relations__label">Uses</div>
+                <div id="source-uses-list" class="source-relations__chips"></div>
+              </div>
+              <div id="source-used-by-section" class="source-relations__section" hidden>
+                <div class="source-relations__label">Used by</div>
+                <div id="source-used-by-list" class="source-relations__chips"></div>
+              </div>
               <div id="source-container-section" class="source-relations__section" hidden>
                 <div class="source-relations__label">Member of</div>
                 <div id="source-container-list" class="source-relations__chips"></div>
