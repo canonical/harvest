@@ -312,6 +312,13 @@ html, body {
   text-align: left;
 }
 
+/* Theme toggle: narrower than a full-width nav link, centered */
+#theme-btn.p-side-navigation__link {
+  width: auto;
+  margin: 0 auto;
+  display: flex;
+}
+
 /* ── Sidenav two-section layout ───────────────────────────────────────────── */
 
 .sidenav-top-container {
@@ -324,6 +331,7 @@ html, body {
 .sidenav-bottom-container {
   flex-shrink: 0;
   border-top: 1px solid var(--vf-color-border-low-contrast);
+  padding-top: 0.5rem;
   padding-bottom: 0.5rem;
 }
 
