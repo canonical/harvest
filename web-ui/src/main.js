@@ -45,7 +45,6 @@ const themeBtnEl  = document.getElementById('theme-btn');
 const navEl       = document.getElementById('app-sidebar');
 const navToggleEl = document.getElementById('nav-toggle');
 const navCloseEl  = document.getElementById('nav-close');
-const navPinEl    = document.getElementById('nav-pin');
 
 // ── Render ────────────────────────────────────────────────────────────────────
 
@@ -359,22 +358,6 @@ document.addEventListener('click', (e) => {
       !navToggleEl.contains(e.target)) {
     closeNav();
   }
-});
-
-// ── Sidebar pin toggle (tablet / desktop) ─────────────────────────────────────
-
-function applyPinState(pinned) {
-  navEl.classList.toggle('is-pinned', pinned);
-  navPinEl.setAttribute('aria-label', pinned ? 'Unpin navigation' : 'Pin navigation open');
-  navPinEl.title = pinned ? 'Unpin navigation' : 'Pin navigation open';
-  localStorage.setItem('nav-pinned', pinned ? '1' : '0');
-}
-
-// Restore persisted pin state
-applyPinState(localStorage.getItem('nav-pinned') === '1');
-
-navPinEl.addEventListener('click', () => {
-  applyPinState(!navEl.classList.contains('is-pinned'));
 });
 
 // ── Sidebar navigation ────────────────────────────────────────────────────────
