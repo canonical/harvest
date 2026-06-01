@@ -1,7 +1,7 @@
 import cytoscape from 'cytoscape';
 import fcose from 'cytoscape-fcose';
 import hljs from 'highlight.js';
-import { fetchGraph, fetchSymbolSource, queryStream } from './api.js';
+import { fetchGraph, fetchSymbolSource, queryStream, fetchToolDescription } from './api.js';
 
 cytoscape.use(fcose);
 
@@ -684,30 +684,30 @@ async function doSearch() {
     div.className = 'search-overlay__call';
 
     const icon = document.createElement('i');
+    // Spin until the AI-generated description arrives (same behaviour as chat)
     icon.className = 'p-icon--circle-of-friends search-overlay__call-icon running';
 
     const text = document.createElement('span');
     text.className = 'search-overlay__call-text';
-    text.textContent = (name === 'search_symbols' && input?.query)
-      ? `Searching for "${input.query}"`
-      : name.replace(/_/g, ' ');
+    // Show humanised tool name as placeholder; replaced when description arrives
+    text.textContent = name.replace(/_/g, ' ');
 
-    const status = document.createElement('span');
-    status.className = 'search-overlay__call-status';
-    status.textContent = 'Running…';
-
-    div.append(icon, text, status);
+    div.append(icon, text);
     callsContainer.appendChild(div);
-    const entry = { icon, status };
+    const entry = { icon, text, done: false };
     pendingCalls.push(entry);
     return entry;
   }
 
-  function completeCall() {
-    const entry = pendingCalls.find(e => e.status.textContent === 'Running…');
-    if (!entry) return;
+  function stopSpin(entry) {
     entry.icon.classList.remove('running');
-    entry.status.textContent = 'Done';
+  }
+
+  function completeCall() {
+    const entry = pendingCalls.find(e => !e.done);
+    if (!entry) return;
+    entry.done = true;
+    stopSpin(entry);
   }
 
   const prompt =
@@ -718,7 +718,13 @@ async function doSearch() {
   try {
     await queryStream(prompt, event => {
       if (event.type === 'tool_call') {
-        addCall(event.name, event.input);
+        const entry = addCall(event.name, event.input);
+        fetchToolDescription(event.name, event.input).then(description => {
+          if (description) {
+            entry.text.textContent = description;
+            stopSpin(entry);
+          }
+        });
       } else if (event.type === 'tool_result') {
         completeCall();
         if (event.name === 'search_symbols' && event.preview) {
