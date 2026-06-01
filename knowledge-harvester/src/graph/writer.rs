@@ -11,6 +11,7 @@ fn to_bolt_list(values: Vec<serde_json::Value>) -> BoltType {
         .expect("well-formed JSON array")
 }
 
+
 pub struct GraphWriter {
     graph: Graph,
 }
@@ -34,6 +35,13 @@ impl GraphWriter {
         for stmt in stmts {
             self.graph.run(query(stmt)).await?;
         }
+        Ok(())
+    }
+
+    pub async fn reset_ingested(&self) -> Result<()> {
+        self.graph
+            .run(query("MATCH (v:Version) SET v.ingested = false"))
+            .await?;
         Ok(())
     }
 
@@ -75,13 +83,7 @@ impl GraphWriter {
         Ok(())
     }
 
-    pub async fn upsert_version(
-        &self,
-        repo: &str,
-        tag: &str,
-        timestamp: i64,
-        ingested: bool,
-    ) -> Result<()> {
+    pub async fn upsert_version(&self, repo: &str, tag: &str, timestamp: i64, ingested: bool) -> Result<()> {
         self.graph
             .run(
                 query(
@@ -99,16 +101,16 @@ impl GraphWriter {
         Ok(())
     }
 
-    pub async fn write_version(
-        &self,
-        repo: &str,
-        tag: &str,
-        files: &[ParsedFile],
-    ) -> Result<()> {
+    pub async fn write_version(&self, repo: &str, tag: &str, files: &[ParsedFile]) -> Result<()> {
         for file in files {
             self.write_file(repo, tag, file).await?;
         }
-        self.link_call_edges(repo, tag).await?;
+        // Call edges are written after all functions exist so cross-file callees resolve.
+        self.write_call_edges(repo, tag, files).await?;
+        self.link_inheritance_edges(repo, tag).await?;
+        self.link_impl_edges(repo, tag).await?;
+        self.link_embed_edges(repo, tag).await?;
+        self.link_uses_edges(repo, tag).await?;
         self.graph
             .run(
                 query("MATCH (v:Version {repo: $repo, tag: $tag}) SET v.ingested = true")
@@ -141,9 +143,13 @@ impl GraphWriter {
                 .iter()
                 .map(|f| {
                     serde_json::json!({
-                        "name": f.name, "signature": f.signature,
-                        "start_line": f.start_line, "end_line": f.end_line,
-                        "source": f.source,
+                        "name":       f.name,
+                        "kind":       f.kind,
+                        "signature":  f.signature,
+                        "start_line": f.start_line,
+                        "end_line":   f.end_line,
+                        "source":     f.source,
+                        "impl_type":  f.impl_type,
                     })
                 })
                 .collect();
@@ -153,10 +159,12 @@ impl GraphWriter {
                         "MATCH (file:File {repo: $repo, version: $tag, path: $path})
                          UNWIND $fns AS fn_data
                          MERGE (fn:Function {repo: $repo, version: $tag, file: $path, name: fn_data.name})
-                         SET fn.signature  = fn_data.signature,
+                         SET fn.kind       = fn_data.kind,
+                             fn.signature  = fn_data.signature,
                              fn.start_line = fn_data.start_line,
                              fn.end_line   = fn_data.end_line,
-                             fn.source     = fn_data.source
+                             fn.source     = fn_data.source,
+                             fn.impl_type  = fn_data.impl_type
                          MERGE (file)-[:DEFINES]->(fn)",
                     )
                     .param("repo", repo)
@@ -173,9 +181,15 @@ impl GraphWriter {
                 .iter()
                 .map(|c| {
                     serde_json::json!({
-                        "name": c.name,
-                        "start_line": c.start_line, "end_line": c.end_line,
-                        "source": c.source,
+                        "name":       c.name,
+                        "kind":       c.kind,
+                        "start_line": c.start_line,
+                        "end_line":   c.end_line,
+                        "source":     c.source,
+                        "bases":      c.bases,
+                        "traits":     c.traits,
+                        "embeds":     c.embeds,
+                        "uses":       c.uses,
                     })
                 })
                 .collect();
@@ -185,9 +199,14 @@ impl GraphWriter {
                         "MATCH (file:File {repo: $repo, version: $tag, path: $path})
                          UNWIND $cls AS cls_data
                          MERGE (c:Class {repo: $repo, version: $tag, file: $path, name: cls_data.name})
-                         SET c.start_line = cls_data.start_line,
+                         SET c.kind       = cls_data.kind,
+                             c.start_line = cls_data.start_line,
                              c.end_line   = cls_data.end_line,
-                             c.source     = cls_data.source
+                             c.source     = cls_data.source,
+                             c.bases      = cls_data.bases,
+                             c.traits     = cls_data.traits,
+                             c.embeds     = cls_data.embeds,
+                             c.uses       = cls_data.uses
                          MERGE (file)-[:DEFINES]->(c)",
                     )
                     .param("repo", repo)
@@ -224,30 +243,152 @@ impl GraphWriter {
         Ok(())
     }
 
-    async fn link_call_edges(&self, repo: &str, tag: &str) -> Result<()> {
+    /// Python/C++: resolve `bases` list → INHERITS edges between Class nodes.
+    /// Only creates an edge when the base name is unambiguous (exactly one Class
+    /// with that name exists in the version); ambiguous names are skipped rather
+    /// than creating spurious edges to wrong types.
+    async fn link_inheritance_edges(&self, repo: &str, tag: &str) -> Result<()> {
         self.graph
             .run(
                 query(
-                    "MATCH (caller:Function {repo: $repo, version: $tag})
-                     WHERE caller.calls IS NOT NULL
-                     UNWIND caller.calls AS call
-                     OPTIONAL MATCH (callee:Function {repo: $repo, version: $tag, name: call.callee})
-                     WITH caller, call, coalesce(callee, null) AS resolved
-                     CALL {
-                         WITH caller, call, resolved
-                         WITH caller, call,
-                              CASE WHEN resolved IS NULL
-                                   THEN '?' + call.callee
-                                   ELSE call.callee
-                              END AS callee_name
-                         MERGE (fn:Function {repo: $repo, version: $tag, name: callee_name})
-                         MERGE (caller)-[:CALLS {line: call.line}]->(fn)
-                     }",
+                    "MATCH (child:Class {repo: $repo, version: $tag})
+                     WHERE child.bases IS NOT NULL AND size(child.bases) > 0
+                     UNWIND child.bases AS base_name
+                     MATCH (parent:Class {repo: $repo, version: $tag, name: base_name})
+                     WITH child, base_name, collect(parent) AS parents
+                     WHERE size(parents) = 1
+                     WITH child, parents[0] AS parent
+                     MERGE (child)-[:INHERITS]->(parent)",
                 )
                 .param("repo", repo)
                 .param("tag", tag),
             )
             .await?;
+        Ok(())
+    }
+
+    /// Rust: resolve `traits` list → IMPLEMENTS edges (struct/enum → trait).
+    /// Only creates an edge when the trait name is unambiguous within the version.
+    async fn link_impl_edges(&self, repo: &str, tag: &str) -> Result<()> {
+        self.graph
+            .run(
+                query(
+                    "MATCH (implementor:Class {repo: $repo, version: $tag})
+                     WHERE implementor.traits IS NOT NULL AND size(implementor.traits) > 0
+                     UNWIND implementor.traits AS trait_name
+                     MATCH (t:Class {repo: $repo, version: $tag, name: trait_name})
+                     WITH implementor, trait_name, collect(t) AS traits
+                     WHERE size(traits) = 1
+                     WITH implementor, traits[0] AS t
+                     MERGE (implementor)-[:IMPLEMENTS]->(t)",
+                )
+                .param("repo", repo)
+                .param("tag", tag),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Rust: resolve `uses` list → USES edges (struct/enum → referenced field type).
+    /// Only creates an edge when the type name is unambiguous within the version.
+    async fn link_uses_edges(&self, repo: &str, tag: &str) -> Result<()> {
+        self.graph
+            .run(
+                query(
+                    "MATCH (user:Class {repo: $repo, version: $tag})
+                     WHERE user.uses IS NOT NULL AND size(user.uses) > 0
+                     UNWIND user.uses AS used_name
+                     MATCH (used:Class {repo: $repo, version: $tag, name: used_name})
+                     WITH user, used_name, collect(used) AS candidates
+                     WHERE size(candidates) = 1
+                     WITH user, candidates[0] AS used
+                     MERGE (user)-[:USES]->(used)",
+                )
+                .param("repo", repo)
+                .param("tag", tag),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Go: resolve `embeds` list → EMBEDS edges (outer struct → embedded type).
+    /// Only creates an edge when the embedded type name is unambiguous within the version.
+    async fn link_embed_edges(&self, repo: &str, tag: &str) -> Result<()> {
+        self.graph
+            .run(
+                query(
+                    "MATCH (outer:Class {repo: $repo, version: $tag})
+                     WHERE outer.embeds IS NOT NULL AND size(outer.embeds) > 0
+                     UNWIND outer.embeds AS embed_name
+                     MATCH (inner:Class {repo: $repo, version: $tag, name: embed_name})
+                     WITH outer, embed_name, collect(inner) AS candidates
+                     WHERE size(candidates) = 1
+                     WITH outer, candidates[0] AS inner
+                     MERGE (outer)-[:EMBEDS]->(inner)",
+                )
+                .param("repo", repo)
+                .param("tag", tag),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Write CALLS edges from in-memory call data collected during parsing.
+    /// Runs after all files are written so cross-file callees can be resolved.
+    ///
+    /// Resolution strategy (in priority order):
+    ///   1. Same-file match — the callee is defined in the caller's own file.
+    ///   2. Unique repo-wide match — the name resolves to exactly one function
+    ///      across the whole version (unambiguous cross-file call).
+    ///   3. Ambiguous — multiple candidates, no same-file match → edge skipped.
+    ///
+    /// Unresolved external calls (library functions, builtins) are silently dropped.
+    async fn write_call_edges(&self, repo: &str, tag: &str, files: &[ParsedFile]) -> Result<()> {
+        for file in files {
+            // Collect only functions that actually have recorded calls.
+            let fn_calls: Vec<serde_json::Value> = file
+                .functions
+                .iter()
+                .filter(|f| !f.calls.is_empty())
+                .map(|f| {
+                    serde_json::json!({
+                        "caller":      f.name,
+                        "caller_file": f.file,
+                        "calls": f.calls.iter().map(|c| serde_json::json!({
+                            "callee": c.callee,
+                            "line":   c.line,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+
+            if fn_calls.is_empty() { continue; }
+
+            self.graph
+                .run(
+                    query(
+                        "UNWIND $fn_calls AS fc
+                         MATCH (caller:Function {repo: $repo, version: $tag, file: fc.caller_file, name: fc.caller})
+                         UNWIND fc.calls AS call
+                         OPTIONAL MATCH (same_file:Function {repo: $repo, version: $tag, file: fc.caller_file, name: call.callee})
+                         WITH caller, call, same_file
+                         OPTIONAL MATCH (any_file:Function {repo: $repo, version: $tag, name: call.callee})
+                         WITH caller, call, same_file, collect(any_file) AS all_matches
+                         WITH caller, call,
+                              CASE
+                                WHEN same_file IS NOT NULL THEN same_file
+                                WHEN size(all_matches) = 1 THEN all_matches[0]
+                                ELSE null
+                              END AS callee
+                         WHERE callee IS NOT NULL AND callee <> caller
+                         MERGE (caller)-[:CALLS {line: call.line}]->(callee)",
+                    )
+                    .param("repo", repo)
+                    .param("tag", tag)
+                    .param("fn_calls", to_bolt_list(fn_calls)),
+                )
+                .await?;
+        }
         Ok(())
     }
 }

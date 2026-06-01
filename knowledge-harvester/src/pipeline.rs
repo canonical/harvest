@@ -29,9 +29,9 @@ impl Pipeline {
         Ok(Self { config, git, parsers, writer })
     }
 
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(&self, force: bool) -> Result<()> {
         for repo in &self.config.repositories {
-            if let Err(e) = self.process_repo(repo).await {
+            if let Err(e) = self.process_repo(repo, force).await {
                 tracing::error!(repo = repo.name, error = %e, "repository failed");
             }
         }
@@ -42,8 +42,14 @@ impl Pipeline {
         let mut ticker = interval(Duration::from_secs(interval_secs));
         loop {
             ticker.tick().await;
-            self.run().await?;
+            self.run(false).await?;
         }
+    }
+
+    pub async fn reingest(&self) -> Result<()> {
+        self.writer.reset_ingested().await?;
+        tracing::info!("all versions marked for re-ingestion");
+        self.run(false).await
     }
 
     pub async fn status(&self) -> Result<()> {
@@ -57,7 +63,7 @@ impl Pipeline {
         Ok(())
     }
 
-    async fn process_repo(&self, repo: &RepoConfig) -> Result<()> {
+    async fn process_repo(&self, repo: &RepoConfig, force: bool) -> Result<()> {
         self.writer.upsert_repository(&repo.name, &repo.url).await?;
         let repo_path = self.git.ensure_cloned(repo)?;
         let tags = match &repo.refs {
@@ -66,7 +72,7 @@ impl Pipeline {
         };
 
         for tag in tags {
-            if self.writer.is_ingested(&repo.name, &tag.name).await? {
+            if !force && self.writer.is_ingested(&repo.name, &tag.name).await? {
                 tracing::debug!(repo = repo.name, tag = tag.name, "already ingested, skipping");
                 continue;
             }
