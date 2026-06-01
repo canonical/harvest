@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::neo4j::Neo4jClient;
+use crate::api::GraphState;
 
 #[derive(Serialize)]
 pub struct RepositoryInfo {
@@ -13,9 +13,9 @@ pub struct RepositoryInfo {
 }
 
 pub async fn handle_list_repositories(
-    State(neo4j): State<Arc<Neo4jClient>>,
+    State(state): State<Arc<GraphState>>,
 ) -> impl IntoResponse {
-    let result = neo4j
+    let result = state.neo4j
         .query_read(
             "MATCH (r:Repository)-[:HAS_VERSION]->(v:Version {ingested: true})
              RETURN r.name AS name, r.url AS url, collect(v.tag) AS versions
