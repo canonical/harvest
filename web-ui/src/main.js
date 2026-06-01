@@ -396,8 +396,8 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
 
     if (page === 'repositories') onRepositoriesPageShow();
 
-    // Close drawer after navigation on mobile
-    if (window.innerWidth < 640) closeSidebar();
+    // Close drawer on mobile after navigating
+    if (window.innerWidth < 620) closeNav();
   });
 });
 
