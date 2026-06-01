@@ -81,7 +81,7 @@ export function onRepositoriesPageHide() {
 
 function populateRepoSelect() {
   const sel = $('repo-select');
-  sel.innerHTML = '<option value="">Repository…</option>';
+  sel.innerHTML = '<option value="" disabled selected>Choose a repository</option>';
   repoList.forEach(r => {
     const opt = document.createElement('option');
     opt.value = r.name;
@@ -103,7 +103,7 @@ function bindEvents() {
 function onRepoChange() {
   currentRepo = $('repo-select').value;
   const verSel = $('version-select');
-  verSel.innerHTML = '<option value="">Version…</option>';
+  verSel.innerHTML = '<option value="" disabled selected>Choose a version</option>';
   verSel.disabled = !currentRepo;
   if (!currentRepo) return;
 
