@@ -2,17 +2,11 @@ export const THEMES = /** @type {const} */ (['auto', 'light', 'dark']);
 
 const STORAGE_KEY = 'theme';
 
-/** Return the current persisted theme, defaulting to 'auto'. */
 export function getTheme() {
   const stored = localStorage.getItem(STORAGE_KEY);
   return THEMES.includes(stored) ? stored : 'auto';
 }
 
-/**
- * Apply a theme by setting/removing the data-theme attribute on <html>
- * and persisting the choice to localStorage.
- * @param {'auto'|'light'|'dark'} theme
- */
 export function setTheme(theme) {
   localStorage.setItem(STORAGE_KEY, theme);
   if (theme === 'auto') {
@@ -22,11 +16,6 @@ export function setTheme(theme) {
   }
 }
 
-/**
- * Advance to the next theme in the cycle (auto → light → dark → auto),
- * apply it, and return the new theme.
- * @returns {'auto'|'light'|'dark'}
- */
 export function nextTheme() {
   const current = getTheme();
   const idx = THEMES.indexOf(current);
@@ -35,7 +24,6 @@ export function nextTheme() {
   return next;
 }
 
-/** Apply the stored theme on page load. */
 export function applyStoredTheme() {
   setTheme(getTheme());
 }
@@ -52,8 +40,6 @@ const LABELS = {
   dark:  'Dark mode',
 };
 
-/** @param {'auto'|'light'|'dark'} theme */
 export function getThemeIcon(theme) { return ICONS[theme] ?? ICONS.auto; }
 
-/** @param {'auto'|'light'|'dark'} theme */
 export function getThemeLabel(theme) { return LABELS[theme] ?? LABELS.auto; }

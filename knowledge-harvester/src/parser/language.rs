@@ -27,8 +27,6 @@ impl LanguageParser for RustParser {
             ..Default::default()
         };
 
-        // ── impl_type map: fn start_byte → implementing type name ────────────
-        // Covers plain `impl Foo` and generic `impl<T> Foo<T>`.
         let mut impl_type_map: HashMap<usize, String> = HashMap::new();
         for impl_q_src in [
             "(impl_item type: (type_identifier) @impl_type body: (declaration_list (function_item) @fn_in_impl))",
@@ -48,8 +46,6 @@ impl LanguageParser for RustParser {
             }
         }
 
-        // ── trait_impl map: struct name → [trait names] ──────────────────────
-        // Populated from `impl Trait for Struct` blocks.
         let mut trait_impl_map: HashMap<String, Vec<String>> = HashMap::new();
         for impl_q_src in [
             "(impl_item trait: (type_identifier) @trait type: (type_identifier) @struct_type)",
@@ -73,9 +69,6 @@ impl LanguageParser for RustParser {
             }
         }
 
-        // ── Pre-built call query (reused per function) ───────────────────────
-        // Covers free calls `foo()`, method calls `obj.method()`,
-        // and associated-function calls `Foo::bar()`.
         let call_q = tree_sitter::Query::new(
             &lang,
             "[(call_expression function: (identifier) @callee)
@@ -84,14 +77,12 @@ impl LanguageParser for RustParser {
         ).expect("valid Rust call query");
         let callee_idx = call_q.capture_index_for_name("callee").unwrap();
 
-        // ── Pre-built field-type query (reused per struct/enum) ───────────────
         let field_q = tree_sitter::Query::new(
             &lang,
             "(field_declaration type: (_) @field_type)",
         ).expect("valid Rust field type query");
         let ft_idx = field_q.capture_index_for_name("field_type").unwrap();
 
-        // ── Functions ────────────────────────────────────────────────────────
         let fn_q = tree_sitter::Query::new(
             &lang,
             "(function_item name: (identifier) @name parameters: (parameters) @params return_type: (_)? @ret) @fn",
@@ -137,7 +128,6 @@ impl LanguageParser for RustParser {
             }
         }
 
-        // ── Structs, enums, traits → ClassNode ───────────────────────────────
         for (type_q_src, kind) in [
             ("(struct_item name: (type_identifier) @name) @node", "struct"),
             ("(enum_item   name: (type_identifier) @name) @node", "enum"),
@@ -156,11 +146,9 @@ impl LanguageParser for RustParser {
                         let end_line   = tn.end_position().row as u32 + 1;
                         let src_text   = &source[tn.byte_range()];
 
-                        // Merge explicit impl-for traits with #[derive(...)] traits.
                         let mut traits = trait_impl_map.get(name).cloned().unwrap_or_default();
                         traits.extend(rust_get_derives(source, tn));
 
-                        // Field types from struct/enum bodies → USES edges.
                         let uses = rust_extract_field_uses(source, tn, name, &field_q, ft_idx);
 
                         out.classes.push(ClassNode {
@@ -186,8 +174,6 @@ impl LanguageParser for RustParser {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-
 pub struct PythonParser;
 
 impl LanguageParser for PythonParser {
@@ -211,7 +197,6 @@ impl LanguageParser for PythonParser {
             ..Default::default()
         };
 
-        // Pre-build call query; reused per function to extract callee names.
         let call_q = tree_sitter::Query::new(
             &lang,
             "[(call function: (identifier) @callee)
@@ -219,7 +204,6 @@ impl LanguageParser for PythonParser {
         ).expect("valid Python call query");
         let callee_idx = call_q.capture_index_for_name("callee").unwrap();
 
-        // ── Functions and methods ─────────────────────────────────────────────
         let fn_q = tree_sitter::Query::new(
             &lang,
             "(function_definition name: (identifier) @name) @fn",
@@ -238,7 +222,6 @@ impl LanguageParser for PythonParser {
                     let src_text   = &source[fn_n.byte_range()];
                     let kind = if python_has_class_ancestor(fn_n) { "method" } else { "function" };
 
-                    // Extract outgoing calls within this function body.
                     let mut calls = Vec::new();
                     let mut call_cursor = tree_sitter::QueryCursor::new();
                     for cm in call_cursor.matches(&call_q, fn_n, source.as_bytes()) {
@@ -266,7 +249,6 @@ impl LanguageParser for PythonParser {
             }
         }
 
-        // ── Classes ──────────────────────────────────────────────────────────
         let cls_q = tree_sitter::Query::new(
             &lang,
             "(class_definition name: (identifier) @name) @class",
@@ -301,7 +283,6 @@ impl LanguageParser for PythonParser {
             }
         }
 
-        // ── Inheritance (base classes) ────────────────────────────────────────
         let inherit_q = tree_sitter::Query::new(
             &lang,
             "(class_definition name: (identifier) @class_name superclasses: (argument_list (identifier) @base_name))",
@@ -328,7 +309,6 @@ impl LanguageParser for PythonParser {
             }
         }
 
-        // ── Imports ──────────────────────────────────────────────────────────
         let imp_q = tree_sitter::Query::new(
             &lang,
             "[(import_statement) (import_from_statement)] @import",
@@ -357,8 +337,6 @@ impl LanguageParser for PythonParser {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-
 pub struct TypeScriptParser;
 
 impl LanguageParser for TypeScriptParser {
@@ -385,8 +363,6 @@ impl LanguageParser for JavaScriptParser {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-
 pub struct GoParser;
 
 impl LanguageParser for GoParser {
@@ -410,8 +386,6 @@ impl LanguageParser for GoParser {
             ..Default::default()
         };
 
-        // ── Pre-built call query ──────────────────────────────────────────────
-        // Direct calls `foo()` and selector calls `obj.Method()` / `pkg.Func()`.
         let call_q = tree_sitter::Query::new(
             &lang,
             "[(call_expression function: (identifier) @callee)
@@ -419,7 +393,6 @@ impl LanguageParser for GoParser {
         ).expect("valid Go call query");
         let callee_idx = call_q.capture_index_for_name("callee").unwrap();
 
-        // ── Receiver-type map: method start_byte → receiver type name ─────────
         let mut receiver_map: HashMap<usize, String> = HashMap::new();
         let method_q = tree_sitter::Query::new(&lang, "(method_declaration) @m")
             .expect("valid Go method query");
@@ -436,7 +409,6 @@ impl LanguageParser for GoParser {
             }
         }
 
-        // ── Functions and methods ─────────────────────────────────────────────
         let fn_q = tree_sitter::Query::new(
             &lang,
             "[(function_declaration name: (identifier) @name) @fn
@@ -485,7 +457,6 @@ impl LanguageParser for GoParser {
             }
         }
 
-        // ── Structs and interfaces ────────────────────────────────────────────
         let type_q = tree_sitter::Query::new(
             &lang,
             "(type_spec name: (type_identifier) @name) @type_spec",
@@ -498,7 +469,6 @@ impl LanguageParser for GoParser {
                 let ts_node   = m.captures.iter().find(|c| c.index == ts_idx).map(|c| c.node);
                 let name_node = m.captures.iter().find(|c| c.index == tnm_idx).map(|c| c.node);
                 if let (Some(ts_n), Some(nm_n)) = (ts_node, name_node) {
-                    // Determine kind from which child type is present; skip type aliases.
                     let kind = ts_n.children(&mut ts_n.walk()).find_map(|c| match c.kind() {
                         "struct_type"    => Some("struct"),
                         "interface_type" => Some("interface"),
@@ -511,7 +481,6 @@ impl LanguageParser for GoParser {
                     let end_line   = ts_n.end_position().row as u32 + 1;
                     let src_text   = &source[ts_n.byte_range()];
 
-                    // Collect anonymously embedded types for struct nodes.
                     let embeds = if kind == "struct" {
                         go_struct_embedded_types(source, ts_n)
                     } else {
@@ -536,7 +505,6 @@ impl LanguageParser for GoParser {
             }
         }
 
-        // ── Imports ──────────────────────────────────────────────────────────
         let imp_q = tree_sitter::Query::new(
             &lang,
             "(import_spec path: (interpreted_string_literal) @path)",
@@ -566,8 +534,6 @@ impl LanguageParser for GoParser {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-
 pub struct CParser;
 
 impl LanguageParser for CParser {
@@ -594,9 +560,6 @@ impl LanguageParser for CppParser {
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// True if any ancestor of `node` is a `class_definition` (Python method detection).
 fn python_has_class_ancestor(mut node: tree_sitter::Node) -> bool {
     while let Some(parent) = node.parent() {
         if parent.kind() == "class_definition" { return true; }
@@ -630,8 +593,6 @@ fn python_import_target(source: &str, node: tree_sitter::Node) -> String {
     }
 }
 
-/// Walk a Go `method_declaration` receiver to extract the base type name.
-/// Handles value (`Foo`), pointer (`*Foo`), and generic (`Foo[T]`, `*Foo[T]`) receivers.
 fn go_receiver_type_name<'a>(source: &'a str, method_node: tree_sitter::Node<'a>) -> Option<&'a str> {
     let receiver = method_node.child_by_field_name("receiver")?;
     let mut walk = receiver.walk();
@@ -644,7 +605,6 @@ fn go_receiver_type_name<'a>(source: &'a str, method_node: tree_sitter::Node<'a>
     None
 }
 
-/// Peel `*` (pointer) and generic type arguments to reach the base `type_identifier`.
 fn go_base_type_name<'a>(source: &'a str, node: tree_sitter::Node<'a>) -> Option<&'a str> {
     match node.kind() {
         "type_identifier" => Some(&source[node.byte_range()]),
@@ -654,8 +614,6 @@ fn go_base_type_name<'a>(source: &'a str, node: tree_sitter::Node<'a>) -> Option
     }
 }
 
-/// Collect the names of types anonymously embedded in a Go struct.
-/// An embedded (anonymous) field has a `type` field but no `name` field.
 fn go_struct_embedded_types(source: &str, type_spec_node: tree_sitter::Node) -> Vec<String> {
     let mut embeds = Vec::new();
     let mut spec_walk = type_spec_node.walk();
@@ -667,7 +625,6 @@ fn go_struct_embedded_types(source: &str, type_spec_node: tree_sitter::Node) -> 
             let mut list_walk = list_child.walk();
             for field in list_child.named_children(&mut list_walk) {
                 if field.kind() != "field_declaration" { continue; }
-                // Embedded field: has a type but no name.
                 if field.child_by_field_name("name").is_none() {
                     if let Some(type_node) = field.child_by_field_name("type") {
                         if let Some(name) = go_base_type_name(source, type_node) {
@@ -681,10 +638,6 @@ fn go_struct_embedded_types(source: &str, type_spec_node: tree_sitter::Node) -> 
     embeds
 }
 
-// ── Rust helpers ─────────────────────────────────────────────────────────────
-
-/// Walk backwards from a struct/enum/trait node to collect trait names from
-/// preceding `#[derive(...)]` attribute items.
 fn rust_get_derives(source: &str, type_item: tree_sitter::Node) -> Vec<String> {
     let mut derives = Vec::new();
     let mut prev = type_item.prev_named_sibling();
@@ -696,16 +649,13 @@ fn rust_get_derives(source: &str, type_item: tree_sitter::Node) -> Vec<String> {
     derives
 }
 
-/// Extract trait names from a `#[derive(Trait1, Trait2)]` attribute_item node.
 fn rust_derives_from_attr(source: &str, attr_item: tree_sitter::Node) -> Vec<String> {
     let mut result = Vec::new();
     let mut walk = attr_item.walk();
     for attr in attr_item.named_children(&mut walk) {
         if attr.kind() != "attribute" { continue; }
-        // The first named child of `attribute` is the path identifier (e.g. "derive").
         let Some(path) = attr.named_child(0) else { continue };
         if source[path.byte_range()].trim() != "derive" { continue; }
-        // Remaining named children include the token_tree with trait names.
         let mut a_walk = attr.walk();
         for sub in attr.named_children(&mut a_walk) {
             if sub.kind() == "token_tree" {
@@ -721,8 +671,6 @@ fn rust_derives_from_attr(source: &str, attr_item: tree_sitter::Node) -> Vec<Str
     result
 }
 
-/// Collect user-defined type names from a Rust type expression recursively.
-/// Only returns names starting with an uppercase letter (excludes primitives).
 fn rust_collect_type_names(source: &str, node: tree_sitter::Node, out: &mut Vec<String>) {
     match node.kind() {
         "type_identifier" => {
@@ -731,7 +679,6 @@ fn rust_collect_type_names(source: &str, node: tree_sitter::Node, out: &mut Vec<
                 out.push(name.to_string());
             }
         }
-        // For `path::Type` scoped references, only the leaf name matters.
         "scoped_type_identifier" => {
             if let Some(name_child) = node.child_by_field_name("name") {
                 rust_collect_type_names(source, name_child, out);
@@ -746,8 +693,6 @@ fn rust_collect_type_names(source: &str, node: tree_sitter::Node, out: &mut Vec<
     }
 }
 
-/// Extract unique user-defined type names referenced in field declarations within
-/// a struct or enum node. Self-references (same name as the type itself) are excluded.
 fn rust_extract_field_uses(
     source: &str,
     type_item: tree_sitter::Node,
@@ -757,7 +702,7 @@ fn rust_extract_field_uses(
 ) -> Vec<String> {
     let mut uses = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    seen.insert(type_name.to_string()); // exclude self-references
+    seen.insert(type_name.to_string());
     let mut cursor = tree_sitter::QueryCursor::new();
     for m in cursor.matches(field_q, type_item, source.as_bytes()) {
         if let Some(cap) = m.captures.iter().find(|c| c.index == ft_idx) {
@@ -777,8 +722,6 @@ fn first_line(text: &str) -> String {
     text.lines().find(|l| !l.trim().is_empty()).unwrap_or(text).trim().to_string()
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -796,8 +739,6 @@ mod tests {
     fn parse_go(source: &str) -> crate::graph::model::ParsedFile {
         GoParser.parse(source, Path::new("main.go"), "myrepo", "v1.0")
     }
-
-    // ── Rust ──────────────────────────────────────────────────────────────────
 
     #[test] fn rust_single_function() {
         let pf = parse_rust(r#"fn hello() { println!("hi"); }"#);
@@ -904,8 +845,6 @@ mod tests {
         assert!(v.traits.contains(&"From".to_string()), "traits: {:?}", v.traits);
     }
 
-    // ── Python ────────────────────────────────────────────────────────────────
-
     #[test] fn python_single_function() {
         let pf = parse_python("def hello():\n    pass");
         assert_eq!(pf.functions.len(), 1);
@@ -986,8 +925,6 @@ mod tests {
         assert!(pf.functions.is_empty() && pf.classes.is_empty() && pf.imports.is_empty());
     }
 
-    // ── Go ────────────────────────────────────────────────────────────────────
-
     #[test] fn go_function_kind() {
         let pf = parse_go("package main\n\nfunc Hello() {}");
         assert_eq!(pf.functions[0].kind, "function");
@@ -1059,8 +996,6 @@ mod tests {
         assert!(pf.functions.is_empty() && pf.language == "go");
     }
 
-    // ── Rust calls ────────────────────────────────────────────────────────────
-
     #[test] fn rust_free_call_extracted() {
         let src = "fn caller() { foo(); bar(); }";
         let pf = parse_rust(src);
@@ -1083,8 +1018,6 @@ mod tests {
         assert!(callees.contains(&"new") && callees.contains(&"create"), "callees: {callees:?}");
     }
 
-    // ── Rust derives ──────────────────────────────────────────────────────────
-
     #[test] fn rust_derive_augments_traits() {
         let src = "#[derive(Debug, Clone)]\nstruct Foo;";
         let pf = parse_rust(src);
@@ -1101,14 +1034,11 @@ mod tests {
             "traits: {:?}", foo.traits);
     }
 
-    // ── Rust field uses ───────────────────────────────────────────────────────
-
     #[test] fn rust_struct_field_uses_extracted() {
         let src = "struct Config;\nstruct Server { config: Config, count: usize }";
         let pf = parse_rust(src);
         let server = pf.classes.iter().find(|c| c.name == "Server").unwrap();
         assert!(server.uses.contains(&"Config".to_string()), "uses: {:?}", server.uses);
-        // usize is a primitive, should not appear
         assert!(!server.uses.contains(&"usize".to_string()), "primitive leaked: {:?}", server.uses);
     }
 
@@ -1126,8 +1056,6 @@ mod tests {
         assert!(!tree.uses.contains(&"Tree".to_string()), "self-ref leaked: {:?}", tree.uses);
     }
 
-    // ── Go calls ──────────────────────────────────────────────────────────────
-
     #[test] fn go_direct_call_extracted() {
         let src = "package main\n\nfunc caller() { foo() }";
         let pf = parse_go(src);
@@ -1142,8 +1070,6 @@ mod tests {
         let callees: Vec<&str> = pf.functions[0].calls.iter().map(|c| c.callee.as_str()).collect();
         assert!(callees.contains(&"Bar"), "callees: {callees:?}");
     }
-
-    // ── Stubs ─────────────────────────────────────────────────────────────────
 
     #[test] fn typescript_stub_returns_empty() {
         let pf = TypeScriptParser.parse("function foo() {}", Path::new("a.ts"), "r", "v1");

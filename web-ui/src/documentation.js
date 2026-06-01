@@ -1,18 +1,16 @@
 import { fetchDocIndex, fetchDocPage } from './api.js';
 import { renderMarkdown } from './markdown.js';
 
-// ── State ─────────────────────────────────────────────────────────────────────
-
 export function createDocState() {
   return {
     repos: [],
     selectedRepo: null,
     selectedVersion: null,
-    docIndex: null,       // { repo, version, sections: { tutorials, how-to-guides, explanations, reference } }
+    docIndex: null,
     expandedSections: new Set(['tutorials']),
     selectedSection: null,
     selectedFile: null,
-    pageContent: null,    // raw markdown string
+    pageContent: null,
     loading: false,
     error: null,
   };
@@ -77,8 +75,6 @@ export function setError(state, error) {
   return { ...state, error, loading: false };
 }
 
-// ── Derived helpers ───────────────────────────────────────────────────────────
-
 export function getVersionsForRepo(state) {
   if (!state.selectedRepo) return [];
   const repo = state.repos.find(r => r.name === state.selectedRepo);
@@ -93,8 +89,6 @@ export const SECTION_LABELS = {
 };
 
 export const SECTION_ORDER = ['tutorials', 'how-to-guides', 'explanations', 'reference'];
-
-// ── HTML renderers ────────────────────────────────────────────────────────────
 
 export function renderDocPage(state) {
   const repoOptions = state.repos
@@ -256,7 +250,7 @@ function copyText(text) {
 
 function addCopyButtons(containerEl) {
   containerEl.querySelectorAll('.doc-article__body pre').forEach(pre => {
-    if (pre.closest('.code-block')) return; // already wrapped
+    if (pre.closest('.code-block')) return;
     const wrapper = document.createElement('div');
     wrapper.className = 'code-block';
     pre.parentNode.insertBefore(wrapper, pre);
@@ -287,8 +281,6 @@ function esc(str) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
-
-// ── Page controller ───────────────────────────────────────────────────────────
 
 export function initDocumentationPage(containerEl, initialRepos) {
   let state = createDocState();

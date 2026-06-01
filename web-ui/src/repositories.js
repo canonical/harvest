@@ -5,8 +5,6 @@ import { fetchGraph, fetchSymbolSource, queryStream, fetchToolDescription } from
 
 cytoscape.use(fcose);
 
-// ── Kind → UML color ──────────────────────────────────────────────────────────
-
 const KIND_COLORS = {
   class:     '#7C3AED',
   struct:    '#6D28D9',
@@ -24,7 +22,6 @@ function kindColor(kind) {
   return KIND_COLORS[kind?.toLowerCase()] ?? '#4F46E5';
 }
 
-// Shape: type-like nodes get a rounded rectangle, callables a plain rectangle
 function kindShape(kind) {
   const k = kind?.toLowerCase() ?? '';
   if (k === 'class' || k === 'struct' || k === 'trait' || k === 'interface' || k === 'enum') {
@@ -33,18 +30,14 @@ function kindShape(kind) {
   return 'round-rectangle';
 }
 
-// ── State ─────────────────────────────────────────────────────────────────────
-
 let cy = null;
 let currentRepo = null;
 let currentVersion = null;
 let pendingGraphData = null;
 let isPageVisible = false;
 let repoList = [];
-let activeLayoutWorker = null; // terminated if the user navigates away mid-layout
-let activeSearchMatched = null; // Set of node IDs from the last AI search, or null
-
-// ── DOM helpers ───────────────────────────────────────────────────────────────
+let activeLayoutWorker = null;
+let activeSearchMatched = null;
 
 const $ = id => document.getElementById(id);
 
@@ -53,8 +46,6 @@ function esc(str) {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
-
-// ── Public API ────────────────────────────────────────────────────────────────
 
 export function initRepositoriesPage(repos) {
   repoList = repos;
@@ -76,8 +67,6 @@ export function onRepositoriesPageShow() {
 export function onRepositoriesPageHide() {
   isPageVisible = false;
 }
-
-// ── Setup ─────────────────────────────────────────────────────────────────────
 
 function populateRepoSelect() {
   const sel = $('repo-select');
@@ -130,8 +119,6 @@ async function onVersionChange() {
   await loadGraph();
 }
 
-// ── Graph loading ─────────────────────────────────────────────────────────────
-
 async function loadGraph() {
   setOverlay('loading');
   destroyCy();
@@ -162,9 +149,6 @@ async function loadGraph() {
   }
 }
 
-// ── Layout position cache (localStorage) ─────────────────────────────────────
-// Saves fcose-computed positions so revisiting a graph is instant.
-
 const positionKey = (repo, ver) => `harvest:positions:${repo}:${ver}`;
 
 function savePositions() {
@@ -176,7 +160,7 @@ function savePositions() {
       pos[n.id()] = { x: Math.round(p.x), y: Math.round(p.y) };
     });
     localStorage.setItem(positionKey(currentRepo, currentVersion), JSON.stringify(pos));
-  } catch { /* localStorage full or unavailable — non-fatal */ }
+  } catch { /* ignore */ }
 }
 
 function loadPositions(nodes) {
@@ -184,15 +168,11 @@ function loadPositions(nodes) {
     const raw = localStorage.getItem(positionKey(currentRepo, currentVersion));
     if (!raw) return null;
     const pos = JSON.parse(raw);
-    // Only use cached positions if every node has a saved position.
     if (nodes.every(n => n.data.id in pos)) return pos;
-    return null; // stale cache (e.g. after reingest added new symbols)
+    return null;
   } catch { return null; }
 }
 
-// ── Graph mounting ────────────────────────────────────────────────────────────
-
-/** Scale layout iterations down for large graphs to keep the worker responsive. */
 function adaptiveIterations(nodeCount) {
   if (nodeCount < 100)  return 2500;
   if (nodeCount < 300)  return 1000;
@@ -200,7 +180,6 @@ function adaptiveIterations(nodeCount) {
   return 250;
 }
 
-/** Scale spacing down for large graphs so the canvas stays navigable. */
 function adaptiveSpacing(nodeCount) {
   if (nodeCount < 50)  return { nodeRepulsion: 90000, idealEdgeLength: 1600, gravity: 0.02, tilingPadding: 500 };
   if (nodeCount < 150) return { nodeRepulsion: 60000, idealEdgeLength: 1100, gravity: 0.03, tilingPadding: 300 };
@@ -249,7 +228,6 @@ function mountCy(data) {
     cy.elements().animate({ style: { opacity: 1 }, duration: 500, easing: 'ease-in-out' });
   }
 
-  /** Apply a precomputed position map and reveal the graph. */
   function applyPositions(positions) {
     cy.nodes().forEach(n => {
       const p = positions[n.id()];
@@ -262,14 +240,11 @@ function mountCy(data) {
   const cached = loadPositions(nodeElements);
 
   if (cached) {
-    // ── Fast path: cached positions → instant preset layout ──────────────────
     cy.layout({ name: 'preset', positions: n => cached[n.id()] ?? { x: 0, y: 0 }, fit: true, padding: 60 }).run();
     revealGraph();
     return;
   }
 
-  // ── Worker path: compute fcose off the main thread ────────────────────────
-  // The main thread stays responsive; Firefox will not show a slow-script warning.
   $('repo-loading-text').textContent = `Computing layout for ${nodeElements.length} symbols…`;
 
   const spacing = adaptiveSpacing(nodeElements.length);
@@ -295,7 +270,7 @@ function mountCy(data) {
   activeLayoutWorker = worker;
 
   worker.onmessage = ({ data: { positions } }) => {
-    if (activeLayoutWorker !== worker) return; // stale — user navigated away
+    if (activeLayoutWorker !== worker) return;
     activeLayoutWorker = null;
     worker.terminate();
     applyPositions(positions);
@@ -307,7 +282,6 @@ function mountCy(data) {
     activeLayoutWorker = null;
     worker.terminate();
     console.error('Layout worker error:', err);
-    // Fallback: random positions so the graph still renders
     applyPositions({});
   };
 
@@ -323,16 +297,12 @@ function destroyCy() {
   clearStatus();
 }
 
-/** Remove the cached layout for the current repo/version (called after reingest). */
 export function clearLayoutCache(repo, version) {
   try { localStorage.removeItem(positionKey(repo, version)); } catch { /* ignore */ }
 }
 
-// ── Cytoscape stylesheet ──────────────────────────────────────────────────────
-
 function cytoscapeStyle() {
   return [
-    // ── File container nodes ─────────────────────────────────────────────────
     {
       selector: 'node.file-node',
       style: {
@@ -369,7 +339,6 @@ function cytoscapeStyle() {
         'background-opacity': 0.1,
       },
     },
-    // ── Symbol nodes ─────────────────────────────────────────────────────────
     {
       selector: 'node.symbol-node',
       style: {
@@ -407,7 +376,6 @@ function cytoscapeStyle() {
       selector: 'node.symbol-node.ring',
       style: { 'border-width': 3, 'border-color': '#FFD700' },
     },
-    // ── Edges — shared base ───────────────────────────────────────────────────
     {
       selector: 'edge',
       style: {
@@ -420,7 +388,6 @@ function cytoscapeStyle() {
         'transition-duration': '150ms',
       },
     },
-    // inherits: solid line, hollow triangle at parent (UML generalization)
     {
       selector: 'edge[relation="inherits"]',
       style: {
@@ -432,7 +399,6 @@ function cytoscapeStyle() {
         width: 2,
       },
     },
-    // implements: dashed line, hollow triangle at trait (UML realization)
     {
       selector: 'edge[relation="implements"]',
       style: {
@@ -445,7 +411,6 @@ function cytoscapeStyle() {
         width: 2,
       },
     },
-    // embeds: solid line, open diamond at outer struct (UML aggregation)
     {
       selector: 'edge[relation="embeds"]',
       style: {
@@ -457,7 +422,6 @@ function cytoscapeStyle() {
         width: 1.5,
       },
     },
-    // contains: solid line, filled diamond at class (UML composition)
     {
       selector: 'edge[relation="contains"]',
       style: {
@@ -469,7 +433,6 @@ function cytoscapeStyle() {
         width: 1.5,
       },
     },
-    // uses: thin solid arrow — struct/enum references another type in field declarations (UML association)
     {
       selector: 'edge[relation="uses"]',
       style: {
@@ -480,7 +443,6 @@ function cytoscapeStyle() {
         width: 1,
       },
     },
-    // calls: dashed line, arrow at callee (UML dependency)
     {
       selector: 'edge[relation="calls"]',
       style: {
@@ -532,8 +494,6 @@ function cytoscapeStyle() {
   ];
 }
 
-// ── Node interaction ──────────────────────────────────────────────────────────
-
 async function onNodeTap(evt) {
   const node = evt.target;
   highlightNeighborhood(node);
@@ -543,7 +503,6 @@ async function onNodeTap(evt) {
 }
 
 function onFileNodeTap(evt) {
-  // Clicking a file container highlights its children and their cross-file connections
   const fileNode = evt.target;
   const symbols = fileNode.children();
   if (!symbols.length) return;
@@ -559,7 +518,6 @@ function highlightNeighborhood(node) {
   cy.elements().addClass('dimmed').removeClass('active ring');
   const hood = node.closedNeighborhood();
   hood.removeClass('dimmed');
-  // Also un-dim the file containers of all highlighted symbols
   hood.filter('.symbol-node').forEach(n => n.parent().removeClass('dimmed').addClass('ring'));
   node.addClass('ring');
   node.connectedEdges().addClass('active');
@@ -582,8 +540,6 @@ function restoreSearchHighlight() {
   matched.closedNeighborhood().removeClass('dimmed');
   matched.forEach(n => { n.addClass('ring'); n.parent().removeClass('dimmed').addClass('ring'); });
 }
-
-// ── Source panel ──────────────────────────────────────────────────────────────
 
 function showSourcePanel(data) {
   const badge = $('source-kind-badge');
@@ -624,27 +580,21 @@ async function loadSymbolSource(data) {
 }
 
 function populateRelations(node) {
-  // Inheritance (Python, C++)
   renderChips($('source-parents-list'),  node.outgoers('edge[relation="inherits"]').targets(),  $('source-parents-section'));
   renderChips($('source-children-list'), node.incomers('edge[relation="inherits"]').sources(), $('source-children-section'));
 
-  // Trait implementation (Rust)
   renderChips($('source-implements-list'),    node.outgoers('edge[relation="implements"]').targets(),  $('source-implements-section'));
   renderChips($('source-implementors-list'),  node.incomers('edge[relation="implements"]').sources(), $('source-implementors-section'));
 
-  // Struct embedding (Go)
   renderChips($('source-embeds-list'),        node.outgoers('edge[relation="embeds"]').targets(),  $('source-embeds-section'));
   renderChips($('source-embedded-by-list'),   node.incomers('edge[relation="embeds"]').sources(), $('source-embedded-by-section'));
 
-  // Field type references / UML association (Rust)
   renderChips($('source-uses-list'),    node.outgoers('edge[relation="uses"]').targets(),  $('source-uses-section'));
   renderChips($('source-used-by-list'), node.incomers('edge[relation="uses"]').sources(), $('source-used-by-section'));
 
-  // Composition: type → methods
   renderChips($('source-container-list'), node.incomers('edge[relation="contains"]').sources(), $('source-container-section'));
   renderChips($('source-members-list'),   node.outgoers('edge[relation="contains"]').targets(), $('source-members-section'));
 
-  // Call graph
   renderChips($('source-callers-list'), node.incomers('edge[relation="calls"]').sources(), $('source-callers-section'));
   renderChips($('source-callees-list'), node.outgoers('edge[relation="calls"]').targets(), $('source-callees-section'));
 }
@@ -670,8 +620,6 @@ function renderChips(listEl, nodes, sectionEl) {
   });
 }
 
-// ── Smart search ──────────────────────────────────────────────────────────────
-
 async function doSearch() {
   const q = $('graph-search').value.trim();
   if (!q || !currentRepo || !currentVersion || !cy) return;
@@ -680,13 +628,11 @@ async function doSearch() {
   $('graph-search').disabled = true;
   $('graph-search-btn').textContent = '…';
 
-  // Show the search progress overlay
   const overlay = $('search-overlay');
   const callsContainer = $('search-overlay-calls');
   callsContainer.innerHTML = '';
   overlay.hidden = false;
 
-  // Track pending tool calls so tool_result can mark them done
   const pendingCalls = [];
 
   function addCall(name, input) {
@@ -694,12 +640,10 @@ async function doSearch() {
     div.className = 'search-overlay__call';
 
     const icon = document.createElement('i');
-    // Spin until the AI-generated description arrives (same behaviour as chat)
     icon.className = 'p-icon--circle-of-friends search-overlay__call-icon running';
 
     const text = document.createElement('span');
     text.className = 'search-overlay__call-text';
-    // Show humanised tool name as placeholder; replaced when description arrives
     text.textContent = name.replace(/_/g, ' ');
 
     div.append(icon, text);
@@ -800,9 +744,6 @@ function resetSearchControls() {
   $('graph-search-btn').textContent = 'Search';
 }
 
-// ── Overlay / UI state ────────────────────────────────────────────────────────
-
-// 'loading' | 'empty' | 'error' | 'none'
 function setOverlay(state, msg = '') {
   const loading = $('repo-loading');
   const empty = $('repo-empty');

@@ -27,8 +27,6 @@ pub struct StorageConfig {
 pub struct RepoConfig {
     pub name: String,
     pub url: String,
-    /// If set, only these git refs (tags, branches, SHAs) are ingested.
-    /// When absent, all git tags are ingested (original behaviour).
     pub refs: Option<Vec<String>>,
 }
 

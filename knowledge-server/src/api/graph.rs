@@ -14,7 +14,6 @@ use crate::neo4j::Neo4jClient;
 
 pub use crate::api::GraphCache;
 
-/// Hard caps to keep the browser responsive on large repositories.
 const MAX_NODES: usize = 1500;
 const MAX_EDGES: usize = 6000;
 
@@ -40,9 +39,7 @@ pub struct GraphEdge {
 pub struct GraphData {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
-    /// True when the graph exceeded MAX_NODES and was truncated.
     pub truncated: bool,
-    /// Total symbol count before truncation.
     pub total_nodes: usize,
 }
 
@@ -62,8 +59,6 @@ pub struct SymbolSource {
     pub signature: Option<String>,
     pub source: Option<String>,
 }
-
-// ── Core computation (runs all Neo4j queries in parallel) ─────────────────────
 
 async fn fetch_graph_data(neo4j: &Neo4jClient, repo: &str, version: &str) -> Result<GraphData, String> {
     let p = || json!({ "repo": repo, "version": version });
@@ -152,7 +147,6 @@ async fn fetch_graph_data(neo4j: &Neo4jClient, repo: &str, version: &str) -> Res
     let uses_rows          = require!(r_uses,            "uses query");
     let embeds_rows        = require!(r_embeds,          "embeds query");
 
-    // ── Assemble nodes ───────────────────────────────────────────────────────
     let mut seen_ids = HashSet::new();
     let mut nodes: Vec<GraphNode> = node_rows
         .into_iter()
@@ -172,8 +166,6 @@ async fn fetch_graph_data(neo4j: &Neo4jClient, repo: &str, version: &str) -> Res
         })
         .collect();
 
-    // Truncate oversized graphs: keep type-like symbols first (class/struct/trait/…),
-    // then functions. Within each priority group the original file/line order is preserved.
     let total_nodes = nodes.len();
     if total_nodes > MAX_NODES {
         fn kind_priority(k: &str) -> u8 {
@@ -190,7 +182,6 @@ async fn fetch_graph_data(neo4j: &Neo4jClient, repo: &str, version: &str) -> Res
     let node_ids: HashSet<String> = nodes.iter().map(|n| n.id.clone()).collect();
     let mut seen_edges = HashSet::new();
 
-    // ── Assemble edges ───────────────────────────────────────────────────────
     let mut edges: Vec<GraphEdge> = edge_rows
         .iter()
         .filter_map(|r| {
@@ -240,7 +231,6 @@ async fn fetch_graph_data(neo4j: &Neo4jClient, repo: &str, version: &str) -> Res
     add_edges!(&embeds_rows,     "embeds",     "outer_file", "outer_name", "inner_file",  "inner_name");
     add_edges!(&uses_rows,       "uses",       "user_file",  "user_name",  "used_file",   "used_name");
 
-    // Cap edges: prefer structural edges over call graph edges.
     if edges.len() > MAX_EDGES {
         edges.retain(|e| e.relation != "calls");
     }
@@ -253,8 +243,6 @@ async fn fetch_graph_data(neo4j: &Neo4jClient, repo: &str, version: &str) -> Res
 
     Ok(GraphData { nodes, edges, truncated: total_nodes > MAX_NODES, total_nodes })
 }
-
-// ── Cache pre-warming (called at server startup) ──────────────────────────────
 
 pub async fn warm_graph_cache(neo4j: Arc<Neo4jClient>, cache: Arc<GraphCache>) {
     let pairs = match neo4j
@@ -295,21 +283,17 @@ pub async fn warm_graph_cache(neo4j: Arc<Neo4jClient>, cache: Arc<GraphCache>) {
     tracing::info!("graph cache ready");
 }
 
-// ── HTTP handlers ─────────────────────────────────────────────────────────────
-
 pub async fn handle_get_graph(
     State(state): State<Arc<GraphState>>,
     Path((repo, version)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let key = format!("{}:{}", repo, version);
 
-    // Cache hit — return pre-computed JSON directly, no Neo4j queries needed.
     if let Some(cached) = state.cache.read().await.get(&key) {
         let json = Arc::clone(cached);
         return ([("content-type", "application/json")], json.as_ref().to_owned()).into_response();
     }
 
-    // Cache miss — compute, store, and return.
     match fetch_graph_data(&state.neo4j, &repo, &version).await {
         Ok(data) => {
             let json = serde_json::to_string(&data).unwrap_or_default();

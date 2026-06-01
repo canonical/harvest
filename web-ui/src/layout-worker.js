@@ -1,10 +1,3 @@
-/**
- * Layout Web Worker — runs fcose in a headless cytoscape instance so the main
- * thread is never blocked during layout computation.
- *
- * Message in:  { elements: CytoscapeElement[], options: FcoseOptions }
- * Message out: { positions: { [nodeId]: { x, y } } }
- */
 import cytoscape from 'cytoscape';
 import fcose from 'cytoscape-fcose';
 
