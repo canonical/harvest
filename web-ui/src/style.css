@@ -152,224 +152,184 @@ html, body {
   transition: background 0.2s, color 0.2s;
 }
 
-/* ── Layout ───────────────────────────────────────────────────────────────── */
+/* ── VF application layout overrides ─────────────────────────────────────── */
 
-#app {
+/* l-main: pages manage their own internal scroll, so override VF's overflow-y */
+.l-main {
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column;
+}
+
+/* ── Nav panel — explicit dark theme using VF colour values ───────────────── */
+
+/*
+ * We set VF's dark-theme CSS custom properties directly on the nav panels.
+ * This is more reliable than relying on the .is-dark cascade alone because
+ * VF compiles .is-dark rules at root level and some component mixins can
+ * override them in certain browser/build environments.
+ * All colour values are taken from VF's $colors--dark-theme-* Sass variables.
+ */
+.nav-panel {
+  --vf-color-background-default:    #262626; /* $colors--dark-theme--background-default */
+  --vf-color-background-alt:        #202020; /* $colors--dark-theme--background-alt */
+  --vf-color-background-hover:      #313131; /* $colors--dark-theme--background-hover */
+  --vf-color-background-active:     #373737; /* $colors--dark-theme--background-active */
+  --vf-color-background-inputs:     #2f2f2f; /* $colors--dark-theme--background-inputs */
+  --vf-color-text-default:          hsl(0, 0%, 100%); /* $colors--dark-theme--text-default */
+  --vf-color-text-muted:            rgba(255, 255, 255, .6);
+  --vf-color-text-inactive:         rgba(255, 255, 255, .75);
+  --vf-color-border-default:        rgba(255, 255, 255, .2);
+  --vf-color-border-low-contrast:   rgba(255, 255, 255, .1);
+  /* flag tokens so vf-themed-property components use dark values */
+  --vf-theme-light: var(--vf-FLAG-OFF);
+  --vf-theme-dark:  var(--vf-FLAG-ON);
+}
+
+/* Override VF's section padding so we control the nav content layout */
+.l-navigation .p-panel__content {
+  padding: 0;
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  padding: 0 1.5rem;
+  height: calc(100dvh - 4.5rem);
+  overflow: hidden;
 }
 
-/* ── Header ───────────────────────────────────────────────────────────────── */
+/* ── Nav logo / branding ──────────────────────────────────────────────────── */
 
-.app-header {
+.nav-logo,
+.nav-logo:visited {
   display: flex;
   align-items: center;
-  gap: 1rem;
-  padding: 0.75rem 0;
-  border-bottom: 1px solid var(--border-color);
+  gap: 0.625rem;
+  text-decoration: none;
+  color: var(--vf-color-text-default);
 }
 
-.app-header__logo {
-  height: 2.75rem;
+/* p-panel__logo-image: mirrors VF's p-panel__logo-icon sizing */
+.p-panel__logo-image {
+  height: 2rem;
   width: auto;
   display: block;
   flex-shrink: 0;
 }
 
-.app-title {
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
+/* logo-text: VF p-heading--4 already styles the font; just reset margin */
+.logo-text {
   margin: 0;
-  line-height: 1;
 }
 
-.app-title__brand {
+.nav-logo__name {
   font-size: 1rem;
   font-weight: 700;
+  color: var(--vf-color-text-default);
   letter-spacing: -0.02em;
-  color: var(--text-primary);
+  white-space: nowrap;
 }
 
-.app-title__sub {
-  font-size: 0.6rem;
-  font-weight: 500;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--text-muted);
+/* VF's p-panel__logo adds vertical margins not suitable inside a header row */
+.p-panel__header .p-panel__logo {
+  margin-bottom: 0;
+  margin-top: 0;
 }
 
-/* ── Theme toggle button ──────────────────────────────────────────────────── */
+/* Flush the nav panel header against the top of the page.
+ * VF sets padding-top: 1rem on p-panel__controls, which inflates the header
+ * height and causes the logo to float down via flex centering. */
+.l-navigation .p-panel__header,
+.l-navigation-bar .p-panel__header {
+  align-items: flex-start;
+  padding-top: 0;
+}
 
-.theme-btn {
-  margin-left: auto;
+.l-navigation .p-panel__controls,
+.l-navigation-bar .p-panel__controls {
+  padding-top: 0;
+}
+
+/* p-panel__toggle: make it look like a small button using VF border token */
+.l-navigation .p-panel__toggle,
+.l-navigation-bar .p-panel__toggle {
+  border: 1px solid var(--vf-color-border-default);
+  border-radius: 0.25rem;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.875rem;
+  cursor: pointer;
+  margin-bottom: 0;
+  margin-top: 0;
+  transition: background 0.15s;
+}
+
+.l-navigation .p-panel__toggle:hover,
+.l-navigation-bar .p-panel__toggle:hover {
+  background: var(--vf-color-background-hover);
+}
+
+/* SVG icons: constrain size (VF positions them absolutely) */
+.l-navigation .p-side-navigation__icon {
+  width: 1rem;
+  height: 1rem;
+}
+
+/* button used as p-side-navigation__link needs reset */
+.l-navigation button.p-side-navigation__link {
+  width: 100%;
+  text-align: left;
+}
+
+/* ── Sidenav two-section layout ───────────────────────────────────────────── */
+
+.sidenav-top-container {
+  flex: 1;
+  overflow-y: auto;
+  /* breathing room between the sticky logo header and the first nav item */
+  padding-top: 3rem;
+}
+
+.sidenav-bottom-container {
+  flex-shrink: 0;
+  border-top: 1px solid var(--vf-color-border-low-contrast);
+  padding-bottom: 0.5rem;
+}
+
+/* ── Sidebar pin (collapse) toggle ───────────────────────────────────────── */
+
+.sidenav-toggle-wrapper {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.375rem 0.75rem 0.25rem;
+}
+
+.sidenav-toggle {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 2rem;
-  height: 2rem;
-  border-radius: 50%;
-  flex-shrink: 0;
-
-  background: var(--theme-btn-bg);
-  border: 1px solid var(--theme-btn-border);
-  color: var(--theme-btn-color);
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 1px solid var(--vf-color-border-default);
+  border-radius: 0.25rem;
+  background: none;
+  color: var(--vf-color-text-inactive);
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
 
-.theme-btn:hover {
-  background: var(--theme-btn-hover-bg);
-}
-
-.theme-btn svg {
+.sidenav-toggle svg {
+  width: 1rem;
+  height: 1rem;
   display: block;
-  width: 1.1rem;
-  height: 1.1rem;
-  pointer-events: none;
-  fill: none;
-  stroke: currentColor;
-  flex-shrink: 0;
 }
 
-/* ── Chat area ────────────────────────────────────────────────────────────── */
-
-.layout {
-  display: flex;
-  flex: 1;
-  overflow: hidden;
-  padding: 1rem 0;
-  gap: 1.5rem;
+.sidenav-toggle:hover {
+  background: var(--vf-color-background-hover);
+  color: var(--vf-color-text-default);
 }
 
-/* ── Sidebar ──────────────────────────────────────────────────────────────── */
-
-.app-sidebar {
-  width: 13rem;
-  flex-shrink: 0;
-  padding-top: 0.25rem;
-}
-
-/* Vanilla side-nav list resets */
-.app-sidebar .p-side-navigation__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.app-sidebar .p-side-navigation__item {
-  margin: 0;
-}
-
-.app-sidebar .p-side-navigation__link {
-  display: block;
-  padding: 0.45rem 0.75rem;
-  border-radius: 0.4rem;
-  font-size: 0.875rem;
-  color: var(--text-secondary);
-  text-decoration: none;
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s;
-}
-
-.app-sidebar .p-side-navigation__link:hover {
-  background: var(--bg-surface-hover);
-  color: var(--text-primary);
-}
-
-.app-sidebar .p-side-navigation__link[aria-current="page"] {
-  background: var(--bg-surface);
-  color: var(--text-primary);
-  font-weight: 600;
-}
-
-/* ── Mobile nav toggle button ─────────────────────────────────────────────── */
-
-.nav-toggle {
-  display: none;
-  align-items: center;
-  justify-content: center;
-  width: 2rem;
-  height: 2rem;
-  flex-shrink: 0;
-  padding: 0;
-  border-radius: 0.4rem;
-  background: none;
-  border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  cursor: pointer;
-  transition: background 0.12s;
-}
-
-.nav-toggle:hover { background: var(--bg-surface-hover); }
-
-.nav-toggle svg {
-  display: block;
-  pointer-events: none;
-}
-
-/* ── Mobile responsive layout ─────────────────────────────────────────────── */
-
-@media (max-width: 639px) {
-  #app {
-    padding: 0 0.75rem;
-  }
-
-  .app-header {
-    gap: 0.6rem;
-  }
-
-  .app-header__logo {
-    height: 2rem;
-  }
-
-  .nav-toggle {
-    display: flex;
-  }
-
-  .layout {
-    position: relative; /* containing block for absolute sidebar + backdrop */
-    padding: 0;
-    gap: 0;
-  }
-
-  /* Sidebar becomes a slide-in drawer */
-  .app-sidebar {
-    position: absolute;
-    top: 0;
-    left: 0;
-    bottom: 0;
-    width: 12.5rem;
-    z-index: 100;
-    background: var(--bg-page);
-    border-right: 1px solid var(--border-color);
-    padding: 0.5rem;
-    overflow-y: auto;
-    transform: translateX(-100%);
-    transition: transform 0.24s cubic-bezier(0.4, 0, 0.2, 1),
-                box-shadow 0.24s ease;
-  }
-
-  .app-sidebar.is-open {
-    transform: translateX(0);
-    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.18);
-  }
-
-  /* Backdrop covers the content area while the drawer is open */
-  .nav-backdrop {
-    position: absolute;
-    inset: 0;
-    z-index: 99;
-    background: rgba(0, 0, 0, 0.45);
-    animation: backdropFadeIn 0.2s ease;
-  }
-}
-
-@keyframes backdropFadeIn {
-  from { opacity: 0; }
-  to   { opacity: 1; }
+/* Highlight when the nav is pinned open */
+.l-navigation.is-pinned .sidenav-toggle {
+  background: var(--vf-color-background-active);
+  color: var(--vf-color-text-default);
 }
 
 /* ── Pages ────────────────────────────────────────────────────────────────── */
@@ -409,17 +369,10 @@ html, body {
   color: var(--text-muted);
 }
 
-.chat-area {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
 .messages {
   flex: 1;
   overflow-y: auto;
-  padding: 0.5rem 0;
+  padding: 0.75rem 1.5rem 0.5rem;
   display: flex;
   flex-direction: column;
   gap: 1rem;

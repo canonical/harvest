@@ -38,13 +38,14 @@ let repoUrlMap = {};
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 
-const messagesEl   = document.getElementById('messages');
-const inputEl      = document.getElementById('query-input');
-const sendBtn      = document.getElementById('send-btn');
-const themeBtnEl   = document.getElementById('theme-btn');
-const navToggleEl  = document.getElementById('nav-toggle');
-const navBackdropEl = document.getElementById('nav-backdrop');
-const sidebarEl    = document.getElementById('app-sidebar');
+const messagesEl  = document.getElementById('messages');
+const inputEl     = document.getElementById('query-input');
+const sendBtn     = document.getElementById('send-btn');
+const themeBtnEl  = document.getElementById('theme-btn');
+const navEl       = document.getElementById('app-sidebar');
+const navToggleEl = document.getElementById('nav-toggle');
+const navCloseEl  = document.getElementById('nav-close');
+const navPinEl    = document.getElementById('nav-pin');
 
 // ── Render ────────────────────────────────────────────────────────────────────
 
@@ -307,33 +308,27 @@ async function sendQuery() {
   }
 }
 
-// ── Input auto-resize ─────────────────────────────────────────────────────────
-
-function autoResize() {
-  inputEl.style.height = 'auto';
-  inputEl.style.height = `${Math.min(inputEl.scrollHeight, 128)}px`;
-}
-
 // ── Event listeners ───────────────────────────────────────────────────────────
 
 sendBtn.addEventListener('click', sendQuery);
 
 inputEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
+  if (e.key === 'Enter') {
     e.preventDefault();
     sendQuery();
   }
 });
 
-inputEl.addEventListener('input', autoResize);
-
 // ── Theme ─────────────────────────────────────────────────────────────────────
 
 function updateThemeButton() {
   const t = getTheme();
-  themeBtnEl.innerHTML = getThemeIcon(t);
-  themeBtnEl.title = getThemeLabel(t);
-  themeBtnEl.setAttribute('aria-label', `Switch theme (current: ${getThemeLabel(t)})`);
+  const label = getThemeLabel(t);
+  // Inject the SVG as a p-side-navigation__icon + label span
+  const svg = getThemeIcon(t).replace(/^<svg /, '<svg class="p-side-navigation__icon" ');
+  themeBtnEl.innerHTML = `${svg}<span class="p-side-navigation__label">${label}</span>`;
+  themeBtnEl.setAttribute('aria-label', `Switch theme (current: ${label})`);
+  themeBtnEl.title = label;
 }
 
 themeBtnEl.addEventListener('click', () => {
@@ -341,36 +336,55 @@ themeBtnEl.addEventListener('click', () => {
   updateThemeButton();
 });
 
-// ── Mobile sidebar drawer ─────────────────────────────────────────────────────
+// ── Navigation open / close (mobile) ──────────────────────────────────────────
 
-function openSidebar() {
-  sidebarEl.classList.add('is-open');
-  navBackdropEl.hidden = false;
+function openNav() {
+  navEl.classList.remove('is-collapsed');
   navToggleEl.setAttribute('aria-expanded', 'true');
-  navToggleEl.setAttribute('aria-label', 'Close navigation');
 }
 
-function closeSidebar() {
-  sidebarEl.classList.remove('is-open');
-  navBackdropEl.hidden = true;
+function closeNav() {
+  navEl.classList.add('is-collapsed');
   navToggleEl.setAttribute('aria-expanded', 'false');
-  navToggleEl.setAttribute('aria-label', 'Open navigation');
 }
 
-navToggleEl.addEventListener('click', () => {
-  sidebarEl.classList.contains('is-open') ? closeSidebar() : openSidebar();
+navToggleEl.addEventListener('click', openNav);
+navCloseEl.addEventListener('click', closeNav);
+
+// Close nav on mobile when clicking outside it
+document.addEventListener('click', (e) => {
+  if (window.innerWidth < 620 &&
+      !navEl.classList.contains('is-collapsed') &&
+      !navEl.contains(e.target) &&
+      !navToggleEl.contains(e.target)) {
+    closeNav();
+  }
 });
 
-navBackdropEl.addEventListener('click', closeSidebar);
+// ── Sidebar pin toggle (tablet / desktop) ─────────────────────────────────────
+
+function applyPinState(pinned) {
+  navEl.classList.toggle('is-pinned', pinned);
+  navPinEl.setAttribute('aria-label', pinned ? 'Unpin navigation' : 'Pin navigation open');
+  navPinEl.title = pinned ? 'Unpin navigation' : 'Pin navigation open';
+  localStorage.setItem('nav-pinned', pinned ? '1' : '0');
+}
+
+// Restore persisted pin state
+applyPinState(localStorage.getItem('nav-pinned') === '1');
+
+navPinEl.addEventListener('click', () => {
+  applyPinState(!navEl.classList.contains('is-pinned'));
+});
 
 // ── Sidebar navigation ────────────────────────────────────────────────────────
 
-document.querySelectorAll('.app-sidebar .p-side-navigation__link').forEach(link => {
+document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').forEach(link => {
   link.addEventListener('click', (e) => {
     e.preventDefault();
     const page = link.dataset.page;
 
-    document.querySelectorAll('.app-sidebar .p-side-navigation__link').forEach(l => {
+    document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').forEach(l => {
       l.removeAttribute('aria-current');
     });
     link.setAttribute('aria-current', 'page');
