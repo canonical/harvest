@@ -200,6 +200,14 @@ function adaptiveIterations(nodeCount) {
   return 250;
 }
 
+/** Scale spacing down for large graphs so the canvas stays navigable. */
+function adaptiveSpacing(nodeCount) {
+  if (nodeCount < 50)  return { nodeRepulsion: 90000, idealEdgeLength: 1600, gravity: 0.02, tilingPadding: 500 };
+  if (nodeCount < 150) return { nodeRepulsion: 60000, idealEdgeLength: 1100, gravity: 0.03, tilingPadding: 300 };
+  if (nodeCount < 400) return { nodeRepulsion: 30000, idealEdgeLength: 600,  gravity: 0.08, tilingPadding: 150 };
+  return                      { nodeRepulsion: 15000, idealEdgeLength: 320,  gravity: 0.15, tilingPadding: 80  };
+}
+
 function mountCy(data) {
   setOverlay('loading');
 
@@ -264,6 +272,7 @@ function mountCy(data) {
   // The main thread stays responsive; Firefox will not show a slow-script warning.
   $('repo-loading-text').textContent = `Computing layout for ${nodeElements.length} symbols…`;
 
+  const spacing = adaptiveSpacing(nodeElements.length);
   const fcoseOptions = {
     quality: 'default',
     randomize: true,
@@ -271,13 +280,13 @@ function mountCy(data) {
     uniformNodeDimensions: false,
     packComponents: true,
     tile: true,
-    tilingPaddingVertical: 300,
-    tilingPaddingHorizontal: 300,
-    nodeRepulsion: 60000,
-    idealEdgeLength: 1100,
+    tilingPaddingVertical: spacing.tilingPadding,
+    tilingPaddingHorizontal: spacing.tilingPadding,
+    nodeRepulsion: spacing.nodeRepulsion,
+    idealEdgeLength: spacing.idealEdgeLength,
     edgeElasticity: 0.45,
     numIter: adaptiveIterations(nodeElements.length),
-    gravity: 0.03,
+    gravity: spacing.gravity,
     gravityRange: 3.5,
     initialEnergyOnIncremental: 0.3,
   };
