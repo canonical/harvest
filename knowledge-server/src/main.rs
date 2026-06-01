@@ -1,10 +1,12 @@
 use anyhow::Result;
 use clap::Parser as ClapParser;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use knowledge_server::agent::{graph_tools, Agent};
-use knowledge_server::api::AppState;
+use knowledge_server::api::{AppState, GraphCache};
 use knowledge_server::config::Config;
 use knowledge_server::llm;
 use knowledge_server::neo4j::Neo4jClient;
@@ -35,8 +37,17 @@ async fn main() -> Result<()> {
     let agent = Arc::new(Agent::new(llm_provider, tools, max_iterations));
 
     let docs_dir = config.documentation.docs_dir.map(|p| Arc::new(p));
-    let state = AppState { agent, neo4j, docs_dir };
-    let app = knowledge_server::api::router(state);
+    let state = AppState { agent, neo4j: Arc::clone(&neo4j), docs_dir };
+
+    // Create the shared graph cache and pre-warm it in the background.
+    let cache: Arc<GraphCache> = Arc::new(RwLock::new(HashMap::new()));
+    tokio::spawn({
+        let neo4j  = Arc::clone(&neo4j);
+        let cache  = Arc::clone(&cache);
+        async move { knowledge_server::api::graph::warm_graph_cache(neo4j, cache).await; }
+    });
+
+    let app = knowledge_server::api::router(state, cache);
 
     let addr = format!("{}:{}", config.server.host, config.server.port);
     tracing::info!("listening on {addr}");
