@@ -288,8 +288,6 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    // ── mock infrastructure ───────────────────────────────────────────────────
-
     struct MockLlm {
         responses: Mutex<VecDeque<LlmResponse>>,
     }
@@ -349,8 +347,6 @@ mod tests {
         Agent::new(llm, tools, max)
     }
 
-    // ── agent loop ────────────────────────────────────────────────────────────
-
     #[tokio::test]
     async fn text_on_first_turn_returns_immediately() {
         let llm = MockLlm::new(vec![text("all done")]);
@@ -386,20 +382,16 @@ mod tests {
 
     #[tokio::test]
     async fn max_iterations_returns_last_assistant_text() {
-        // LLM keeps issuing tool calls; max_iterations=1 stops after one tool call turn.
         let llm = MockLlm::new(vec![
-            text("partial answer so far"),   // the first LLM response (text, stored in messages)
-            tool_call("my_tool"),            // would be second, but max_iterations cut off
+            text("partial answer so far"),
+            tool_call("my_tool"),
         ]);
-        // Give max_iterations=0 so the loop exits immediately on the first check.
         let agent = agent_with(
             MockLlm::new(vec![text("partial answer so far")]),
             vec![],
             0,
         );
-        // With max_iterations=0, the loop body never runs; last_assistant_text returns "".
         let resp = agent.query("hi").await.unwrap();
-        // answer is empty string (no assistant message was ever pushed), not a panic.
         assert_eq!(resp.tool_calls_made, 0);
     }
 
@@ -409,13 +401,10 @@ mod tests {
             tool_call("nonexistent_tool"),
             text("handled gracefully"),
         ]);
-        // No tools registered — the call to "nonexistent_tool" should yield an error message
         let agent = agent_with(llm, vec![], 5);
         let resp = agent.query("hi").await.unwrap();
         assert_eq!(resp.answer, "handled gracefully");
     }
-
-    // ── parse_citations ───────────────────────────────────────────────────────
 
     #[test]
     fn single_citation_parsed() {
@@ -445,7 +434,6 @@ mod tests {
 
     #[test]
     fn malformed_citation_ignored() {
-        // Missing the line number field
         let sources = parse_citations("bad [only:two:fields] here");
         assert!(sources.is_empty());
     }
@@ -458,8 +446,6 @@ mod tests {
 
     #[test]
     fn citation_line_zero_on_invalid_number() {
-        // Regex only matches \d+ so invalid numbers can't actually be captured —
-        // confirm the regex never panics on edge input.
         let sources = parse_citations("[r:v1:f.rs:0]");
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].line, 0);

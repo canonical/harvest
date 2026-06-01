@@ -29,7 +29,6 @@ pub struct DocPage {
     pub content: String,
 }
 
-/// Lightweight plan returned by Phase 4a — filename and title only, no content.
 #[derive(Debug, Deserialize)]
 struct PagePlan {
     filename: String,
@@ -54,7 +53,6 @@ pub struct Workflow<'a> {
 }
 
 impl<'a> Workflow<'a> {
-    /// Phase 1: Identify major features from codebase structure.
     pub async fn identify_features(
         &self,
         repo: &str,
@@ -81,8 +79,6 @@ impl<'a> Workflow<'a> {
         parse_json_array(&raw, "features")
     }
 
-    /// Phase 2+3: For each feature, generate detailed description and intent
-    /// using the full source code of related symbols.
     pub async fn describe_features(
         &self,
         repo: &str,
@@ -124,8 +120,6 @@ impl<'a> Workflow<'a> {
         Ok(described)
     }
 
-    /// Phase 4a: Ask the LLM for a page plan (filename + title only) for one section.
-    /// Returns a small JSON array — well within token limits.
     async fn plan_section_pages(
         &self,
         repo: &str,
@@ -157,9 +151,6 @@ impl<'a> Workflow<'a> {
         parse_json_array(&raw, "page plan")
     }
 
-    /// Phase 4b: Generate the content of one page as raw markdown.
-    /// No JSON wrapping — the response is written to disk directly, so there
-    /// is no risk of the output being truncated mid-string inside a JSON value.
     async fn generate_page_content(
         &self,
         repo: &str,
@@ -205,9 +196,6 @@ impl<'a> Workflow<'a> {
         self.llm.complete(&system, &user).await
     }
 
-    /// Phase 4: Generate all pages for one Diataxis section.
-    /// Uses two LLM calls per page (plan then content) so each call stays
-    /// well within the output token limit regardless of page length.
     pub async fn generate_section(
         &self,
         repo: &str,
@@ -238,7 +226,6 @@ impl<'a> Workflow<'a> {
         Ok(pages)
     }
 
-    /// Run the full 4-phase workflow for a repo/version.
     pub async fn run(
         &self,
         repo: &str,
@@ -339,7 +326,6 @@ fn parse_json_object(raw: &str, context: &str) -> Result<Value> {
         .with_context(|| format!("parsing {context} JSON object from LLM response: {raw}"))
 }
 
-/// Strip markdown code fences and extract raw JSON from LLM output.
 fn extract_json(raw: &str) -> &str {
     let s = raw.trim();
     if s.starts_with("```") {
@@ -380,8 +366,6 @@ fn epoch_to_datetime(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
     (y, mo.min(12), d.min(31), h, mi, s)
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,8 +376,6 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
         Arc,
     };
-
-    // ── helpers ───────────────────────────────────────────────────────────────
 
     fn make_workflow<'a>(llm: &'a dyn LlmClient, docs_dir: &'a PathBuf) -> Workflow<'a> {
         Workflow { llm, docs_dir }
@@ -447,13 +429,11 @@ mod tests {
         .to_string()
     }
 
-    /// A page-plan response: just filename + title, no content.
     fn plan_json() -> String {
         serde_json::json!([{"filename": "getting-started.md", "title": "Getting Started"}])
             .to_string()
     }
 
-    /// Raw markdown content (no JSON wrapper) returned by Phase 4b.
     fn page_markdown() -> String {
         "# Getting Started\n\nLearn to use the auth module.".to_string()
     }
@@ -468,7 +448,6 @@ mod tests {
         }]
     }
 
-    /// A mock that returns a different response per call index.
     struct SequenceMock {
         calls: Arc<AtomicUsize>,
         responses: Vec<String>,
@@ -487,8 +466,6 @@ mod tests {
             Ok(self.responses[idx % self.responses.len()].clone())
         }
     }
-
-    // ── Phase 1 ───────────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn identify_features_parses_llm_json() {
@@ -517,8 +494,6 @@ mod tests {
         assert_eq!(feats.len(), 1);
     }
 
-    // ── Phase 2+3 ─────────────────────────────────────────────────────────────
-
     #[tokio::test]
     async fn describe_features_produces_described_features() {
         let llm = MockLlmClient { response: describe_json() };
@@ -538,11 +513,8 @@ mod tests {
         assert!(!described[0].intent.is_empty());
     }
 
-    // ── Phase 4 ───────────────────────────────────────────────────────────────
-
     #[tokio::test]
     async fn generate_section_returns_doc_pages() {
-        // Two LLM calls per section: plan (JSON) then content (raw markdown).
         let llm = SequenceMock::new(vec![plan_json(), page_markdown()]);
         let dir = tempfile::tempdir().unwrap();
         let docs_dir = dir.path().to_path_buf();
@@ -558,8 +530,6 @@ mod tests {
 
     #[tokio::test]
     async fn generate_section_content_is_raw_markdown_not_json() {
-        // Verify that page content is stored as-is from the LLM, not JSON-parsed.
-        // A truncated JSON string would fail JSON parsing but succeed here.
         let raw_md = "# My Page\n\nSome content with a `code` snippet.\n\n## Section\n\nMore.";
         let llm = SequenceMock::new(vec![plan_json(), raw_md.to_string()]);
         let dir = tempfile::tempdir().unwrap();
@@ -573,7 +543,6 @@ mod tests {
 
     #[tokio::test]
     async fn generate_section_makes_two_llm_calls_per_page() {
-        // Exactly 2 calls for 1 planned page: plan call + content call.
         let counter = Arc::new(AtomicUsize::new(0));
         struct CountingMock(Arc<AtomicUsize>, Vec<String>);
         #[async_trait]
@@ -595,21 +564,17 @@ mod tests {
 
     #[tokio::test]
     async fn run_writes_all_section_dirs_and_index() {
-        // Phase 1:    1 call  → features_json
-        // Phase 2+3:  1 call  → describe_json  (one feature)
-        // Phase 4:    per section: plan call + content call = 2 × 4 = 8 calls
-        // Total:     10 calls
         let responses = vec![
-            features_json(),   // phase 1
-            describe_json(),   // phase 2+3
-            plan_json(),       // tutorials  — plan
-            page_markdown(),   // tutorials  — content
-            plan_json(),       // how-to-guides — plan
-            page_markdown(),   // how-to-guides — content
-            plan_json(),       // explanations  — plan
-            page_markdown(),   // explanations  — content
-            plan_json(),       // reference     — plan
-            page_markdown(),   // reference     — content
+            features_json(),
+            describe_json(),
+            plan_json(),
+            page_markdown(),
+            plan_json(),
+            page_markdown(),
+            plan_json(),
+            page_markdown(),
+            plan_json(),
+            page_markdown(),
         ];
         let llm = SequenceMock::new(responses);
         let dir = tempfile::tempdir().unwrap();
@@ -624,7 +589,6 @@ mod tests {
         for section in &["tutorials", "how-to-guides", "explanations", "reference"] {
             let section_dir = dir.path().join("testrepo").join("v1.0").join(section);
             assert!(section_dir.exists(), "missing section dir: {section}");
-            // The single page file should exist and contain raw markdown.
             let page = section_dir.join("getting-started.md");
             assert!(page.exists(), "missing page file in {section}");
             let content = std::fs::read_to_string(&page).unwrap();
@@ -647,8 +611,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_total_llm_call_count_matches_expected() {
-        // Verify the exact number of LLM calls for a known input.
-        // 1 feature → 1 + 1 + (2 × 4) = 10 calls.
         let counter = Arc::new(AtomicUsize::new(0));
         struct CountingMock(Arc<AtomicUsize>);
         #[async_trait]

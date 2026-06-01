@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Harvest — Code Knowledge Chat</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌾</text></svg>" />
-  <!-- Apply persisted theme before first paint to avoid flash -->
   <script>
     (function () {
       var t = localStorage.getItem('theme');
@@ -16,7 +15,6 @@
 <body>
   <div class="l-application">
 
-    <!-- Top bar: hamburger on mobile, invisible grid spacer on tablet -->
     <div class="l-navigation-bar">
       <div class="p-panel is-dark nav-panel">
         <div class="p-panel__header">
@@ -38,12 +36,10 @@
       </div>
     </div>
 
-    <!-- Side navigation -->
     <nav id="app-sidebar" class="l-navigation is-collapsed" aria-label="Main navigation">
       <div class="l-navigation__drawer">
         <div class="p-panel is-dark nav-panel">
 
-          <!-- Sticky logo header -->
           <div class="p-panel__header is-sticky">
             <a class="p-panel__logo nav-logo" href="#">
               <img src="/canonical-logo.png" alt="Canonical" class="p-panel__logo-image" height="32" />
@@ -56,10 +52,8 @@
             </div>
           </div>
 
-          <!-- Nav items + bottom actions -->
           <div class="p-panel__content">
 
-            <!-- Top nav items (scrollable, fills available height) -->
             <div class="p-side-navigation--icons sidenav-top-container">
               <ul class="p-side-navigation__list">
                 <li class="p-side-navigation__item">
@@ -83,7 +77,6 @@
               </ul>
             </div>
 
-            <!-- Bottom: theme toggle + sidebar pin -->
             <div class="p-side-navigation--icons sidenav-bottom-container">
               <ul class="p-side-navigation__list">
                 <li class="p-side-navigation__item">
@@ -92,23 +85,20 @@
                     class="p-side-navigation__link"
                     type="button"
                     aria-label="Switch colour theme"
-                  ><!-- icon + label injected by JS --></button>
+                  ></button>
                 </li>
               </ul>
             </div>
 
-          </div><!-- /.p-panel__content -->
-        </div><!-- /.p-panel -->
-      </div><!-- /.l-navigation__drawer -->
+          </div>
+        </div>
+      </div>
     </nav>
 
-    <!-- Main content area -->
     <main class="l-main">
 
-      <!-- Chat page (default) -->
       <section class="page" id="page-chat">
         <div class="messages" id="messages" role="log" aria-live="polite" aria-label="Chat messages">
-          <!-- Welcome placeholder -->
           <div class="message message--assistant">
             <div class="message__bubble">
               <div class="message__body">
@@ -124,7 +114,6 @@
           </div>
         </div>
 
-        <!-- Input bar -->
         <div class="input-area">
           <div class="p-search-box">
             <input
@@ -145,10 +134,8 @@
         </div>
       </section>
 
-      <!-- Code repositories page -->
       <section class="page" id="page-repositories" hidden>
 
-        <!-- Toolbar -->
         <div class="repo-toolbar">
           <div class="doc-selector">
             <label class="doc-selector__label" for="repo-select">
@@ -179,16 +166,12 @@
           </div>
         </div>
 
-        <!-- Status bar (search results / truncation notice) -->
         <div class="repo-search-status" id="repo-search-status" hidden></div>
 
-        <!-- Main area: graph + sliding source panel -->
         <div class="repo-main">
 
-          <!-- Graph canvas area -->
           <div class="repo-graph-wrap">
             <div id="cy" class="repo-graph"></div>
-            <!-- Search progress overlay (shown during AI search) -->
             <div id="search-overlay" class="search-overlay" hidden>
               <div class="search-overlay__panel">
                 <div class="search-overlay__heading">
@@ -207,7 +190,6 @@
               <div class="repo-empty__icon">⬡</div>
               <p class="repo-empty__text">Select a repository and version<br>to explore its symbol graph</p>
             </div>
-            <!-- Edge-type legend, shown once graph is loaded -->
             <div id="graph-legend" class="graph-legend" hidden>
               <div class="graph-legend__item">
                 <svg width="26" height="10" viewBox="0 0 26 10" aria-hidden="true"><line x1="0" y1="5" x2="18" y2="5" stroke="rgba(124,58,237,0.9)" stroke-width="1.5"/><polygon points="18,1 26,5 18,9" fill="none" stroke="rgba(124,58,237,0.9)" stroke-width="1.5"/></svg>
@@ -236,7 +218,6 @@
             </div>
           </div>
 
-          <!-- Source panel — slides in from the right when a node is selected -->
           <aside id="repo-source-panel" class="repo-source-panel" aria-label="Symbol source code">
             <div class="repo-source-panel__head">
               <div class="repo-source-panel__title">
@@ -304,13 +285,11 @@
         </div>
       </section>
 
-      <!-- Documentation page -->
       <section class="page page--docs" id="page-documentation" hidden>
-        <!-- content injected by documentation.js -->
       </section>
 
-    </main><!-- /.l-main -->
-  </div><!-- /.l-application -->
+    </main>
+  </div>
 
   <script type="module" src="/src/main.js"></script>
 </body>

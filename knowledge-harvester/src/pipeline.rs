@@ -100,8 +100,6 @@ impl Pipeline {
         let tag_owned = tag.to_owned();
         let repo_clone = repo_owned.clone();
         let tag_clone = tag_owned.clone();
-        // Capture repo_path as PathBuf so paths stored in the graph are
-        // relative to the repo root rather than absolute clone paths.
         let repo_root = repo_path.to_path_buf();
 
         let parsed = tokio::task::spawn_blocking(move || {

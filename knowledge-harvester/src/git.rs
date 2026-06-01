@@ -76,8 +76,6 @@ impl GitClient {
         Ok(tags)
     }
 
-    /// Resolve a list of git ref names (tags, branches, commit SHAs) to
-    /// `TagInfo` values. Returns an error if any ref cannot be found.
     pub fn resolve_refs(&self, repo_path: &Path, refs: &[String]) -> Result<Vec<TagInfo>> {
         let repo = Repository::open(repo_path)?;
         let mut out = Vec::with_capacity(refs.len());
@@ -120,14 +118,6 @@ impl GitClient {
     }
 }
 
-/// Resolve a ref name to a git object using git's DWIM rules, with an
-/// additional fallback for remote-tracking branches on `origin`.
-///
-/// git2 DWIM tries (among others): refs/tags/<n>, refs/heads/<n>,
-/// refs/remotes/<n>. That last step treats the first path segment as the
-/// remote name, so a slashed branch like "stable/2023.1.1" would look for
-/// remote "stable", branch "2023.1.1" — which is wrong for an `origin`-
-/// cloned repo. We fall back to refs/remotes/origin/<n> explicitly.
 fn resolve_one<'r>(repo: &'r Repository, refname: &str) -> Result<git2::Object<'r>> {
     if let Ok(obj) = repo.revparse_single(refname) {
         return Ok(obj);
@@ -143,15 +133,10 @@ mod tests {
     use git2::{Repository, Signature, Time};
     use tempfile::TempDir;
 
-    // ── helpers ───────────────────────────────────────────────────────────────
-
     fn sig() -> Signature<'static> {
         Signature::new("Test", "test@example.com", &Time::new(1_000_000, 0)).unwrap()
     }
 
-    /// Repo with two commits:
-    ///   commit A → lightweight tag "v1.0"
-    ///   commit B → branch "develop"
     fn make_repo() -> (TempDir, PathBuf) {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();
@@ -177,8 +162,6 @@ mod tests {
 
         (dir, path)
     }
-
-    // ── resolve_refs ──────────────────────────────────────────────────────────
 
     #[test]
     fn resolve_refs_resolves_tag() {
@@ -241,8 +224,6 @@ mod tests {
 
     #[test]
     fn resolve_refs_resolves_slashed_remote_tracking_branch() {
-        // Simulate a cloned repo where "stable/2023.1.1" only exists as
-        // refs/remotes/origin/stable/2023.1.1 (no local branch).
         let (_dir, repo_path) = make_repo();
         let repo = Repository::open(&repo_path).unwrap();
         let head_oid = repo.head().unwrap().peel_to_commit().unwrap().id();

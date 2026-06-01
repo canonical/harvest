@@ -105,7 +105,6 @@ impl GraphWriter {
         for file in files {
             self.write_file(repo, tag, file).await?;
         }
-        // Call edges are written after all functions exist so cross-file callees resolve.
         self.write_call_edges(repo, tag, files).await?;
         self.link_inheritance_edges(repo, tag).await?;
         self.link_impl_edges(repo, tag).await?;
@@ -243,10 +242,6 @@ impl GraphWriter {
         Ok(())
     }
 
-    /// Python/C++: resolve `bases` list → INHERITS edges between Class nodes.
-    /// Only creates an edge when the base name is unambiguous (exactly one Class
-    /// with that name exists in the version); ambiguous names are skipped rather
-    /// than creating spurious edges to wrong types.
     async fn link_inheritance_edges(&self, repo: &str, tag: &str) -> Result<()> {
         self.graph
             .run(
@@ -267,8 +262,6 @@ impl GraphWriter {
         Ok(())
     }
 
-    /// Rust: resolve `traits` list → IMPLEMENTS edges (struct/enum → trait).
-    /// Only creates an edge when the trait name is unambiguous within the version.
     async fn link_impl_edges(&self, repo: &str, tag: &str) -> Result<()> {
         self.graph
             .run(
@@ -289,8 +282,6 @@ impl GraphWriter {
         Ok(())
     }
 
-    /// Rust: resolve `uses` list → USES edges (struct/enum → referenced field type).
-    /// Only creates an edge when the type name is unambiguous within the version.
     async fn link_uses_edges(&self, repo: &str, tag: &str) -> Result<()> {
         self.graph
             .run(
@@ -311,8 +302,6 @@ impl GraphWriter {
         Ok(())
     }
 
-    /// Go: resolve `embeds` list → EMBEDS edges (outer struct → embedded type).
-    /// Only creates an edge when the embedded type name is unambiguous within the version.
     async fn link_embed_edges(&self, repo: &str, tag: &str) -> Result<()> {
         self.graph
             .run(
@@ -333,19 +322,8 @@ impl GraphWriter {
         Ok(())
     }
 
-    /// Write CALLS edges from in-memory call data collected during parsing.
-    /// Runs after all files are written so cross-file callees can be resolved.
-    ///
-    /// Resolution strategy (in priority order):
-    ///   1. Same-file match — the callee is defined in the caller's own file.
-    ///   2. Unique repo-wide match — the name resolves to exactly one function
-    ///      across the whole version (unambiguous cross-file call).
-    ///   3. Ambiguous — multiple candidates, no same-file match → edge skipped.
-    ///
-    /// Unresolved external calls (library functions, builtins) are silently dropped.
     async fn write_call_edges(&self, repo: &str, tag: &str, files: &[ParsedFile]) -> Result<()> {
         for file in files {
-            // Collect only functions that actually have recorded calls.
             let fn_calls: Vec<serde_json::Value> = file
                 .functions
                 .iter()

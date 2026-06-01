@@ -4,7 +4,6 @@ import hljs from 'highlight.js';
 
 const CITATION_RE = /\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+):(\d+)\]/g;
 
-// Configure marked with syntax highlighting and safe HTML
 marked.use(
   markedHighlight({
     langPrefix: 'language-',
@@ -17,9 +16,7 @@ marked.use(
 
 marked.use({
   renderer: {
-    // No custom link renderer; let default handle links safely
   },
-  // Sanitize raw HTML to prevent XSS
   hooks: {
     postprocess(html) {
       return html.replace(/<script[\s\S]*?<\/script>/gi, '');
@@ -27,17 +24,6 @@ marked.use({
   },
 });
 
-/**
- * Render a markdown string to an HTML string.
- * Citation brackets like [repo:v1:file.rs:42] are replaced with numbered
- * superscripts ([1], [2], …) when citationIndex provides a mapping, and
- * linked when repoUrlMap provides a clone URL.
- *
- * @param {string} text
- * @param {Object.<string, string>} [repoUrlMap]    — repo name → clone URL
- * @param {Object.<string, number>} [citationIndex] — "repo:ver:file:line" → 1-based index
- * @returns {string} HTML
- */
 export function renderMarkdown(text, repoUrlMap = {}, citationIndex = {}) {
   const withCitations = text.replace(CITATION_RE, (match, repo, version, file, line) => {
     const key = `${repo}:${version}:${file}:${line}`;
@@ -56,17 +42,6 @@ export function renderMarkdown(text, repoUrlMap = {}, citationIndex = {}) {
   return marked.parse(withCitations, { async: false });
 }
 
-/**
- * Build a URL pointing to a specific file and line in an upstream repository.
- * Handles GitHub, GitLab, and Bitbucket. SSH clone URLs are converted to HTTPS.
- * Returns null if the URL cannot be determined.
- *
- * @param {string} repoUrl  — clone URL (https or ssh)
- * @param {string} version  — tag or branch name
- * @param {string} file     — relative file path
- * @param {number} line
- * @returns {string|null}
- */
 export function buildFileUrl(repoUrl, version, file, line) {
   const base = normalizeRepoUrl(repoUrl);
   if (!base) return null;
@@ -79,15 +54,12 @@ export function buildFileUrl(repoUrl, version, file, line) {
   if (base.includes('bitbucket.org')) {
     return `${base}/src/${version}/${file}#lines-${line}`;
   }
-  // Generic fallback — works for most Gitea/Forgejo/cgit instances
   return `${base}/blob/${version}/${file}#L${line}`;
 }
 
 function normalizeRepoUrl(url) {
   if (!url) return null;
-  // Convert SSH format: git@github.com:owner/repo.git → https://github.com/owner/repo
   let normalized = url.replace(/^git@([^:]+):/, 'https://$1/');
-  // Strip .git suffix
   normalized = normalized.replace(/\.git$/, '');
   return normalized;
 }
@@ -101,23 +73,11 @@ function esc(str) {
     .replace(/'/g, '&#39;');
 }
 
-/**
- * Format a source citation object into a short human-readable label.
- *
- * @param {{repo: string, version: string, file: string, line: number}} source
- * @returns {string}
- */
 export function formatCitation({ repo, version, file, line }) {
   const filename = file.split('/').pop();
   return `${repo} ${version} · ${filename}:${line}`;
 }
 
-/**
- * Parse [repo:version:file:line] citations from text, returning unique sources.
- *
- * @param {string} text
- * @returns {{repo: string, version: string, file: string, line: number}[]}
- */
 export function parseCitations(text) {
   const seen = new Set();
   const results = [];

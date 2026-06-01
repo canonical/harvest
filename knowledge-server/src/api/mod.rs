@@ -15,18 +15,14 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use crate::agent::Agent;
 use crate::neo4j::Neo4jClient;
 
-/// Serialised JSON per `"repo:version"` key.  Never expires during a server
-/// run; the server must be restarted after reingestion to pick up fresh data.
 pub type GraphCache = RwLock<HashMap<String, Arc<String>>>;
 
-/// State shared by the graph and repository HTTP handlers.
 #[derive(Clone)]
 pub struct GraphState {
     pub neo4j: Arc<Neo4jClient>,
     pub cache: Arc<GraphCache>,
 }
 
-/// State shared by the LLM-agent HTTP handlers.
 #[derive(Clone)]
 pub struct AppState {
     pub agent: Arc<Agent>,
