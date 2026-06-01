@@ -102,7 +102,6 @@ impl LlmProvider for AnthropicProvider {
                     continue;
                 }
                 529 | 503 if attempt < self.max_retries => {
-                    // 529 = Anthropic overloaded
                     attempt += 1;
                     tracing::warn!(attempt, status = %status, "Anthropic overloaded — retrying in 5s");
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -426,10 +425,6 @@ mod tests {
             .await
             .unwrap();
         mock.assert();
-        // Also verify no "role":"system" appears inside the messages array
-        // by checking the function behaviour directly via the pure helper.
-        // (The chat() call succeeding with the above body_contains mock is already
-        // sufficient proof that the system field was serialised correctly.)
         match result {
             LlmResponse::Message { .. } => {}
             other => panic!("unexpected: {other:?}"),

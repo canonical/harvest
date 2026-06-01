@@ -19,8 +19,6 @@ import {
   isLoading,
 } from './chat.js';
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 function escapeHtml(str) {
   return String(str)
     .replace(/&/g, '&amp;')
@@ -30,13 +28,8 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
-// ── State ─────────────────────────────────────────────────────────────────────
-
 let state = createChatState();
-/** @type {Object.<string, string>} repo name → clone URL */
 let repoUrlMap = {};
-
-// ── DOM refs ──────────────────────────────────────────────────────────────────
 
 const messagesEl  = document.getElementById('messages');
 const inputEl     = document.getElementById('query-input');
@@ -46,10 +39,7 @@ const navEl       = document.getElementById('app-sidebar');
 const navToggleEl = document.getElementById('nav-toggle');
 const navCloseEl  = document.getElementById('nav-close');
 
-// ── Render ────────────────────────────────────────────────────────────────────
-
 function render() {
-  // Snapshot open state before replacing the DOM
   const prevAssistantEls = [...messagesEl.querySelectorAll('.message--assistant')];
   const openGroups = new Set(
     prevAssistantEls.flatMap((el, i) =>
@@ -69,10 +59,8 @@ function render() {
   sendBtn.disabled = loading;
   inputEl.disabled = loading;
 
-  // Scroll to bottom
   messagesEl.scrollTop = messagesEl.scrollHeight;
 
-  // Restore open state
   [...messagesEl.querySelectorAll('.message--assistant')].forEach((el, i) => {
     const group = el.querySelector('details.tc-group');
     if (group && openGroups.has(i)) group.open = true;
@@ -87,7 +75,6 @@ function render() {
     });
   });
 
-  // Attach step detail expand/collapse listeners (whole row is the trigger)
   messagesEl.querySelectorAll('.tc-step__row--clickable').forEach(row => {
     const toggle = () => {
       const step = row.closest('.tc-step');
@@ -101,7 +88,6 @@ function render() {
     row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
   });
 
-  // Wrap each code block in a container and inject a copy button
   messagesEl.querySelectorAll('.message__body pre').forEach(pre => {
     const wrapper = document.createElement('div');
     wrapper.className = 'code-block';
@@ -129,7 +115,6 @@ function copyText(text) {
   if (navigator.clipboard?.writeText) {
     return navigator.clipboard.writeText(text);
   }
-  // Fallback for non-secure contexts (HTTP on non-localhost)
   return new Promise((resolve, reject) => {
     const ta = document.createElement('textarea');
     ta.value = text;
@@ -176,7 +161,6 @@ function renderMessage(msg) {
     `;
   }
 
-  // Assistant message (loading with tool calls or fully done)
   const n = msg.tool_calls.length;
   const anyRunning = msg.tool_calls.some(tc => tc.status === 'running');
   const toolCallsHtml = n > 0 ? `
@@ -189,7 +173,6 @@ function renderMessage(msg) {
     </details>
   ` : '';
 
-  // Map each unique source to a 1-based index so inline citations and chips share the same numbering
   const citationIndex = Object.fromEntries(
     (msg.sources || []).map((s, i) => [`${s.repo}:${s.version}:${s.file}:${s.line}`, i + 1])
   );
@@ -265,8 +248,6 @@ function renderToolCall(tc, i) {
   `;
 }
 
-// ── Send ──────────────────────────────────────────────────────────────────────
-
 async function sendQuery() {
   const query = inputEl.value.trim();
   if (!query || isLoading(state)) return;
@@ -307,8 +288,6 @@ async function sendQuery() {
   }
 }
 
-// ── Event listeners ───────────────────────────────────────────────────────────
-
 sendBtn.addEventListener('click', sendQuery);
 
 inputEl.addEventListener('keydown', (e) => {
@@ -318,12 +297,9 @@ inputEl.addEventListener('keydown', (e) => {
   }
 });
 
-// ── Theme ─────────────────────────────────────────────────────────────────────
-
 function updateThemeButton() {
   const t = getTheme();
   const label = getThemeLabel(t);
-  // Inject the SVG as a p-side-navigation__icon + label span
   const svg = getThemeIcon(t).replace(/^<svg /, '<svg class="p-side-navigation__icon" ');
   themeBtnEl.innerHTML = `${svg}<span class="p-side-navigation__label">${label}</span>`;
   themeBtnEl.setAttribute('aria-label', `Switch theme (current: ${label})`);
@@ -334,8 +310,6 @@ themeBtnEl.addEventListener('click', () => {
   nextTheme();
   updateThemeButton();
 });
-
-// ── Navigation open / close (mobile) ──────────────────────────────────────────
 
 function openNav() {
   navEl.classList.remove('is-collapsed');
@@ -350,7 +324,6 @@ function closeNav() {
 navToggleEl.addEventListener('click', openNav);
 navCloseEl.addEventListener('click', closeNav);
 
-// Close nav on mobile when clicking outside it
 document.addEventListener('click', (e) => {
   if (window.innerWidth < 620 &&
       !navEl.classList.contains('is-collapsed') &&
@@ -359,8 +332,6 @@ document.addEventListener('click', (e) => {
     closeNav();
   }
 });
-
-// ── Sidebar navigation ────────────────────────────────────────────────────────
 
 document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').forEach(link => {
   link.addEventListener('click', (e) => {
@@ -380,12 +351,9 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
 
     if (page === 'repositories') onRepositoriesPageShow();
 
-    // Close drawer on mobile after navigating
     if (window.innerWidth < 620) closeNav();
   });
 });
-
-// ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 applyStoredTheme();
 updateThemeButton();

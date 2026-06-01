@@ -1,10 +1,3 @@
-/* ── Vanilla Framework base ────────────────────────────────────────────────── */
-/* VF is compiled from the npm package in vanilla.scss (imported before this   */
-/* file in main.js) so that non-default icons like p-icon--circle-of-friends   */
-/* can be included via @include vf-p-icon-circle-of-friends.                   */
-
-/* ── Design tokens (light defaults) ──────────────────────────────────────── */
-
 :root {
   --bg-page:              #ffffff;
   --bg-surface:           #f5f5f5;
@@ -46,8 +39,6 @@
   --theme-btn-hover-bg:   #f0f0f0;
 }
 
-/* ── Dark theme tokens ────────────────────────────────────────────────────── */
-
 [data-theme="dark"] {
   --bg-page:              #111111;
   --bg-surface:           #1e1e1e;
@@ -88,13 +79,6 @@
   --theme-btn-color:      #cccccc;
   --theme-btn-hover-bg:   #333333;
 
-  /*
-   * VF theme flags + colour tokens for the main content area.
-   * Without these, VF components (icons, inputs, buttons) stay in light mode
-   * even when our page is in dark mode, producing invisible black icons and
-   * bright white inputs on a dark background.
-   * The nav panel overrides these locally via its .nav-panel class.
-   */
   --vf-theme-light:               var(--vf-FLAG-OFF);
   --vf-theme-dark:                var(--vf-FLAG-ON);
   --vf-color-background-default:  #1e1e1e;
@@ -110,7 +94,6 @@
   --vf-color-border-low-contrast: #2e2e2e;
 }
 
-/* Auto mode: follow OS preference when no explicit theme is set */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     --bg-page:              #111111;
@@ -168,15 +151,6 @@
     }
 }
 
-/* ── Base ─────────────────────────────────────────────────────────────────── */
-
-/*
- * Re-enforce the HTML `hidden` attribute. Author stylesheets always beat the
- * browser's user-agent sheet in the cascade, so any element that has an
- * explicit `display` value in a class rule (e.g. `display: flex`) will ignore
- * the UA's `[hidden] { display: none }`. This rule restores the expected
- * semantics with !important, which is the pattern endorsed by the HTML spec.
- */
 [hidden] { display: none !important; }
 
 html, body {
@@ -187,41 +161,27 @@ html, body {
   transition: background 0.2s, color 0.2s;
 }
 
-/* ── VF application layout overrides ─────────────────────────────────────── */
-
-/* l-main: pages manage their own internal scroll, so override VF's overflow-y */
 .l-main {
   overflow: hidden !important;
   display: flex !important;
   flex-direction: column;
 }
 
-/* ── Nav panel — explicit dark theme using VF colour values ───────────────── */
-
-/*
- * We set VF's dark-theme CSS custom properties directly on the nav panels.
- * This is more reliable than relying on the .is-dark cascade alone because
- * VF compiles .is-dark rules at root level and some component mixins can
- * override them in certain browser/build environments.
- * All colour values are taken from VF's $colors--dark-theme-* Sass variables.
- */
 .nav-panel {
-  --vf-color-background-default:    #262626; /* $colors--dark-theme--background-default */
-  --vf-color-background-alt:        #202020; /* $colors--dark-theme--background-alt */
-  --vf-color-background-hover:      #313131; /* $colors--dark-theme--background-hover */
-  --vf-color-background-active:     #373737; /* $colors--dark-theme--background-active */
-  --vf-color-background-inputs:     #2f2f2f; /* $colors--dark-theme--background-inputs */
-  --vf-color-text-default:          hsl(0, 0%, 100%); /* $colors--dark-theme--text-default */
+  --vf-color-background-default:    #262626;
+  --vf-color-background-alt:        #202020;
+  --vf-color-background-hover:      #313131;
+  --vf-color-background-active:     #373737;
+  --vf-color-background-inputs:     #2f2f2f;
+  --vf-color-text-default:          hsl(0, 0%, 100%);
   --vf-color-text-muted:            rgba(255, 255, 255, .6);
   --vf-color-text-inactive:         rgba(255, 255, 255, .75);
   --vf-color-border-default:        rgba(255, 255, 255, .2);
   --vf-color-border-low-contrast:   rgba(255, 255, 255, .1);
-  /* flag tokens so vf-themed-property components use dark values */
   --vf-theme-light: var(--vf-FLAG-OFF);
   --vf-theme-dark:  var(--vf-FLAG-ON);
 }
 
-/* Override VF's section padding so we control the nav content layout */
 .l-navigation .p-panel__content {
   padding: 0;
   display: flex;
@@ -229,8 +189,6 @@ html, body {
   height: calc(100dvh - 4.5rem);
   overflow: hidden;
 }
-
-/* ── Nav logo / branding ──────────────────────────────────────────────────── */
 
 .nav-logo,
 .nav-logo:visited {
@@ -241,7 +199,6 @@ html, body {
   color: var(--vf-color-text-default);
 }
 
-/* p-panel__logo-image: mirrors VF's p-panel__logo-icon sizing */
 .p-panel__logo-image {
   height: 2rem;
   width: auto;
@@ -249,7 +206,6 @@ html, body {
   flex-shrink: 0;
 }
 
-/* logo-text: VF p-heading--4 already styles the font; just reset margin */
 .logo-text {
   margin: 0;
 }
@@ -262,15 +218,11 @@ html, body {
   white-space: nowrap;
 }
 
-/* VF's p-panel__logo adds vertical margins not suitable inside a header row */
 .p-panel__header .p-panel__logo {
   margin-bottom: 0;
   margin-top: 0;
 }
 
-/* Flush the nav panel header against the top of the page.
- * VF sets padding-top: 1rem on p-panel__controls, which inflates the header
- * height and causes the logo to float down via flex centering. */
 .l-navigation .p-panel__header,
 .l-navigation-bar .p-panel__header {
   align-items: flex-start;
@@ -282,7 +234,6 @@ html, body {
   padding-top: 0;
 }
 
-/* p-panel__toggle: make it look like a small button using VF border token */
 .l-navigation .p-panel__toggle,
 .l-navigation-bar .p-panel__toggle {
   border: 1px solid var(--vf-color-border-default);
@@ -300,31 +251,25 @@ html, body {
   background: var(--vf-color-background-hover);
 }
 
-/* SVG icons: constrain size (VF positions them absolutely) */
 .l-navigation .p-side-navigation__icon {
   width: 1rem;
   height: 1rem;
 }
 
-/* button used as p-side-navigation__link needs reset */
 .l-navigation button.p-side-navigation__link {
   width: 100%;
   text-align: left;
 }
 
-/* Theme toggle: narrower than a full-width nav link, centered */
 #theme-btn.p-side-navigation__link {
   width: auto;
   margin: 0 auto;
   display: flex;
 }
 
-/* ── Sidenav two-section layout ───────────────────────────────────────────── */
-
 .sidenav-top-container {
   flex: 1;
   overflow-y: auto;
-  /* breathing room between the sticky logo header and the first nav item */
   padding-top: 3rem;
 }
 
@@ -335,8 +280,6 @@ html, body {
   padding-bottom: 0.5rem;
 }
 
-
-/* ── Pages ────────────────────────────────────────────────────────────────── */
 
 .page {
   flex: 1;
@@ -382,8 +325,6 @@ html, body {
   gap: 1rem;
 }
 
-/* ── Message bubbles ──────────────────────────────────────────────────────── */
-
 .message {
   display: flex;
   flex-direction: column;
@@ -413,8 +354,6 @@ html, body {
   border-bottom-left-radius: 0.25rem;
   min-width: 200px;
 }
-
-/* ── Markdown content ─────────────────────────────────────────────────────── */
 
 .message__body h1,
 .message__body h2,
@@ -478,8 +417,6 @@ html, body {
 
 .message__body a { color: #4d9fff; }
 
-/* ── Citation spans ───────────────────────────────────────────────────────── */
-
 .citation {
   background: var(--citation-bg);
   color: var(--citation-color);
@@ -495,8 +432,6 @@ html, body {
   text-decoration: none;
 }
 
-/* ── Tool call timeline ───────────────────────────────────────────────────── */
-
 .tc-group {
   margin-bottom: 0.625rem;
   border-left: 2px solid var(--border-subtle);
@@ -507,7 +442,6 @@ html, body {
   border-left-color: #0066cc;
 }
 
-/* Summary row — shown when collapsed (message done) */
 .tc-group__summary {
   display: flex;
   align-items: center;
@@ -540,12 +474,9 @@ details.tc-group[open] .tc-group__summary-chevron {
   transform: rotate(180deg);
 }
 
-/* Steps sit inside the details, indented */
 details.tc-group[open] {
   padding-left: 0.875rem;
 }
-
-/* ── Individual step ──────────────────────────────────────────────────────── */
 
 .tc-step {
   font-size: 0.8125rem;
@@ -559,7 +490,6 @@ details.tc-group[open] {
   min-height: 1.625rem;
 }
 
-/* Status icon */
 .tc-step__icon {
   width: 1rem;
   height: 1rem;
@@ -570,7 +500,6 @@ details.tc-group[open] {
   animation: spin 0.8s linear infinite;
 }
 
-/* Step label */
 .tc-step__label {
   flex: 1;
   color: var(--text-muted);
@@ -590,7 +519,6 @@ details.tc-group[open] {
   font-family: 'Ubuntu Mono', monospace;
 }
 
-/* Clickable row */
 .tc-step__row--clickable {
   cursor: pointer;
   border-radius: 3px;
@@ -604,7 +532,6 @@ details.tc-group[open] {
   background: var(--bg-surface-hover);
 }
 
-/* Expand chevron — hidden until hover or open */
 .tc-step__chevron {
   width: 10px;
   height: 10px;
@@ -623,8 +550,6 @@ details.tc-group[open] {
 .tc-step__row--clickable[aria-expanded="true"] .tc-step__chevron {
   transform: rotate(180deg);
 }
-
-/* ── Step detail panel ────────────────────────────────────────────────────── */
 
 .tc-step__detail {
   margin: 0.125rem 0 0.375rem 1rem;
@@ -660,8 +585,6 @@ details.tc-group[open] {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── tool-data: Vanilla table/list inside tool-call cards ─────────────────── */
-
 .tool-data {
   margin-top: 0.25rem;
   overflow-x: auto;
@@ -671,7 +594,6 @@ details.tc-group[open] {
   width: 100%;
   font-size: 0.78rem;
   border-collapse: collapse;
-  /* reset any Vanilla Framework margin */
   margin-bottom: 0 !important;
 }
 
@@ -744,8 +666,6 @@ details.tc-group[open] {
   border-bottom: 1px dashed var(--border-color);
 }
 
-/* ── Source code preview blocks ───────────────────────────────────────────── */
-
 .tool-source {
   border: 1px solid var(--border-color);
   border-radius: 0.4rem;
@@ -761,7 +681,6 @@ details.tc-group[open] {
   border-bottom: 1px solid var(--border-color);
 }
 
-/* separator between multiple blocks (e.g. diff view) */
 .tool-source__pre + .tool-source__meta {
   border-top: 1px solid var(--border-color);
 }
@@ -777,8 +696,6 @@ details.tc-group[open] {
   background: var(--bg-code);
   color: #f0f0f0;
 }
-
-/* ── Sources ──────────────────────────────────────────────────────────────── */
 
 .sources {
   margin-top: 0.75rem;
@@ -846,8 +763,6 @@ a.source-chip:hover {
   border-color: var(--text-secondary);
 }
 
-/* ── Loading dots ─────────────────────────────────────────────────────────── */
-
 .loading-dots {
   display: inline-flex;
   gap: 0.3rem;
@@ -870,27 +785,20 @@ a.source-chip:hover {
   40%           { transform: scale(1.0); opacity: 1.0; }
 }
 
-/* ── Error ────────────────────────────────────────────────────────────────── */
-
 .message--error .message__bubble {
   background: var(--bg-error);
   border: 1px solid var(--border-error);
   color: var(--error-text);
 }
 
-/* ── Input area ───────────────────────────────────────────────────────────── */
-
 .input-area {
   padding: 0.75rem 1.5rem 1rem;
   border-top: 1px solid var(--border-color);
 }
 
-/* Stretch p-search-box to fill the input area width */
 .input-area .p-search-box {
   margin-bottom: 0;
 }
-
-/* ── Repositories page ────────────────────────────────────────────────────── */
 
 .repo-toolbar {
   display: flex;
@@ -1019,8 +927,6 @@ a.source-chip:hover {
 
 .graph-legend__item svg { display: block; flex-shrink: 0; }
 
-/* ── Smart search progress overlay ───────────────────────────────────────── */
-
 .search-overlay {
   position: absolute;
   inset: 0;
@@ -1131,8 +1037,6 @@ a.source-chip:hover {
 }
 
 .repo-empty__error { color: var(--error-text); }
-
-/* ── Source panel ─────────────────────────────────────────────────────────── */
 
 .repo-source-panel {
   position: absolute;
@@ -1327,8 +1231,6 @@ a.source-chip:hover {
   to   { opacity: 1; transform: translateY(0); }
 }
 
-/* ── hljs theme (atom one dark — always dark for code blocks) ─────────────── */
-
 .hljs            { color: #abb2bf; }
 .hljs-keyword,
 .hljs-built_in   { color: #c678dd; }
@@ -1339,8 +1241,6 @@ a.source-chip:hover {
 .hljs-title.function_ { color: #61afef; }
 .hljs-type       { color: #e5c07b; }
 .hljs-attr       { color: #e06c75; }
-
-/* ── Documentation page ─────────────────────────────────────────────────────── */
 
 .page--docs {
   display: flex;
@@ -1433,8 +1333,6 @@ a.source-chip:hover {
   flex: 1;
   overflow: hidden;
 }
-
-/* ── Doc tree (left sidebar) ─────────────────────────────────────────────────── */
 
 .doc-tree {
   width: 14rem;
@@ -1544,8 +1442,6 @@ a.source-chip:hover {
   color: var(--text-muted);
   font-style: italic;
 }
-
-/* ── Doc content (right pane) ────────────────────────────────────────────────── */
 
 .doc-content {
   flex: 1;
@@ -1664,8 +1560,6 @@ a.source-chip:hover {
   background: var(--bg-surface);
   font-weight: 600;
 }
-
-/* ── Responsive: collapse doc-tree on mobile ────────────────────────────────── */
 
 @media (max-width: 640px) {
   .doc-toolbar {

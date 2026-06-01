@@ -53,7 +53,6 @@ pub async fn handle_get_page(
     if !SECTIONS.contains(&section.as_str()) {
         return (StatusCode::NOT_FOUND, axum::Json(json!({"error": "unknown section"}))).into_response();
     }
-    // Prevent path traversal
     if filename.contains("..") || filename.contains('/') {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": "invalid filename"}))).into_response();
     }

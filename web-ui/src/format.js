@@ -6,15 +6,6 @@ const EXT_TO_LANG = {
   rb: 'ruby', sh: 'bash', toml: 'toml', yaml: 'yaml', yml: 'yaml',
 };
 
-/**
- * Render a parsed JSON value as a Vanilla-Framework-styled HTML string.
- * Arrays of objects become full tables with headers.
- * Plain objects become two-column key/value tables.
- * Primitives are returned as escaped text (numbers/booleans in <code>).
- *
- * @param {unknown} value
- * @returns {string} HTML string
- */
 export function renderJsonToHtml(value) {
   if (value === null || value === undefined) return '<em>—</em>';
   if (typeof value === 'string') return esc(value);
@@ -24,22 +15,9 @@ export function renderJsonToHtml(value) {
   return esc(String(value));
 }
 
-/**
- * Try to parse a preview string as JSON and render it nicely.
- * If the result is an array of objects that all carry a `source` field,
- * renders syntax-highlighted code instead of a table.
- * If the string is a truncated JSON array, recover the complete objects
- * that appear before the cut and render them with a truncation notice.
- * Falls back to escaped plain text for anything else.
- *
- * @param {string|null} text
- * @param {string|null} [filePath] — source file path, used to infer language
- * @returns {string} HTML string
- */
 export function renderPreviewToHtml(text, filePath = null) {
   if (!text) return '';
 
-  // 1. Try a full parse first.
   try {
     const parsed = JSON.parse(text);
     if (Array.isArray(parsed) && parsed.length === 0) {
@@ -50,7 +28,6 @@ export function renderPreviewToHtml(text, filePath = null) {
     return renderJsonToHtml(parsed);
   } catch { /* fall through */ }
 
-  // 2. Try to recover complete objects from a truncated JSON array.
   const partial = tryParsePartialArray(text);
   if (partial) {
     const sourceHtml = tryRenderAsSource(partial, filePath);
@@ -61,16 +38,11 @@ export function renderPreviewToHtml(text, filePath = null) {
       + '<span class="tool-data__truncated">… preview truncated</span>';
   }
 
-  // 2b. For truncated source results the whole first element may be incomplete.
-  //     Extract the source string directly from the partial text.
   const truncatedSourceHtml = tryExtractTruncatedSource(text, filePath);
   if (truncatedSourceHtml !== null) return truncatedSourceHtml;
 
-  // 3. Plain-text fallback.
   return `<span class="tool-data__fallback">${esc(text)}</span>`;
 }
-
-// ── internal ──────────────────────────────────────────────────────────────────
 
 function renderObject(obj) {
   const entries = Object.entries(obj);
@@ -99,13 +71,11 @@ function renderObjectArray(arr) {
   </table>`;
 }
 
-/** Render a leaf value (no further recursion into objects). */
 function leaf(v) {
   if (v === null || v === undefined) return '<em>—</em>';
   if (typeof v === 'object') return `<code>${esc(JSON.stringify(v))}</code>`;
   if (typeof v === 'number' || typeof v === 'boolean') return `<code>${esc(String(v))}</code>`;
   const s = String(v);
-  // Shorten long absolute paths — keep the last 4 components, full path as tooltip.
   const shortened = shortenAbsPath(s);
   if (shortened) {
     return `<span class="tool-data__path" title="${esc(s)}">${esc(shortened)}</span>`;
@@ -113,10 +83,6 @@ function leaf(v) {
   return esc(s);
 }
 
-/**
- * If `str` is an absolute path with more than 4 components, return a
- * shortened version showing only the last 4 components. Otherwise null.
- */
 function shortenAbsPath(str) {
   if (!str.startsWith('/')) return null;
   const parts = str.split('/').filter(Boolean);
@@ -124,25 +90,16 @@ function shortenAbsPath(str) {
   return parts.slice(-4).join('/');
 }
 
-/**
- * Last-resort extraction for a truncated source-result JSON array.
- * Walks the "source" string value character by character so it handles
- * JSON escape sequences even when the value (or the surrounding object)
- * is cut off mid-way. Returns rendered HTML with a truncation notice,
- * or null if the text doesn't look like a source result.
- */
 function tryExtractTruncatedSource(text, filePath) {
   const t = text.trimStart();
   if (!t.startsWith('[') || !t.includes('"source"')) return null;
 
-  // Locate the opening quote of the "source" value
   const keyIdx = t.indexOf('"source"');
   let pos = keyIdx + 8;
   while (pos < t.length && /[\s:]/.test(t[pos])) pos++;
   if (pos >= t.length || t[pos] !== '"') return null;
-  pos++; // step past the opening quote
+  pos++;
 
-  // Collect the string, respecting backslash escapes
   let raw = '';
   let closed = false;
   while (pos < t.length) {
@@ -159,7 +116,6 @@ function tryExtractTruncatedSource(text, filePath) {
     }
   }
 
-  // Unescape the collected JSON string fragment
   let source;
   try {
     source = JSON.parse('"' + raw + '"');
@@ -169,7 +125,6 @@ function tryExtractTruncatedSource(text, filePath) {
       .replace(/\\"/g, '"').replace(/\\\\/g, '\\');
   }
 
-  // Pull metadata with simple regexes (order in the JSON doesn't matter)
   const nameMatch  = t.match(/"name"\s*:\s*"([^"\\]+)"/);
   const startMatch = t.match(/"start_line"\s*:\s*(\d+)/);
   const endMatch   = t.match(/"end_line"\s*:\s*(\d+)/);
@@ -186,11 +141,6 @@ function tryExtractTruncatedSource(text, filePath) {
   return html + (!closed ? '<span class="tool-data__truncated">… preview truncated</span>' : '');
 }
 
-/**
- * If `parsed` is an array of objects where every item has a `source` string,
- * render each item as a syntax-highlighted code block with a compact meta
- * header (version · name · line range). Returns null otherwise.
- */
 function tryRenderAsSource(parsed, filePath) {
   if (!Array.isArray(parsed) || parsed.length === 0) return null;
   if (!parsed.every(item => isPlainObject(item) && typeof item.source === 'string')) return null;
@@ -219,13 +169,6 @@ function langFromPath(filePath) {
   return hljs.getLanguage(lang) ? lang : 'plaintext';
 }
 
-/**
- * Recover the complete array elements from a truncated JSON array string.
- * Walks the string character-by-character tracking depth and string state,
- * identifies the end of each top-level array element, then tries to parse
- * the prefix up to the last complete element.
- * Returns the parsed array or null if recovery is not possible.
- */
 function tryParsePartialArray(text) {
   const t = text.trimStart();
   if (!t.startsWith('[')) return null;
@@ -247,7 +190,6 @@ function tryParsePartialArray(text) {
     if (c === '{' || c === '[') depth++;
     else if (c === '}' || c === ']') {
       depth--;
-      // depth === 1 means we just closed a top-level array element
       if (depth === 1) lastTopLevelClose = i;
     }
   }

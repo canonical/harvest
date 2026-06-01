@@ -1,8 +1,3 @@
-/**
- * Immutable chat state management.
- * All functions return a new state object — original is never mutated.
- */
-
 let _nextToolCallId = 1;
 
 export function createChatState() {
@@ -54,7 +49,6 @@ export function updateToolCallDescription(state, { id, description }) {
 
 export function completeToolCall(state, { name, preview }) {
   return updateLastAssistant(state, (msg) => {
-    // Mark the first still-running call with this name as done
     let marked = false;
     const tool_calls = msg.tool_calls.map((tc) => {
       if (!marked && tc.name === name && tc.status === 'running') {
@@ -86,8 +80,6 @@ export function setError(state, error) {
   }));
   return { ...next, loading: false };
 }
-
-// ── internal ──────────────────────────────────────────────────────────────────
 
 function updateLastAssistant(state, updater) {
   const messages = [...state.messages];
