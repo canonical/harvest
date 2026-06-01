@@ -5,28 +5,32 @@ import { fetchGraph, fetchSymbolSource, queryStream } from './api.js';
 
 cytoscape.use(fcose);
 
-// ── File → color palette ──────────────────────────────────────────────────────
+// ── Kind → UML color ──────────────────────────────────────────────────────────
 
-const PALETTE = [
-  '#2563EB', '#7C3AED', '#059669', '#D97706',
-  '#DC2626', '#0891B2', '#DB2777', '#4F46E5',
-  '#65A30D', '#EA580C',
-];
+const KIND_COLORS = {
+  class:     '#7C3AED',
+  struct:    '#6D28D9',
+  trait:     '#0891B2',
+  interface: '#0284C7',
+  function:  '#2563EB',
+  method:    '#1D4ED8',
+  enum:      '#D97706',
+  module:    '#6B7280',
+  impl:      '#059669',
+  type:      '#DB2777',
+};
 
-const fileColorMap = new Map();
-let fileColorIdx = 0;
-
-function fileColor(file) {
-  if (!fileColorMap.has(file)) {
-    fileColorMap.set(file, PALETTE[fileColorIdx++ % PALETTE.length]);
-  }
-  return fileColorMap.get(file);
+function kindColor(kind) {
+  return KIND_COLORS[kind?.toLowerCase()] ?? '#4F46E5';
 }
 
-// Label shown on the file-container node (last 2 path components)
-function fileLabel(path) {
-  const parts = path.replace(/\\/g, '/').split('/');
-  return parts.length >= 2 ? parts.slice(-2).join('/') : parts[0];
+// Shape: type-like nodes get a rounded rectangle, callables a plain rectangle
+function kindShape(kind) {
+  const k = kind?.toLowerCase() ?? '';
+  if (k === 'class' || k === 'struct' || k === 'trait' || k === 'interface' || k === 'enum') {
+    return 'rectangle';
+  }
+  return 'round-rectangle';
 }
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -37,6 +41,8 @@ let currentVersion = null;
 let pendingGraphData = null;
 let isPageVisible = false;
 let repoList = [];
+let activeLayoutWorker = null; // terminated if the user navigates away mid-layout
+let activeSearchMatched = null; // Set of node IDs from the last AI search, or null
 
 // ── DOM helpers ───────────────────────────────────────────────────────────────
 
@@ -144,132 +150,172 @@ async function loadGraph() {
       setOverlay('empty', 'Graph ready — navigate here to view.');
     }
     enableControls(true);
-    if (data.truncated) setStatus('Showing first 300 symbols. Use search to explore further.');
+    if (data.truncated) {
+      setStatus(
+        `Showing ${data.nodes.length.toLocaleString()} of ${data.total_nodes.toLocaleString()} symbols ` +
+        `— type definitions prioritised. Use AI search to locate specific functions.`
+      );
+    }
   } catch (err) {
     setOverlay('error', `Failed to load: ${esc(err.message)}`);
     enableControls(false);
   }
 }
 
+// ── Layout position cache (localStorage) ─────────────────────────────────────
+// Saves fcose-computed positions so revisiting a graph is instant.
+
+const positionKey = (repo, ver) => `harvest:positions:${repo}:${ver}`;
+
+function savePositions() {
+  if (!cy || !currentRepo || !currentVersion) return;
+  try {
+    const pos = {};
+    cy.nodes('.symbol-node').forEach(n => {
+      const p = n.position();
+      pos[n.id()] = { x: Math.round(p.x), y: Math.round(p.y) };
+    });
+    localStorage.setItem(positionKey(currentRepo, currentVersion), JSON.stringify(pos));
+  } catch { /* localStorage full or unavailable — non-fatal */ }
+}
+
+function loadPositions(nodes) {
+  try {
+    const raw = localStorage.getItem(positionKey(currentRepo, currentVersion));
+    if (!raw) return null;
+    const pos = JSON.parse(raw);
+    // Only use cached positions if every node has a saved position.
+    if (nodes.every(n => n.data.id in pos)) return pos;
+    return null; // stale cache (e.g. after reingest added new symbols)
+  } catch { return null; }
+}
+
 // ── Graph mounting ────────────────────────────────────────────────────────────
+
+/** Scale layout iterations down for large graphs to keep the worker responsive. */
+function adaptiveIterations(nodeCount) {
+  if (nodeCount < 100)  return 2500;
+  if (nodeCount < 300)  return 1000;
+  if (nodeCount < 700)  return 500;
+  return 250;
+}
 
 function mountCy(data) {
   setOverlay('loading');
-  fileColorMap.clear();
-  fileColorIdx = 0;
 
-  // Build unique file set and create compound-node parents
-  const files = [...new Set(data.nodes.map(n => n.file))];
+  const nodeElements = data.nodes.map(n => ({
+    group: 'nodes',
+    classes: `symbol-node kind-${(n.kind ?? 'unknown').toLowerCase()}`,
+    data: {
+      id: n.id,
+      label: n.name,
+      file: n.file,
+      kind: n.kind,
+      start_line: n.start_line,
+      signature: n.signature ?? '',
+      color: kindColor(n.kind),
+      shape: kindShape(n.kind),
+    },
+  }));
 
-  const elements = [
-    // File container nodes (parents)
-    ...files.map(file => ({
-      group: 'nodes',
-      classes: 'file-node',
-      data: {
-        id: `file::${file}`,
-        label: fileLabel(file),
-        fullPath: file,
-        color: fileColor(file),
-      },
-    })),
-    // Symbol nodes (children of their file container)
-    ...data.nodes.map(n => ({
-      group: 'nodes',
-      classes: 'symbol-node',
-      data: {
-        id: n.id,
-        label: n.name,
-        parent: `file::${n.file}`,
-        file: n.file,
-        kind: n.kind,
-        start_line: n.start_line,
-        signature: n.signature ?? '',
-        color: fileColor(n.file),
-        shape: n.kind === 'Class' ? 'ellipse' : 'round-rectangle',
-      },
-    })),
-    // Edges (calls + contains) — carry the relation type through to Cytoscape
-    ...data.edges.map(e => ({
-      group: 'edges',
-      data: { id: e.id, source: e.source, target: e.target, relation: e.relation },
-    })),
-  ];
+  const edgeElements = data.edges.map(e => ({
+    group: 'edges',
+    data: { id: e.id, source: e.source, target: e.target, relation: e.relation },
+  }));
 
   cy = cytoscape({
     container: $('cy'),
-    elements,
+    elements: [...nodeElements, ...edgeElements],
     style: cytoscapeStyle(),
     minZoom: 0.04,
     maxZoom: 5,
   });
 
-  // Start everything hidden for fade-in
   cy.elements().style('opacity', 0);
 
-  const layout = cy.layout({
-    name: 'fcose',
-    quality: 'default',
-    randomize: true,
-    animate: true,
-    animationDuration: 1000,
-    animationEasing: 'ease-out',
-    fit: true,
-    padding: 60,
-    // Include label extents so nodes never overlap their own text
-    nodeDimensionsIncludeLabels: true,
-    uniformNodeDimensions: false,
-    // Pack isolated components (files with no cross-file calls) tightly
-    packComponents: true,
-    tile: true,
-    tilingPaddingVertical: 16,
-    tilingPaddingHorizontal: 16,
-    // Edge and repulsion tuning
-    idealEdgeLength: 160,
-    edgeElasticity: 0.45,
-    nestingFactor: 0.1,
-    numIter: 2500,
-    // Gravity: pull disconnected clusters toward center without crushing them
-    gravity: 0.15,
-    gravityRange: 3.8,
-    gravityCompound: 1.0,
-    gravityRangeCompound: 1.5,
-    initialEnergyOnIncremental: 0.3,
-  });
+  cy.on('tap', 'node.symbol-node', onNodeTap);
+  cy.on('tap', e => { if (e.target === cy) { clearHighlight(); closeSourcePanel(); } });
 
-  // Use a one-shot guard that handles both the layout event and a fallback timer.
-  // cy.one('layoutstop') can miss the event in some Cytoscape builds; layout.one()
-  // is the authoritative listener.
-  let revealed = false;
   function revealGraph() {
-    if (revealed) return;
-    revealed = true;
     setOverlay('none');
-    cy.nodes('.symbol-node').animate({ style: { opacity: 1 }, duration: 500, easing: 'ease-in-out' });
-    cy.nodes('.file-node').animate({ style: { opacity: 0.95 }, duration: 400, easing: 'ease-in-out' });
-    cy.edges('[relation="calls"]').animate({ style: { opacity: 0.55 }, duration: 700, easing: 'ease-in-out' });
-    cy.edges('[relation="contains"]').animate({ style: { opacity: 0.75 }, duration: 700, easing: 'ease-in-out' });
+    cy.elements().animate({ style: { opacity: 1 }, duration: 500, easing: 'ease-in-out' });
   }
 
-  layout.one('layoutstop', revealGraph);      // primary: fires on the layout object
-  cy.one('layoutstop', revealGraph);           // secondary: cy-level event
-  setTimeout(revealGraph, 3000);              // final fallback
+  /** Apply a precomputed position map and reveal the graph. */
+  function applyPositions(positions) {
+    cy.nodes().forEach(n => {
+      const p = positions[n.id()];
+      if (p) n.position(p);
+    });
+    cy.fit(undefined, 60);
+    revealGraph();
+  }
 
-  layout.run();
+  const cached = loadPositions(nodeElements);
 
-  cy.on('tap', 'node.symbol-node', onNodeTap);
-  cy.on('tap', 'node.file-node', onFileNodeTap);
-  cy.on('tap', e => { if (e.target === cy) { clearHighlight(); closeSourcePanel(); } });
+  if (cached) {
+    // ── Fast path: cached positions → instant preset layout ──────────────────
+    cy.layout({ name: 'preset', positions: n => cached[n.id()] ?? { x: 0, y: 0 }, fit: true, padding: 60 }).run();
+    revealGraph();
+    return;
+  }
+
+  // ── Worker path: compute fcose off the main thread ────────────────────────
+  // The main thread stays responsive; Firefox will not show a slow-script warning.
+  setLoadingText(`Computing layout for ${nodeElements.length} symbols…`);
+
+  const fcoseOptions = {
+    quality: 'default',
+    randomize: true,
+    nodeDimensionsIncludeLabels: true,
+    uniformNodeDimensions: false,
+    packComponents: true,
+    tile: true,
+    tilingPaddingVertical: 20,
+    tilingPaddingHorizontal: 20,
+    idealEdgeLength: 140,
+    edgeElasticity: 0.45,
+    numIter: adaptiveIterations(nodeElements.length),
+    gravity: 0.25,
+    gravityRange: 3.5,
+    initialEnergyOnIncremental: 0.3,
+  };
+
+  const worker = new Worker(new URL('./layout-worker.js', import.meta.url), { type: 'module' });
+  activeLayoutWorker = worker;
+
+  worker.onmessage = ({ data: { positions } }) => {
+    if (activeLayoutWorker !== worker) return; // stale — user navigated away
+    activeLayoutWorker = null;
+    worker.terminate();
+    applyPositions(positions);
+    savePositions();
+  };
+
+  worker.onerror = err => {
+    if (activeLayoutWorker !== worker) return;
+    activeLayoutWorker = null;
+    worker.terminate();
+    console.error('Layout worker error:', err);
+    // Fallback: random positions so the graph still renders
+    applyPositions({});
+  };
+
+  worker.postMessage({ elements: [...nodeElements, ...edgeElements], options: fcoseOptions });
 }
 
 function destroyCy() {
+  if (activeLayoutWorker) { activeLayoutWorker.terminate(); activeLayoutWorker = null; }
   if (cy) { cy.destroy(); cy = null; }
-  fileColorMap.clear();
-  fileColorIdx = 0;
   pendingGraphData = null;
   closeSourcePanel();
   clearSearch();
   clearStatus();
+}
+
+/** Remove the cached layout for the current repo/version (called after reingest). */
+export function clearLayoutCache(repo, version) {
+  try { localStorage.removeItem(positionKey(repo, version)); } catch { /* ignore */ }
 }
 
 // ── Cytoscape stylesheet ──────────────────────────────────────────────────────
@@ -356,31 +402,83 @@ function cytoscapeStyle() {
       selector: 'edge',
       style: {
         'curve-style': 'bezier',
-        'target-arrow-shape': 'triangle',
-        'arrow-scale': 0.75,
+        'target-arrow-shape': 'none',
+        'source-arrow-shape': 'none',
+        'arrow-scale': 0.9,
         width: 1.5,
-        'transition-property': 'opacity, line-color, target-arrow-color, width',
+        'transition-property': 'opacity, line-color, target-arrow-color, source-arrow-color, width',
         'transition-duration': '150ms',
       },
     },
-    // calls: solid gray
+    // inherits: solid line, hollow triangle at parent (UML generalization)
     {
-      selector: 'edge[relation="calls"]',
+      selector: 'edge[relation="inherits"]',
       style: {
-        'line-color': 'rgba(120,120,120,0.45)',
-        'target-arrow-color': 'rgba(120,120,120,0.6)',
+        'line-color': 'rgba(124,58,237,0.85)',
+        'target-arrow-shape': 'triangle',
+        'target-arrow-fill': 'hollow',
+        'target-arrow-color': 'rgba(124,58,237,0.85)',
         'line-style': 'solid',
+        width: 2,
       },
     },
-    // contains: dashed purple — class → method structural edge
+    // implements: dashed line, hollow triangle at trait (UML realization)
+    {
+      selector: 'edge[relation="implements"]',
+      style: {
+        'line-color': 'rgba(8,145,178,0.85)',
+        'target-arrow-shape': 'triangle',
+        'target-arrow-fill': 'hollow',
+        'target-arrow-color': 'rgba(8,145,178,0.85)',
+        'line-style': 'dashed',
+        'line-dash-pattern': [6, 3],
+        width: 2,
+      },
+    },
+    // embeds: solid line, open diamond at outer struct (UML aggregation)
+    {
+      selector: 'edge[relation="embeds"]',
+      style: {
+        'line-color': 'rgba(5,150,105,0.7)',
+        'source-arrow-shape': 'diamond',
+        'source-arrow-fill': 'hollow',
+        'source-arrow-color': 'rgba(5,150,105,0.85)',
+        'line-style': 'solid',
+        width: 1.5,
+      },
+    },
+    // contains: solid line, filled diamond at class (UML composition)
     {
       selector: 'edge[relation="contains"]',
       style: {
         'line-color': 'rgba(139,92,246,0.55)',
-        'target-arrow-color': 'rgba(139,92,246,0.7)',
-        'line-style': 'dashed',
-        'line-dash-pattern': [6, 3],
+        'source-arrow-shape': 'diamond',
+        'source-arrow-fill': 'filled',
+        'source-arrow-color': 'rgba(139,92,246,0.75)',
+        'line-style': 'solid',
         width: 1.5,
+      },
+    },
+    // uses: thin solid arrow — struct/enum references another type in field declarations (UML association)
+    {
+      selector: 'edge[relation="uses"]',
+      style: {
+        'line-color': 'rgba(217,119,6,0.6)',
+        'target-arrow-shape': 'triangle',
+        'target-arrow-color': 'rgba(217,119,6,0.75)',
+        'line-style': 'solid',
+        width: 1,
+      },
+    },
+    // calls: dashed line, arrow at callee (UML dependency)
+    {
+      selector: 'edge[relation="calls"]',
+      style: {
+        'line-color': 'rgba(120,120,120,0.4)',
+        'target-arrow-shape': 'triangle',
+        'target-arrow-color': 'rgba(120,120,120,0.55)',
+        'line-style': 'dashed',
+        'line-dash-pattern': [5, 3],
       },
     },
     {
@@ -388,20 +486,36 @@ function cytoscapeStyle() {
       style: { opacity: 0.04 },
     },
     {
-      selector: 'edge[relation="calls"].active',
-      style: {
-        'line-color': '#3B82F6',
-        'target-arrow-color': '#3B82F6',
-        width: 2.5,
-        opacity: 1,
-      },
+      selector: 'edge[relation="inherits"].active',
+      style: { 'line-color': '#7C3AED', 'target-arrow-color': '#7C3AED', width: 2.5, opacity: 1 },
+    },
+    {
+      selector: 'edge[relation="implements"].active',
+      style: { 'line-color': '#0891B2', 'target-arrow-color': '#0891B2', width: 2.5, opacity: 1 },
+    },
+    {
+      selector: 'edge[relation="embeds"].active',
+      style: { 'line-color': '#059669', 'source-arrow-color': '#059669', width: 2, opacity: 1 },
+    },
+    {
+      selector: 'edge[relation="uses"].active',
+      style: { 'line-color': '#D97706', 'target-arrow-color': '#D97706', width: 2, opacity: 1 },
     },
     {
       selector: 'edge[relation="contains"].active',
       style: {
         'line-color': '#8B5CF6',
-        'target-arrow-color': '#8B5CF6',
+        'source-arrow-color': '#8B5CF6',
         width: 2,
+        opacity: 1,
+      },
+    },
+    {
+      selector: 'edge[relation="calls"].active',
+      style: {
+        'line-color': '#3B82F6',
+        'target-arrow-color': '#3B82F6',
+        width: 2.5,
         opacity: 1,
       },
     },
@@ -444,7 +558,19 @@ function highlightNeighborhood(node) {
 
 function clearHighlight() {
   if (!cy) return;
-  cy.elements().removeClass('dimmed active ring').deselect();
+  if (activeSearchMatched) {
+    restoreSearchHighlight();
+  } else {
+    cy.elements().removeClass('dimmed active ring').deselect();
+  }
+}
+
+function restoreSearchHighlight() {
+  if (!cy || !activeSearchMatched) return;
+  cy.elements().addClass('dimmed').removeClass('ring active').deselect();
+  const matched = cy.nodes('.symbol-node').filter(n => activeSearchMatched.has(n.id()));
+  matched.closedNeighborhood().removeClass('dimmed');
+  matched.forEach(n => { n.addClass('ring'); n.parent().removeClass('dimmed').addClass('ring'); });
 }
 
 // ── Source panel ──────────────────────────────────────────────────────────────
@@ -488,17 +614,29 @@ async function loadSymbolSource(data) {
 }
 
 function populateRelations(node) {
-  // Structural: class → method containment
-  const container = node.incomers('edge[relation="contains"]').sources();
-  const methods   = node.outgoers('edge[relation="contains"]').targets();
-  renderChips($('source-container-list'), container, $('source-container-section'));
-  renderChips($('source-members-list'),   methods,   $('source-members-section'));
+  // Inheritance (Python, C++)
+  renderChips($('source-parents-list'),  node.outgoers('edge[relation="inherits"]').targets(),  $('source-parents-section'));
+  renderChips($('source-children-list'), node.incomers('edge[relation="inherits"]').sources(), $('source-children-section'));
 
-  // Behavioural: function call graph
-  const callers = node.incomers('edge[relation="calls"]').sources();
-  const callees = node.outgoers('edge[relation="calls"]').targets();
-  renderChips($('source-callers-list'), callers, $('source-callers-section'));
-  renderChips($('source-callees-list'), callees, $('source-callees-section'));
+  // Trait implementation (Rust)
+  renderChips($('source-implements-list'),    node.outgoers('edge[relation="implements"]').targets(),  $('source-implements-section'));
+  renderChips($('source-implementors-list'),  node.incomers('edge[relation="implements"]').sources(), $('source-implementors-section'));
+
+  // Struct embedding (Go)
+  renderChips($('source-embeds-list'),        node.outgoers('edge[relation="embeds"]').targets(),  $('source-embeds-section'));
+  renderChips($('source-embedded-by-list'),   node.incomers('edge[relation="embeds"]').sources(), $('source-embedded-by-section'));
+
+  // Field type references / UML association (Rust)
+  renderChips($('source-uses-list'),    node.outgoers('edge[relation="uses"]').targets(),  $('source-uses-section'));
+  renderChips($('source-used-by-list'), node.incomers('edge[relation="uses"]').sources(), $('source-used-by-section'));
+
+  // Composition: type → methods
+  renderChips($('source-container-list'), node.incomers('edge[relation="contains"]').sources(), $('source-container-section'));
+  renderChips($('source-members-list'),   node.outgoers('edge[relation="contains"]').targets(), $('source-members-section'));
+
+  // Call graph
+  renderChips($('source-callers-list'), node.incomers('edge[relation="calls"]').sources(), $('source-callers-section'));
+  renderChips($('source-callees-list'), node.outgoers('edge[relation="calls"]').targets(), $('source-callees-section'));
 }
 
 function renderChips(listEl, nodes, sectionEl) {
@@ -531,7 +669,46 @@ async function doSearch() {
   $('graph-search-btn').disabled = true;
   $('graph-search').disabled = true;
   $('graph-search-btn').textContent = '…';
-  setStatus('Asking AI to find relevant symbols…');
+
+  // Show the search progress overlay
+  const overlay = $('search-overlay');
+  const callsContainer = $('search-overlay-calls');
+  callsContainer.innerHTML = '';
+  overlay.hidden = false;
+
+  // Track pending tool calls so tool_result can mark them done
+  const pendingCalls = [];
+
+  function addCall(name, input) {
+    const div = document.createElement('div');
+    div.className = 'search-overlay__call';
+
+    const icon = document.createElement('i');
+    icon.className = 'p-icon--circle-of-friends search-overlay__call-icon running';
+
+    const text = document.createElement('span');
+    text.className = 'search-overlay__call-text';
+    text.textContent = (name === 'search_symbols' && input?.query)
+      ? `Searching for "${input.query}"`
+      : name.replace(/_/g, ' ');
+
+    const status = document.createElement('span');
+    status.className = 'search-overlay__call-status';
+    status.textContent = 'Running…';
+
+    div.append(icon, text, status);
+    callsContainer.appendChild(div);
+    const entry = { icon, status };
+    pendingCalls.push(entry);
+    return entry;
+  }
+
+  function completeCall() {
+    const entry = pendingCalls.find(e => e.status.textContent === 'Running…');
+    if (!entry) return;
+    entry.icon.classList.remove('running');
+    entry.status.textContent = 'Done';
+  }
 
   const prompt =
     `In repository "${currentRepo}" version "${currentVersion}", use the search_symbols tool ` +
@@ -540,17 +717,24 @@ async function doSearch() {
   const matched = new Set();
   try {
     await queryStream(prompt, event => {
-      if (event.type === 'tool_result' && event.name === 'search_symbols' && event.preview) {
-        const parsed = tryParseJsonArray(event.preview);
-        if (parsed) parsed.forEach(r => { if (r.name && r.file) matched.add(`${r.file}:${r.name}`); });
+      if (event.type === 'tool_call') {
+        addCall(event.name, event.input);
+      } else if (event.type === 'tool_result') {
+        completeCall();
+        if (event.name === 'search_symbols' && event.preview) {
+          const parsed = tryParseJsonArray(event.preview);
+          if (parsed) parsed.forEach(r => { if (r.name && r.file) matched.add(`${r.file}:${r.name}`); });
+        }
       }
     });
   } catch (err) {
+    overlay.hidden = true;
     setStatus(`Search error: ${esc(err.message)}`);
     resetSearchControls();
     return;
   }
 
+  overlay.hidden = true;
   applySearchHighlight(matched, q);
   resetSearchControls();
 }
@@ -565,6 +749,8 @@ function tryParseJsonArray(text) {
 function applySearchHighlight(matchedIds, query) {
   if (!cy) return;
   if (!matchedIds.size) { setStatus(`No symbols found for "${esc(query)}"`); return; }
+
+  activeSearchMatched = matchedIds;
 
   cy.elements().addClass('dimmed').removeClass('ring active');
   const matched = cy.nodes('.symbol-node').filter(n => matchedIds.has(n.id()));
@@ -582,6 +768,7 @@ function applySearchHighlight(matchedIds, query) {
 }
 
 function clearSearch() {
+  activeSearchMatched = null;
   $('graph-search').value = '';
   $('graph-search-clear').hidden = true;
   clearStatus();

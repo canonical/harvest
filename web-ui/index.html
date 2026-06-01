@@ -199,9 +199,20 @@
           <!-- Graph canvas area -->
           <div class="repo-graph-wrap">
             <div id="cy" class="repo-graph"></div>
+            <!-- Search progress overlay (shown during AI search) -->
+            <div id="search-overlay" class="search-overlay" hidden>
+              <div class="search-overlay__panel">
+                <div class="search-overlay__heading">
+                  <div class="loading-dots"><span></span><span></span><span></span></div>
+                  <span>Searching…</span>
+                </div>
+                <div id="search-overlay-calls" class="search-overlay__calls"></div>
+              </div>
+            </div>
+
             <div id="repo-loading" class="repo-loading" hidden>
               <div class="loading-dots"><span></span><span></span><span></span></div>
-              <span>Loading graph…</span>
+              <span id="repo-loading-text">Loading graph…</span>
             </div>
             <div id="repo-empty" class="repo-empty">
               <div class="repo-empty__icon">⬡</div>
