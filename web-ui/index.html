@@ -137,18 +137,22 @@
 
         <!-- Input bar -->
         <div class="input-area">
-          <textarea
-            id="query-input"
-            placeholder="Ask about our code"
-            rows="1"
-            aria-label="Query input"
-          ></textarea>
-          <button
-            id="send-btn"
-            class="p-button--positive"
-            type="button"
-            aria-label="Send query"
-          >Send</button>
+          <div class="p-search-box">
+            <input
+              id="query-input"
+              class="p-search-box__input"
+              type="search"
+              placeholder="Ask about our code"
+              aria-label="Query input"
+              autocomplete="off"
+            />
+            <button
+              id="send-btn"
+              class="p-search-box__button"
+              type="button"
+              aria-label="Send query"
+            ><i class="p-icon--arrow-right" aria-hidden="true"></i></button>
+          </div>
         </div>
       </section>
 

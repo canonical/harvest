@@ -272,7 +272,6 @@ async function sendQuery() {
   if (!query || isLoading(state)) return;
 
   inputEl.value = '';
-  autoResize();
 
   state = addUserMessage(state, query);
   state = startAssistantMessage(state);
