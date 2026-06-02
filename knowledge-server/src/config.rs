@@ -47,6 +47,7 @@ pub enum LlmConfig {
         #[serde(default = "default_max_retries")]
         max_retries: u32,
     },
+    #[serde(rename = "openai-compatible")]
     OpenAiCompat {
         base_url: String,
         api_key: String,
