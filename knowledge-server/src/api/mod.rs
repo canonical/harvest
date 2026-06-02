@@ -5,7 +5,8 @@ pub mod repositories;
 pub mod tool_description;
 
 use axum::{
-    routing::{get, post},
+    middleware::from_fn_with_state,
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -13,6 +14,8 @@ use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::agent::Agent;
+use crate::auth::{self, handlers as auth_handlers, AuthState};
+use crate::config::AuthConfig;
 use crate::neo4j::Neo4jClient;
 
 pub type GraphCache = RwLock<HashMap<String, Arc<String>>>;
@@ -28,6 +31,7 @@ pub struct AppState {
     pub agent: Arc<Agent>,
     pub neo4j: Arc<Neo4jClient>,
     pub docs_dir: Option<Arc<PathBuf>>,
+    pub auth: Arc<AuthConfig>,
 }
 
 pub fn router(state: AppState, cache: Arc<GraphCache>) -> Router {
@@ -36,6 +40,25 @@ pub fn router(state: AppState, cache: Arc<GraphCache>) -> Router {
         cache,
     });
 
+    let auth_state = Arc::new(AuthState {
+        neo4j: Arc::clone(&state.neo4j),
+        config: Arc::clone(&state.auth),
+        http: reqwest::Client::new(),
+    });
+
+    let jwt_secret = Arc::new(state.auth.jwt_secret.clone());
+
+    // ── Public routes ─────────────────────────────────────────────────────────
+    let public_router = Router::new()
+        .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
+        .route("/auth/register", post(auth_handlers::register))
+        .route("/auth/login", post(auth_handlers::login))
+        .route("/auth/logout", post(auth_handlers::logout))
+        .route("/auth/google", get(auth_handlers::google_redirect))
+        .route("/auth/google/callback", get(auth_handlers::google_callback))
+        .with_state(Arc::clone(&auth_state));
+
+    // ── Protected routes (any authenticated user) ─────────────────────────────
     let agent_router = Router::new()
         .route("/query", post(query::handle_query))
         .route("/query/stream", post(query::handle_query_stream))
@@ -48,20 +71,41 @@ pub fn router(state: AppState, cache: Arc<GraphCache>) -> Router {
         .route("/graph/:repo/:version/source", get(graph::handle_get_symbol_source))
         .with_state(Arc::clone(&graph_state));
 
-    let mut router = Router::new()
+    let me_router = Router::new()
+        .route("/auth/me", get(auth_handlers::me))
+        .with_state(Arc::clone(&auth_state));
+
+    let mut protected_router = Router::new()
+        .merge(me_router)
         .merge(agent_router)
-        .merge(graph_router)
-        .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }));
+        .merge(graph_router);
 
     if let Some(docs_dir) = state.docs_dir {
         let docs_router = Router::new()
             .route("/docs/:repo/:version", get(docs::handle_get_index))
             .route("/docs/:repo/:version/:section/*filename", get(docs::handle_get_page))
             .with_state(docs_dir);
-        router = router.merge(docs_router);
+        protected_router = protected_router.merge(docs_router);
     }
 
-    router
+    let protected_router = protected_router
+        .layer(from_fn_with_state(Arc::clone(&jwt_secret), auth::require_auth));
+
+    // ── Admin routes (admin role required) ────────────────────────────────────
+    let admin_router = Router::new()
+        .route("/admin/users", get(crate::admin::handlers::list_users))
+        .route("/admin/users/:id/role", put(crate::admin::handlers::set_user_role))
+        .route("/admin/users/:id/groups", put(crate::admin::handlers::set_user_groups))
+        .route("/admin/groups", get(crate::admin::handlers::list_groups))
+        .route("/admin/groups", post(crate::admin::handlers::create_group))
+        .route("/admin/groups/:id", delete(crate::admin::handlers::delete_group))
+        .with_state(Arc::clone(&auth_state))
+        .layer(from_fn_with_state(Arc::clone(&jwt_secret), auth::require_admin));
+
+    Router::new()
+        .merge(public_router)
+        .merge(protected_router)
+        .merge(admin_router)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
 }

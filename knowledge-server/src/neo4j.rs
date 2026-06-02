@@ -12,6 +12,11 @@ impl Neo4jClient {
         Ok(Self { graph })
     }
 
+    pub async fn run(&self, cypher: &str) -> Result<()> {
+        self.graph.run(query(cypher)).await?;
+        Ok(())
+    }
+
     pub async fn query_read(&self, cypher: &str, params: Value) -> Result<Vec<Value>> {
         let mut q = query(cypher);
 
