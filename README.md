@@ -13,18 +13,18 @@ Harvest turns versioned source code repositories into a queryable knowledge grap
 │  (Rust CLI / daemon)│     │  functions, classes, │     │ server       │
 │  git + tree-sitter  │     │  calls, imports, …   │     │ (HTTP + SSE) │
 └─────────────────────┘     └──────────────────────┘     └──────┬───────┘
-                                                                  │
-                                                         ┌────────▼───────┐
-                                                         │    web-ui      │
-                                                         │  (Vite / JS)   │
-                                                         └────────────────┘
+                                                                │
+                                                       ┌────────▼───────┐
+                                                       │    web-ui      │
+                                                       │  (Vite / JS)   │
+                                                       └────────────────┘
 ```
 
 ---
 
 ## What it does
 
-1. **Harvester** clones each repository, walks every git tag, and parses the source with [tree-sitter](https://tree-sitter.github.io/tree-sitter/). Functions, classes, imports, and call edges are written to Neo4j. Each `(repo, version)` pair is an atomic unit — safe to interrupt and re-run.
+1. **Harvester** clones each repository, walks provided git refs, and parses the source with [tree-sitter](https://tree-sitter.github.io/tree-sitter/). Functions, classes, imports, and call edges are written to Neo4j. Each `(repo, version)` pair is an atomic unit — safe to interrupt and re-run.
 
 2. **Server** exposes a REST + SSE API. A query triggers an agentic loop: the LLM calls graph tools (search, source retrieval, call-graph traversal, custom Cypher) until it has enough context, then returns a structured answer with inline `[repo:version:file:line]` citations.
 
