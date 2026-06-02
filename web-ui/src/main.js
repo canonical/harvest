@@ -6,6 +6,9 @@ import { initRepositoriesPage, onRepositoriesPageShow, onRepositoriesPageHide } 
 import { initDocumentationPage } from './documentation.js';
 import { renderMarkdown, buildFileUrl } from './markdown.js';
 import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
+import { escapeHtml as esc, addCopyButtons } from './utils.js';
+import { initSourcePanel } from './source-panel.js';
+import { mountInlineGraphs } from './inline-graph.js';
 import {
   createChatState,
   addUserMessage,
@@ -18,15 +21,6 @@ import {
   getMessages,
   isLoading,
 } from './chat.js';
-
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 
 let state = createChatState();
 let repoUrlMap = {};
@@ -59,7 +53,8 @@ function render() {
   sendBtn.disabled = loading;
   inputEl.disabled = loading;
 
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  const atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+  if (atBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
 
   [...messagesEl.querySelectorAll('.message--assistant')].forEach((el, i) => {
     const group = el.querySelector('details.tc-group');
@@ -88,55 +83,15 @@ function render() {
     row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
   });
 
-  messagesEl.querySelectorAll('.message__body pre').forEach(pre => {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'code-block';
-    pre.parentNode.insertBefore(wrapper, pre);
-    wrapper.appendChild(pre);
-
-    const btn = document.createElement('button');
-    btn.className = 'copy-btn';
-    btn.textContent = 'Copy';
-    btn.addEventListener('click', () => {
-      const text = (pre.querySelector('code') ?? pre).innerText;
-      copyText(text).then(() => {
-        btn.textContent = 'Copied!';
-      }).catch(() => {
-        btn.textContent = 'Failed';
-      }).finally(() => {
-        setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
-      });
-    });
-    wrapper.appendChild(btn);
-  });
-}
-
-function copyText(text) {
-  if (navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(text);
-  }
-  return new Promise((resolve, reject) => {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    try {
-      document.execCommand('copy') ? resolve() : reject(new Error('execCommand failed'));
-    } catch (e) {
-      reject(e);
-    } finally {
-      document.body.removeChild(ta);
-    }
-  });
+  addCopyButtons(messagesEl, '.message__body pre');
+  mountInlineGraphs(messagesEl);
 }
 
 function renderMessage(msg) {
   if (msg.role === 'user') {
     return `
       <div class="message message--user">
-        <div class="message__bubble">${escapeHtml(msg.text)}</div>
+        <div class="message__bubble">${esc(msg.text)}</div>
       </div>
     `;
   }
@@ -155,7 +110,7 @@ function renderMessage(msg) {
     return `
       <div class="message message--assistant message--error">
         <div class="message__bubble">
-          <strong>Error:</strong> ${escapeHtml(msg.error)}
+          <strong>Error:</strong> ${esc(msg.error)}
         </div>
       </div>
     `;
@@ -190,12 +145,12 @@ function renderMessage(msg) {
         ${msg.sources.map((s, i) => {
           const repoUrl = repoUrlMap[s.repo];
           const fileUrl = repoUrl ? buildFileUrl(repoUrl, s.version, s.file, s.line) : null;
-          const title = escapeHtml(`${s.repo} ${s.version} · ${s.file}:${s.line}`);
-          const filename = escapeHtml(s.file.split('/').pop());
-          const desc = escapeHtml(`${s.repo} · L${s.line}`);
+          const title = esc(`${s.repo} ${s.version} · ${s.file}:${s.line}`);
+          const filename = esc(s.file.split('/').pop());
+          const desc = esc(`${s.repo} · L${s.line}`);
           const inner = `<span class="source-chip__num">${i + 1}</span><strong class="source-chip__name">${filename}</strong><span class="source-chip__desc">${desc}</span>`;
           return fileUrl
-            ? `<a href="${escapeHtml(fileUrl)}" class="source-chip" target="_blank" rel="noopener noreferrer" title="${title}">${inner}</a>`
+            ? `<a href="${esc(fileUrl)}" class="source-chip" target="_blank" rel="noopener noreferrer" title="${title}">${inner}</a>`
             : `<span class="source-chip" title="${title}">${inner}</span>`;
         }).join('')}
       </div>
@@ -215,13 +170,13 @@ function renderMessage(msg) {
 
 function renderToolCall(tc, i) {
   const label = tc.description
-    ? escapeHtml(tc.description)
-    : `<span class="tc-step__name-bare">${escapeHtml(tc.name.replace(/_/g, ' '))}</span>`;
+    ? esc(tc.description)
+    : `<span class="tc-step__name-bare">${esc(tc.name.replace(/_/g, ' '))}</span>`;
 
   const hasDetail = !!(tc.input || tc.preview);
   const detailHtml = hasDetail ? `
     <div class="tc-step__detail" hidden>
-      <span class="tc-step__tool-tag">${escapeHtml(tc.name)}</span>
+      <span class="tc-step__tool-tag">${esc(tc.name)}</span>
       ${tc.input ? `
         <div class="tc-step__detail-section">
           <div class="tc-step__detail-label">Input</div>
@@ -238,7 +193,7 @@ function renderToolCall(tc, i) {
   return `
     <div class="tc-step tc-step--${tc.status}" data-tc-idx="${i}">
       <div class="tc-step__row${hasDetail ? ' tc-step__row--clickable' : ''}" ${hasDetail ? 'role="button" tabindex="0" aria-expanded="false"' : ''}>
-        <i class="p-icon--circle-of-friends tc-step__icon${tc.description ? '' : ' tc-step__icon--spinning'}" aria-hidden="true"></i>
+        <i class="p-icon--circle-of-friends tc-step__icon${tc.status === 'running' && !tc.description ? ' tc-step__icon--spinning' : ''}" aria-hidden="true"></i>
         <span class="tc-step__label">${label}</span>
         ${hasDetail ? `
           <svg class="tc-step__chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><polyline points="2,3 5,7 8,3"/></svg>` : ''}
@@ -317,6 +272,12 @@ function openNav() {
 }
 
 function closeNav() {
+  // Vanilla's .l-navigation.is-collapsed:focus-within { transform: none } rule
+  // keeps the nav visible if anything inside it still has focus when we collapse.
+  // Blur first so that rule never fires.
+  if (navEl.contains(document.activeElement)) {
+    document.activeElement.blur();
+  }
   navEl.classList.add('is-collapsed');
   navToggleEl.setAttribute('aria-expanded', 'false');
 }
@@ -357,6 +318,7 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
 
 applyStoredTheme();
 updateThemeButton();
+initSourcePanel();
 
 const docsPage = initDocumentationPage(
   document.getElementById('page-documentation'),
