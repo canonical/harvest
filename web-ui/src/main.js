@@ -1,7 +1,7 @@
 import './vanilla.scss';
 import './style.css';
 import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
-import { queryStream, fetchToolDescription, fetchRepositories } from './api.js';
+import { queryStream, fetchToolDescription, fetchRepositories, setUnauthorizedHandler } from './api.js';
 import { initRepositoriesPage, onRepositoriesPageShow, onRepositoriesPageHide } from './repositories.js';
 import { initDocumentationPage } from './documentation.js';
 import { renderMarkdown, buildFileUrl } from './markdown.js';
@@ -9,6 +9,10 @@ import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
 import { escapeHtml as esc, addCopyButtons } from './utils.js';
 import { initSourcePanel } from './source-panel.js';
 import { mountInlineGraphs } from './inline-graph.js';
+import {
+  fetchMe, logout, initAuthPages, showLoginPage, hideAuthPages, isAdmin, setUser,
+} from './auth.js';
+import { initAdminPage } from './admin.js';
 import {
   createChatState,
   addUserMessage,
@@ -306,6 +310,7 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
 
     const prevPage = document.querySelector('.page:not([hidden])');
     if (prevPage?.id === 'page-repositories') onRepositoriesPageHide();
+    if (page === 'admin' && !isAdmin()) return;
 
     document.querySelectorAll('.page').forEach(p => { p.hidden = true; });
     document.getElementById(`page-${page}`).hidden = false;
@@ -325,11 +330,55 @@ const docsPage = initDocumentationPage(
   [],
 );
 
-fetchRepositories().then((repos) => {
-  repoUrlMap = Object.fromEntries(
-    repos.filter(r => r.url).map(r => [r.name, r.url])
-  );
-  initRepositoriesPage(repos);
-  docsPage.update(repos);
+// ── Auth guard ────────────────────────────────────────────────────────────────
+
+const mainEl    = document.querySelector('.l-main');
+const navEl2    = document.getElementById('app-sidebar');
+const adminNavItem = document.getElementById('nav-item-admin');
+const logoutBtn = document.getElementById('logout-btn');
+
+function showApp(user) {
+  setUser(user);
+  hideAuthPages();
+  mainEl.hidden = false;
+  navEl2.hidden = false;
+
+  // Show admin nav item only for admins
+  if (adminNavItem) adminNavItem.hidden = user.role !== 'admin';
+
+  // Init admin page if present
+  const adminPage = document.getElementById('page-admin');
+  if (adminPage && user.role === 'admin') initAdminPage(adminPage);
+
+  fetchRepositories().then((repos) => {
+    repoUrlMap = Object.fromEntries(
+      repos.filter(r => r.url).map(r => [r.name, r.url])
+    );
+    initRepositoriesPage(repos);
+    docsPage.update(repos);
+  });
+  render();
+}
+
+function showAuth() {
+  mainEl.hidden = true;
+  navEl2.hidden = true;
+  showLoginPage();
+}
+
+setUnauthorizedHandler(showAuth);
+
+initAuthPages({ onLoginSuccess: showApp });
+
+logoutBtn?.addEventListener('click', async () => {
+  await logout();
+  showAuth();
 });
-render();
+
+fetchMe().then(user => {
+  if (user) {
+    showApp(user);
+  } else {
+    showAuth();
+  }
+});

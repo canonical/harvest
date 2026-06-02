@@ -13,6 +13,54 @@
   </script>
 </head>
 <body>
+  <!-- ── Login page ─────────────────────────────────────────────────────── -->
+  <div id="page-login" class="auth-page" hidden>
+    <div class="auth-card">
+      <h1 class="p-heading--2">Sign in to Harvest</h1>
+      <form id="login-form" class="p-form" novalidate>
+        <div class="p-form__group">
+          <label class="p-form__label" for="login-email">Email</label>
+          <input id="login-email" class="p-form__control" type="email" autocomplete="email" required />
+        </div>
+        <div class="p-form__group">
+          <label class="p-form__label" for="login-password">Password</label>
+          <input id="login-password" class="p-form__control" type="password" autocomplete="current-password" required />
+        </div>
+        <p id="login-error" class="auth-error" role="alert"></p>
+        <button class="p-button--positive u-no-margin--bottom" type="submit" style="width:100%">Sign in</button>
+      </form>
+      <hr />
+      <button id="google-login-btn" class="p-button u-no-margin--bottom" type="button" style="width:100%">
+        Login with Google
+      </button>
+      <p class="auth-switch">No account? <a href="#" id="to-register-link">Register</a></p>
+    </div>
+  </div>
+
+  <!-- ── Register page ──────────────────────────────────────────────────── -->
+  <div id="page-register" class="auth-page" hidden>
+    <div class="auth-card">
+      <h1 class="p-heading--2">Create account</h1>
+      <form id="register-form" class="p-form" novalidate>
+        <div class="p-form__group">
+          <label class="p-form__label" for="register-name">Display name</label>
+          <input id="register-name" class="p-form__control" type="text" autocomplete="name" required />
+        </div>
+        <div class="p-form__group">
+          <label class="p-form__label" for="register-email">Email</label>
+          <input id="register-email" class="p-form__control" type="email" autocomplete="email" required />
+        </div>
+        <div class="p-form__group">
+          <label class="p-form__label" for="register-password">Password <span class="u-text--muted">(min 8 chars)</span></label>
+          <input id="register-password" class="p-form__control" type="password" autocomplete="new-password" required />
+        </div>
+        <p id="register-error" class="auth-error" role="alert"></p>
+        <button class="p-button--positive u-no-margin--bottom" type="submit" style="width:100%">Create account</button>
+      </form>
+      <p class="auth-switch">Already have an account? <a href="#" id="to-login-link">Sign in</a></p>
+    </div>
+  </div>
+
   <div class="l-application">
 
     <div class="l-navigation-bar">
@@ -79,6 +127,12 @@
 
             <div class="p-side-navigation--icons sidenav-bottom-container">
               <ul class="p-side-navigation__list">
+                <li class="p-side-navigation__item" id="nav-item-admin" hidden>
+                  <a href="#" class="p-side-navigation__link" data-page="admin">
+                    <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                    <span class="p-side-navigation__label">Admin</span>
+                  </a>
+                </li>
                 <li class="p-side-navigation__item">
                   <button
                     id="theme-btn"
@@ -86,6 +140,17 @@
                     type="button"
                     aria-label="Switch colour theme"
                   ></button>
+                </li>
+                <li class="p-side-navigation__item">
+                  <button
+                    id="logout-btn"
+                    class="p-side-navigation__link"
+                    type="button"
+                    aria-label="Sign out"
+                  >
+                    <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                    <span class="p-side-navigation__label">Sign out</span>
+                  </button>
                 </li>
               </ul>
             </div>
@@ -222,6 +287,111 @@
       </section>
 
       <section class="page page--docs" id="page-documentation" hidden>
+      </section>
+
+      <section class="page page--admin" id="page-admin" hidden>
+
+        <!-- Toast notification -->
+        <div id="admin-toast" class="admin-toast" hidden aria-live="polite"></div>
+
+        <div class="admin-wrap">
+
+          <!-- Page header -->
+          <header class="admin-page-header">
+            <h2 class="p-heading--3 u-no-margin--bottom">Admin</h2>
+            <div id="admin-stats" class="admin-page-header__stats"></div>
+          </header>
+
+          <!-- Tabs -->
+          <div class="p-tabs">
+            <ul class="p-tabs__list" role="tablist" aria-label="Admin sections">
+              <li class="p-tabs__item" role="presentation">
+                <button class="p-tabs__link" id="tab-users" role="tab"
+                  aria-selected="true" aria-controls="panel-users">Users</button>
+              </li>
+              <li class="p-tabs__item" role="presentation">
+                <button class="p-tabs__link" id="tab-groups" role="tab"
+                  aria-selected="false" aria-controls="panel-groups" tabindex="-1">Groups</button>
+              </li>
+            </ul>
+          </div>
+
+          <!-- Users panel -->
+          <div id="panel-users" role="tabpanel" aria-labelledby="tab-users">
+            <div id="admin-users-container"></div>
+          </div>
+
+          <!-- Groups panel -->
+          <div id="panel-groups" role="tabpanel" aria-labelledby="tab-groups" hidden>
+            <div class="admin-panel-toolbar">
+              <button id="add-group-btn" class="p-button--positive" type="button">Add group</button>
+            </div>
+            <div id="admin-groups-container"></div>
+          </div>
+
+        </div>
+
+        <!-- ── Create group modal ───────────────────────────────────────────── -->
+        <div class="p-modal" id="modal-create-group" hidden>
+          <div class="p-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="modal-create-group-title">
+            <header class="p-modal__header">
+              <h2 class="p-modal__title" id="modal-create-group-title">Add group</h2>
+              <button class="p-modal__close" id="modal-create-group-close" aria-label="Close" aria-controls="modal-create-group">Close</button>
+            </header>
+            <div class="p-modal__body">
+              <div class="p-form__group row">
+                <label class="p-form__label" for="group-name-input">Name</label>
+                <input id="group-name-input" class="p-form__control" type="text" autocomplete="off" />
+              </div>
+              <div class="p-form__group row">
+                <label class="p-form__label" for="group-desc-input">Description <span class="u-text--muted">(optional)</span></label>
+                <input id="group-desc-input" class="p-form__control" type="text" autocomplete="off" />
+              </div>
+              <p id="create-group-error" class="auth-error" role="alert"></p>
+            </div>
+            <footer class="p-modal__footer">
+              <button id="modal-create-group-cancel" class="p-button u-no-margin--bottom" type="button">Cancel</button>
+              <button id="modal-create-group-submit" class="p-button--positive u-no-margin--bottom" type="button">Create</button>
+            </footer>
+          </div>
+        </div>
+
+        <!-- ── Edit user modal ──────────────────────────────────────────────── -->
+        <div class="p-modal" id="modal-edit-user" hidden>
+          <div class="p-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="modal-edit-user-title">
+            <header class="p-modal__header">
+              <h2 class="p-modal__title" id="modal-edit-user-title">Edit user</h2>
+              <button class="p-modal__close" id="modal-edit-user-close" aria-label="Close" aria-controls="modal-edit-user">Close</button>
+            </header>
+            <div class="p-modal__body">
+              <div class="admin-modal-user-header">
+                <div class="admin-avatar admin-avatar--lg" id="modal-user-avatar"></div>
+                <div>
+                  <p class="u-no-margin--bottom" id="modal-user-name" style="font-weight:600"></p>
+                  <p class="u-text--muted u-no-margin--bottom" id="modal-user-email" style="font-size:0.875rem"></p>
+                </div>
+              </div>
+              <hr class="u-no-margin--top" />
+              <div class="p-form__group row">
+                <label class="p-form__label" for="edit-user-role">Role</label>
+                <select id="edit-user-role" class="p-form__control">
+                  <option value="regular">Regular</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </div>
+              <div class="p-form__group row">
+                <label class="p-form__label">Groups</label>
+                <div id="edit-user-groups-list" class="admin-checklist"></div>
+              </div>
+              <p id="edit-user-error" class="auth-error" role="alert"></p>
+            </div>
+            <footer class="p-modal__footer">
+              <button id="modal-edit-user-cancel" class="p-button u-no-margin--bottom" type="button">Cancel</button>
+              <button id="modal-edit-user-save" class="p-button--positive u-no-margin--bottom" type="button">Save changes</button>
+            </footer>
+          </div>
+        </div>
+
       </section>
 
     </main>
