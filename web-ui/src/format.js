@@ -1,4 +1,5 @@
 import hljs from 'highlight.js';
+import { escapeHtml as esc } from './utils.js';
 
 const EXT_TO_LANG = {
   rs: 'rust', py: 'python', js: 'javascript', ts: 'typescript',
@@ -162,7 +163,7 @@ function tryRenderAsSource(parsed, filePath) {
   return `<div class="tool-source">${blocks.join('')}</div>`;
 }
 
-function langFromPath(filePath) {
+export function langFromPath(filePath) {
   if (!filePath) return 'plaintext';
   const ext = filePath.split('.').pop().toLowerCase();
   const lang = EXT_TO_LANG[ext] ?? ext;
@@ -205,13 +206,4 @@ function tryParsePartialArray(text) {
 
 function isPlainObject(v) {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
-function esc(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
