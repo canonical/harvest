@@ -46,6 +46,7 @@ pub enum LlmConfig {
         #[serde(default = "default_max_retries")]
         max_retries: u32,
     },
+    #[serde(rename = "openai-compatible")]
     OpenAiCompat {
         base_url: String,
         api_key: String,
@@ -199,7 +200,7 @@ name = "my-repo"
 url  = "https://github.com/owner/repo.git"
 
 [llm]
-provider = "open-ai-compat"
+provider = "openai-compatible"
 base_url = "https://api.groq.com/openai/v1"
 api_key  = "gsk_test"
 model    = "llama-3.3-70b"
