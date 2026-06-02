@@ -1,34 +1,8 @@
 import cytoscape from 'cytoscape';
-import fcose from 'cytoscape-fcose';
-import hljs from 'highlight.js';
-import { fetchGraph, fetchSymbolSource, queryStream, fetchToolDescription } from './api.js';
-
-cytoscape.use(fcose);
-
-const KIND_COLORS = {
-  class:     '#7C3AED',
-  struct:    '#6D28D9',
-  trait:     '#0891B2',
-  interface: '#0284C7',
-  function:  '#2563EB',
-  method:    '#1D4ED8',
-  enum:      '#D97706',
-  module:    '#6B7280',
-  impl:      '#059669',
-  type:      '#DB2777',
-};
-
-function kindColor(kind) {
-  return KIND_COLORS[kind?.toLowerCase()] ?? '#4F46E5';
-}
-
-function kindShape(kind) {
-  const k = kind?.toLowerCase() ?? '';
-  if (k === 'class' || k === 'struct' || k === 'trait' || k === 'interface' || k === 'enum') {
-    return 'rectangle';
-  }
-  return 'round-rectangle';
-}
+import { kindColor, kindShape, cytoscapeStyle } from './graph-utils.js';
+import { openSourcePanel, closeSourcePanel } from './source-panel.js';
+import { fetchGraph, queryStream, fetchToolDescription } from './api.js';
+import { escapeHtml as esc } from './utils.js';
 
 let cy = null;
 let currentRepo = null;
@@ -40,12 +14,6 @@ let activeLayoutWorker = null;
 let activeSearchMatched = null;
 
 const $ = id => document.getElementById(id);
-
-function esc(str) {
-  return String(str)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
 
 export function initRepositoriesPage(repos) {
   repoList = repos;
@@ -86,7 +54,7 @@ function bindEvents() {
   $('graph-search').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
   $('graph-search-clear').addEventListener('click', clearSearch);
   $('graph-fit-btn').addEventListener('click', () => cy?.fit(undefined, 40));
-  $('source-panel-close').addEventListener('click', () => { closeSourcePanel(); clearHighlight(); });
+  $('source-panel-close').addEventListener('click', clearHighlight);
 }
 
 function onRepoChange() {
@@ -297,221 +265,37 @@ function destroyCy() {
   clearStatus();
 }
 
-export function clearLayoutCache(repo, version) {
-  try { localStorage.removeItem(positionKey(repo, version)); } catch { /* ignore */ }
-}
-
-function cytoscapeStyle() {
-  return [
-    {
-      selector: 'node.file-node',
-      style: {
-        label: 'data(label)',
-        'background-color': 'data(color)',
-        'background-opacity': 0.06,
-        'border-width': 1.5,
-        'border-color': 'data(color)',
-        'border-opacity': 0.55,
-        color: 'data(color)',
-        'font-size': '11px',
-        'font-family': '"Ubuntu Mono", "Courier New", monospace',
-        'font-weight': '600',
-        'text-valign': 'top',
-        'text-halign': 'center',
-        'text-margin-y': -6,
-        padding: '24px 16px 14px',
-        'min-width': 60,
-        'min-height': 32,
-        'transition-property': 'opacity, border-opacity, background-opacity',
-        'transition-duration': '180ms',
-        cursor: 'default',
-      },
-    },
-    {
-      selector: 'node.file-node.dimmed',
-      style: { opacity: 0.1 },
-    },
-    {
-      selector: 'node.file-node.ring',
-      style: {
-        'border-opacity': 1,
-        'border-width': 2.5,
-        'background-opacity': 0.1,
-      },
-    },
-    {
-      selector: 'node.symbol-node',
-      style: {
-        label: 'data(label)',
-        'background-color': 'data(color)',
-        color: '#ffffff',
-        'font-size': '11px',
-        'font-family': '"Ubuntu Mono", "Courier New", monospace',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'text-wrap': 'ellipsis',
-        'text-max-width': '110px',
-        shape: 'data(shape)',
-        width: 'label',
-        height: 'label',
-        padding: '6px 11px',
-        'min-width': 48,
-        'min-height': 22,
-        'border-width': 0,
-        'border-color': '#ffffff',
-        'transition-property': 'opacity, border-width',
-        'transition-duration': '150ms',
-        cursor: 'pointer',
-      },
-    },
-    {
-      selector: 'node.symbol-node:selected',
-      style: { 'border-width': 3, 'border-color': '#ffffff' },
-    },
-    {
-      selector: 'node.symbol-node.dimmed',
-      style: { opacity: 0.1, color: 'transparent' },
-    },
-    {
-      selector: 'node.symbol-node.ring',
-      style: { 'border-width': 3, 'border-color': '#FFD700' },
-    },
-    {
-      selector: 'edge',
-      style: {
-        'curve-style': 'bezier',
-        'target-arrow-shape': 'none',
-        'source-arrow-shape': 'none',
-        'arrow-scale': 0.9,
-        width: 1.5,
-        'transition-property': 'opacity, line-color, target-arrow-color, source-arrow-color, width',
-        'transition-duration': '150ms',
-      },
-    },
-    {
-      selector: 'edge[relation="inherits"]',
-      style: {
-        'line-color': 'rgba(124,58,237,0.85)',
-        'target-arrow-shape': 'triangle',
-        'target-arrow-fill': 'hollow',
-        'target-arrow-color': 'rgba(124,58,237,0.85)',
-        'line-style': 'solid',
-        width: 2,
-      },
-    },
-    {
-      selector: 'edge[relation="implements"]',
-      style: {
-        'line-color': 'rgba(8,145,178,0.85)',
-        'target-arrow-shape': 'triangle',
-        'target-arrow-fill': 'hollow',
-        'target-arrow-color': 'rgba(8,145,178,0.85)',
-        'line-style': 'dashed',
-        'line-dash-pattern': [6, 3],
-        width: 2,
-      },
-    },
-    {
-      selector: 'edge[relation="embeds"]',
-      style: {
-        'line-color': 'rgba(5,150,105,0.7)',
-        'source-arrow-shape': 'diamond',
-        'source-arrow-fill': 'hollow',
-        'source-arrow-color': 'rgba(5,150,105,0.85)',
-        'line-style': 'solid',
-        width: 1.5,
-      },
-    },
-    {
-      selector: 'edge[relation="contains"]',
-      style: {
-        'line-color': 'rgba(139,92,246,0.55)',
-        'source-arrow-shape': 'diamond',
-        'source-arrow-fill': 'filled',
-        'source-arrow-color': 'rgba(139,92,246,0.75)',
-        'line-style': 'solid',
-        width: 1.5,
-      },
-    },
-    {
-      selector: 'edge[relation="uses"]',
-      style: {
-        'line-color': 'rgba(217,119,6,0.6)',
-        'target-arrow-shape': 'triangle',
-        'target-arrow-color': 'rgba(217,119,6,0.75)',
-        'line-style': 'solid',
-        width: 1,
-      },
-    },
-    {
-      selector: 'edge[relation="calls"]',
-      style: {
-        'line-color': 'rgba(120,120,120,0.4)',
-        'target-arrow-shape': 'triangle',
-        'target-arrow-color': 'rgba(120,120,120,0.55)',
-        'line-style': 'dashed',
-        'line-dash-pattern': [5, 3],
-      },
-    },
-    {
-      selector: 'edge.dimmed',
-      style: { opacity: 0.04 },
-    },
-    {
-      selector: 'edge[relation="inherits"].active',
-      style: { 'line-color': '#7C3AED', 'target-arrow-color': '#7C3AED', width: 2.5, opacity: 1 },
-    },
-    {
-      selector: 'edge[relation="implements"].active',
-      style: { 'line-color': '#0891B2', 'target-arrow-color': '#0891B2', width: 2.5, opacity: 1 },
-    },
-    {
-      selector: 'edge[relation="embeds"].active',
-      style: { 'line-color': '#059669', 'source-arrow-color': '#059669', width: 2, opacity: 1 },
-    },
-    {
-      selector: 'edge[relation="uses"].active',
-      style: { 'line-color': '#D97706', 'target-arrow-color': '#D97706', width: 2, opacity: 1 },
-    },
-    {
-      selector: 'edge[relation="contains"].active',
-      style: {
-        'line-color': '#8B5CF6',
-        'source-arrow-color': '#8B5CF6',
-        width: 2,
-        opacity: 1,
-      },
-    },
-    {
-      selector: 'edge[relation="calls"].active',
-      style: {
-        'line-color': '#3B82F6',
-        'target-arrow-color': '#3B82F6',
-        width: 2.5,
-        opacity: 1,
-      },
-    },
-  ];
-}
-
-async function onNodeTap(evt) {
+function onNodeTap(evt) {
   const node = evt.target;
   highlightNeighborhood(node);
-  showSourcePanel(node.data());
-  await loadSymbolSource(node.data());
-  populateRelations(node);
+  openSourcePanel(node.data(), currentRepo, currentVersion, buildRelationSections(node));
 }
 
-function onFileNodeTap(evt) {
-  const fileNode = evt.target;
-  const symbols = fileNode.children();
-  if (!symbols.length) return;
+function buildRelationSections(node) {
+  const chip = n => ({
+    name: n.data('label'),
+    title: n.data('file'),
+    onClick: () => {
+      highlightNeighborhood(n);
+      openSourcePanel(n.data(), currentRepo, currentVersion, buildRelationSections(n));
+      cy.animate({ center: { eles: n }, zoom: Math.max(cy.zoom(), 1.2), duration: 350, easing: 'ease-in-out' });
+    },
+  });
 
-  cy.elements().addClass('dimmed').removeClass('active ring');
-  const neighborhood = symbols.closedNeighborhood();
-  neighborhood.removeClass('dimmed');
-  fileNode.removeClass('dimmed').addClass('ring');
-  symbols.connectedEdges().addClass('active');
+  return [
+    { label: 'Extends',        chips: node.outgoers('edge[relation="inherits"]').targets().map(chip) },
+    { label: 'Subclasses',     chips: node.incomers('edge[relation="inherits"]').sources().map(chip) },
+    { label: 'Implements',     chips: node.outgoers('edge[relation="implements"]').targets().map(chip) },
+    { label: 'Implemented by', chips: node.incomers('edge[relation="implements"]').sources().map(chip) },
+    { label: 'Embeds',         chips: node.outgoers('edge[relation="embeds"]').targets().map(chip) },
+    { label: 'Embedded by',    chips: node.incomers('edge[relation="embeds"]').sources().map(chip) },
+    { label: 'Uses',           chips: node.outgoers('edge[relation="uses"]').targets().map(chip) },
+    { label: 'Used by',        chips: node.incomers('edge[relation="uses"]').sources().map(chip) },
+    { label: 'Member of',      chips: node.incomers('edge[relation="contains"]').sources().map(chip) },
+    { label: 'Methods',        chips: node.outgoers('edge[relation="contains"]').targets().map(chip) },
+    { label: 'Callers',        chips: node.incomers('edge[relation="calls"]').sources().map(chip) },
+    { label: 'Callees',        chips: node.outgoers('edge[relation="calls"]').targets().map(chip) },
+  ].filter(s => s.chips.length > 0);
 }
 
 function highlightNeighborhood(node) {
@@ -539,85 +323,6 @@ function restoreSearchHighlight() {
   const matched = cy.nodes('.symbol-node').filter(n => activeSearchMatched.has(n.id()));
   matched.closedNeighborhood().removeClass('dimmed');
   matched.forEach(n => { n.addClass('ring'); n.parent().removeClass('dimmed').addClass('ring'); });
-}
-
-function showSourcePanel(data) {
-  const badge = $('source-kind-badge');
-  badge.textContent = data.kind.toLowerCase();
-  badge.className = `source-kind-badge source-kind-badge--${data.kind.toLowerCase()}`;
-  $('source-symbol-name').textContent = data.label;
-  $('source-symbol-file').textContent = `${data.file}  ·  line ${data.start_line}`;
-  $('source-code').textContent = '// Loading…';
-  $('source-code').className = '';
-  $('source-callers-section').hidden = true;
-  $('source-callees-section').hidden = true;
-  $('repo-source-panel').classList.add('is-open');
-}
-
-function closeSourcePanel() {
-  $('repo-source-panel').classList.remove('is-open');
-}
-
-async function loadSymbolSource(data) {
-  const codeEl = $('source-code');
-  try {
-    const sym = await fetchSymbolSource(currentRepo, currentVersion, data.file, data.label);
-    if (!sym?.source) { codeEl.textContent = '// Source not available'; return; }
-    const ext = data.file.split('.').pop().toLowerCase();
-    const lang = { rs: 'rust', py: 'python', js: 'javascript', ts: 'typescript',
-                   go: 'go', java: 'java', cpp: 'cpp', cc: 'cpp', c: 'c',
-                   rb: 'ruby', sh: 'bash' }[ext];
-    if (lang && hljs.getLanguage(lang)) {
-      const result = hljs.highlight(sym.source, { language: lang, ignoreIllegals: true });
-      codeEl.innerHTML = result.value;
-      codeEl.className = `hljs language-${lang}`;
-    } else {
-      codeEl.textContent = sym.source;
-    }
-  } catch (err) {
-    codeEl.textContent = `// Error: ${err.message}`;
-  }
-}
-
-function populateRelations(node) {
-  renderChips($('source-parents-list'),  node.outgoers('edge[relation="inherits"]').targets(),  $('source-parents-section'));
-  renderChips($('source-children-list'), node.incomers('edge[relation="inherits"]').sources(), $('source-children-section'));
-
-  renderChips($('source-implements-list'),    node.outgoers('edge[relation="implements"]').targets(),  $('source-implements-section'));
-  renderChips($('source-implementors-list'),  node.incomers('edge[relation="implements"]').sources(), $('source-implementors-section'));
-
-  renderChips($('source-embeds-list'),        node.outgoers('edge[relation="embeds"]').targets(),  $('source-embeds-section'));
-  renderChips($('source-embedded-by-list'),   node.incomers('edge[relation="embeds"]').sources(), $('source-embedded-by-section'));
-
-  renderChips($('source-uses-list'),    node.outgoers('edge[relation="uses"]').targets(),  $('source-uses-section'));
-  renderChips($('source-used-by-list'), node.incomers('edge[relation="uses"]').sources(), $('source-used-by-section'));
-
-  renderChips($('source-container-list'), node.incomers('edge[relation="contains"]').sources(), $('source-container-section'));
-  renderChips($('source-members-list'),   node.outgoers('edge[relation="contains"]').targets(), $('source-members-section'));
-
-  renderChips($('source-callers-list'), node.incomers('edge[relation="calls"]').sources(), $('source-callers-section'));
-  renderChips($('source-callees-list'), node.outgoers('edge[relation="calls"]').targets(), $('source-callees-section'));
-}
-
-function renderChips(listEl, nodes, sectionEl) {
-  if (!nodes.length) { sectionEl.hidden = true; return; }
-  sectionEl.hidden = false;
-  listEl.innerHTML = '';
-  nodes.forEach(n => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'relation-chip';
-    btn.textContent = n.data('label');
-    btn.title = n.data('file');
-    btn.addEventListener('click', () => {
-      highlightNeighborhood(n);
-      showSourcePanel(n.data());
-      loadSymbolSource(n.data());
-      populateRelations(n);
-      cy.animate({ center: { eles: n }, zoom: Math.max(cy.zoom(), 1.2), duration: 350, easing: 'ease-in-out' });
-    });
-    listEl.appendChild(btn);
-  });
 }
 
 async function doSearch() {
