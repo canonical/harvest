@@ -1,6 +1,7 @@
 import { marked } from 'marked';
 import { markedHighlight } from 'marked-highlight';
 import hljs from 'highlight.js';
+import { escapeHtml as esc } from './utils.js';
 
 const CITATION_RE = /\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+):(\d+)\]/g;
 
@@ -15,8 +16,23 @@ marked.use(
 );
 
 marked.use({
-  renderer: {
-  },
+  extensions: [
+    {
+      name: 'harvest-graph',
+      level: 'block',
+      start(src) { return src.indexOf('```harvest-graph'); },
+      tokenizer(src) {
+        const match = src.match(/^```harvest-graph\n([\s\S]*?)\n```(?:\n|$)/);
+        if (match) {
+          return { type: 'harvest-graph', raw: match[0], text: match[1] };
+        }
+      },
+      renderer(token) {
+        const encoded = encodeURIComponent(token.text);
+        return `<div class="inline-graph" data-graph="${encoded}"></div>\n`;
+      },
+    },
+  ],
   hooks: {
     postprocess(html) {
       return html.replace(/<script[\s\S]*?<\/script>/gi, '');
@@ -62,15 +78,6 @@ function normalizeRepoUrl(url) {
   let normalized = url.replace(/^git@([^:]+):/, 'https://$1/');
   normalized = normalized.replace(/\.git$/, '');
   return normalized;
-}
-
-function esc(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
 }
 
 export function formatCitation({ repo, version, file, line }) {
