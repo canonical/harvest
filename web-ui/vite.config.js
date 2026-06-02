@@ -12,12 +12,14 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/query': 'http://localhost:8080',
-      '/repositories': 'http://localhost:8080',
-      '/graph': 'http://localhost:8080',
-      '/health': 'http://localhost:8080',
+      '/auth':             'http://localhost:8080',
+      '/admin':            'http://localhost:8080',
+      '/query':            'http://localhost:8080',
+      '/repositories':     'http://localhost:8080',
+      '/graph':            'http://localhost:8080',
+      '/health':           'http://localhost:8080',
       '/tool-description': 'http://localhost:8080',
-      '/docs': 'http://localhost:8080',
+      '/docs':             'http://localhost:8080',
     },
   },
 });
