@@ -1,4 +1,7 @@
 # Harvest
+| Chat | Explore | Document |
+|-|-|-|
+| <img width="1920" height="952" alt="image" src="https://github.com/user-attachments/assets/cb1311b8-df2c-4644-b68f-df667446082a" /> | <img width="1920" height="952" alt="image" src="https://github.com/user-attachments/assets/a5df1658-a119-4d97-a817-95bcb050d1ac" /> | <img width="1920" height="952" alt="image" src="https://github.com/user-attachments/assets/6f71950f-1769-42c4-9466-7050e1d28346" /> |
 
 Harvest turns versioned source code repositories into a queryable knowledge graph. Point it at a list of Git repositories, let it ingest every tagged version, then ask natural-language questions through the chat interface or the HTTP API.
 
