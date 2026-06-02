@@ -199,6 +199,7 @@ html, body {
   color: var(--vf-color-text-default);
 }
 
+
 .p-panel__logo-image {
   height: 2rem;
   width: auto;
@@ -210,13 +211,6 @@ html, body {
   margin: 0;
 }
 
-.nav-logo__name {
-  font-size: 1rem;
-  font-weight: 700;
-  color: var(--vf-color-text-default);
-  letter-spacing: -0.02em;
-  white-space: nowrap;
-}
 
 .p-panel__header .p-panel__logo {
   margin-bottom: 0;
@@ -430,6 +424,12 @@ html, body {
   vertical-align: super;
   cursor: help;
   text-decoration: none;
+}
+
+a.citation {
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 1px;
 }
 
 .tc-group {
@@ -758,6 +758,12 @@ a.source-chip {
   cursor: pointer;
 }
 
+a.source-chip .source-chip__name {
+  color: var(--loading-dot-color);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 a.source-chip:hover {
   background: var(--bg-surface-hover);
   border-color: var(--text-secondary);
@@ -1039,7 +1045,7 @@ a.source-chip:hover {
 .repo-empty__error { color: var(--error-text); }
 
 .repo-source-panel {
-  position: absolute;
+  position: fixed;
   top: 0;
   right: 0;
   bottom: 0;
@@ -1052,7 +1058,7 @@ a.source-chip:hover {
   transform: translateX(100%);
   transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1),
               box-shadow 0.26s ease;
-  z-index: 10;
+  z-index: 60;
 }
 
 .repo-source-panel.is-open {
@@ -1594,5 +1600,104 @@ a.source-chip:hover {
 
   .doc-content {
     padding: 1rem;
+  }
+}
+
+/* ============================================================
+   Inline graph (embedded in chat messages)
+   ============================================================ */
+
+.inline-graph {
+  width: 100%;
+  height: 280px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.5rem;
+  margin: 1rem 0;
+  overflow: hidden;
+  position: relative;
+  background: var(--bg-surface-alt);
+  cursor: default;
+}
+
+.inline-graph--error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+/* ============================================================
+   Mobile / Touch
+   ============================================================ */
+
+/* Touch devices have no hover state, so copy buttons must be
+   visible at all times rather than only on pointer hover. */
+@media (hover: none) {
+  .copy-btn {
+    opacity: 1;
+  }
+}
+
+@media (max-width: 640px) {
+  /* Chat: recover reading width by tightening side padding. */
+  .messages {
+    padding: 0.75rem 0.875rem 0.5rem;
+  }
+
+  .input-area {
+    padding: 0.5rem 0.875rem 0.75rem;
+  }
+
+  /* The fixed min-width exists for loading-dot width, which is
+     fine without it at any realistic mobile width. */
+  .message--assistant .message__bubble {
+    min-width: unset;
+  }
+
+  /* iOS Safari zooms the viewport on focus for inputs < 16 px.
+     Override to 1rem to prevent that involuntary zoom. */
+  .repo-search-bar input,
+  .doc-select,
+  #query-input {
+    font-size: 1rem;
+  }
+
+  /* Source panel: becomes a full-width bottom sheet instead of
+     a right-side drawer (min(400px,42%) = ~157 px on a 375 px
+     screen — far too narrow to read code). Panel is position:fixed
+     so these overrides work regardless of which page opened it. */
+  .repo-source-panel {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    height: 70%;
+    border-left: none;
+    border-top: 1px solid var(--border-color);
+    transform: translateY(100%);
+    transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1),
+                box-shadow 0.26s ease;
+  }
+
+  .repo-source-panel.is-open {
+    transform: translateY(0);
+    box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.14);
+  }
+
+  .inline-graph {
+    height: 220px;
+  }
+
+  /* Enlarge the close button to a comfortable 44 × 44 px tap target. */
+  .source-panel-close {
+    padding: 0.5rem;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 }

@@ -19,8 +19,8 @@
       <div class="p-panel is-dark nav-panel">
         <div class="p-panel__header">
           <a class="p-panel__logo nav-logo" href="#">
-            <span class="nav-logo__badge"><img src="/canonical-logo.png" alt="Canonical" class="nav-logo__img" /></span>
-            <span class="nav-logo__name">Harvest</span>
+            <img src="/canonical-logo.png" alt="Canonical" class="p-panel__logo-image" height="32" />
+            <div class="logo-text p-heading--4">Harvest</div>
           </a>
           <div class="p-panel__controls">
             <button
@@ -218,70 +218,6 @@
             </div>
           </div>
 
-          <aside id="repo-source-panel" class="repo-source-panel" aria-label="Symbol source code">
-            <div class="repo-source-panel__head">
-              <div class="repo-source-panel__title">
-                <span id="source-kind-badge" class="source-kind-badge"></span>
-                <span id="source-symbol-name" class="source-symbol-name"></span>
-              </div>
-              <button id="source-panel-close" class="source-panel-close" type="button" aria-label="Close source panel">✕</button>
-            </div>
-            <p id="source-symbol-file" class="source-symbol-file"></p>
-            <div class="source-code-block">
-              <pre id="source-pre"><code id="source-code"></code></pre>
-            </div>
-            <div id="source-relations" class="source-relations">
-              <div id="source-parents-section" class="source-relations__section" hidden>
-                <div class="source-relations__label">Extends</div>
-                <div id="source-parents-list" class="source-relations__chips"></div>
-              </div>
-              <div id="source-children-section" class="source-relations__section" hidden>
-                <div class="source-relations__label">Subclasses</div>
-                <div id="source-children-list" class="source-relations__chips"></div>
-              </div>
-              <div id="source-implements-section" class="source-relations__section" hidden>
-                <div class="source-relations__label">Implements</div>
-                <div id="source-implements-list" class="source-relations__chips"></div>
-              </div>
-              <div id="source-implementors-section" class="source-relations__section" hidden>
-                <div class="source-relations__label">Implemented by</div>
-                <div id="source-implementors-list" class="source-relations__chips"></div>
-              </div>
-              <div id="source-embeds-section" class="source-relations__section" hidden>
-                <div class="source-relations__label">Embeds</div>
-                <div id="source-embeds-list" class="source-relations__chips"></div>
-              </div>
-              <div id="source-embedded-by-section" class="source-relations__section" hidden>
-                <div class="source-relations__label">Embedded by</div>
-                <div id="source-embedded-by-list" class="source-relations__chips"></div>
-              </div>
-              <div id="source-uses-section" class="source-relations__section" hidden>
-                <div class="source-relations__label">Uses</div>
-                <div id="source-uses-list" class="source-relations__chips"></div>
-              </div>
-              <div id="source-used-by-section" class="source-relations__section" hidden>
-                <div class="source-relations__label">Used by</div>
-                <div id="source-used-by-list" class="source-relations__chips"></div>
-              </div>
-              <div id="source-container-section" class="source-relations__section" hidden>
-                <div class="source-relations__label">Member of</div>
-                <div id="source-container-list" class="source-relations__chips"></div>
-              </div>
-              <div id="source-members-section" class="source-relations__section" hidden>
-                <div class="source-relations__label">Methods</div>
-                <div id="source-members-list" class="source-relations__chips"></div>
-              </div>
-              <div id="source-callers-section" class="source-relations__section" hidden>
-                <div class="source-relations__label">Callers</div>
-                <div id="source-callers-list" class="source-relations__chips"></div>
-              </div>
-              <div id="source-callees-section" class="source-relations__section" hidden>
-                <div class="source-relations__label">Callees</div>
-                <div id="source-callees-list" class="source-relations__chips"></div>
-              </div>
-            </div>
-          </aside>
-
         </div>
       </section>
 
@@ -289,6 +225,21 @@
       </section>
 
     </main>
+
+    <aside id="repo-source-panel" class="repo-source-panel" aria-label="Symbol source code">
+      <div class="repo-source-panel__head">
+        <div class="repo-source-panel__title">
+          <span id="source-kind-badge" class="source-kind-badge"></span>
+          <span id="source-symbol-name" class="source-symbol-name"></span>
+        </div>
+        <button id="source-panel-close" class="source-panel-close" type="button" aria-label="Close source panel">✕</button>
+      </div>
+      <p id="source-symbol-file" class="source-symbol-file"></p>
+      <div class="source-code-block">
+        <pre id="source-pre"><code id="source-code"></code></pre>
+      </div>
+      <div id="source-relations" class="source-relations"></div>
+    </aside>
   </div>
 
   <script type="module" src="/src/main.js"></script>
