@@ -1,5 +1,6 @@
 import { fetchDocIndex, fetchDocPage } from './api.js';
 import { renderMarkdown } from './markdown.js';
+import { escapeHtml as esc, copyText, addCopyButtons } from './utils.js';
 
 export function createDocState() {
   return {
@@ -227,61 +228,6 @@ function renderContent(state) {
   return '';
 }
 
-function copyText(text) {
-  if (navigator.clipboard?.writeText) {
-    return navigator.clipboard.writeText(text);
-  }
-  return new Promise((resolve, reject) => {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    try {
-      document.execCommand('copy') ? resolve() : reject(new Error('execCommand failed'));
-    } catch (e) {
-      reject(e);
-    } finally {
-      document.body.removeChild(ta);
-    }
-  });
-}
-
-function addCopyButtons(containerEl) {
-  containerEl.querySelectorAll('.doc-article__body pre').forEach(pre => {
-    if (pre.closest('.code-block')) return;
-    const wrapper = document.createElement('div');
-    wrapper.className = 'code-block';
-    pre.parentNode.insertBefore(wrapper, pre);
-    wrapper.appendChild(pre);
-
-    const btn = document.createElement('button');
-    btn.className = 'copy-btn';
-    btn.textContent = 'Copy';
-    btn.addEventListener('click', () => {
-      const text = (pre.querySelector('code') ?? pre).innerText;
-      copyText(text).then(() => {
-        btn.textContent = 'Copied!';
-      }).catch(() => {
-        btn.textContent = 'Failed';
-      }).finally(() => {
-        setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
-      });
-    });
-    wrapper.appendChild(btn);
-  });
-}
-
-function esc(str) {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
-
 export function initDocumentationPage(containerEl, initialRepos) {
   let state = createDocState();
   state = setRepos(state, initialRepos);
@@ -292,7 +238,7 @@ export function initDocumentationPage(containerEl, initialRepos) {
   }
 
   function attachListeners() {
-    addCopyButtons(containerEl);
+    addCopyButtons(containerEl, '.doc-article__body pre');
     const repoSelect = containerEl.querySelector('#doc-repo-select');
     const versionSelect = containerEl.querySelector('#doc-version-select');
 
