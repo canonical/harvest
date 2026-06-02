@@ -5,6 +5,13 @@ const TOOL_DESCRIPTION_URL = '/tool-description';
 const GRAPH_URL = '/graph';
 const DOCS_URL = '/docs';
 
+let _onUnauthorized = null;
+export function setUnauthorizedHandler(fn) { _onUnauthorized = fn; }
+
+function handleUnauthorized(status) {
+  if (status === 401 && _onUnauthorized) _onUnauthorized();
+}
+
 export async function queryStream(query, onEvent) {
   const response = await fetch(QUERY_STREAM_URL, {
     method: 'POST',
@@ -13,6 +20,7 @@ export async function queryStream(query, onEvent) {
   });
 
   if (!response.ok) {
+    handleUnauthorized(response.status);
     throw new Error(`Server error: ${response.status}`);
   }
 
