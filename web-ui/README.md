@@ -1,14 +1,26 @@
 # Harvest Web UI
 
-A chat interface for the [knowledge-server](../knowledge-server/). Ask natural-language questions about your ingested codebases and see live tool calls as the agent reasons about your code.
+A single-page application for [knowledge-server](../knowledge-server/). It provides three views: a streaming chat interface, an interactive symbol graph explorer, and a Diataxis documentation browser.
 
 ## Features
 
-- **Streaming tool calls** — tool invocations appear as collapsible cards in real time, showing the tool name, inputs, and a result preview
-- **Markdown answers** — final answers render as formatted Markdown with syntax-highlighted code blocks
-- **Source citations** — inline `[repo:version:file:line]` citations are rendered as highlighted chips with a sources list below each answer
-- **Repository sidebar** — lists all ingested repositories and their versions from the live server
-- **Vanilla CSS** — uses [Canonical's Vanilla framework](https://vanillaframework.io/) for consistent Ubuntu-style design
+**Chat**
+- **Step timeline** — tool invocations appear as a collapsible step-by-step timeline with AI-generated plain-English descriptions, tool name, raw inputs, and result preview
+- **Inline symbol graphs** — answers that reference specific symbols embed a mini interactive graph showing that symbol's relationships (calls, contains, inherits, etc.)
+- **Markdown answers** — rendered with syntax-highlighted code blocks and copy-to-clipboard buttons
+- **Source citations** — inline `[repo:version:file:line]` markers become amber chips that link to the source file; a sources panel lists them all
+
+**Explore**
+- **Interactive symbol graph** — browse the full call and relationship graph for any `(repo, version)` pair, rendered with [Cytoscape.js](https://cytoscape.org/) and an off-thread fcose layout
+- **Symbol search** — full-text search highlights matching nodes; AI search mode finds semantically related symbols via the `/query/stream` endpoint with live progress on the canvas
+- **Source panel** — click any node to see its signature and full source inline
+
+**Document**
+- **Diataxis browser** — read AI-generated documentation organised into Tutorials, How-to Guides, Explanations, and Reference sections for any ingested version
+
+**Shell**
+- **Dark / light / auto theme** — toggle in the sidebar; persists via `localStorage`; auto follows OS preference with no flash on reload
+- **Responsive navigation** — Vanilla Framework `l-application` shell with collapsible sidebar for mobile
 
 ---
 
@@ -31,7 +43,17 @@ npm run dev
 # Open http://localhost:5173
 ```
 
-Vite's dev server proxies `/query`, `/query/stream`, `/repositories`, and `/health` to `http://localhost:8080` automatically. Make sure the knowledge-server is running first.
+Vite's dev server proxies all API paths to `http://localhost:8080`:
+
+| Proxied path | Endpoint |
+|---|---|
+| `/query` | `POST /query` |
+| `/query/stream` | `POST /query/stream` |
+| `/repositories` | `GET /repositories` |
+| `/graph` | `GET /graph/:repo/:version[/source]` |
+| `/docs` | `GET /docs/:repo/:version[/:section/:file]` |
+| `/tool-description` | `POST /tool-description` |
+| `/health` | `GET /health` |
 
 ---
 
@@ -51,26 +73,54 @@ Vite's dev server proxies `/query`, `/query/stream`, `/repositories`, and `/heal
 
 ```
 web-ui/
-├── index.html          Entry HTML — chat layout, sidebar, input bar
+├── index.html              Entry HTML — navigation shell, page containers
 ├── package.json
-├── vite.config.js      Vite config with proxy rules and Vitest settings
+├── vite.config.js          Vite config with proxy rules and Vitest settings
 ├── src/
-│   ├── api.js          API client: queryStream() and queryOnce()
-│   ├── chat.js         Immutable chat state machine
-│   ├── markdown.js     Markdown rendering with citation highlighting
-│   ├── main.js         UI entry point: render loop and event handlers
-│   └── style.css       Layout and component styles (Vanilla CSS + overrides)
+│   ├── api.js              API client: queryStream(), fetchGraph(), fetchDocIndex(), etc.
+│   ├── chat.js             Immutable chat state machine
+│   ├── documentation.js    Documentation page state machine and renderer
+│   ├── format.js           JSON-to-HTML and preview formatters for tool call detail
+│   ├── graph-utils.js      Cytoscape node colour/shape helpers and shared stylesheet
+│   ├── inline-graph.js     Inline mini-graph renderer mounted inside chat answers
+│   ├── layout-worker.js    Web Worker: runs fcose layout off the main thread
+│   ├── main.js             App entry point: render loop, routing, event handlers
+│   ├── markdown.js         Markdown rendering with citation chip injection
+│   ├── repositories.js     Explore page: Cytoscape graph, search, source panel
+│   ├── source-panel.js     Shared slide-in source panel component
+│   ├── theme.js            Dark/light/auto theme management
+│   └── utils.js            escapeHtml, copyText, addCopyButtons
+├── src/style.css           Component and layout styles (Vanilla CSS + overrides)
 └── tests/
-    ├── api.test.js     Tests for the API client
-    ├── chat.test.js    Tests for the chat state machine
-    └── markdown.test.js Tests for markdown processing and citation parsing
+    ├── api.test.js
+    ├── chat.test.js
+    ├── documentation.test.js
+    ├── format.test.js
+    ├── graph-utils.test.js
+    ├── inline-graph.test.js
+    ├── markdown.test.js
+    └── utils.test.js
 ```
 
 ---
 
 ## Architecture
 
-### Streaming flow
+### Page routing
+
+The app renders three pages inside a Vanilla Framework `l-application` shell. Navigation links use `data-page` attributes; the active page's `<div>` has `hidden` removed.
+
+```
+#app-sidebar nav links (data-page="chat"|"repositories"|"documentation")
+       │
+       ▼
+show/hide .page elements:
+  #page-chat           ← Chat view
+  #page-repositories   ← Explore / graph view
+  #page-documentation  ← Document / Diataxis view
+```
+
+### Chat streaming flow
 
 ```
 User submits query
@@ -78,80 +128,73 @@ User submits query
        ▼
 queryStream() → POST /query/stream (SSE)
        │
-       ├── tool_call event  → addToolCall(state, ...)   → re-render
-       ├── tool_result event → completeToolCall(state, ...) → re-render
-       └── done event       → finalizeAssistantMessage(state, ...) → re-render
+       ├── tool_call   → addToolCall(state)  + fetchToolDescription() → re-render
+       ├── tool_result → completeToolCall(state)                       → re-render
+       └── done        → finalizeAssistantMessage(state)               → re-render
+                              └── mountInlineGraphs(messagesEl)
 ```
 
-Each SSE event from the server carries a JSON payload:
+Each `tool_call` event also triggers a `POST /tool-description` request to obtain an AI-generated description for the step-timeline label. Descriptions arrive asynchronously and trigger an additional re-render when ready.
 
-| Event type | Payload |
-|-----------|---------|
-| `tool_call` | `{type, name, input}` |
-| `tool_result` | `{type, name, preview}` |
-| `done` | `{type, answer, sources, tool_calls_made}` |
-| `error` | `{type, message}` |
+### Chat state machine (`chat.js`)
 
-### State machine (`chat.js`)
-
-Chat state is immutable. Every function returns a new state object:
+Chat state is immutable — every function returns a new object:
 
 ```
 createChatState()
   → addUserMessage(state, text)
   → startAssistantMessage(state)
     → addToolCall(state, {name, input})
+    → updateToolCallDescription(state, {id, description})
     → completeToolCall(state, {name, preview})
     → finalizeAssistantMessage(state, {answer, sources, tool_calls_made})
     OR
     → setError(state, message)
 ```
 
-### Markdown rendering (`markdown.js`)
+### Explore page (`repositories.js`)
 
-Uses [`marked`](https://marked.js.org/) with [`marked-highlight`](https://github.com/markedjs/marked-highlight) and [highlight.js](https://highlightjs.org/). Citation brackets are transformed into `<span class="citation">` elements before markdown parsing, preserving their inline position in the rendered text.
+1. User selects a repo and version → `GET /graph/:repo/:version`
+2. Layout computed off-thread by `layout-worker.js` (fcose via Cytoscape.js)
+3. Cytoscape renders nodes and edges; colour and shape are derived from `kind` via `graph-utils.js`
+4. Symbol search: full-text mode highlights matching nodes instantly; AI mode sends a query over SSE and overlays progress on the canvas, highlighting matched nodes as results arrive
+5. Clicking a node → `GET /graph/:repo/:version/source?file=...&name=...` → source panel
 
----
+### Inline graphs (`inline-graph.js`)
 
-## API
+The server embeds `<div class="inline-graph" data-graph="...">` markers in chat answers when it references specific symbols. `mountInlineGraphs()` scans the chat DOM after each render, parses the URL-encoded JSON graph definition from `data-graph`, and mounts a small Cytoscape instance in place.
 
-The web UI communicates with the knowledge-server over two endpoints:
+### Documentation page (`documentation.js`)
 
-### `POST /query/stream` (SSE)
+State machine with the same immutable pattern as chat. On version select:
 
-Streaming query endpoint. The web UI sends:
-
-```json
-{ "query": "How does authentication work?" }
-```
-
-The server streams SSE events until a `done` or `error` event is received.
-
-### `GET /repositories`
-
-Returns ingested repositories for the sidebar.
+1. `GET /docs/:repo/:version` → populate section tree
+2. On page select → `GET /docs/:repo/:version/:section/:filename` → render markdown
 
 ---
 
 ## Tests
 
-Tests are written with [Vitest](https://vitest.dev/) and run in a jsdom environment (no browser needed).
+Tests are written with [Vitest](https://vitest.dev/) and run in a jsdom environment.
 
 ```bash
 npm test            # run once
 npm run test:watch  # watch mode
-```
-
-Coverage report:
-
-```bash
 npx vitest run --coverage
 ```
 
-Tests are co-located in `tests/` and cover:
-- API client (11 tests): SSE event parsing, error handling, HTTP status codes
-- Chat state (16 tests): state transitions, immutability, multi-turn conversations
-- Markdown (15 tests): rendering, citation extraction, XSS prevention
+Test coverage:
+
+| File | What is tested |
+|------|---------------|
+| `api.test.js` | SSE event parsing, error handling, HTTP status codes |
+| `chat.test.js` | State transitions, immutability, multi-turn conversations |
+| `documentation.test.js` | Doc state machine, section toggling, page selection |
+| `format.test.js` | JSON-to-HTML formatting, preview rendering |
+| `graph-utils.test.js` | Node colour/shape mappings, stylesheet generation |
+| `inline-graph.test.js` | Graph definition parsing, mount/error paths |
+| `markdown.test.js` | Markdown rendering, citation extraction, XSS prevention |
+| `utils.test.js` | escapeHtml, copyText, addCopyButtons |
 
 ---
 
@@ -163,5 +206,6 @@ npm run build
 
 # Serve with any static file server:
 npx serve dist
-# or let the knowledge-server serve the dist/ directory (see server docs)
 ```
+
+The knowledge-server can also serve the `dist/` directory directly — configure a static file route pointing at the build output.

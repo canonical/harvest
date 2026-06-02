@@ -6,6 +6,7 @@
 |------|---------|---------|
 | Rust (stable) | Build both crates | `curl https://sh.rustup.rs -sSf \| sh` |
 | Docker + Compose | Run Neo4j locally | docker.com/get-docker |
+| Node.js ≥ 20 | Run the web UI | [nodejs.org](https://nodejs.org) or `nvm install 22` |
 | `cargo-watch` (optional) | Auto-rebuild on save | `cargo install cargo-watch` |
 
 ---
@@ -25,7 +26,7 @@ Apps connect on the Bolt port `localhost:7687`.
 
 ---
 
-## Step 2 — Configure the harvester
+## Step 2 — Configure and run the harvester
 
 Edit [knowledge-harvester/harvester.toml](../../knowledge-harvester/harvester.toml):
 
@@ -41,24 +42,11 @@ clone_root = "/tmp/harvest-repos"   # created automatically
 [[repositories]]
 name = "my-repo"
 url  = "https://github.com/owner/repo.git"
+# Optional: pin specific refs instead of all tags
+# refs = ["v2.0.0", "v2.1.0", "main"]
 ```
 
-Add more `[[repositories]]` blocks for each repo you want to index.
-
-To ingest only specific refs instead of all tags, add a `refs` list:
-
-```toml
-[[repositories]]
-name = "my-repo"
-url  = "https://github.com/owner/repo.git"
-refs = ["v2.0.0", "v2.1.0", "main"]   # tags, branches, or commit SHAs
-```
-
-Omit `refs` (or remove the field entirely) to harvest all git tags as before.
-
----
-
-## Step 3 — Run the harvester
+Run the harvester:
 
 ```bash
 cd knowledge-harvester
@@ -66,24 +54,27 @@ cd knowledge-harvester
 # Single harvest pass (recommended for first run)
 RUST_LOG=info cargo run -- --config harvester.toml run
 
-# Watch mode: re-check for new tags every 5 min
+# Watch mode: re-check for new refs every 5 min
 RUST_LOG=info cargo run -- --config harvester.toml watch --interval-secs 300
 
 # Check ingestion status
 cargo run -- --config harvester.toml status
+
+# Mark all versions as pending (force full re-ingest on next run)
+cargo run -- --config harvester.toml reingest
 ```
 
 The harvester will:
 1. Clone each repo under `clone_root`
-2. Enumerate git tags
+2. Enumerate git refs (all tags, or the explicit `refs` list)
 3. Skip versions already marked `ingested: true` in Neo4j
 4. Parse source files with tree-sitter
-5. Write nodes + relationships to Neo4j
-6. Set `ingested: true` on the Version node when done
+5. Write nodes and relationships (calls, inherits, implements, embeds, uses) to Neo4j
+6. Set `ingested: true` on the `Version` node when done
 
 ---
 
-## Step 4 — Configure the server
+## Step 3 — Configure and start the server
 
 Edit [knowledge-server/server.toml](../../knowledge-server/server.toml):
 
@@ -108,32 +99,68 @@ For Groq / Ollama instead:
 
 ```toml
 [llm]
-provider  = "openai-compat"
+provider  = "openai-compatible"
 base_url  = "https://api.groq.com/openai/v1"   # or http://localhost:11434/v1
 api_key   = "gsk_..."
 model     = "llama-3.3-70b-versatile"
 ```
-
----
-
-## Step 5 — Run the server
 
 ```bash
 cd knowledge-server
 
 RUST_LOG=info cargo run -- --config server.toml
 # Listening on 127.0.0.1:8080
-```
 
-With auto-rebuild on save:
-
-```bash
+# With auto-rebuild on save:
 cargo watch -x 'run -- --config server.toml'
 ```
 
 ---
 
-## Step 6 — Test the API
+## Step 4 — Generate documentation (optional)
+
+The `document` command generates [Diataxis](https://diataxis.fr/)-structured documentation for an ingested version. It requires `[llm]` and `[documentation]` sections in `harvester.toml`:
+
+```toml
+[llm]
+provider = "anthropic"
+model    = "claude-sonnet-4-6"
+api_key  = "sk-ant-..."
+
+[documentation]
+docs_dir = "/tmp/harvest-docs"
+```
+
+```bash
+cd knowledge-harvester
+RUST_LOG=info cargo run -- --config harvester.toml document my-repo:v1.2.0
+```
+
+To serve these pages through the web UI, add the same `docs_dir` to `server.toml`:
+
+```toml
+[documentation]
+docs_dir = "/tmp/harvest-docs"
+```
+
+Restart the server. The **Document** tab in the web UI will show the generated documentation.
+
+---
+
+## Step 5 — Start the web UI
+
+```bash
+cd web-ui
+npm install
+npm run dev
+# Open http://localhost:5173
+```
+
+The Vite dev server proxies API calls to `localhost:8080` automatically — all `/query`, `/query/stream`, `/repositories`, `/graph`, `/docs`, and `/health` requests are forwarded. The knowledge-server (Step 3) must be running first.
+
+---
+
+## Step 6 — Verify everything works
 
 ### Health check
 ```bash
@@ -150,62 +177,32 @@ curl http://localhost:8080/repositories | jq
 ```bash
 curl -s http://localhost:8080/query \
   -H 'Content-Type: application/json' \
-  -d '{"query": "How does the regex engine handle Unicode character classes?"}' \
+  -d '{"query": "How does the retry logic work?"}' \
   | jq '{answer: .answer, sources: .sources, tool_calls_made: .tool_calls_made}'
 ```
 
-Optional filters (not yet wired to the agent, reserved for future use):
-```json
-{
-  "query": "...",
-  "repositories": ["my-repo"],
-  "versions": ["v1.2.0"]
-}
-```
-
----
-
-## Step 6 — Run the web UI
-
-The web UI is a Vite application that proxies API calls to the knowledge-server.
-
-### Prerequisites
-
+### Fetch the symbol graph
 ```bash
-# Install Node.js if not already present (use nvm or your system package manager)
-curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
-source ~/.nvm/nvm.sh
-nvm install 22
+curl "http://localhost:8080/graph/my-repo/v1.2.0" | jq '{nodes: (.nodes | length), edges: (.edges | length), truncated}'
 ```
 
-### Start the dev server
+### Browse the web UI pages
 
-```bash
-cd web-ui
-npm install
-npm run dev
-# Open http://localhost:5173
-```
+Open http://localhost:5173 and use the sidebar to switch between:
 
-The Vite proxy routes `/query`, `/query/stream`, `/repositories`, and `/health` to `http://localhost:8080` automatically. The knowledge-server (Step 5) must be running first.
-
-### Run the UI tests
-
-```bash
-cd web-ui
-npm test            # run once (CI mode)
-npm run test:watch  # interactive watch mode
-```
+- **Chat** — submit a natural-language question and watch tool calls stream in real time
+- **Explore** — select a repo and version to see the interactive symbol graph; click a node to open the source panel; use the search box to find symbols
+- **Document** — select a repo and version to read the AI-generated documentation (requires Step 4)
 
 ---
 
 ## Running everything together (split terminals)
 
 ```
-Terminal 1:  docker compose up                                                           # Neo4j
+Terminal 1:  docker compose up
 Terminal 2:  cd knowledge-harvester && RUST_LOG=info cargo run -- --config harvester.toml run
 Terminal 3:  cd knowledge-server    && RUST_LOG=info cargo run -- --config server.toml
-Terminal 4:  cd web-ui && npm run dev                                                    # http://localhost:5173
+Terminal 4:  cd web-ui && npm run dev   # http://localhost:5173
 ```
 
 Or with `tmux`:
@@ -220,6 +217,21 @@ tmux send-keys -t harvest 'cd knowledge-server && RUST_LOG=info cargo run -- --c
 tmux split-window -h -t harvest
 tmux send-keys -t harvest 'cd web-ui && npm run dev' Enter
 tmux attach -t harvest
+```
+
+---
+
+## Running tests
+
+```bash
+# Rust unit + integration tests (no Docker needed)
+cargo test
+
+# Rust Docker-gated tests (Neo4j testcontainers)
+cargo test -- --include-ignored
+
+# Web UI tests
+cd web-ui && npm test
 ```
 
 ---
@@ -247,11 +259,3 @@ To wipe the graph and start fresh:
 docker compose down -v   # destroys the neo4j_data volume
 docker compose up -d
 ```
-
----
-
-## Known issues (pre-release)
-
-- **P1 compile blocker** in `knowledge-server/src/agent/mod.rs:57` — `tool_map` key borrows from a temporary. Fix: change `HashMap<&str, &dyn Tool>` to `HashMap<String, &dyn Tool>`. Neither binary will compile until this is resolved.
-- **Call edge writes** are not yet implemented in the harvester (`graph/writer.rs`). `CALLS` relationships won't appear in the graph until P2 is fixed.
-- Language parsers other than Rust return empty results (P4-P9).
