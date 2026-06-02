@@ -9,6 +9,21 @@ pub struct Config {
     pub llm: LlmConfig,
     #[serde(default)]
     pub documentation: DocumentationConfig,
+    pub auth: AuthConfig,
+}
+
+#[derive(Deserialize)]
+pub struct AuthConfig {
+    pub jwt_secret: String,
+    #[serde(default)]
+    pub google: Option<GoogleConfig>,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct GoogleConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_uri: String,
 }
 
 #[derive(Deserialize, Default)]

@@ -37,6 +37,15 @@ regex        = "1"
 # Async trait support
 async-trait  = "0.1"
 
+# Auth
+argon2       = "0.5"
+jsonwebtoken = "9"
+axum-extra   = { version = "0.9", features = ["cookie"] }
+rand_core    = { version = "0.6", features = ["getrandom"] }
+uuid         = { version = "1", features = ["v4"] }
+chrono       = { version = "0.4", features = ["serde"] }
+time         = "0.3"
+
 # Logging
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

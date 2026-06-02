@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 
 use knowledge_server::agent::{graph_tools, Agent};
 use knowledge_server::api::{AppState, GraphCache};
+use knowledge_server::auth;
 use knowledge_server::config::Config;
 use knowledge_server::llm;
 use knowledge_server::neo4j::Neo4jClient;
@@ -31,15 +32,21 @@ async fn main() -> Result<()> {
         Neo4jClient::new(&config.neo4j.uri, &config.neo4j.user, &config.neo4j.password).await?,
     );
 
+    auth::setup_constraints(&neo4j).await?;
+
     let llm_provider = llm::from_config(&config.llm);
     let max_iterations = config.llm.max_iterations();
     let tools = graph_tools::all_tools(Arc::clone(&neo4j));
     let agent = Arc::new(Agent::new(llm_provider, tools, max_iterations));
 
-    let docs_dir = config.documentation.docs_dir.map(|p| Arc::new(p));
-    let state = AppState { agent, neo4j: Arc::clone(&neo4j), docs_dir };
+    let docs_dir = config.documentation.docs_dir.map(Arc::new);
+    let state = AppState {
+        agent,
+        neo4j: Arc::clone(&neo4j),
+        docs_dir,
+        auth: Arc::new(config.auth),
+    };
 
-    // Create the shared graph cache and pre-warm it in the background.
     let cache: Arc<GraphCache> = Arc::new(RwLock::new(HashMap::new()));
     tokio::spawn({
         let neo4j  = Arc::clone(&neo4j);
