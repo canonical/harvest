@@ -1,3 +1,21 @@
+const AVATAR_COLORS = [
+  '#c7162b', '#0e8420', '#0066cc', '#772953',
+  '#e95420', '#57407c', '#006e90', '#3c763d',
+];
+
+export function avatarColor(name) {
+  let h = 0;
+  for (const c of String(name ?? '')) h = (h * 31 + c.charCodeAt(0)) & 0x7fffffff;
+  return AVATAR_COLORS[h % AVATAR_COLORS.length];
+}
+
+export function initials(name) {
+  const parts = String(name ?? '').trim().split(/\s+/);
+  return parts.length >= 2
+    ? (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
+    : (parts[0]?.[0] ?? '?').toUpperCase();
+}
+
 export function escapeHtml(str) {
   return String(str ?? '')
     .replace(/&/g, '&amp;')

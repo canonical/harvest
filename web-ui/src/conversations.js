@@ -68,7 +68,11 @@ const trashIcon = `
     <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
   </svg>`;
 
-export function renderConvList(container, conversations, activeId, { onSelect, onDelete }) {
+export function renderConvList(container, conversations, activeId, {
+  onSelect, onDelete,
+  showCreator = false,
+  canDelete   = () => true,
+}) {
   if (!conversations.length) {
     container.innerHTML = '<p class="conv-empty">No past conversations yet.</p>';
     return;
@@ -83,11 +87,17 @@ export function renderConvList(container, conversations, activeId, { onSelect, o
         <div class="conv-item${c.id === activeId ? ' conv-item--active' : ''}"
           data-conv-id="${esc(c.id)}" role="button" tabindex="0"
           aria-label="${esc(c.title)}" aria-pressed="${c.id === activeId}">
-          <span class="conv-item__title">${esc(c.title)}</span>
+          <div class="conv-item__body">
+            <span class="conv-item__title">${esc(c.title)}</span>
+            ${showCreator && c.created_by_name
+              ? `<span class="conv-item__creator">${esc(c.created_by_name)}</span>`
+              : ''}
+          </div>
+          ${canDelete(c) ? `
           <button class="conv-item__delete" data-delete-conv="${esc(c.id)}"
             aria-label="Delete conversation" title="Delete" tabindex="-1" type="button">
             ${trashIcon}
-          </button>
+          </button>` : ''}
         </div>
       `).join('')}
     </div>
