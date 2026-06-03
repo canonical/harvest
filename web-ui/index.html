@@ -29,7 +29,7 @@
         <p id="login-error" class="auth-error" role="alert"></p>
         <button class="p-button--positive u-no-margin--bottom" type="submit" style="width:100%">Sign in</button>
       </form>
-      <hr />
+      <hr id="google-divider" />
       <button id="google-login-btn" class="p-button u-no-margin--bottom" type="button" style="width:100%">
         Login with Google
       </button>
@@ -53,6 +53,10 @@
         <div class="p-form__group">
           <label class="p-form__label" for="register-password">Password <span class="u-text--muted">(min 8 chars)</span></label>
           <input id="register-password" class="p-form__control" type="password" autocomplete="new-password" required />
+        </div>
+        <div class="p-form__group">
+          <label class="p-form__label" for="register-password-confirm">Confirm password</label>
+          <input id="register-password-confirm" class="p-form__control" type="password" autocomplete="new-password" required />
         </div>
         <p id="register-error" class="auth-error" role="alert"></p>
         <button class="p-button--positive u-no-margin--bottom" type="submit" style="width:100%">Create account</button>

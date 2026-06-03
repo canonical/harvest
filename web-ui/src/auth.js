@@ -2,6 +2,7 @@ const LOGIN_URL    = '/auth/login';
 const REGISTER_URL = '/auth/register';
 const LOGOUT_URL   = '/auth/logout';
 const ME_URL       = '/auth/me';
+const CONFIG_URL   = '/auth/config';
 
 // ── Auth state ────────────────────────────────────────────────────────────────
 
@@ -57,11 +58,25 @@ export function initAuthPages({ onLoginSuccess }) {
   const loginPage    = document.getElementById('page-login');
   const registerPage = document.getElementById('page-register');
 
+  // Hide Google button until we confirm it's enabled server-side
+  const googleBtn      = document.getElementById('google-login-btn');
+  const googleDivider  = document.getElementById('google-divider');
+  googleBtn.hidden    = true;
+  googleDivider.hidden = true;
+  fetch(CONFIG_URL)
+    .then(r => r.ok ? r.json() : null)
+    .then(cfg => {
+      if (cfg?.google) {
+        googleBtn.hidden    = false;
+        googleDivider.hidden = false;
+      }
+    })
+    .catch(() => {});
+
   // Login form
   const loginForm      = document.getElementById('login-form');
   const loginError     = document.getElementById('login-error');
   const toRegisterLink = document.getElementById('to-register-link');
-  const googleBtn      = document.getElementById('google-login-btn');
 
   loginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -101,8 +116,13 @@ export function initAuthPages({ onLoginSuccess }) {
     const email    = document.getElementById('register-email').value.trim();
     const name     = document.getElementById('register-name').value.trim();
     const password = document.getElementById('register-password').value;
+    const confirm  = document.getElementById('register-password-confirm').value;
     if (password.length < 8) {
       registerError.textContent = 'Password must be at least 8 characters.';
+      return;
+    }
+    if (password !== confirm) {
+      registerError.textContent = 'Passwords do not match.';
       return;
     }
     try {
