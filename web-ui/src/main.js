@@ -7,7 +7,7 @@ import { initDocumentationPage } from './documentation.js';
 import { renderMarkdown, buildFileUrl } from './markdown.js';
 import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
 import { escapeHtml as esc, addCopyButtons } from './utils.js';
-import { initSourcePanel } from './source-panel.js';
+import { initSourcePanel, closeSourcePanel } from './source-panel.js';
 import { mountInlineGraphs } from './inline-graph.js';
 import {
   fetchMe, logout, initAuthPages, showLoginPage, hideAuthPages, isAdmin, setUser,
@@ -323,6 +323,7 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
 
     const prevPage = document.querySelector('.page:not([hidden])');
     if (prevPage?.id === 'page-repositories') onRepositoriesPageHide();
+    closeSourcePanel();
     if (page === 'admin' && !isAdmin()) return;
 
     document.querySelectorAll('.page').forEach(p => { p.hidden = true; });

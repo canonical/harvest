@@ -8,10 +8,30 @@ const $id    = id => document.getElementById(id);
 
 export function initSourcePanel() {
   $id('source-panel-close').addEventListener('click', closeSourcePanel);
+  $id('source-panel-expand').addEventListener('click', toggleExpandPanel);
 }
 
 export function closeSourcePanel() {
-  $panel()?.classList.remove('is-open');
+  const panel = $panel();
+  panel?.classList.remove('is-open');
+  panel?.classList.remove('is-expanded');
+  _resetExpandBtn();
+}
+
+function toggleExpandPanel() {
+  const panel = $panel();
+  const expanded = panel?.classList.toggle('is-expanded');
+  const btn = $id('source-panel-expand');
+  if (!btn) return;
+  btn.querySelector('i').className = expanded ? 'p-icon--chevron-right' : 'p-icon--chevron-left';
+  btn.setAttribute('aria-label', expanded ? 'Shrink source panel' : 'Expand source panel');
+}
+
+function _resetExpandBtn() {
+  const btn = $id('source-panel-expand');
+  if (!btn) return;
+  btn.querySelector('i').className = 'p-icon--chevron-left';
+  btn.setAttribute('aria-label', 'Expand source panel');
 }
 
 export function openSourcePanel(data, repo, version, sections = []) {
