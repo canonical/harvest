@@ -257,22 +257,33 @@ html, body {
 
 #theme-btn.p-side-navigation__link,
 #logout-btn.p-side-navigation__link {
-  width: auto;
-  margin: 0 auto;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: inherit;
+  font-weight: inherit;
+  justify-content: flex-start;
+  margin: 0;
+  text-align: left;
+  width: 100%;
   display: flex;
 }
 
-#theme-btn.p-side-navigation__link {
-  margin-top: 1.25rem;
+#theme-btn.p-side-navigation__link:hover,
+#logout-btn.p-side-navigation__link:hover {
+  background: var(--vf-color-background-hover);
 }
 
-#logout-btn.p-side-navigation__link {
-  margin-top: 1.25rem;
-}
-
-.project-selector-section {
+#project-selector-section {
   flex-shrink: 0;
-  padding: 1rem 0.75rem 0.625rem;
+  padding: 0.75rem 0.5rem 0.5rem;
+}
+
+#project-selector-section .project-select {
+  display: block;
 }
 
 .project-selector__label {
@@ -287,9 +298,15 @@ html, body {
 
 /* Toggle button fills the available width */
 .project-selector__toggle {
+  display: flex;
+  align-items: center;
   width: 100%;
   justify-content: space-between;
   text-align: left;
+}
+
+.project-selector__toggle .p-contextual-menu__indicator {
+  margin-left: auto;
 }
 
 /* Name label inside the toggle — truncates long project names */
@@ -317,9 +334,37 @@ html, body {
   color: var(--vf-color-text-muted);
 }
 
-.project-selector__menu .p-contextual-menu__link[aria-current="true"] {
+.project-selector__dropdown .p-contextual-menu__link[aria-current="true"] {
   color: #E95420;
   font-weight: 600;
+}
+
+.project-selector__dropdown .p-contextual-menu__group .p-contextual-menu__link {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.project-selector__dropdown .p-contextual-menu__group .name {
+  display: inline-block;
+  max-width: 55%;
+  vertical-align: top;
+}
+
+.project-selector__dropdown .p-contextual-menu__group .count {
+  float: right;
+  max-width: 40%;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-selector__dropdown .p-contextual-menu__group .description {
+  clear: both;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sidenav-top-container {
@@ -333,6 +378,14 @@ html, body {
   border-top: 1px solid var(--vf-color-border-low-contrast);
   padding-top: 1.25rem;
   padding-bottom: 0.5rem;
+}
+
+.sidenav-bottom-container li:has(#theme-btn) {
+  margin-top: 1rem;
+}
+
+.sidenav-bottom-container li:has(#logout-btn) {
+  margin-top: 0.25rem;
 }
 
 
