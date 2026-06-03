@@ -372,7 +372,7 @@ initAuthPages({ onLoginSuccess: showApp });
 
 logoutBtn?.addEventListener('click', async () => {
   await logout();
-  showAuth();
+  window.location.reload();
 });
 
 fetchMe().then(user => {
