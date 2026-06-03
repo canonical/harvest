@@ -6,3 +6,4 @@ pub mod config;
 pub mod conversations;
 pub mod llm;
 pub mod neo4j;
+pub mod projects;
