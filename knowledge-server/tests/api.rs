@@ -1,8 +1,3 @@
-/// HTTP API integration tests.
-///
-/// Query and health tests run without any external services.
-/// Repository tests require Docker — run with:
-///   cargo test --test api -- --include-ignored
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
@@ -17,6 +12,9 @@ use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
 use tower::ServiceExt as _;
 
+use std::collections::HashMap;
+use tokio::sync::RwLock;
+
 use knowledge_server::{
     agent::{Agent, tool::Tool},
     api::{
@@ -24,6 +22,7 @@ use knowledge_server::{
         query::{handle_query, handle_query_stream},
         repositories::handle_list_repositories,
         tool_description::handle_tool_description,
+        GraphState,
     },
     llm::{
         LlmProvider,
@@ -32,7 +31,6 @@ use knowledge_server::{
     neo4j::Neo4jClient,
 };
 
-// ── mock LLM infrastructure ───────────────────────────────────────────────────
 
 struct FixedTextLlm(String);
 
@@ -58,7 +56,6 @@ impl LlmProvider for ErrorLlm {
     }
 }
 
-// ── router builders ───────────────────────────────────────────────────────────
 
 fn query_app(agent: Arc<Agent>) -> Router {
     Router::new()
@@ -70,9 +67,13 @@ fn query_app(agent: Arc<Agent>) -> Router {
 }
 
 fn repos_app(neo4j: Arc<Neo4jClient>) -> Router {
+    let state = Arc::new(GraphState {
+        neo4j,
+        cache: Arc::new(RwLock::new(HashMap::new())),
+    });
     Router::new()
         .route("/repositories", get(handle_list_repositories))
-        .with_state(neo4j)
+        .with_state(state)
 }
 
 fn make_agent(text: &str) -> Arc<Agent> {
@@ -83,7 +84,6 @@ fn make_error_agent() -> Arc<Agent> {
     Arc::new(Agent::new(Arc::new(ErrorLlm), vec![], 5))
 }
 
-// ── response helpers ──────────────────────────────────────────────────────────
 
 async fn body_json(resp: axum::response::Response) -> Value {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -114,7 +114,6 @@ fn get_req(uri: &str) -> Request<Body> {
         .unwrap()
 }
 
-// ── GET /health ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn health_returns_200() {
@@ -131,7 +130,6 @@ async fn health_body_is_ok_json() {
     assert_eq!(json["status"], "ok");
 }
 
-// ── POST /query — happy paths ─────────────────────────────────────────────────
 
 #[tokio::test]
 async fn query_valid_request_returns_200() {
@@ -187,7 +185,6 @@ async fn query_with_optional_repositories_field_returns_200() {
     assert_eq!(status, StatusCode::OK);
 }
 
-// ── POST /query — error / bad input paths ─────────────────────────────────────
 
 #[tokio::test]
 async fn query_missing_query_field_returns_422() {
@@ -207,7 +204,6 @@ async fn query_empty_body_returns_4xx() {
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    // Axum returns 400 Bad Request for an empty JSON body.
     assert!(
         resp.status().is_client_error(),
         "expected a 4xx status, got {}",
@@ -240,14 +236,12 @@ async fn query_agent_error_returns_500() {
         .oneshot(post_query(json!({ "query": "hi" })))
         .await
         .unwrap();
-    // Error response body is plain text, not JSON.
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body = std::str::from_utf8(&bytes).unwrap();
     assert!(body.contains("simulated LLM failure"), "body: {body}");
 }
 
-// ── POST /tool-description ────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn tool_description_returns_200_with_description_field() {
@@ -290,7 +284,6 @@ async fn tool_description_missing_name_returns_4xx() {
     assert!(resp.status().is_client_error());
 }
 
-// ── POST /query/stream — SSE endpoint ────────────────────────────────────────
 
 fn post_query_stream(body: Value) -> Request<Body> {
     Request::builder()
@@ -350,7 +343,6 @@ async fn stream_missing_query_field_returns_422() {
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
 
-// ── GET /repositories (Docker-gated) ─────────────────────────────────────────
 
 use neo4j_testcontainers::{prelude::*, runners::AsyncRunner as _, Neo4j, Neo4jImageExt as _};
 use neo4rs::{query, Graph};
@@ -421,7 +413,6 @@ async fn repositories_returns_versions_for_repo() {
     );
 }
 
-// ── GET /docs/:repo/:version  and  GET /docs/:repo/:version/:section/*filename ─
 
 fn docs_app(docs_dir: PathBuf) -> Router {
     Router::new()
@@ -474,7 +465,6 @@ async fn docs_index_returns_sections_json() {
 #[tokio::test]
 async fn docs_index_different_repo_version_returns_404() {
     let dir = tempfile::tempdir().unwrap();
-    // Only create testrepo/v1.0, not testrepo/v2.0
     let path = dir.path().join("testrepo").join("v1.0");
     std::fs::create_dir_all(&path).unwrap();
     let index = json!({"repo":"testrepo","version":"v1.0","sections":{"tutorials":[],"how-to-guides":[],"explanations":[],"reference":[]}});
@@ -537,7 +527,6 @@ async fn docs_page_path_traversal_returns_400() {
         .oneshot(get_req("/docs/testrepo/v1.0/tutorials/..%2F..%2Fetc%2Fpasswd"))
         .await
         .unwrap();
-    // Either 400 (bad request) or 404 is acceptable — must not be 200
     assert!(
         resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::NOT_FOUND,
         "expected 400 or 404, got {}",
