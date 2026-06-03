@@ -24,9 +24,9 @@
   --border-source-chip:   #d9d9d9;
   --border-error:         #f5c6cb;
 
-  --citation-bg:          #fff3cd;
-  --citation-color:       #856404;
-  --citation-border:      #ffc107;
+  --citation-bg:          #fce9e2;
+  --citation-color:       #bf3c10;
+  --citation-border:      #e8845e;
 
   --user-bubble-bg:       #0066cc;
   --user-bubble-text:     #ffffff;
@@ -65,9 +65,9 @@
   --border-source-chip:   #444444;
   --border-error:         #6b2f2f;
 
-  --citation-bg:          #3a2e00;
-  --citation-color:       #ffd166;
-  --citation-border:      #997a00;
+  --citation-bg:          #3d1507;
+  --citation-color:       #f07a50;
+  --citation-border:      #7a3318;
 
   --user-bubble-bg:       #1a6bc2;
   --user-bubble-text:     #ffffff;
@@ -437,8 +437,7 @@ html, body {
 
 a.citation {
   cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 1px;
+  text-decoration: none;
 }
 
 .tc-group {
@@ -768,14 +767,18 @@ a.source-chip {
 }
 
 a.source-chip .source-chip__name {
-  color: var(--loading-dot-color);
-  text-decoration: underline;
-  text-underline-offset: 2px;
+  color: var(--text-code-inline);
+  text-decoration: none;
 }
 
 a.source-chip:hover {
   background: var(--bg-surface-hover);
   border-color: var(--text-secondary);
+}
+
+a.source-chip:hover .source-chip__name {
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .loading-dots {
