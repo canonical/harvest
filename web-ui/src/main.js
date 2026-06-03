@@ -24,10 +24,22 @@ import {
   setError,
   getMessages,
   isLoading,
+  getSaveableMessages,
+  loadFromHistory,
 } from './chat.js';
+import {
+  listConversations,
+  createConversation,
+  getConversation,
+  updateConversation,
+  deleteConversation,
+  renderConvList,
+} from './conversations.js';
 
 let state = createChatState();
 let repoUrlMap = {};
+let activeConvId = null;
+let conversations = [];
 
 const messagesEl  = document.getElementById('messages');
 const inputEl     = document.getElementById('query-input');
@@ -241,6 +253,7 @@ async function sendQuery() {
       }
       render();
     });
+    saveCurrentConversation().catch(() => {});
   } catch (err) {
     state = setError(state, err.message);
     render();
@@ -337,6 +350,98 @@ const navEl2    = document.getElementById('app-sidebar');
 const adminNavItem = document.getElementById('nav-item-admin');
 const logoutBtn = document.getElementById('logout-btn');
 
+// ── Conversation history ──────────────────────────────────────────────────────
+
+const convListEl      = document.getElementById('conv-list');
+const newChatBtn      = document.getElementById('new-chat-btn');
+const historyPanel    = document.getElementById('chat-history-panel');
+const historyToggle   = document.getElementById('chat-history-toggle');
+const historyClose    = document.getElementById('chat-history-close');
+const historyBackdrop = document.getElementById('chat-history-backdrop');
+
+function openHistoryPanel() {
+  historyPanel.classList.add('is-open');
+  historyBackdrop.hidden = false;
+  historyToggle?.setAttribute('aria-expanded', 'true');
+}
+
+function closeHistoryPanel() {
+  historyPanel.classList.remove('is-open');
+  historyBackdrop.hidden = true;
+  historyToggle?.setAttribute('aria-expanded', 'false');
+}
+
+historyToggle?.addEventListener('click', () => {
+  historyPanel.classList.contains('is-open') ? closeHistoryPanel() : openHistoryPanel();
+});
+historyClose?.addEventListener('click', closeHistoryPanel);
+historyBackdrop?.addEventListener('click', closeHistoryPanel);
+
+function refreshConvList() {
+  renderConvList(convListEl, conversations, activeConvId, {
+    onSelect: loadConversation,
+    onDelete: handleDeleteConversation,
+  });
+}
+
+async function saveCurrentConversation() {
+  const saveable = getSaveableMessages(state);
+  if (!saveable.length) return;
+
+  const firstUser = saveable.find(m => m.role === 'user');
+  const raw = firstUser?.text ?? 'New conversation';
+  const title = raw.length > 60 ? raw.slice(0, 57) + '…' : raw;
+
+  if (!activeConvId) {
+    const conv = await createConversation(title);
+    activeConvId = conv.id;
+    conversations = [conv, ...conversations];
+  }
+
+  await updateConversation(activeConvId, { title, messages: saveable });
+
+  const idx = conversations.findIndex(c => c.id === activeConvId);
+  if (idx !== -1) {
+    conversations[idx] = { ...conversations[idx], title, updated_at: new Date().toISOString() };
+    conversations.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  }
+  refreshConvList();
+}
+
+async function loadConversation(id) {
+  try {
+    const conv = await getConversation(id);
+    activeConvId = id;
+    state = loadFromHistory(Array.isArray(conv.messages) ? conv.messages : []);
+    render();
+    refreshConvList();
+    closeHistoryPanel();
+  } catch {}
+}
+
+async function handleDeleteConversation(id) {
+  if (!confirm('Delete this conversation?')) return;
+  try {
+    await deleteConversation(id);
+    conversations = conversations.filter(c => c.id !== id);
+    if (activeConvId === id) {
+      activeConvId = null;
+      state = createChatState();
+      render();
+    }
+    refreshConvList();
+  } catch {}
+}
+
+newChatBtn?.addEventListener('click', () => {
+  activeConvId = null;
+  state = createChatState();
+  render();
+  refreshConvList();
+});
+
+// ── App init ──────────────────────────────────────────────────────────────────
+
 function showApp(user) {
   setUser(user);
   hideAuthPages();
@@ -349,6 +454,11 @@ function showApp(user) {
   // Init admin page if present
   const adminPage = document.getElementById('page-admin');
   if (adminPage && user.role === 'admin') initAdminPage(adminPage);
+
+  // Load conversation history
+  listConversations()
+    .then(list => { conversations = list; refreshConvList(); })
+    .catch(() => {});
 
   fetchRepositories().then((repos) => {
     repoUrlMap = Object.fromEntries(
