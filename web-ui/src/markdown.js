@@ -3,7 +3,7 @@ import { markedHighlight } from 'marked-highlight';
 import hljs from 'highlight.js';
 import { escapeHtml as esc } from './utils.js';
 
-const CITATION_RE = /\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+):(\d+)\]/g;
+const CITATION_RE = /\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+):(\d+(?:[–\-]\d+)?)\]/g;
 
 marked.use(
   markedHighlight({
@@ -42,7 +42,7 @@ marked.use({
 
 export function renderMarkdown(text, repoUrlMap = {}, citationIndex = {}) {
   const withCitations = text.replace(CITATION_RE, (match, repo, version, file, line) => {
-    const key = `${repo}:${version}:${file}:${line}`;
+    const key = `${repo}:${version}:${file}:${parseInt(line, 10)}`;
     const n = citationIndex[key];
     const label = n != null ? `${n}` : `${repo}:${version}:${file}:${line}`;
     const title = `${repo} ${version} · ${file}:${line}`;
