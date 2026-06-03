@@ -44,7 +44,7 @@ export function renderMarkdown(text, repoUrlMap = {}, citationIndex = {}) {
   const withCitations = text.replace(CITATION_RE, (match, repo, version, file, line) => {
     const key = `${repo}:${version}:${file}:${line}`;
     const n = citationIndex[key];
-    const label = n != null ? `[${n}]` : `[${repo}:${version}:${file}:${line}]`;
+    const label = n != null ? `${n}` : `${repo}:${version}:${file}:${line}`;
     const title = `${repo} ${version} · ${file}:${line}`;
     const repoUrl = repoUrlMap[repo];
     const fileUrl = repoUrl ? buildFileUrl(repoUrl, version, file, parseInt(line, 10)) : null;
