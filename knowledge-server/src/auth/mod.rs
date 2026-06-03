@@ -41,11 +41,15 @@ fn token_from_request(req: &Request) -> Option<String> {
 
 pub async fn require_auth(
     axum::extract::State(secret): axum::extract::State<Arc<String>>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> impl IntoResponse {
-    match token_from_request(&req).and_then(|t| jwt::validate(&secret, &t).ok()) {
-        Some(_) => next.run(req).await.into_response(),
+    let token = token_from_request(&req);
+    match token.and_then(|t| jwt::validate(&secret, &t).ok()) {
+        Some(claims) => {
+            req.extensions_mut().insert(claims);
+            next.run(req).await.into_response()
+        }
         None => (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response(),
     }
 }
