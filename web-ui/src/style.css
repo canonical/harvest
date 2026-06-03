@@ -809,9 +809,13 @@ a.source-chip:hover {
 .input-area {
   padding: 0.75rem 1.5rem 1rem;
   border-top: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .input-area .p-search-box {
+  flex: 1;
   margin-bottom: 0;
 }
 
@@ -1641,10 +1645,11 @@ a.source-chip:hover {
    Mobile / Touch
    ============================================================ */
 
-/* Touch devices have no hover state, so copy buttons must be
-   visible at all times rather than only on pointer hover. */
+/* Touch devices have no hover state — reveal controls that are
+   otherwise only visible on pointer hover. */
 @media (hover: none) {
-  .copy-btn {
+  .copy-btn,
+  .conv-item__delete {
     opacity: 1;
   }
 }
@@ -1652,11 +1657,16 @@ a.source-chip:hover {
 @media (max-width: 640px) {
   /* Chat: recover reading width by tightening side padding. */
   .messages {
-    padding: 0.75rem 0.875rem 0.5rem;
+    padding: 0.75rem 0.75rem 0.5rem;
   }
 
   .input-area {
-    padding: 0.5rem 0.875rem 0.75rem;
+    padding: 0.5rem 0.625rem 0.75rem;
+  }
+
+  /* More of the screen for message content. */
+  .message__bubble {
+    max-width: 92%;
   }
 
   /* The fixed min-width exists for loading-dot width, which is
@@ -1674,9 +1684,7 @@ a.source-chip:hover {
   }
 
   /* Source panel: becomes a full-width bottom sheet instead of
-     a right-side drawer (min(400px,42%) = ~157 px on a 375 px
-     screen — far too narrow to read code). Panel is position:fixed
-     so these overrides work regardless of which page opened it. */
+     a right-side drawer. */
   .repo-source-panel {
     top: auto;
     left: 0;
@@ -1700,8 +1708,10 @@ a.source-chip:hover {
     height: 220px;
   }
 
-  /* Enlarge the close button to a comfortable 44 × 44 px tap target. */
-  .source-panel-close {
+  /* 44 × 44 px tap targets for all close/action buttons. */
+  .source-panel-close,
+  .chat-history-close-btn,
+  .chat-history-toggle-btn {
     padding: 0.5rem;
     min-width: 2.75rem;
     min-height: 2.75rem;
@@ -1709,6 +1719,233 @@ a.source-chip:hover {
     align-items: center;
     justify-content: center;
   }
+
+  /* Conv items: taller rows so they're easier to tap. */
+  .conv-item {
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+    min-height: 2.75rem;
+  }
+
+  /* Delete button: always at full size on touch. */
+  .conv-item__delete {
+    padding: 0.375rem;
+    min-width: 2rem;
+    min-height: 2rem;
+  }
+
+  /* Admin: replace the desktop-oriented padding with something
+     that leaves reasonable content space on a phone. */
+  .admin-wrap {
+    padding: 1rem;
+  }
+
+  .admin-page-header {
+    margin-bottom: 1rem;
+  }
+
+  /* Auth card: tighten padding on very small screens. */
+  .auth-card {
+    padding: 1.25rem;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .auth-page {
+    align-items: flex-start;
+    padding-top: 2rem;
+  }
+}
+
+/* ── Chat history sidebar ────────────────────────────────────────────────── */
+
+.chat-with-history {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+
+.chat-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.chat-history-panel {
+  width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--bg-surface);
+  overflow: hidden;
+  background: var(--bg-surface-alt);
+}
+
+.chat-history-panel__header {
+  padding: 0.625rem 0.625rem 0.5rem;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.chat-new-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex: 1;
+  padding: 0.4rem 0.625rem;
+  border-radius: 6px;
+  border: 1px solid var(--bg-surface);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.chat-new-btn:hover {
+  background: var(--bg-surface-hover);
+  border-color: var(--text-muted);
+}
+
+/* Close button — only shown on mobile */
+.chat-history-close-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  padding: 0.3rem;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.chat-history-close-btn:hover { background: var(--bg-surface-hover); }
+
+.chat-history-panel__list {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 0.25rem 0 0.5rem;
+}
+
+.conv-group { margin-bottom: 0.25rem; }
+
+.conv-group-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.625rem 0.75rem 0.2rem;
+}
+
+.conv-item {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3rem 0.375rem 0.3rem 0.75rem;
+  border-radius: 6px;
+  margin: 1px 0.375rem;
+  cursor: pointer;
+  outline: none;
+}
+
+.conv-item:hover,
+.conv-item:focus-visible { background: var(--bg-surface); }
+
+.conv-item--active { background: var(--bg-surface); }
+
+.conv-item__title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+.conv-item__delete {
+  flex-shrink: 0;
+  opacity: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 0.2rem;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: opacity 0.1s, color 0.1s, background 0.1s;
+}
+
+.conv-item:hover .conv-item__delete,
+.conv-item--active .conv-item__delete { opacity: 1; }
+
+.conv-item__delete:hover {
+  color: #c7162b;
+  background: rgba(199, 22, 43, 0.08);
+}
+
+.conv-empty {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 1.5rem 0.75rem;
+}
+
+/* Mobile toggle button (hidden on desktop) */
+.chat-history-toggle-btn { display: none; }
+
+/* Mobile overlay */
+.chat-history-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 149;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+@media (max-width: 800px) {
+  .chat-history-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 150;
+    width: min(300px, 85vw);
+    border-left: none;
+    box-shadow: -4px 0 24px rgba(0, 0, 0, 0.18);
+    transform: translateX(100%);
+    transition: transform 0.22s ease;
+  }
+
+  .chat-history-panel.is-open {
+    transform: translateX(0);
+  }
+
+  .chat-history-close-btn { display: flex; }
+
+  .chat-history-toggle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    padding: 0.3rem 0.4rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-radius: 4px;
+  }
+
+  .chat-history-toggle-btn:hover { background: var(--bg-surface-hover); }
 }
 
 /* ── Auth pages ──────────────────────────────────────────────────────────── */

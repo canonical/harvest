@@ -14,6 +14,7 @@ export default defineConfig({
     proxy: {
       '/auth':             'http://localhost:8080',
       '/admin':            'http://localhost:8080',
+      '/conversations':    'http://localhost:8080',
       '/query':            'http://localhost:8080',
       '/repositories':     'http://localhost:8080',
       '/graph':            'http://localhost:8080',
