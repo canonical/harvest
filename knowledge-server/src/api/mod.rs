@@ -18,6 +18,7 @@ use crate::auth::{self, handlers as auth_handlers, AuthState};
 use crate::config::AuthConfig;
 use crate::conversations::handlers::{self as conv_handlers, ConvState};
 use crate::neo4j::Neo4jClient;
+use crate::projects::handlers::{self as proj_handlers, ProjectState};
 
 pub type GraphCache = RwLock<HashMap<String, Arc<String>>>;
 
@@ -53,7 +54,6 @@ pub fn router(state: AppState, cache: Arc<GraphCache>) -> Router {
         neo4j: Arc::clone(&state.neo4j),
     });
 
-    // ── Public routes ─────────────────────────────────────────────────────────
     let public_router = Router::new()
         .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
         .route("/auth/config", get(auth_handlers::config))
@@ -64,7 +64,6 @@ pub fn router(state: AppState, cache: Arc<GraphCache>) -> Router {
         .route("/auth/google/callback", get(auth_handlers::google_callback))
         .with_state(Arc::clone(&auth_state));
 
-    // ── Protected routes (any authenticated user) ─────────────────────────────
     let agent_router = Router::new()
         .route("/query", post(query::handle_query))
         .route("/query/stream", post(query::handle_query_stream))
@@ -89,11 +88,33 @@ pub fn router(state: AppState, cache: Arc<GraphCache>) -> Router {
         .route("/conversations/:id", delete(conv_handlers::delete))
         .with_state(Arc::clone(&conv_state));
 
+    let project_state = Arc::new(ProjectState {
+        neo4j:  Arc::clone(&state.neo4j),
+        agent:  Arc::clone(&state.agent),
+    });
+
+    let project_router = Router::new()
+        .route("/groups",       get(proj_handlers::list_my_groups))
+        .route("/projects",     get(proj_handlers::list_projects).post(proj_handlers::create_project))
+        .route("/projects/:pid", get(proj_handlers::get_project)
+                                .put(proj_handlers::update_project)
+                                .delete(proj_handlers::delete_project))
+        .route("/projects/:pid/conversations",
+               get(proj_handlers::list_conversations).post(proj_handlers::create_conversation))
+        .route("/projects/:pid/conversations/:cid",
+               get(proj_handlers::get_conversation)
+               .put(proj_handlers::update_conversation)
+               .delete(proj_handlers::delete_conversation))
+        .route("/projects/:pid/query",        post(proj_handlers::project_query))
+        .route("/projects/:pid/query/stream", post(proj_handlers::project_query_stream))
+        .with_state(project_state);
+
     let mut protected_router = Router::new()
         .merge(me_router)
         .merge(conv_router)
         .merge(agent_router)
-        .merge(graph_router);
+        .merge(graph_router)
+        .merge(project_router);
 
     if let Some(docs_dir) = state.docs_dir {
         let docs_router = Router::new()
@@ -106,7 +127,6 @@ pub fn router(state: AppState, cache: Arc<GraphCache>) -> Router {
     let protected_router = protected_router
         .layer(from_fn_with_state(Arc::clone(&jwt_secret), auth::require_auth));
 
-    // ── Admin routes (admin role required) ────────────────────────────────────
     let admin_router = Router::new()
         .route("/admin/users", get(crate::admin::handlers::list_users))
         .route("/admin/users/:id/role", put(crate::admin::handlers::set_user_role))
