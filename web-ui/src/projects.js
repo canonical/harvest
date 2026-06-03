@@ -49,52 +49,41 @@ export function initProjectSelector(container, { onChange } = {}) {
 
 function _build() {
   _container.innerHTML = `
-    <p class="project-selector__label">Project</p>
-    <span class="p-contextual-menu is-dark project-selector__menu">
+    <div class="project-select-label">Project</div>
+    <span class="project-select is-dark p-contextual-menu p-contextual-menu--left">
       <button type="button"
-        class="p-button--base has-icon p-contextual-menu__toggle project-selector__toggle"
+        class="p-button has-icon p-contextual-menu__toggle project-selector__toggle toggle is-dark"
         aria-controls="project-dropdown"
         aria-expanded="false"
+        aria-pressed="false"
         aria-haspopup="true">
-        <span class="project-selector__name">…</span>
+        <span class="project-selector__name">All projects</span>
         <i class="p-icon--chevron-down p-contextual-menu__indicator"></i>
       </button>
       <span class="p-contextual-menu__dropdown project-selector__dropdown"
         id="project-dropdown"
         aria-hidden="true"
         aria-label="Select project">
-
-        <span class="p-contextual-menu__group">
-          <form class="p-search-box">
-            <label class="u-off-screen" for="project-search">Search projects</label>
+        <div class="list is-dark">
+          <div class="p-search-box">
+            <label class="u-off-screen" for="project-search">Search</label>
             <input type="search" id="project-search" name="project-search"
               class="p-search-box__input" placeholder="Search" autocomplete="off">
-            <button type="reset" class="p-search-box__reset u-no-margin--bottom">
-              <i class="p-icon--close">Clear</i>
-            </button>
-            <button type="submit" class="p-search-box__button u-no-margin--bottom">
+            <button type="submit" class="p-search-box__button">
               <i class="p-icon--search">Search</i>
             </button>
-          </form>
-        </span>
-
-        <span class="p-contextual-menu__group">
-          <button type="button" class="p-contextual-menu__link has-icon" id="project-all-btn">
-            <i class="p-icon--switcher-dashboard"></i>
+          </div>
+          <button type="button" class="p-button has-icon p-contextual-menu__link all-projects" id="project-all-btn">
+            <i class="p-icon--folder is-light"></i>
             <span>All projects</span>
           </button>
-        </span>
-
-        <span class="p-contextual-menu__group" id="project-list-group">
-        </span>
-
-        <span class="p-contextual-menu__group">
-          <button type="button" class="p-contextual-menu__link has-icon" id="project-create-btn">
-            <i class="p-icon--plus"></i>
+          <div class="projects" id="project-list-group"></div>
+          <hr class="is-dark">
+          <button type="button" class="p-button has-icon p-contextual-menu__link" id="project-create-btn">
+            <i class="p-icon--plus is-light"></i>
             <span>Create project</span>
           </button>
-        </span>
-
+        </div>
       </span>
     </span>
   `;
@@ -109,9 +98,6 @@ function _build() {
   });
 
   _searchInput.addEventListener('input', () => _renderList(_searchInput.value));
-  _container.querySelector('.p-search-box').addEventListener('reset', () => {
-    setTimeout(() => _renderList(''), 0);
-  });
 
   _container.querySelector('#project-all-btn').addEventListener('click', () => {
     _currentProject = null;
@@ -143,12 +129,11 @@ function _build() {
 function _open() {
   const rect = _toggleBtn.getBoundingClientRect();
   const w    = 284;
-  let left   = rect.right + 8;
-  let top    = rect.top;
+  let left   = rect.left;
+  let top    = rect.bottom + 4;
 
   if (left + w > window.innerWidth - 8) {
-    left = Math.max(8, rect.left);
-    top  = rect.bottom + 4;
+    left = Math.max(8, window.innerWidth - w - 8);
   }
 
   _dropdown.style.top  = `${Math.round(top)}px`;
@@ -195,17 +180,22 @@ function _renderList(query) {
   }
 
   _listGroup.innerHTML = filtered.map(p => {
-    const active   = p.id === _currentProject?.id;
-    const subtitle = [p.group_name, p.description].filter(Boolean).join(' · ');
+    const active = p.id === _currentProject?.id;
+    const desc   = p.description ?? '';
+    const group  = p.group_name  ?? '';
     return `
-      <button type="button"
-        class="p-contextual-menu__link"
-        aria-current="${active ? 'true' : 'false'}"
-        data-id="${esc(p.id)}"
-        data-name="${esc(p.name)}">
-        <div class="u-truncate">${esc(p.name)}</div>
-        ${subtitle ? `<div class="p-text--x-small u-no-margin--bottom u-truncate u-text--muted">${esc(subtitle)}</div>` : ''}
-      </button>`;
+      <div class="p-contextual-menu__group">
+        <button type="button"
+          class="p-contextual-menu__link link"
+          aria-current="${active ? 'true' : 'false'}"
+          data-id="${esc(p.id)}"
+          data-name="${esc(p.name)}">
+          <div title="${esc(p.name)}" class="u-truncate name">${esc(p.name)}</div>
+          ${group ? `<div class="p-text--x-small u-float-right u-no-margin--bottom count">${esc(group)}</div>` : ''}
+          <br>
+          <div class="p-text--x-small u-no-margin--bottom u-truncate description" title="${esc(desc)}">${desc ? esc(desc) : '-'}</div>
+        </button>
+      </div>`;
   }).join('');
 
   _listGroup.querySelectorAll('[data-id]').forEach(btn => {
