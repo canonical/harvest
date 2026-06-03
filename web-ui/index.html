@@ -106,6 +106,8 @@
 
           <div class="p-panel__content">
 
+            <div id="project-selector-section" class="project-selector-section is-fading-when-collapsed"></div>
+
             <div class="p-side-navigation--icons sidenav-top-container">
               <ul class="p-side-navigation__list">
                 <li class="p-side-navigation__item">
@@ -442,6 +444,35 @@
       </section>
 
     </main>
+
+    <!-- ── Create project modal ──────────────────────────────────────────────── -->
+    <div class="p-modal" id="modal-create-project" hidden>
+      <div class="p-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="modal-create-project-title">
+        <header class="p-modal__header">
+          <h2 class="p-modal__title" id="modal-create-project-title">Create project</h2>
+          <button class="p-modal__close" id="modal-create-project-close" aria-label="Close" aria-controls="modal-create-project">Close</button>
+        </header>
+        <div class="p-modal__body">
+          <div class="p-form__group row">
+            <label class="p-form__label" for="create-project-name">Name</label>
+            <input id="create-project-name" class="p-form__control" type="text" autocomplete="off" />
+          </div>
+          <div class="p-form__group row">
+            <label class="p-form__label" for="create-project-description">Description <span class="u-text--muted">(optional)</span></label>
+            <input id="create-project-description" class="p-form__control" type="text" autocomplete="off" />
+          </div>
+          <div class="p-form__group row" id="create-project-group-row">
+            <label class="p-form__label" for="create-project-group">Group</label>
+            <select id="create-project-group" class="p-form__control"></select>
+          </div>
+          <p id="create-project-error" class="auth-error" role="alert" hidden></p>
+        </div>
+        <footer class="p-modal__footer">
+          <button id="modal-create-project-cancel" class="p-button u-no-margin--bottom" type="button">Cancel</button>
+          <button id="modal-create-project-submit" class="p-button--positive u-no-margin--bottom" type="button">Create</button>
+        </footer>
+      </div>
+    </div>
 
     <aside id="repo-source-panel" class="repo-source-panel" aria-label="Symbol source code">
       <div class="repo-source-panel__body">
