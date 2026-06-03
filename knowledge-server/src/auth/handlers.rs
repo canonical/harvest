@@ -38,6 +38,14 @@ fn clear_token_cookie() -> Cookie<'static> {
         .build()
 }
 
+// ── Config (public) ───────────────────────────────────────────────────────────
+
+pub async fn config(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "google": state.config.google.is_some(),
+    }))
+}
+
 // ── Register ─────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]

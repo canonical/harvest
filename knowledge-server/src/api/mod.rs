@@ -51,6 +51,7 @@ pub fn router(state: AppState, cache: Arc<GraphCache>) -> Router {
     // ── Public routes ─────────────────────────────────────────────────────────
     let public_router = Router::new()
         .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
+        .route("/auth/config", get(auth_handlers::config))
         .route("/auth/register", post(auth_handlers::register))
         .route("/auth/login", post(auth_handlers::login))
         .route("/auth/logout", post(auth_handlers::logout))
