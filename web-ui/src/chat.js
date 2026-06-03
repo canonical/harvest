@@ -12,11 +12,9 @@ export function isLoading(state) {
   return state.loading;
 }
 
-export function addUserMessage(state, text) {
-  return {
-    ...state,
-    messages: [...state.messages, { role: 'user', text }],
-  };
+export function addUserMessage(state, text, username = null) {
+  const msg = username ? { role: 'user', text, username } : { role: 'user', text };
+  return { ...state, messages: [...state.messages, msg] };
 }
 
 export function startAssistantMessage(state) {
@@ -81,22 +79,28 @@ export function setError(state, error) {
   return { ...next, loading: false };
 }
 
-// Returns messages in a compact format suitable for server storage.
 export function getSaveableMessages(state) {
   return state.messages
     .filter(m => m.role === 'user' || (m.role === 'assistant' && m.status === 'done' && m.answer))
-    .map(m => m.role === 'user'
-      ? { role: 'user', text: m.text }
-      : { role: 'assistant', text: m.answer, sources: m.sources ?? [] });
+    .map(m => {
+      if (m.role === 'user') {
+        const saved = { role: 'user', text: m.text };
+        if (m.username) saved.username = m.username;
+        return saved;
+      }
+      return { role: 'assistant', text: m.answer, sources: m.sources ?? [] };
+    });
 }
 
-// Rebuilds chat state from stored messages.
 export function loadFromHistory(messages) {
-  const hydrated = messages.map(m =>
-    m.role === 'user'
-      ? { role: 'user', text: m.text }
-      : { role: 'assistant', status: 'done', tool_calls: [], answer: m.text, sources: m.sources ?? [], tool_calls_made: 0 }
-  );
+  const hydrated = messages.map(m => {
+    if (m.role === 'user') {
+      const msg = { role: 'user', text: m.text };
+      if (m.username) msg.username = m.username;
+      return msg;
+    }
+    return { role: 'assistant', status: 'done', tool_calls: [], answer: m.text, sources: m.sources ?? [], tool_calls_made: 0 };
+  });
   return { messages: hydrated, loading: false };
 }
 

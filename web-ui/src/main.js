@@ -1,16 +1,22 @@
 import './vanilla.scss';
 import './style.css';
 import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
-import { queryStream, fetchToolDescription, fetchRepositories, setUnauthorizedHandler } from './api.js';
+import {
+  queryStream, fetchToolDescription, fetchRepositories, setUnauthorizedHandler,
+  projectQueryStream,
+  listProjectConversations, createProjectConversation,
+  getProjectConversation, updateProjectConversation, deleteProjectConversation,
+} from './api.js';
 import { initRepositoriesPage, onRepositoriesPageShow, onRepositoriesPageHide } from './repositories.js';
 import { initDocumentationPage } from './documentation.js';
 import { renderMarkdown, buildFileUrl } from './markdown.js';
 import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
-import { escapeHtml as esc, addCopyButtons } from './utils.js';
+import { escapeHtml as esc, addCopyButtons, avatarColor, initials } from './utils.js';
 import { initSourcePanel, closeSourcePanel } from './source-panel.js';
+import { initProjectSelector, getCurrentProject, refreshProjectSelector } from './projects.js';
 import { mountInlineGraphs } from './inline-graph.js';
 import {
-  fetchMe, logout, initAuthPages, showLoginPage, hideAuthPages, isAdmin, setUser,
+  fetchMe, logout, initAuthPages, showLoginPage, hideAuthPages, isAdmin, setUser, getUser,
 } from './auth.js';
 import { initAdminPage } from './admin.js';
 import {
@@ -40,6 +46,7 @@ let state = createChatState();
 let repoUrlMap = {};
 let activeConvId = null;
 let conversations = [];
+let activeProjectId = null; // null = personal context
 
 const messagesEl  = document.getElementById('messages');
 const inputEl     = document.getElementById('query-input');
@@ -105,8 +112,15 @@ function render() {
 
 function renderMessage(msg) {
   if (msg.role === 'user') {
+    const senderHtml = msg.username ? `
+      <div class="message__sender">
+        <div class="message-avatar" style="background:${esc(avatarColor(msg.username))}"
+          aria-hidden="true">${esc(initials(msg.username))}</div>
+        <span class="message__sender-name">${esc(msg.username)}</span>
+      </div>` : '';
     return `
       <div class="message message--user">
+        ${senderHtml}
         <div class="message__bubble">${esc(msg.text)}</div>
       </div>
     `;
@@ -225,12 +239,17 @@ async function sendQuery() {
 
   inputEl.value = '';
 
-  state = addUserMessage(state, query);
+  const msgUsername = activeProjectId ? (getUser()?.name ?? null) : null;
+  state = addUserMessage(state, query, msgUsername);
   state = startAssistantMessage(state);
   render();
 
   try {
-    await queryStream(query, (event) => {
+    const streamFn = activeProjectId
+      ? (q, cb) => projectQueryStream(activeProjectId, q, cb)
+      : queryStream;
+
+    await streamFn(query, (event) => {
       if (event.type === 'tool_call') {
         state = addToolCall(state, { name: event.name, input: event.input });
         const tc = getMessages(state).at(-1).tool_calls.at(-1);
@@ -289,9 +308,6 @@ function openNav() {
 }
 
 function closeNav() {
-  // Vanilla's .l-navigation.is-collapsed:focus-within { transform: none } rule
-  // keeps the nav visible if anything inside it still has focus when we collapse.
-  // Blur first so that rule never fires.
   if (navEl.contains(document.activeElement)) {
     document.activeElement.blur();
   }
@@ -338,20 +354,19 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
 applyStoredTheme();
 updateThemeButton();
 initSourcePanel();
+initProjectSelector(document.getElementById('project-selector-section'), {
+  onChange: switchToProject,
+});
 
 const docsPage = initDocumentationPage(
   document.getElementById('page-documentation'),
   [],
 );
 
-// ── Auth guard ────────────────────────────────────────────────────────────────
-
 const mainEl    = document.querySelector('.l-main');
 const navEl2    = document.getElementById('app-sidebar');
 const adminNavItem = document.getElementById('nav-item-admin');
 const logoutBtn = document.getElementById('logout-btn');
-
-// ── Conversation history ──────────────────────────────────────────────────────
 
 const convListEl      = document.getElementById('conv-list');
 const newChatBtn      = document.getElementById('new-chat-btn');
@@ -379,10 +394,29 @@ historyClose?.addEventListener('click', closeHistoryPanel);
 historyBackdrop?.addEventListener('click', closeHistoryPanel);
 
 function refreshConvList() {
+  const user = getUser();
   renderConvList(convListEl, conversations, activeConvId, {
-    onSelect: loadConversation,
-    onDelete: handleDeleteConversation,
+    onSelect:    loadConversation,
+    onDelete:    handleDeleteConversation,
+    showCreator: !!activeProjectId,
+    canDelete:   (c) => !activeProjectId || isAdmin() || c.created_by === user?.id,
   });
+}
+
+async function switchToProject(project) {
+  activeProjectId = project?.id ?? null;
+  activeConvId    = null;
+  state           = createChatState();
+  render();
+
+  try {
+    conversations = activeProjectId
+      ? await listProjectConversations(activeProjectId)
+      : await listConversations();
+  } catch {
+    conversations = [];
+  }
+  refreshConvList();
 }
 
 async function saveCurrentConversation() {
@@ -390,16 +424,30 @@ async function saveCurrentConversation() {
   if (!saveable.length) return;
 
   const firstUser = saveable.find(m => m.role === 'user');
-  const raw = firstUser?.text ?? 'New conversation';
+  const raw   = firstUser?.text ?? 'New conversation';
   const title = raw.length > 60 ? raw.slice(0, 57) + '…' : raw;
 
-  if (!activeConvId) {
-    const conv = await createConversation(title);
-    activeConvId = conv.id;
-    conversations = [conv, ...conversations];
-  }
+  if (activeProjectId) {
+    const user     = getUser();
+    const username = user?.name ?? user?.email ?? 'Unknown';
+    const projectMessages = saveable.map(m =>
+      m.role === 'user' && !m.username ? { ...m, username } : m
+    );
 
-  await updateConversation(activeConvId, { title, messages: saveable });
+    if (!activeConvId) {
+      const conv = await createProjectConversation(activeProjectId, { title });
+      activeConvId = conv.id;
+      conversations = [conv, ...conversations];
+    }
+    await updateProjectConversation(activeProjectId, activeConvId, { title, messages: projectMessages });
+  } else {
+    if (!activeConvId) {
+      const conv = await createConversation(title);
+      activeConvId = conv.id;
+      conversations = [conv, ...conversations];
+    }
+    await updateConversation(activeConvId, { title, messages: saveable });
+  }
 
   const idx = conversations.findIndex(c => c.id === activeConvId);
   if (idx !== -1) {
@@ -411,7 +459,9 @@ async function saveCurrentConversation() {
 
 async function loadConversation(id) {
   try {
-    const conv = await getConversation(id);
+    const conv = activeProjectId
+      ? await getProjectConversation(activeProjectId, id)
+      : await getConversation(id);
     activeConvId = id;
     state = loadFromHistory(Array.isArray(conv.messages) ? conv.messages : []);
     render();
@@ -423,7 +473,11 @@ async function loadConversation(id) {
 async function handleDeleteConversation(id) {
   if (!confirm('Delete this conversation?')) return;
   try {
-    await deleteConversation(id);
+    if (activeProjectId) {
+      await deleteProjectConversation(activeProjectId, id);
+    } else {
+      await deleteConversation(id);
+    }
     conversations = conversations.filter(c => c.id !== id);
     if (activeConvId === id) {
       activeConvId = null;
@@ -431,7 +485,9 @@ async function handleDeleteConversation(id) {
       render();
     }
     refreshConvList();
-  } catch {}
+  } catch (err) {
+    alert(`Could not delete: ${err.message}`);
+  }
 }
 
 newChatBtn?.addEventListener('click', () => {
@@ -441,22 +497,20 @@ newChatBtn?.addEventListener('click', () => {
   refreshConvList();
 });
 
-// ── App init ──────────────────────────────────────────────────────────────────
-
 function showApp(user) {
   setUser(user);
   hideAuthPages();
   mainEl.hidden = false;
   navEl2.hidden = false;
 
-  // Show admin nav item only for admins
   if (adminNavItem) adminNavItem.hidden = user.role !== 'admin';
 
-  // Init admin page if present
   const adminPage = document.getElementById('page-admin');
   if (adminPage && user.role === 'admin') initAdminPage(adminPage);
 
-  // Load conversation history
+  refreshProjectSelector();
+
+  activeProjectId = null;
   listConversations()
     .then(list => { conversations = list; refreshConvList(); })
     .catch(() => {});
