@@ -16,6 +16,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use crate::agent::Agent;
 use crate::auth::{self, handlers as auth_handlers, AuthState};
 use crate::config::AuthConfig;
+use crate::conversations::handlers::{self as conv_handlers, ConvState};
 use crate::neo4j::Neo4jClient;
 
 pub type GraphCache = RwLock<HashMap<String, Arc<String>>>;
@@ -48,6 +49,10 @@ pub fn router(state: AppState, cache: Arc<GraphCache>) -> Router {
 
     let jwt_secret = Arc::new(state.auth.jwt_secret.clone());
 
+    let conv_state = Arc::new(ConvState {
+        neo4j: Arc::clone(&state.neo4j),
+    });
+
     // ── Public routes ─────────────────────────────────────────────────────────
     let public_router = Router::new()
         .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
@@ -76,8 +81,17 @@ pub fn router(state: AppState, cache: Arc<GraphCache>) -> Router {
         .route("/auth/me", get(auth_handlers::me))
         .with_state(Arc::clone(&auth_state));
 
+    let conv_router = Router::new()
+        .route("/conversations", get(conv_handlers::list))
+        .route("/conversations", post(conv_handlers::create))
+        .route("/conversations/:id", get(conv_handlers::get))
+        .route("/conversations/:id", put(conv_handlers::update))
+        .route("/conversations/:id", delete(conv_handlers::delete))
+        .with_state(Arc::clone(&conv_state));
+
     let mut protected_router = Router::new()
         .merge(me_router)
+        .merge(conv_router)
         .merge(agent_router)
         .merge(graph_router);
 
