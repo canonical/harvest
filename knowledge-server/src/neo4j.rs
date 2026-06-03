@@ -28,7 +28,16 @@ impl Neo4jClient {
                     Value::Number(n)  => q.param(&key, n.as_f64().unwrap()),
                     Value::Bool(b)    => q.param(&key, b),
                     Value::Null       => q,
-                    other             => q.param(&key, other.to_string()),
+                    Value::Array(arr) => {
+                        let items: Vec<String> = arr.into_iter()
+                            .map(|v| match v {
+                                Value::String(s) => s,
+                                other            => other.to_string(),
+                            })
+                            .collect();
+                        q.param(&key, items)
+                    }
+                    other => q.param(&key, other.to_string()),
                 };
             }
         }
