@@ -79,8 +79,8 @@ function render() {
   messagesEl.innerHTML = messages.map(renderMessage).join('');
 
   const loading = isLoading(state);
-  sendBtn.disabled = loading;
-  inputEl.disabled = loading;
+  sendBtn.disabled = !activeProjectId || loading;
+  inputEl.disabled = !activeProjectId || loading;
 
   const atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
   if (atBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -563,19 +563,32 @@ async function switchToProject(project) {
   state           = createChatState();
   render();
 
-  const header = document.getElementById('project-chat-header');
-  if (header) header.hidden = !activeProjectId;
+  const hasProject = !!activeProjectId;
 
-  if (activeProjectId) {
+  const header = document.getElementById('project-chat-header');
+  if (header) header.hidden = !hasProject;
+
+  const noProject = document.getElementById('chat-no-project');
+  if (noProject) noProject.hidden = hasProject;
+
+  if (historyPanel) historyPanel.hidden = !hasProject;
+  if (historyToggle) historyToggle.hidden = !hasProject;
+  if (!hasProject) closeHistoryPanel();
+
+  inputEl.disabled = !hasProject;
+  sendBtn.disabled = !hasProject;
+
+  if (hasProject) {
     openProjectEventStream(activeProjectId);
   } else {
     closeProjectEventStream();
+    conversations = [];
+    refreshConvList();
+    return;
   }
 
   try {
-    conversations = activeProjectId
-      ? await listProjectConversations(activeProjectId)
-      : await listConversations();
+    conversations = await listProjectConversations(activeProjectId);
   } catch {
     conversations = [];
   }
@@ -677,9 +690,14 @@ function showApp(user) {
   refreshProjectSelector();
 
   activeProjectId = null;
-  listConversations()
-    .then(list => { conversations = list; refreshConvList(); })
-    .catch(() => {});
+  const noProject = document.getElementById('chat-no-project');
+  if (noProject) noProject.hidden = false;
+  if (historyPanel) historyPanel.hidden = true;
+  if (historyToggle) historyToggle.hidden = true;
+  inputEl.disabled = true;
+  sendBtn.disabled = true;
+  conversations = [];
+  refreshConvList();
 
   fetchRepositories().then((repos) => {
     repoUrlMap = Object.fromEntries(

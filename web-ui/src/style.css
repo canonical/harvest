@@ -365,7 +365,7 @@ html, body {
   display: flex;
   flex-shrink: 0;
   gap: 0.625rem;
-  min-height: 3rem;
+  height: 3.25rem;
   padding: 0 1rem;
 }
 
@@ -377,14 +377,17 @@ html, body {
 }
 
 .project-selector__search-input {
+  align-self: center;
   background: none;
   border: none;
   color: rgba(255, 255, 255, 0.9);
+  display: block;
   font-family: inherit;
   font-size: 1rem;
-  height: 100%;
+  height: 2.25rem;
+  margin: 0;
   outline: none;
-  padding: 0;
+  padding: 0 0.75rem;
   width: 100%;
 }
 
@@ -529,6 +532,7 @@ html, body {
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  position: relative;
 }
 
 .page[hidden] { display: none; }
@@ -1312,10 +1316,14 @@ a.source-chip:hover .source-chip__name {
 }
 
 .repo-empty__icon {
-  font-size: 3.5rem;
-  opacity: 0.12;
-  line-height: 1;
+  opacity: 0.18;
   user-select: none;
+}
+
+.repo-empty__icon svg {
+  display: block;
+  width: 3.5rem;
+  height: 3.5rem;
 }
 
 .repo-empty__text {
@@ -1773,21 +1781,30 @@ a.source-chip:hover .source-chip__name {
   overflow-y: auto;
   padding: 1.5rem 2rem;
   background: var(--bg-page);
+  position: relative;
 }
 
 .doc-welcome {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  min-height: 12rem;
+  gap: 0.625rem;
+  pointer-events: none;
   text-align: center;
-  color: var(--text-muted);
 }
 
 .doc-welcome__icon {
-  font-size: 2.5rem;
-  margin-bottom: 0.5rem;
+  opacity: 0.18;
+  user-select: none;
+}
+
+.doc-welcome__icon svg {
+  display: block;
+  width: 3.5rem;
+  height: 3.5rem;
 }
 
 .doc-welcome__title {
@@ -1795,12 +1812,15 @@ a.source-chip:hover .source-chip__name {
   font-weight: 600;
   color: var(--text-primary);
   margin: 0 0 0.5rem;
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .doc-welcome__body {
-  font-size: 0.9375rem;
-  max-width: 28rem;
-  line-height: 1.5;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin: 0;
+  line-height: 1.6;
 }
 
 .doc-content-loading {
@@ -2117,6 +2137,39 @@ a.source-chip:hover .source-chip__name {
 }
 
 /* ── Chat history sidebar ────────────────────────────────────────────────── */
+
+.chat-no-project {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.625rem;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.chat-no-project[hidden] { display: none; }
+
+.chat-no-project__icon {
+  opacity: 0.18;
+  user-select: none;
+}
+
+.chat-no-project__icon svg {
+  display: block;
+  width: 3.5rem;
+  height: 3.5rem;
+}
+
+.chat-no-project__text {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  text-align: center;
+  margin: 0;
+  line-height: 1.6;
+}
 
 .chat-with-history {
   display: flex;
@@ -2567,4 +2620,34 @@ a.source-chip:hover .source-chip__name {
   font-size: 2.25rem;
   margin-bottom: 0.5rem;
   opacity: 0.5;
+}
+
+/* ── Empty-state icon theme adjustments ──────────────────────────────────── */
+
+[data-theme="light"] .repo-empty__icon,
+[data-theme="light"] .doc-welcome__icon,
+[data-theme="light"] .chat-no-project__icon {
+  opacity: 0.3;
+}
+
+@media (prefers-color-scheme: light) {
+  .repo-empty__icon,
+  .doc-welcome__icon,
+  .chat-no-project__icon {
+    opacity: 0.3;
+  }
+}
+
+[data-theme="dark"] .repo-empty__icon,
+[data-theme="dark"] .doc-welcome__icon,
+[data-theme="dark"] .chat-no-project__icon {
+  opacity: 0.22;
+}
+
+@media (prefers-color-scheme: dark) {
+  .repo-empty__icon,
+  .doc-welcome__icon,
+  .chat-no-project__icon {
+    opacity: 0.22;
+  }
 }
