@@ -331,6 +331,72 @@ describe('addUserMessage with attachments', () => {
   });
 });
 
+describe('getSaveableMessages with tool calls', () => {
+  it('includes tool_calls on saved assistant messages', () => {
+    const s = pipe(
+      createChatState(),
+      s => addUserMessage(s, 'q'),
+      s => startAssistantMessage(s),
+      s => addToolCall(s, { name: 'search_symbols', input: { query: 'foo' } }),
+      s => completeToolCall(s, { name: 'search_symbols', preview: 'result' }),
+      s => finalizeAssistantMessage(s, { answer: 'done', sources: [], tool_calls_made: 1 }),
+    );
+    const saved = getSaveableMessages(s);
+    const assistant = saved.find(m => m.role === 'assistant');
+    expect(assistant.tool_calls).toHaveLength(1);
+    expect(assistant.tool_calls[0].name).toBe('search_symbols');
+    expect(assistant.tool_calls[0].preview).toBe('result');
+    expect(assistant.tool_calls[0].status).toBe('done');
+  });
+
+  it('includes tool_calls_made on saved assistant messages', () => {
+    const s = pipe(
+      createChatState(),
+      s => addUserMessage(s, 'q'),
+      s => startAssistantMessage(s),
+      s => addToolCall(s, { name: 'search_symbols', input: {} }),
+      s => completeToolCall(s, { name: 'search_symbols', preview: '' }),
+      s => finalizeAssistantMessage(s, { answer: 'done', sources: [], tool_calls_made: 1 }),
+    );
+    const saved = getSaveableMessages(s);
+    expect(saved.find(m => m.role === 'assistant').tool_calls_made).toBe(1);
+  });
+});
+
+describe('loadFromHistory with tool calls', () => {
+  it('restores tool_calls on assistant messages', () => {
+    const history = [
+      { role: 'user', text: 'q' },
+      {
+        role: 'assistant', text: 'done', sources: [], tool_calls_made: 1,
+        tool_calls: [{ name: 'search_symbols', input: { query: 'foo' }, preview: 'result', description: 'Searching foo', status: 'done' }],
+      },
+    ];
+    const { messages } = loadFromHistory(history);
+    const assistant = messages.find(m => m.role === 'assistant');
+    expect(assistant.tool_calls).toHaveLength(1);
+    expect(assistant.tool_calls[0].name).toBe('search_symbols');
+    expect(assistant.tool_calls[0].status).toBe('done');
+    expect(assistant.tool_calls[0].preview).toBe('result');
+    expect(assistant.tool_calls[0].description).toBe('Searching foo');
+  });
+
+  it('restores tool_calls_made on assistant messages', () => {
+    const history = [
+      { role: 'user', text: 'q' },
+      { role: 'assistant', text: 'done', sources: [], tool_calls_made: 3, tool_calls: [] },
+    ];
+    const { messages } = loadFromHistory(history);
+    expect(messages.find(m => m.role === 'assistant').tool_calls_made).toBe(3);
+  });
+
+  it('defaults to empty tool_calls when absent in history', () => {
+    const history = [{ role: 'assistant', text: 'hi', sources: [] }];
+    const { messages } = loadFromHistory(history);
+    expect(messages[0].tool_calls).toEqual([]);
+  });
+});
+
 describe('getSaveableMessages with attachments', () => {
   it('includes attachments in saved user messages', () => {
     const s = pipe(
