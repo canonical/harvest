@@ -12,11 +12,12 @@ use serde::Deserialize;
 use std::{convert::Infallible, sync::Arc};
 use tokio::sync::mpsc;
 
-use crate::agent::{Agent, AgentEvent};
+use crate::agent::{Agent, AgentEvent, HistoryMessage};
 
 #[derive(Deserialize)]
 pub struct QueryRequest {
     pub query: String,
+    pub history: Option<Vec<HistoryMessage>>,
     pub repositories: Option<Vec<String>>,
     pub versions: Option<Vec<String>>,
 }
@@ -25,7 +26,8 @@ pub async fn handle_query(
     State(agent): State<Arc<Agent>>,
     Json(req): Json<QueryRequest>,
 ) -> impl IntoResponse {
-    match agent.query(&req.query).await {
+    let history = req.history.as_deref().unwrap_or(&[]);
+    match agent.query(&req.query, history).await {
         Ok(response) => Json(response).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "query failed");
@@ -39,9 +41,10 @@ pub async fn handle_query_stream(
     Json(req): Json<QueryRequest>,
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
+    let history = req.history.unwrap_or_default();
 
     tokio::spawn(async move {
-        agent.query_streaming(&req.query, tx).await;
+        agent.query_streaming(&req.query, &history, tx).await;
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(|event| {

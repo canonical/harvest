@@ -246,8 +246,10 @@ async function sendQuery() {
 
   if (activeProjectId) {
     // Project chat: fire-and-forget POST; all events arrive via EventSource.
+    // Capture history before the POST — the current message isn't in state yet.
+    const history = getSaveableMessages(state);
     try {
-      await projectQueryStart(activeProjectId, query);
+      await projectQueryStart(activeProjectId, query, history);
     } catch (err) {
       if (err.status === 409) {
         // Already locked — the lock banner will have appeared via EventSource.
@@ -261,13 +263,14 @@ async function sendQuery() {
     return;
   }
 
-  // Personal chat: drive state locally from the POST stream.
+  // Personal chat: capture history before adding the new user message.
+  const history = getSaveableMessages(state);
   state = addUserMessage(state, query, null);
   state = startAssistantMessage(state);
   render();
 
   try {
-    await queryStream(query, (event) => {
+    await queryStream(query, history, (event) => {
       if (event.type === 'tool_call') {
         state = addToolCall(state, { name: event.name, input: event.input });
         const tc = getMessages(state).at(-1).tool_calls.at(-1);
