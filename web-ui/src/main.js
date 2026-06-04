@@ -32,6 +32,10 @@ import {
   isLoading,
   getSaveableMessages,
   loadFromHistory,
+  addPendingAttachment,
+  removePendingAttachment,
+  getPendingAttachments,
+  clearPendingAttachments,
 } from './chat.js';
 import {
   listConversations,
@@ -116,6 +120,16 @@ function render() {
   mountInlineGraphs(messagesEl);
 }
 
+function renderAttachments(attachments) {
+  if (!attachments?.length) return '';
+  return `<div class="message__attachments">${attachments.map(a => {
+    if (a.preview_url) {
+      return `<img class="message__attachment-img" src="${esc(a.preview_url)}" alt="${esc(a.name)}" title="${esc(a.name)}">`;
+    }
+    return `<span class="message__attachment-chip"><i class="p-icon--document" aria-hidden="true"></i>${esc(a.name)}</span>`;
+  }).join('')}</div>`;
+}
+
 function renderMessage(msg) {
   if (msg.role === 'user') {
     const senderHtml = msg.username ? `
@@ -127,6 +141,7 @@ function renderMessage(msg) {
     return `
       <div class="message message--user">
         ${senderHtml}
+        ${renderAttachments(msg.attachments)}
         <div class="message__bubble">${esc(msg.text)}</div>
       </div>
     `;
@@ -239,22 +254,95 @@ function renderToolCall(tc, i) {
   `;
 }
 
+// ── Attachment helpers ────────────────────────────────────────────────────────
+
+const attachTrayEl   = document.getElementById('attachment-tray');
+const attachInputEl  = document.getElementById('attachment-input');
+const attachBtnEl    = document.getElementById('attach-btn');
+
+function toWireAttachment(a) {
+  return { name: a.name, mime_type: a.mime_type, data: a.data };
+}
+
+function renderAttachmentTray() {
+  if (!attachTrayEl) return;
+  const pending = getPendingAttachments(state);
+  if (pending.length === 0) { attachTrayEl.hidden = true; attachTrayEl.innerHTML = ''; return; }
+  attachTrayEl.hidden = false;
+  attachTrayEl.innerHTML = pending.map(a => {
+    const thumb = a.preview_url
+      ? `<img class="attach-chip__thumb" src="${esc(a.preview_url)}" alt="">`
+      : `<i class="p-icon--document" aria-hidden="true"></i>`;
+    return `<div class="attach-chip" data-id="${a.id}">
+      ${thumb}
+      <span class="attach-chip__name">${esc(a.name)}</span>
+      <button class="attach-chip__remove" aria-label="Remove ${esc(a.name)}" data-id="${a.id}">×</button>
+    </div>`;
+  }).join('');
+}
+
+async function addFileAttachment(file) {
+  const ACCEPTED = ['image/png','image/jpeg','image/gif','image/webp','application/pdf'];
+  if (!ACCEPTED.includes(file.type)) return;
+  const data = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+  const preview_url = file.type.startsWith('image/') ? `data:${file.type};base64,${data}` : null;
+  state = addPendingAttachment(state, { name: file.name, mime_type: file.type, data, preview_url });
+  renderAttachmentTray();
+}
+
+if (attachBtnEl) {
+  attachBtnEl.addEventListener('click', () => attachInputEl?.click());
+}
+if (attachInputEl) {
+  attachInputEl.addEventListener('change', (e) => {
+    [...(e.target.files ?? [])].forEach(addFileAttachment);
+    attachInputEl.value = '';
+  });
+}
+document.addEventListener('paste', (e) => {
+  if (!activeProjectId && !document.getElementById('page-chat')?.offsetParent) return;
+  const items = [...(e.clipboardData?.items ?? [])];
+  for (const item of items) {
+    if (item.kind === 'file') {
+      const file = item.getAsFile();
+      if (file) addFileAttachment(file);
+    }
+  }
+});
+if (attachTrayEl) {
+  attachTrayEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('.attach-chip__remove');
+    if (!btn) return;
+    state = removePendingAttachment(state, Number(btn.dataset.id));
+    renderAttachmentTray();
+  });
+}
+
 async function sendQuery() {
   const query = inputEl.value.trim();
-  if (!query || isLoading(state) || projectRemoteLocked) return;
+  const hasPending = getPendingAttachments(state).length > 0;
+  if ((!query && !hasPending) || isLoading(state) || projectRemoteLocked) return;
   inputEl.value = '';
 
   if (activeProjectId) {
     // Project chat: fire-and-forget POST; all events arrive via EventSource.
-    // Capture history before the POST — the current message isn't in state yet.
+    // Capture history and attachments before the POST.
     const history = getSaveableMessages(state);
+    const attachments = getPendingAttachments(state).map(toWireAttachment);
+    state = clearPendingAttachments(state);
+    renderAttachmentTray();
     try {
-      await projectQueryStart(activeProjectId, query, history);
+      await projectQueryStart(activeProjectId, query, history, attachments);
     } catch (err) {
       if (err.status === 409) {
         // Already locked — the lock banner will have appeared via EventSource.
       } else {
-        state = addUserMessage(state, query, getUser()?.name ?? null);
+        state = addUserMessage(state, query, getUser()?.name ?? null, attachments);
         state = startAssistantMessage(state);
         state = setError(state, err.message);
         render();
@@ -263,14 +351,17 @@ async function sendQuery() {
     return;
   }
 
-  // Personal chat: capture history before adding the new user message.
+  // Personal chat: capture history + attachments before adding the user message.
   const history = getSaveableMessages(state);
-  state = addUserMessage(state, query, null);
+  const attachments = getPendingAttachments(state).map(toWireAttachment);
+  state = clearPendingAttachments(state);
+  renderAttachmentTray();
+  state = addUserMessage(state, query, null, attachments);
   state = startAssistantMessage(state);
   render();
 
   try {
-    await queryStream(query, history, (event) => {
+    await queryStream(query, history, attachments, (event) => {
       if (event.type === 'tool_call') {
         state = addToolCall(state, { name: event.name, input: event.input });
         const tc = getMessages(state).at(-1).tool_calls.at(-1);
@@ -376,7 +467,7 @@ function handleProjectEvent(event) {
 
     case 'user_message': {
       const msgUsername = event.username ?? null;
-      state = addUserMessage(state, event.query ?? '', msgUsername);
+      state = addUserMessage(state, event.query ?? '', msgUsername, event.attachments ?? []);
       state = startAssistantMessage(state);
       render();
       break;

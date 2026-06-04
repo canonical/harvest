@@ -1,7 +1,8 @@
 let _nextToolCallId = 1;
+let _nextAttachmentId = 1;
 
 export function createChatState() {
-  return { messages: [], loading: false };
+  return { messages: [], loading: false, pendingAttachments: [] };
 }
 
 export function getMessages(state) {
@@ -12,9 +13,27 @@ export function isLoading(state) {
   return state.loading;
 }
 
-export function addUserMessage(state, text, username = null) {
-  const msg = username ? { role: 'user', text, username } : { role: 'user', text };
+export function addUserMessage(state, text, username = null, attachments = []) {
+  const msg = { role: 'user', text, attachments };
+  if (username) msg.username = username;
   return { ...state, messages: [...state.messages, msg] };
+}
+
+export function addPendingAttachment(state, attachment) {
+  const att = { ...attachment, id: attachment.id ?? _nextAttachmentId++ };
+  return { ...state, pendingAttachments: [...state.pendingAttachments, att] };
+}
+
+export function removePendingAttachment(state, id) {
+  return { ...state, pendingAttachments: state.pendingAttachments.filter(a => a.id !== id) };
+}
+
+export function getPendingAttachments(state) {
+  return state.pendingAttachments;
+}
+
+export function clearPendingAttachments(state) {
+  return { ...state, pendingAttachments: [] };
 }
 
 export function startAssistantMessage(state) {
@@ -84,7 +103,7 @@ export function getSaveableMessages(state) {
     .filter(m => m.role === 'user' || (m.role === 'assistant' && m.status === 'done' && m.answer))
     .map(m => {
       if (m.role === 'user') {
-        const saved = { role: 'user', text: m.text };
+        const saved = { role: 'user', text: m.text, attachments: m.attachments ?? [] };
         if (m.username) saved.username = m.username;
         return saved;
       }
@@ -95,13 +114,13 @@ export function getSaveableMessages(state) {
 export function loadFromHistory(messages) {
   const hydrated = messages.map(m => {
     if (m.role === 'user') {
-      const msg = { role: 'user', text: m.text };
+      const msg = { role: 'user', text: m.text, attachments: m.attachments ?? [] };
       if (m.username) msg.username = m.username;
       return msg;
     }
     return { role: 'assistant', status: 'done', tool_calls: [], answer: m.text, sources: m.sources ?? [], tool_calls_made: 0 };
   });
-  return { messages: hydrated, loading: false };
+  return { messages: hydrated, loading: false, pendingAttachments: [] };
 }
 
 function updateLastAssistant(state, updater) {

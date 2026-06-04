@@ -133,6 +133,25 @@ fn to_openai_message(msg: &Message) -> Value {
                 });
             }
 
+            let has_media = parts.iter().any(|p| {
+                matches!(p, ContentPart::Image { .. } | ContentPart::Document { .. })
+            });
+
+            if has_media {
+                let content_items: Vec<Value> = parts.iter().filter_map(|p| match p {
+                    ContentPart::Text { text } =>
+                        Some(json!({ "type": "text", "text": text })),
+                    ContentPart::Image { media_type, data } =>
+                        Some(json!({ "type": "image_url", "image_url": {
+                            "url": format!("data:{};base64,{}", media_type, data)
+                        }})),
+                    ContentPart::Document { .. } =>
+                        Some(json!({ "type": "text", "text": "[Attached PDF document]" })),
+                    _ => None,
+                }).collect();
+                return json!({ "role": role, "content": content_items });
+            }
+
             let text: String = parts
                 .iter()
                 .filter_map(|p| match p {
@@ -327,6 +346,42 @@ mod tests {
         assert_eq!(v["role"], "tool");
         assert_eq!(v["tool_call_id"], "call_1");
         assert_eq!(v["content"], "result text");
+    }
+
+    // ── image and document content parts ─────────────────────────────────────
+
+    #[test]
+    fn image_content_part_serializes_as_image_url() {
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text { text: "look at this".into() },
+                ContentPart::Image { media_type: "image/jpeg".into(), data: "abc123".into() },
+            ]),
+        };
+        let v = to_openai_message(&msg);
+        let content = v["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "look at this");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/jpeg;base64,abc123");
+    }
+
+    #[test]
+    fn document_content_part_falls_back_to_text_for_openai() {
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text { text: "read this".into() },
+                ContentPart::Document { media_type: "application/pdf".into(), data: "pdfdata".into() },
+            ]),
+        };
+        let v = to_openai_message(&msg);
+        let content = v["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        // Document becomes a text note
+        assert_eq!(content[1]["type"], "text");
+        assert!(content[1]["text"].as_str().unwrap().contains("PDF"));
     }
 
     // ── to_openai_function ────────────────────────────────────────────────────

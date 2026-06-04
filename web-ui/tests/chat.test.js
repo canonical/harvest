@@ -10,6 +10,12 @@ import {
   setError,
   getMessages,
   isLoading,
+  getSaveableMessages,
+  loadFromHistory,
+  addPendingAttachment,
+  removePendingAttachment,
+  getPendingAttachments,
+  clearPendingAttachments,
 } from '../src/chat.js';
 
 // ── state creation ────────────────────────────────────────────────────────────
@@ -247,6 +253,124 @@ describe('multi-turn conversation', () => {
     expect(msgs[2].role).toBe('user');
     expect(msgs[3].role).toBe('assistant');
     expect(msgs[3].answer).toBe('second answer');
+  });
+});
+
+// ── pending attachments ───────────────────────────────────────────────────────
+
+const fakeImage = { id: 1, name: 'photo.png', mime_type: 'image/png', data: 'abc', preview_url: 'data:image/png;base64,abc' };
+const fakePdf   = { id: 2, name: 'doc.pdf',   mime_type: 'application/pdf', data: 'pdf', preview_url: null };
+
+describe('addPendingAttachment', () => {
+  it('adds an attachment to the pending list', () => {
+    const s = addPendingAttachment(createChatState(), fakeImage);
+    expect(getPendingAttachments(s)).toHaveLength(1);
+    expect(getPendingAttachments(s)[0].name).toBe('photo.png');
+  });
+
+  it('accumulates multiple attachments', () => {
+    const s = pipe(
+      createChatState(),
+      s => addPendingAttachment(s, fakeImage),
+      s => addPendingAttachment(s, fakePdf),
+    );
+    expect(getPendingAttachments(s)).toHaveLength(2);
+  });
+
+  it('does not mutate the original state', () => {
+    const s = createChatState();
+    addPendingAttachment(s, fakeImage);
+    expect(getPendingAttachments(s)).toHaveLength(0);
+  });
+});
+
+describe('removePendingAttachment', () => {
+  it('removes an attachment by id', () => {
+    const s = pipe(
+      createChatState(),
+      s => addPendingAttachment(s, fakeImage),
+      s => addPendingAttachment(s, fakePdf),
+      s => removePendingAttachment(s, 1),
+    );
+    expect(getPendingAttachments(s)).toHaveLength(1);
+    expect(getPendingAttachments(s)[0].id).toBe(2);
+  });
+
+  it('is a no-op for an unknown id', () => {
+    const s = addPendingAttachment(createChatState(), fakeImage);
+    const s2 = removePendingAttachment(s, 999);
+    expect(getPendingAttachments(s2)).toHaveLength(1);
+  });
+});
+
+describe('clearPendingAttachments', () => {
+  it('empties the pending list', () => {
+    const s = pipe(
+      createChatState(),
+      s => addPendingAttachment(s, fakeImage),
+      s => addPendingAttachment(s, fakePdf),
+      s => clearPendingAttachments(s),
+    );
+    expect(getPendingAttachments(s)).toHaveLength(0);
+  });
+});
+
+// ── attachments in messages ───────────────────────────────────────────────────
+
+describe('addUserMessage with attachments', () => {
+  it('stores attachments on the message', () => {
+    const s = addUserMessage(createChatState(), 'hello', null, [fakeImage]);
+    const msg = getMessages(s)[0];
+    expect(msg.attachments).toHaveLength(1);
+    expect(msg.attachments[0].name).toBe('photo.png');
+  });
+
+  it('defaults to empty attachments when not provided', () => {
+    const s = addUserMessage(createChatState(), 'hello');
+    expect(getMessages(s)[0].attachments).toEqual([]);
+  });
+});
+
+describe('getSaveableMessages with attachments', () => {
+  it('includes attachments in saved user messages', () => {
+    const s = pipe(
+      createChatState(),
+      s => addUserMessage(s, 'see this', null, [fakeImage]),
+      s => startAssistantMessage(s),
+      s => finalizeAssistantMessage(s, { answer: 'ok', sources: [], tool_calls_made: 0 }),
+    );
+    const saved = getSaveableMessages(s);
+    expect(saved[0].attachments).toHaveLength(1);
+    expect(saved[0].attachments[0].name).toBe('photo.png');
+  });
+
+  it('saves an empty attachments array when message has none', () => {
+    const s = pipe(
+      createChatState(),
+      s => addUserMessage(s, 'no attachments'),
+      s => startAssistantMessage(s),
+      s => finalizeAssistantMessage(s, { answer: 'ok', sources: [], tool_calls_made: 0 }),
+    );
+    const saved = getSaveableMessages(s);
+    expect(saved[0].attachments).toEqual([]);
+  });
+});
+
+describe('loadFromHistory with attachments', () => {
+  it('restores attachments on user messages', () => {
+    const history = [
+      { role: 'user', text: 'see this', attachments: [{ name: 'img.png', mime_type: 'image/png', data: 'xyz', preview_url: null }] },
+      { role: 'assistant', text: 'got it', sources: [] },
+    ];
+    const { messages } = loadFromHistory(history);
+    expect(messages[0].attachments).toHaveLength(1);
+    expect(messages[0].attachments[0].name).toBe('img.png');
+  });
+
+  it('defaults to empty attachments when history message has none', () => {
+    const history = [{ role: 'user', text: 'hello' }];
+    const { messages } = loadFromHistory(history);
+    expect(messages[0].attachments).toEqual([]);
   });
 });
 
