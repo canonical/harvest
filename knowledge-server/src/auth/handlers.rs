@@ -167,6 +167,7 @@ pub async fn google_redirect(
 
     let oauth_state = Uuid::new_v4().to_string();
     let url = build_google_auth_url(google, &oauth_state);
+    tracing::info!(redirect_uri = %google.redirect_uri, auth_url = %url, "Initiating Google OAuth");
 
     let state_cookie = Cookie::build(("oauth_state", oauth_state))
         .http_only(true)
@@ -180,8 +181,10 @@ pub async fn google_redirect(
 
 #[derive(Deserialize)]
 pub struct GoogleCallbackParams {
-    pub code: String,
-    pub state: String,
+    pub code:              Option<String>,
+    pub state:             Option<String>,
+    pub error:             Option<String>,
+    pub error_description: Option<String>,
 }
 
 pub async fn google_callback(
@@ -191,13 +194,23 @@ pub async fn google_callback(
 ) -> Result<impl IntoResponse, ApiError> {
     let google = state.config.google.as_ref().ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "Google login not configured"))?;
 
+    // Google returned an error (e.g. redirect_uri_mismatch, access_denied).
+    if let Some(e) = params.error {
+        let desc = params.error_description.unwrap_or_default();
+        tracing::warn!(error = %e, description = %desc, "Google OAuth error");
+        return Err(err(StatusCode::BAD_REQUEST, &format!("Google OAuth error: {e}")));
+    }
+
+    let code = params.code.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth code"))?;
+    let oauth_state = params.state.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth state"))?;
+
     // Validate CSRF state
     let stored = jar.get("oauth_state").map(|c| c.value().to_string());
-    if stored.as_deref() != Some(&params.state) {
+    if stored.as_deref() != Some(oauth_state.as_str()) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid OAuth state"));
     }
 
-    let access_token = exchange_google_code(&state.http, google, &params.code)
+    let access_token = exchange_google_code(&state.http, google, &code)
         .await
         .map_err(|_| err(StatusCode::BAD_GATEWAY, "failed to exchange OAuth code"))?;
 
