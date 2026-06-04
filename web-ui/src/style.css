@@ -2662,30 +2662,21 @@ a.source-chip:hover .source-chip__name {
 
 /* ── Attachment tray & chips ────────────────────────────────────────────── */
 
-.input-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.input-row .p-search-box {
-  flex: 1;
-}
-
 .attach-btn {
-  flex-shrink: 0;
   background: none;
-  border: 1px solid var(--color-mid);
-  border-radius: 4px;
-  padding: 0.4rem 0.5rem;
+  border: none;
+  border-left: 1px solid var(--border-color);
+  padding: 0 0.6rem;
   cursor: pointer;
   color: var(--color-mid);
   line-height: 1;
-  transition: border-color 0.15s, color 0.15s;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s;
 }
 
 .attach-btn:hover {
-  border-color: var(--color-link);
   color: var(--color-link);
 }
 
