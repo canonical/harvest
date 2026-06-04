@@ -88,10 +88,10 @@ pub fn router(state: AppState, cache: Arc<GraphCache>) -> Router {
         .route("/conversations/:id", delete(conv_handlers::delete))
         .with_state(Arc::clone(&conv_state));
 
-    let project_state = Arc::new(ProjectState {
-        neo4j:  Arc::clone(&state.neo4j),
-        agent:  Arc::clone(&state.agent),
-    });
+    let project_state = Arc::new(ProjectState::new(
+        Arc::clone(&state.neo4j),
+        Arc::clone(&state.agent),
+    ));
 
     let project_router = Router::new()
         .route("/groups",       get(proj_handlers::list_my_groups))
@@ -105,6 +105,7 @@ pub fn router(state: AppState, cache: Arc<GraphCache>) -> Router {
                get(proj_handlers::get_conversation)
                .put(proj_handlers::update_conversation)
                .delete(proj_handlers::delete_conversation))
+        .route("/projects/:pid/events",       get(proj_handlers::project_events))
         .route("/projects/:pid/query",        post(proj_handlers::project_query))
         .route("/projects/:pid/query/stream", post(proj_handlers::project_query_stream))
         .with_state(project_state);
