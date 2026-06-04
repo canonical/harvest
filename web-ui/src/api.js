@@ -151,6 +151,32 @@ export const getProjectConversation     = (projectId, convId)   => projectFetch(
 export const updateProjectConversation  = (projectId, convId, body) => projectFetch(cid(projectId, convId), { method: 'PUT',  body: JSON.stringify(body) });
 export const deleteProjectConversation  = (projectId, convId)   => projectFetch(cid(projectId, convId), { method: 'DELETE' });
 
+export async function projectQueryStart(projectId, query) {
+  const url = `${pid(projectId)}/query/stream`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query }),
+  });
+  if (!response.ok) {
+    handleUnauthorized(response.status);
+    const data = await response.json().catch(() => ({}));
+    const e = new Error(data.error || `Server error: ${response.status}`);
+    e.status = response.status;
+    throw e;
+  }
+}
+
+export function openProjectEvents(projectId, convId, onEvent) {
+  const base = `${pid(projectId)}/events`;
+  const url  = convId ? `${base}?conv=${encodeURIComponent(convId)}` : base;
+  const es   = new EventSource(url);
+  es.onmessage = (e) => {
+    try { onEvent(JSON.parse(e.data)); } catch {}
+  };
+  return es;
+}
+
 export async function projectQueryStream(projectId, query, onEvent) {
   const url = `${pid(projectId)}/query/stream`;
   const response = await fetch(url, {
