@@ -11,8 +11,41 @@
       if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
     })();
   </script>
+  <style>
+    #app-loading {
+      align-items: center;
+      background: #1a1a1a;
+      display: flex;
+      inset: 0;
+      justify-content: center;
+      position: fixed;
+      transition: opacity 0.18s ease;
+      z-index: 9999;
+    }
+    [data-theme="light"] #app-loading {
+      background: #f5f5f5;
+    }
+    #app-loading svg {
+      color: rgba(255, 255, 255, 0.55);
+      width: 96px;
+      height: 96px;
+    }
+    [data-theme="light"] #app-loading svg {
+      color: rgba(0, 0, 0, 0.35);
+    }
+  </style>
 </head>
 <body>
+  <div id="app-loading" role="status" aria-label="Loading Harvest">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <g fill="currentColor" clip-path="url(#cof-clip)">
+        <path d="M.81 7.36a1.92 1.92 0 1 1 3.799.572A1.92 1.92 0 0 1 .81 7.36M8.826 3.033a1.92 1.92 0 1 1 3.755.806 1.92 1.92 0 0 1-3.755-.806M7.04 12.585a4.68 4.68 0 0 1-3.19-2.432 2.76 2.76 0 0 1-1.64.202 6.25 6.25 0 0 0 4.498 3.77c.45.098.908.144 1.364.141a2.74 2.74 0 0 1-.562-1.605 5 5 0 0 1-.47-.076M8.394 12.193a1.92 1.92 0 0 1 3.754.805 1.92 1.92 0 1 1-3.754-.805M12.943 11.89a6.3 6.3 0 0 0 1.22-2.587 6.3 6.3 0 0 0-.905-4.782 2.77 2.77 0 0 1-1.08 1.265 4.7 4.7 0 0 1-.154 4.674c.45.37.77.87.919 1.43M2.56 4.892a2.75 2.75 0 0 1 1.603.41 4.68 4.68 0 0 1 3.77-2.015q.012-.218.057-.433c.088-.411.268-.795.525-1.124A6.31 6.31 0 0 0 2.56 4.892"/>
+      </g>
+      <defs>
+        <clipPath id="cof-clip"><path d="M0 0h16v16H0z"/></clipPath>
+      </defs>
+    </svg>
+  </div>
   <!-- ── Login page ─────────────────────────────────────────────────────── -->
   <div id="page-login" class="auth-page" hidden>
     <div class="auth-card">
@@ -118,13 +151,13 @@
                 <li class="p-side-navigation__item">
                   <a href="#" class="p-side-navigation__link" data-page="repositories">
                     <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-                    <span class="p-side-navigation__label">Code repositories</span>
+                    <span class="p-side-navigation__label">Explore code</span>
                   </a>
                 </li>
                 <li class="p-side-navigation__item">
                   <a href="#" class="p-side-navigation__link" data-page="documentation">
                     <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-                    <span class="p-side-navigation__label">Documentation</span>
+                    <span class="p-side-navigation__label">Document</span>
                   </a>
                 </li>
               </ul>
@@ -175,6 +208,10 @@
 
           <!-- Chat area -->
           <div class="chat-content">
+            <div class="project-chat-header" id="project-chat-header" hidden>
+              <div id="project-lock-banner" class="project-lock-banner" hidden></div>
+              <div id="project-presence-bar" class="project-presence-bar" hidden></div>
+            </div>
             <div class="messages" id="messages" role="log" aria-live="polite" aria-label="Chat messages">
               <div class="message message--assistant">
                 <div class="message__bubble">
