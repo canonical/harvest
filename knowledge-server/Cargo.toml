@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 # Async runtime
 tokio        = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # Error handling
 anyhow       = "1"
