@@ -13,11 +13,11 @@ function handleUnauthorized(status) {
   if (status === 401 && _onUnauthorized) _onUnauthorized();
 }
 
-export async function queryStream(query, history, onEvent) {
+export async function queryStream(query, history, attachments, onEvent) {
   const response = await fetch(QUERY_STREAM_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, history }),
+    body: JSON.stringify({ query, history, attachments }),
   });
 
   if (!response.ok) {
@@ -151,12 +151,12 @@ export const getProjectConversation     = (projectId, convId)   => projectFetch(
 export const updateProjectConversation  = (projectId, convId, body) => projectFetch(cid(projectId, convId), { method: 'PUT',  body: JSON.stringify(body) });
 export const deleteProjectConversation  = (projectId, convId)   => projectFetch(cid(projectId, convId), { method: 'DELETE' });
 
-export async function projectQueryStart(projectId, query, history) {
+export async function projectQueryStart(projectId, query, history, attachments) {
   const url = `${pid(projectId)}/query/stream`;
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, history }),
+    body: JSON.stringify({ query, history, attachments }),
   });
   if (!response.ok) {
     handleUnauthorized(response.status);

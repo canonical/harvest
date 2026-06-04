@@ -142,6 +142,14 @@ fn to_anthropic_message(msg: &Message) -> Value {
                 ContentPart::ToolResult { tool_use_id, content, is_error } =>
                     json!({ "type": "tool_result", "tool_use_id": tool_use_id,
                             "content": content, "is_error": is_error }),
+                ContentPart::Image { media_type, data } =>
+                    json!({ "type": "image", "source": {
+                        "type": "base64", "media_type": media_type, "data": data
+                    }}),
+                ContentPart::Document { media_type, data } =>
+                    json!({ "type": "document", "source": {
+                        "type": "base64", "media_type": media_type, "data": data
+                    }}),
             }).collect();
             Value::Array(items)
         }
@@ -302,6 +310,42 @@ mod tests {
         assert_eq!(parts[0]["type"], "tool_result");
         assert_eq!(parts[0]["tool_use_id"], "tu_1");
         assert_eq!(parts[0]["content"], "result text");
+    }
+
+    // ── image and document content parts ─────────────────────────────────────
+
+    #[test]
+    fn image_content_part_serializes_for_anthropic() {
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text { text: "look at this".into() },
+                ContentPart::Image { media_type: "image/png".into(), data: "abc123".into() },
+            ]),
+        };
+        let v = to_anthropic_message(&msg);
+        let parts = v["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image");
+        assert_eq!(parts[1]["source"]["type"], "base64");
+        assert_eq!(parts[1]["source"]["media_type"], "image/png");
+        assert_eq!(parts[1]["source"]["data"], "abc123");
+    }
+
+    #[test]
+    fn document_content_part_serializes_for_anthropic() {
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Document { media_type: "application/pdf".into(), data: "pdfdata".into() },
+            ]),
+        };
+        let v = to_anthropic_message(&msg);
+        let parts = v["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "document");
+        assert_eq!(parts[0]["source"]["type"], "base64");
+        assert_eq!(parts[0]["source"]["media_type"], "application/pdf");
+        assert_eq!(parts[0]["source"]["data"], "pdfdata");
     }
 
     // ── to_anthropic_tool ─────────────────────────────────────────────────────
