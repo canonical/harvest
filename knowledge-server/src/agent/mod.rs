@@ -15,10 +15,18 @@ use crate::llm::{
 };
 use tool::Tool;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    pub name: String,
+    pub mime_type: String,
+    pub data: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct HistoryMessage {
     pub role: String,
     pub text: String,
+    pub attachments: Option<Vec<Attachment>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,7 +68,7 @@ impl Agent {
         Self { llm, tools, max_iterations }
     }
 
-    pub async fn query(&self, user_query: &str, history: &[HistoryMessage]) -> Result<QueryResponse> {
+    pub async fn query(&self, user_query: &str, history: &[HistoryMessage], attachments: &[Attachment]) -> Result<QueryResponse> {
         let tool_defs: Vec<ToolDefinition> =
             self.tools.iter().map(|t| t.definition()).collect();
 
@@ -69,7 +77,7 @@ impl Agent {
 
         let mut messages = vec![Message::system(prompt::system_prompt())];
         messages.extend(history_to_messages(history));
-        messages.push(Message::user(user_query));
+        messages.push(build_user_message(user_query, attachments));
 
         let mut iterations = 0;
 
@@ -141,7 +149,7 @@ impl Agent {
         }
     }
 
-    pub async fn query_streaming(&self, user_query: &str, history: &[HistoryMessage], tx: mpsc::Sender<AgentEvent>) {
+    pub async fn query_streaming(&self, user_query: &str, history: &[HistoryMessage], attachments: &[Attachment], tx: mpsc::Sender<AgentEvent>) {
         let tool_defs: Vec<ToolDefinition> =
             self.tools.iter().map(|t| t.definition()).collect();
 
@@ -150,7 +158,7 @@ impl Agent {
 
         let mut messages = vec![Message::system(prompt::system_prompt())];
         messages.extend(history_to_messages(history));
-        messages.push(Message::user(user_query));
+        messages.push(build_user_message(user_query, attachments));
 
         let mut iterations = 0;
 
@@ -265,12 +273,28 @@ impl Agent {
     }
 }
 
+pub(crate) fn build_user_message(text: &str, attachments: &[Attachment]) -> Message {
+    if attachments.is_empty() {
+        return Message::user(text);
+    }
+    let mut parts = vec![ContentPart::Text { text: text.to_string() }];
+    for att in attachments {
+        if att.mime_type.starts_with("image/") {
+            parts.push(ContentPart::Image { media_type: att.mime_type.clone(), data: att.data.clone() });
+        } else {
+            parts.push(ContentPart::Document { media_type: att.mime_type.clone(), data: att.data.clone() });
+        }
+    }
+    Message { role: crate::llm::types::Role::User, content: MessageContent::Parts(parts) }
+}
+
 fn history_to_messages(history: &[HistoryMessage]) -> Vec<Message> {
     history.iter().map(|h| {
+        let atts = h.attachments.as_deref().unwrap_or(&[]);
         if h.role == "assistant" {
             Message::assistant_text(&h.text)
         } else {
-            Message::user(&h.text)
+            build_user_message(&h.text, atts)
         }
     }).collect()
 }
@@ -361,11 +385,67 @@ mod tests {
         Agent::new(llm, tools, max)
     }
 
+    // ── attachment handling ───────────────────────────────────────────────────
+
+    #[test]
+    fn user_message_with_no_attachments_is_text_content() {
+        let msg = build_user_message("hello", &[]);
+        match msg.content {
+            MessageContent::Text(t) => assert_eq!(t, "hello"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_message_with_image_attachment_is_parts() {
+        let att = Attachment { name: "photo.png".into(), mime_type: "image/png".into(), data: "abc".into() };
+        let msg = build_user_message("check this", &[att]);
+        match msg.content {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(&parts[0], ContentPart::Text { text } if text == "check this"));
+                assert!(matches!(&parts[1], ContentPart::Image { media_type, .. } if media_type == "image/png"));
+            }
+            other => panic!("expected Parts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_message_with_pdf_attachment_is_parts() {
+        let att = Attachment { name: "doc.pdf".into(), mime_type: "application/pdf".into(), data: "pdf".into() };
+        let msg = build_user_message("read this", &[att]);
+        match msg.content {
+            MessageContent::Parts(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert!(matches!(&parts[1], ContentPart::Document { media_type, .. } if media_type == "application/pdf"));
+            }
+            other => panic!("expected Parts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_message_with_image_attachment_becomes_parts() {
+        let att = Attachment { name: "img.jpg".into(), mime_type: "image/jpeg".into(), data: "data".into() };
+        let h = HistoryMessage { role: "user".into(), text: "see".into(), attachments: Some(vec![att]) };
+        let msgs = history_to_messages(&[h]);
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(msgs[0].content, MessageContent::Parts(_)));
+    }
+
+    #[test]
+    fn history_message_without_attachments_is_text() {
+        let h = HistoryMessage { role: "user".into(), text: "hello".into(), attachments: None };
+        let msgs = history_to_messages(&[h]);
+        assert!(matches!(msgs[0].content, MessageContent::Text(_)));
+    }
+
+    // ── query / streaming ─────────────────────────────────────────────────────
+
     #[tokio::test]
     async fn text_on_first_turn_returns_immediately() {
         let llm = MockLlm::new(vec![text("all done")]);
         let agent = agent_with(llm, vec![], 5);
-        let resp = agent.query("hi", &[]).await.unwrap();
+        let resp = agent.query("hi", &[], &[]).await.unwrap();
         assert_eq!(resp.answer, "all done");
         assert_eq!(resp.tool_calls_made, 0);
     }
@@ -377,7 +457,7 @@ mod tests {
             text("result arrived"),
         ]);
         let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
-        let resp = agent.query("hi", &[]).await.unwrap();
+        let resp = agent.query("hi", &[], &[]).await.unwrap();
         assert_eq!(resp.answer, "result arrived");
         assert_eq!(resp.tool_calls_made, 1);
     }
@@ -390,7 +470,7 @@ mod tests {
             text("done after two rounds"),
         ]);
         let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
-        let resp = agent.query("hi", &[]).await.unwrap();
+        let resp = agent.query("hi", &[], &[]).await.unwrap();
         assert_eq!(resp.tool_calls_made, 2);
     }
 
@@ -405,7 +485,7 @@ mod tests {
             vec![],
             0,
         );
-        let resp = agent.query("hi", &[]).await.unwrap();
+        let resp = agent.query("hi", &[], &[]).await.unwrap();
         assert_eq!(resp.tool_calls_made, 0);
     }
 
@@ -416,7 +496,7 @@ mod tests {
             text("handled gracefully"),
         ]);
         let agent = agent_with(llm, vec![], 5);
-        let resp = agent.query("hi", &[]).await.unwrap();
+        let resp = agent.query("hi", &[], &[]).await.unwrap();
         assert_eq!(resp.answer, "handled gracefully");
     }
 

@@ -2651,3 +2651,108 @@ a.source-chip:hover .source-chip__name {
     opacity: 0.22;
   }
 }
+
+/* ── Attachment tray & chips ────────────────────────────────────────────── */
+
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.input-row .p-search-box {
+  flex: 1;
+}
+
+.attach-btn {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid var(--color-mid);
+  border-radius: 4px;
+  padding: 0.4rem 0.5rem;
+  cursor: pointer;
+  color: var(--color-mid);
+  line-height: 1;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.attach-btn:hover {
+  border-color: var(--color-link);
+  color: var(--color-link);
+}
+
+.attachment-tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.4rem 0;
+}
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: var(--color-bg-alt);
+  border: 1px solid var(--color-mid);
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.8rem;
+  max-width: 180px;
+}
+
+.attach-chip__thumb {
+  width: 24px;
+  height: 24px;
+  object-fit: cover;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.attach-chip__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attach-chip__remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 0.1rem;
+  font-size: 1rem;
+  line-height: 1;
+  color: var(--color-mid);
+  flex-shrink: 0;
+}
+
+.attach-chip__remove:hover {
+  color: var(--color-negative);
+}
+
+/* ── Attachments inside chat messages ───────────────────────────────────── */
+
+.message__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.4rem;
+}
+
+.message__attachment-img {
+  max-width: 280px;
+  max-height: 200px;
+  border-radius: 6px;
+  object-fit: contain;
+  border: 1px solid var(--color-mid);
+}
+
+.message__attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: var(--color-bg-alt);
+  border: 1px solid var(--color-mid);
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+}

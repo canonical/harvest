@@ -20,7 +20,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_stream::{wrappers::BroadcastStream, Stream};
 use uuid::Uuid;
 
-use crate::agent::{Agent, AgentEvent, HistoryMessage};
+use crate::agent::{Agent, AgentEvent, Attachment, HistoryMessage};
 use crate::auth::jwt::Claims;
 use crate::neo4j::Neo4jClient;
 
@@ -239,6 +239,7 @@ pub async fn project_events(
 pub struct ProjectQueryBody {
     pub query: String,
     pub history: Option<Vec<HistoryMessage>>,
+    pub attachments: Option<Vec<Attachment>>,
 }
 
 pub async fn project_query_stream(
@@ -265,10 +266,23 @@ pub async fn project_query_stream(
         "type": "lock",
         "by": user.name,
     }).to_string()).await;
+    let att_for_broadcast: Vec<serde_json::Value> = body.attachments.as_ref()
+        .map(|atts| atts.iter().map(|a| json!({
+            "name": a.name,
+            "mime_type": a.mime_type,
+            "data": a.data,
+            "preview_url": if a.mime_type.starts_with("image/") {
+                format!("data:{};base64,{}", a.mime_type, a.data)
+            } else {
+                String::new()
+            }
+        })).collect())
+        .unwrap_or_default();
     state.broadcast(&project_id, json!({
         "type": "user_message",
         "query": body.query,
         "username": user.name,
+        "attachments": att_for_broadcast,
     }).to_string()).await;
 
     // Spawn agent task — all events go to the broadcast channel.
@@ -276,13 +290,14 @@ pub async fn project_query_stream(
     let locks    = Arc::clone(&state.locks);
     let channels = Arc::clone(&state.channels);
     let pid      = project_id.clone();
-    let query    = body.query.clone();
-    let history  = body.history.unwrap_or_default();
+    let query       = body.query.clone();
+    let history     = body.history.unwrap_or_default();
+    let attachments = body.attachments.unwrap_or_default();
 
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         let agent_clone = Arc::clone(&agent);
-        tokio::spawn(async move { agent_clone.query_streaming(&query, &history, agent_tx).await; });
+        tokio::spawn(async move { agent_clone.query_streaming(&query, &history, &attachments, agent_tx).await; });
 
         while let Some(event) = agent_rx.recv().await {
             if let Ok(data) = serde_json::to_string(&event) {
@@ -605,7 +620,8 @@ pub async fn project_query(
         return e.into_response();
     }
     let history = body.history.as_deref().unwrap_or(&[]);
-    match state.agent.query(&body.query, history).await {
+    let attachments = body.attachments.as_deref().unwrap_or(&[]);
+    match state.agent.query(&body.query, history, attachments).await {
         Ok(response) => Json(response).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "project query failed");

@@ -52,6 +52,14 @@ pub enum ContentPart {
         #[serde(default)]
         is_error: bool,
     },
+    Image {
+        media_type: String,
+        data: String,
+    },
+    Document {
+        media_type: String,
+        data: String,
+    },
 }
 
 #[derive(Debug, Clone)]
