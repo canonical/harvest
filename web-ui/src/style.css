@@ -277,39 +277,48 @@ html, body {
   background: var(--vf-color-background-hover);
 }
 
+/* ── Project selector ── */
+
 #project-selector-section {
   flex-shrink: 0;
-  padding: 0.75rem 0.5rem 0.5rem;
+  margin-bottom: 1.5rem;
 }
 
-#project-selector-section .project-select {
-  display: block;
-}
-
-.project-selector__label {
-  font-size: 0.6875rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--vf-color-text-muted);
-  margin-bottom: 0.375rem;
-  padding: 0 0.125rem;
-}
-
-/* Toggle button fills the available width */
+/* Toggle: styled as a sidebar nav link */
 .project-selector__toggle {
-  display: flex;
   align-items: center;
-  width: 100%;
-  justify-content: space-between;
+  background: none;
+  border: 0;
+  border-radius: 0.25rem;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  font-family: inherit;
+  font-size: inherit;
+  gap: 0.75rem;
+  justify-content: flex-start;
+  margin: 0;
+  padding: 0.625rem 0.75rem;
   text-align: left;
+  width: 100%;
 }
 
-.project-selector__toggle .p-contextual-menu__indicator {
-  margin-left: auto;
+.project-selector__toggle:hover,
+.project-selector__toggle:focus-visible {
+  background: var(--vf-color-background-hover, rgba(255, 255, 255, 0.07));
+  outline: none;
 }
 
-/* Name label inside the toggle — truncates long project names */
+.project-selector__toggle[aria-expanded="true"] {
+  background: var(--vf-color-background-hover, rgba(255, 255, 255, 0.07));
+}
+
+.project-selector__folder-icon {
+  flex-shrink: 0;
+  height: 1.25rem;
+  width: 1.25rem;
+}
+
 .project-selector__name {
   flex: 1;
   overflow: hidden;
@@ -317,54 +326,180 @@ html, body {
   white-space: nowrap;
 }
 
+.project-selector__chevron {
+  flex-shrink: 0;
+  margin-left: auto;
+  opacity: 0.6;
+  transition: transform 0.15s ease;
+  width: 14px;
+  height: 14px;
+}
+
+.project-selector__toggle[aria-expanded="true"] .project-selector__chevron {
+  transform: rotate(180deg);
+}
+
+/* Dropdown panel */
 .project-selector__dropdown {
-  position: fixed;
-  width: 284px;
+  background: #2b2b2b;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0.375rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
   max-height: 70vh;
+  overflow: hidden;
+  position: fixed;
+  width: 584px;
+  z-index: 1000;
+}
+
+.project-selector__dropdown[aria-hidden="true"] {
+  display: none;
+}
+
+/* Search row */
+.project-selector__search-wrap {
+  align-items: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-shrink: 0;
+  gap: 0.625rem;
+  min-height: 3rem;
+  padding: 0 1rem;
+}
+
+.project-selector__search-icon {
+  flex-shrink: 0;
+  height: 16px;
+  opacity: 0.45;
+  width: 16px;
+}
+
+.project-selector__search-input {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.9);
+  font-family: inherit;
+  font-size: 1rem;
+  height: 100%;
+  outline: none;
+  padding: 0;
+  width: 100%;
+}
+
+.project-selector__search-input::placeholder {
+  color: rgba(255, 255, 255, 0.38);
+}
+
+/* Scrollable item list */
+.project-selector__list {
+  flex: 1;
   overflow-y: auto;
+  padding: 0.25rem 0;
 }
 
-.project-selector__menu .p-search-box__input {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--vf-color-text-default);
-  border-color: var(--vf-color-border-default);
+/* Each item row */
+.project-selector__item {
+  align-items: center;
+  background: none;
+  border: 0;
+  color: rgba(255, 255, 255, 0.82);
+  cursor: pointer;
+  display: flex;
+  font-family: inherit;
+  font-size: 0.875rem;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  width: 100%;
 }
 
-.project-selector__menu .p-search-box__input::placeholder {
-  color: var(--vf-color-text-muted);
+.project-selector__item:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 1);
 }
 
-.project-selector__dropdown .p-contextual-menu__link[aria-current="true"] {
-  color: #E95420;
-  font-weight: 600;
+.project-selector__item[aria-selected="true"] {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 1);
+  font-weight: 500;
 }
 
-.project-selector__dropdown .p-contextual-menu__group .p-contextual-menu__link {
-  white-space: normal;
-  overflow: visible;
-  text-overflow: clip;
+.project-item__name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.project-selector__dropdown .p-contextual-menu__group .name {
-  display: inline-block;
-  max-width: 55%;
-  vertical-align: top;
-}
-
-.project-selector__dropdown .p-contextual-menu__group .count {
-  float: right;
+.project-item__group-badge {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2rem;
+  color: rgba(255, 255, 255, 0.55);
+  flex-shrink: 0;
+  font-size: 0.6875rem;
   max-width: 40%;
-  text-align: right;
   overflow: hidden;
+  padding: 0.125rem 0.5rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.project-selector__dropdown .p-contextual-menu__group .description {
-  clear: both;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.project-item__check {
+  color: rgba(255, 255, 255, 0.85);
+  flex-shrink: 0;
+  height: 13px;
+  opacity: 0;
+  transition: opacity 0.1s;
+  width: 13px;
+}
+
+.project-selector__item[aria-selected="true"] .project-item__check {
+  opacity: 1;
+}
+
+.project-selector__empty {
+  color: rgba(255, 255, 255, 0.38);
+  font-size: 0.875rem;
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+}
+
+/* Footer: New project */
+.project-selector__footer {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+  padding: 0.25rem 0;
+}
+
+.project-selector__new-btn {
+  align-items: center;
+  background: none;
+  border: 0;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  display: flex;
+  font-family: inherit;
+  font-size: 0.875rem;
+  gap: 0.625rem;
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  width: 100%;
+}
+
+.project-selector__new-btn:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.project-selector__new-btn svg {
+  flex-shrink: 0;
+  height: 13px;
+  opacity: 0.7;
+  width: 13px;
 }
 
 .sidenav-top-container {
@@ -1935,6 +2070,52 @@ a.source-chip:hover .source-chip__name {
   }
 }
 
+/* ── Project collaboration header ───────────────────────────────────────── */
+
+.project-chat-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+  min-height: 2.25rem;
+}
+
+.project-lock-banner {
+  flex: 1;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.project-presence-bar {
+  display: flex;
+  align-items: center;
+  gap: -0.375rem;
+  flex-direction: row;
+}
+
+.presence-avatar {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.6rem;
+  font-weight: 700;
+  color: #fff;
+  text-transform: uppercase;
+  border: 2px solid var(--bg-surface-alt, #fff);
+  margin-left: -0.375rem;
+  cursor: default;
+}
+
+.presence-avatar:first-child {
+  margin-left: 0;
+}
+
 /* ── Chat history sidebar ────────────────────────────────────────────────── */
 
 .chat-with-history {
@@ -1959,6 +2140,13 @@ a.source-chip:hover .source-chip__name {
   border-left: 1px solid var(--border-subtle);
   overflow: hidden;
   background: var(--bg-surface-alt);
+  transition: width 0.2s ease;
+}
+
+@media (min-width: 801px) {
+  .chat-history-panel:hover {
+    width: 380px;
+  }
 }
 
 .chat-history-panel__header {
@@ -2027,12 +2215,13 @@ a.source-chip:hover .source-chip__name {
   display: flex;
   align-items: center;
   gap: 0.25rem;
-  padding: 0.3rem 0.375rem 0.3rem 0.75rem;
+  padding: 0.3rem 2.25rem 0.3rem 0.75rem;
   border-radius: 6px;
   border: 1px solid var(--border-subtle);
   margin: 2px 0.375rem;
   cursor: pointer;
   outline: none;
+  position: relative;
 }
 
 .conv-item:hover,
@@ -2071,7 +2260,10 @@ a.source-chip:hover .source-chip__name {
 }
 
 .conv-item__delete {
-  flex-shrink: 0;
+  position: absolute;
+  right: 0.375rem;
+  top: 50%;
+  transform: translateY(-50%);
   opacity: 0;
   display: flex;
   align-items: center;

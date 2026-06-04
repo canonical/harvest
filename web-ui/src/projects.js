@@ -49,47 +49,42 @@ export function initProjectSelector(container, { onChange } = {}) {
 
 function _build() {
   _container.innerHTML = `
-    <div class="project-select-label">Project</div>
-    <span class="project-select is-dark p-contextual-menu p-contextual-menu--left">
-      <button type="button"
-        class="p-button has-icon p-contextual-menu__toggle project-selector__toggle toggle is-dark"
-        aria-controls="project-dropdown"
-        aria-expanded="false"
-        aria-pressed="false"
-        aria-haspopup="true">
-        <span class="project-selector__name">All projects</span>
-        <i class="p-icon--chevron-down p-contextual-menu__indicator"></i>
-      </button>
-      <span class="p-contextual-menu__dropdown project-selector__dropdown"
-        id="project-dropdown"
-        aria-hidden="true"
-        aria-label="Select project">
-        <div class="list is-dark">
-          <div class="p-search-box">
-            <label class="u-off-screen" for="project-search">Search</label>
-            <input type="search" id="project-search" name="project-search"
-              class="p-search-box__input" placeholder="Search" autocomplete="off">
-            <button type="submit" class="p-search-box__button">
-              <i class="p-icon--search">Search</i>
-            </button>
-          </div>
-          <button type="button" class="p-button has-icon p-contextual-menu__link all-projects" id="project-all-btn">
-            <i class="p-icon--folder is-light"></i>
-            <span>All projects</span>
-          </button>
-          <div class="projects" id="project-list-group"></div>
-          <hr class="is-dark">
-          <button type="button" class="p-button has-icon p-contextual-menu__link" id="project-create-btn">
-            <i class="p-icon--plus is-light"></i>
-            <span>Create project</span>
-          </button>
-        </div>
-      </span>
-    </span>
+    <button type="button"
+      class="project-selector__toggle"
+      aria-controls="project-dropdown"
+      aria-expanded="false"
+      aria-haspopup="listbox">
+      <svg class="project-selector__folder-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+      </svg>
+      <span class="project-selector__name">Select project</span>
+      <svg class="project-selector__chevron" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 6 8 10 12 6"/></svg>
+    </button>
+    <div class="project-selector__dropdown"
+      id="project-dropdown"
+      role="listbox"
+      aria-hidden="true"
+      aria-label="Select project">
+      <div class="project-selector__search-wrap">
+        <svg class="project-selector__search-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6.5" cy="6.5" r="4"/><line x1="10" y1="10" x2="14" y2="14"/></svg>
+        <label class="u-off-screen" for="project-search">Search projects</label>
+        <input type="search" id="project-search" name="project-search"
+          class="project-selector__search-input" placeholder="Search projects…" autocomplete="off">
+      </div>
+      <div class="project-selector__list">
+        <div id="project-list-group"></div>
+      </div>
+      <div class="project-selector__footer">
+        <button type="button" class="project-selector__new-btn" id="project-create-btn">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="8" y1="3" x2="8" y2="13"/><line x1="3" y1="8" x2="13" y2="8"/></svg>
+          <span>New project</span>
+        </button>
+      </div>
+    </div>
   `;
 
-  _toggleBtn   = _container.querySelector('.p-contextual-menu__toggle');
-  _dropdown    = _container.querySelector('.p-contextual-menu__dropdown');
+  _toggleBtn   = _container.querySelector('.project-selector__toggle');
+  _dropdown    = _container.querySelector('.project-selector__dropdown');
   _listGroup   = _container.querySelector('#project-list-group');
   _searchInput = _container.querySelector('#project-search');
 
@@ -99,14 +94,6 @@ function _build() {
 
   _searchInput.addEventListener('input', () => _renderList(_searchInput.value));
 
-  _container.querySelector('#project-all-btn').addEventListener('click', () => {
-    _currentProject = null;
-    _close();
-    _updateLabel();
-    _renderList('');
-    if (_onChange) _onChange(null);
-  });
-
   _container.querySelector('#project-create-btn').addEventListener('click', () => {
     _close();
     _openCreateModal();
@@ -114,7 +101,7 @@ function _build() {
 
   document.addEventListener('click', e => {
     if (_toggleBtn.getAttribute('aria-expanded') === 'true' &&
-        !_container.contains(e.target)) {
+        !_container.contains(e.target) && !_dropdown.contains(e.target)) {
       _close();
     }
   });
@@ -128,7 +115,7 @@ function _build() {
 
 function _open() {
   const rect = _toggleBtn.getBoundingClientRect();
-  const w    = 284;
+  const w    = 584;
   let left   = rect.left;
   let top    = rect.bottom + 4;
 
@@ -153,13 +140,7 @@ function _close() {
 
 function _updateLabel() {
   const el = _toggleBtn?.querySelector('.project-selector__name');
-  if (el) el.textContent = _currentProject?.name ?? 'All projects';
-
-  const allBtn = _container?.querySelector('#project-all-btn');
-  if (allBtn) {
-    allBtn.setAttribute('aria-current', _currentProject === null ? 'true' : 'false');
-    allBtn.classList.toggle('is-active', _currentProject === null);
-  }
+  if (el) el.textContent = _currentProject?.name ?? 'Select project';
 }
 
 function _renderList(query) {
@@ -174,28 +155,25 @@ function _renderList(query) {
 
   if (filtered.length === 0) {
     _listGroup.innerHTML = q
-      ? `<p class="p-contextual-menu__link u-text--muted u-no-margin">No projects match.</p>`
+      ? `<p class="project-selector__empty">No projects match.</p>`
       : '';
     return;
   }
 
   _listGroup.innerHTML = filtered.map(p => {
     const active = p.id === _currentProject?.id;
-    const desc   = p.description ?? '';
-    const group  = p.group_name  ?? '';
+    const group  = p.group_name ?? '';
     return `
-      <div class="p-contextual-menu__group">
-        <button type="button"
-          class="p-contextual-menu__link link"
-          aria-current="${active ? 'true' : 'false'}"
-          data-id="${esc(p.id)}"
-          data-name="${esc(p.name)}">
-          <div title="${esc(p.name)}" class="u-truncate name">${esc(p.name)}</div>
-          ${group ? `<div class="p-text--x-small u-float-right u-no-margin--bottom count">${esc(group)}</div>` : ''}
-          <br>
-          <div class="p-text--x-small u-no-margin--bottom u-truncate description" title="${esc(desc)}">${desc ? esc(desc) : '-'}</div>
-        </button>
-      </div>`;
+      <button type="button"
+        class="project-selector__item"
+        role="option"
+        aria-selected="${active ? 'true' : 'false'}"
+        data-id="${esc(p.id)}"
+        data-name="${esc(p.name)}">
+        <span class="project-item__name" title="${esc(p.name)}">${esc(p.name)}</span>
+        ${group ? `<span class="project-item__group-badge" title="${esc(group)}">${esc(group)}</span>` : ''}
+        <svg class="project-item__check" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 8 6 11 13 4"/></svg>
+      </button>`;
   }).join('');
 
   _listGroup.querySelectorAll('[data-id]').forEach(btn => {
