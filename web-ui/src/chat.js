@@ -107,7 +107,7 @@ export function getSaveableMessages(state) {
         if (m.username) saved.username = m.username;
         return saved;
       }
-      return { role: 'assistant', text: m.answer, sources: m.sources ?? [] };
+      return { role: 'assistant', text: m.answer, sources: m.sources ?? [], tool_calls: m.tool_calls ?? [], tool_calls_made: m.tool_calls_made ?? 0 };
     });
 }
 
@@ -118,7 +118,8 @@ export function loadFromHistory(messages) {
       if (m.username) msg.username = m.username;
       return msg;
     }
-    return { role: 'assistant', status: 'done', tool_calls: [], answer: m.text, sources: m.sources ?? [], tool_calls_made: 0 };
+    const tool_calls = (m.tool_calls ?? []).map(tc => ({ ...tc, status: 'done' }));
+    return { role: 'assistant', status: 'done', tool_calls, answer: m.text, sources: m.sources ?? [], tool_calls_made: m.tool_calls_made ?? 0 };
   });
   return { messages: hydrated, loading: false, pendingAttachments: [] };
 }
