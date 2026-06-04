@@ -293,7 +293,7 @@ function closeEditUserModal() {
 
 // ── Wire up events ────────────────────────────────────────────────────────────
 
-function wireEvents() {
+function wireEvents(onUserGroupsChanged) {
   // Tabs
   document.getElementById('tab-users').addEventListener('click', () => switchTab('users'));
   document.getElementById('tab-groups').addEventListener('click', () => switchTab('groups'));
@@ -348,6 +348,7 @@ function wireEvents() {
       closeEditUserModal();
       await fetchAll();
       renderStats(); renderUsers(); renderGroups();
+      onUserGroupsChanged?.();
       toast('User updated.');
     } catch (err) {
       errorEl.textContent = err.message;
@@ -371,7 +372,7 @@ function wireEvents() {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-export function initAdminPage(_container) {
+export function initAdminPage(_container, { onUserGroupsChanged } = {}) {
   if (_container.dataset.adminInit) {
     fetchAll()
       .then(() => { renderStats(); renderUsers(); renderGroups(); })
@@ -379,7 +380,7 @@ export function initAdminPage(_container) {
     return;
   }
   _container.dataset.adminInit = '1';
-  wireEvents();
+  wireEvents(onUserGroupsChanged);
   fetchAll()
     .then(() => { renderStats(); renderUsers(); renderGroups(); })
     .catch(err => toast(err.message, 'negative'));

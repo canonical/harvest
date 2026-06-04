@@ -11,6 +11,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@playwright/test": "^1.60.0",
     "cytoscape": "^3.33.4",
     "cytoscape-fcose": "^2.2.0",
     "highlight.js": "^11.0.0",

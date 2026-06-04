@@ -3,7 +3,7 @@ import './style.css';
 import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
 import {
   queryStream, fetchToolDescription, fetchRepositories, setUnauthorizedHandler,
-  projectQueryStream,
+  projectQueryStart, openProjectEvents,
   listProjectConversations, createProjectConversation,
   getProjectConversation, updateProjectConversation, deleteProjectConversation,
 } from './api.js';
@@ -47,6 +47,12 @@ let repoUrlMap = {};
 let activeConvId = null;
 let conversations = [];
 let activeProjectId = null; // null = personal context
+
+// Project real-time collaboration state
+let projectEventSource = null;
+let projectRemoteLocked = false;   // locked by someone else
+let projectLockedBy = '';
+let projectPresence = [];          // [{user_id, name}]
 
 const messagesEl  = document.getElementById('messages');
 const inputEl     = document.getElementById('query-input');
@@ -235,21 +241,33 @@ function renderToolCall(tc, i) {
 
 async function sendQuery() {
   const query = inputEl.value.trim();
-  if (!query || isLoading(state)) return;
-
+  if (!query || isLoading(state) || projectRemoteLocked) return;
   inputEl.value = '';
 
-  const msgUsername = activeProjectId ? (getUser()?.name ?? null) : null;
-  state = addUserMessage(state, query, msgUsername);
+  if (activeProjectId) {
+    // Project chat: fire-and-forget POST; all events arrive via EventSource.
+    try {
+      await projectQueryStart(activeProjectId, query);
+    } catch (err) {
+      if (err.status === 409) {
+        // Already locked — the lock banner will have appeared via EventSource.
+      } else {
+        state = addUserMessage(state, query, getUser()?.name ?? null);
+        state = startAssistantMessage(state);
+        state = setError(state, err.message);
+        render();
+      }
+    }
+    return;
+  }
+
+  // Personal chat: drive state locally from the POST stream.
+  state = addUserMessage(state, query, null);
   state = startAssistantMessage(state);
   render();
 
   try {
-    const streamFn = activeProjectId
-      ? (q, cb) => projectQueryStream(activeProjectId, q, cb)
-      : queryStream;
-
-    await streamFn(query, (event) => {
+    await queryStream(query, (event) => {
       if (event.type === 'tool_call') {
         state = addToolCall(state, { name: event.name, input: event.input });
         const tc = getMessages(state).at(-1).tool_calls.at(-1);
@@ -277,6 +295,142 @@ async function sendQuery() {
     state = setError(state, err.message);
     render();
   }
+}
+
+// ── Project presence & real-time event handling ───────────────────────────────
+
+function renderPresence() {
+  const bar = document.getElementById('project-presence-bar');
+  if (!bar) return;
+  const me = getUser();
+  // Only show users viewing the exact same conversation.
+  const others = projectPresence.filter(u =>
+    u.user_id !== me?.id &&
+    u.conv_id != null &&
+    u.conv_id === activeConvId
+  );
+  if (!activeProjectId || !activeConvId || others.length === 0) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  bar.innerHTML = others.map(u => `
+    <div class="presence-avatar" title="${esc(u.name)}"
+      style="background:${esc(avatarColor(u.name))}"
+      aria-label="${esc(u.name)}">
+      ${esc(initials(u.name))}
+    </div>`).join('');
+}
+
+function renderLockBanner() {
+  const banner = document.getElementById('project-lock-banner');
+  if (!banner) return;
+  if (projectRemoteLocked) {
+    banner.textContent = `${projectLockedBy} is generating a response…`;
+    banner.hidden = false;
+  } else {
+    banner.hidden = true;
+  }
+}
+
+function handleProjectEvent(event) {
+  switch (event.type) {
+    case 'presence':
+      projectPresence = event.users ?? [];
+      renderPresence();
+      break;
+
+    case 'user_join':
+      projectPresence = [
+        ...projectPresence.filter(u => u.user_id !== event.user_id),
+        { user_id: event.user_id, name: event.name, conv_id: event.conv_id ?? null },
+      ];
+      renderPresence();
+      break;
+
+    case 'user_leave':
+      projectPresence = projectPresence.filter(u => u.user_id !== event.user_id);
+      renderPresence();
+      break;
+
+    case 'lock':
+      projectRemoteLocked = true;
+      projectLockedBy = event.by ?? '';
+      renderLockBanner();
+      sendBtn.disabled = true;
+      inputEl.disabled = true;
+      break;
+
+    case 'unlock':
+      projectRemoteLocked = false;
+      projectLockedBy = '';
+      renderLockBanner();
+      if (!isLoading(state)) {
+        sendBtn.disabled = false;
+        inputEl.disabled = false;
+      }
+      break;
+
+    case 'user_message': {
+      const msgUsername = event.username ?? null;
+      state = addUserMessage(state, event.query ?? '', msgUsername);
+      state = startAssistantMessage(state);
+      render();
+      break;
+    }
+
+    case 'tool_call':
+      state = addToolCall(state, { name: event.name, input: event.input });
+      fetchToolDescription(event.name, event.input).then(description => {
+        if (description) {
+          const tc = getMessages(state).at(-1)?.tool_calls?.at(-1);
+          if (tc) { state = updateToolCallDescription(state, { id: tc.id, description }); render(); }
+        }
+      });
+      render();
+      break;
+
+    case 'tool_result':
+      state = completeToolCall(state, { name: event.name, preview: event.preview });
+      render();
+      break;
+
+    case 'done':
+      state = finalizeAssistantMessage(state, {
+        answer: event.answer,
+        sources: event.sources,
+        tool_calls_made: event.tool_calls_made,
+      });
+      render();
+      saveCurrentConversation().catch(() => {});
+      break;
+
+    case 'error':
+      state = setError(state, event.message);
+      render();
+      break;
+  }
+}
+
+function openProjectEventStream(projectId, convId = null) {
+  closeProjectEventStream();
+  projectEventSource = openProjectEvents(projectId, convId, handleProjectEvent);
+}
+
+function resubscribeProjectEvents() {
+  if (activeProjectId) openProjectEventStream(activeProjectId, activeConvId);
+}
+
+function closeProjectEventStream() {
+  if (projectEventSource) {
+    projectEventSource.close();
+    projectEventSource = null;
+  }
+  projectRemoteLocked = false;
+  projectLockedBy = '';
+  projectPresence = [];
+  renderPresence();
+  renderLockBanner();
 }
 
 sendBtn.addEventListener('click', sendQuery);
@@ -409,6 +563,15 @@ async function switchToProject(project) {
   state           = createChatState();
   render();
 
+  const header = document.getElementById('project-chat-header');
+  if (header) header.hidden = !activeProjectId;
+
+  if (activeProjectId) {
+    openProjectEventStream(activeProjectId);
+  } else {
+    closeProjectEventStream();
+  }
+
   try {
     conversations = activeProjectId
       ? await listProjectConversations(activeProjectId)
@@ -438,6 +601,7 @@ async function saveCurrentConversation() {
       const conv = await createProjectConversation(activeProjectId, { title });
       activeConvId = conv.id;
       conversations = [conv, ...conversations];
+      resubscribeProjectEvents();
     }
     await updateProjectConversation(activeProjectId, activeConvId, { title, messages: projectMessages });
   } else {
@@ -467,6 +631,7 @@ async function loadConversation(id) {
     render();
     refreshConvList();
     closeHistoryPanel();
+    resubscribeProjectEvents();
   } catch {}
 }
 
@@ -495,6 +660,7 @@ newChatBtn?.addEventListener('click', () => {
   state = createChatState();
   render();
   refreshConvList();
+  resubscribeProjectEvents();
 });
 
 function showApp(user) {
@@ -506,7 +672,7 @@ function showApp(user) {
   if (adminNavItem) adminNavItem.hidden = user.role !== 'admin';
 
   const adminPage = document.getElementById('page-admin');
-  if (adminPage && user.role === 'admin') initAdminPage(adminPage);
+  if (adminPage && user.role === 'admin') initAdminPage(adminPage, { onUserGroupsChanged: refreshProjectSelector });
 
   refreshProjectSelector();
 
@@ -536,11 +702,20 @@ setUnauthorizedHandler(showAuth);
 initAuthPages({ onLoginSuccess: showApp });
 
 logoutBtn?.addEventListener('click', async () => {
+  closeProjectEventStream();
   await logout();
   window.location.reload();
 });
 
+function dismissLoading() {
+  const el = document.getElementById('app-loading');
+  if (!el) return;
+  el.style.opacity = '0';
+  el.addEventListener('transitionend', () => el.remove(), { once: true });
+}
+
 fetchMe().then(user => {
+  dismissLoading();
   if (user) {
     showApp(user);
   } else {
