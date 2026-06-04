@@ -2662,17 +2662,13 @@ a.source-chip:hover .source-chip__name {
 
 /* ── Attachment tray & chips ────────────────────────────────────────────── */
 
+/* Widen input padding to make room for attach + send buttons */
+.input-area .p-search-box .p-search-box__input {
+  padding-right: 6rem;
+}
+
 .attach-btn {
-  background: none;
-  border: none;
-  border-left: 1px solid var(--border-color);
-  padding: 0 0.6rem;
-  cursor: pointer;
   color: var(--color-mid);
-  line-height: 1;
-  height: 100%;
-  display: flex;
-  align-items: center;
   transition: color 0.15s;
 }
 
