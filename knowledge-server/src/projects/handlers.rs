@@ -20,7 +20,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_stream::{wrappers::BroadcastStream, Stream};
 use uuid::Uuid;
 
-use crate::agent::{Agent, AgentEvent};
+use crate::agent::{Agent, AgentEvent, HistoryMessage};
 use crate::auth::jwt::Claims;
 use crate::neo4j::Neo4jClient;
 
@@ -238,6 +238,7 @@ pub async fn project_events(
 #[derive(serde::Deserialize)]
 pub struct ProjectQueryBody {
     pub query: String,
+    pub history: Option<Vec<HistoryMessage>>,
 }
 
 pub async fn project_query_stream(
@@ -276,11 +277,12 @@ pub async fn project_query_stream(
     let channels = Arc::clone(&state.channels);
     let pid      = project_id.clone();
     let query    = body.query.clone();
+    let history  = body.history.unwrap_or_default();
 
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         let agent_clone = Arc::clone(&agent);
-        tokio::spawn(async move { agent_clone.query_streaming(&query, agent_tx).await; });
+        tokio::spawn(async move { agent_clone.query_streaming(&query, &history, agent_tx).await; });
 
         while let Some(event) = agent_rx.recv().await {
             if let Ok(data) = serde_json::to_string(&event) {
@@ -602,7 +604,8 @@ pub async fn project_query(
     if let Err(e) = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await {
         return e.into_response();
     }
-    match state.agent.query(&body.query).await {
+    let history = body.history.as_deref().unwrap_or(&[]);
+    match state.agent.query(&body.query, history).await {
         Ok(response) => Json(response).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "project query failed");

@@ -15,6 +15,12 @@ use crate::llm::{
 };
 use tool::Tool;
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct HistoryMessage {
+    pub role: String,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
     pub repo: String,
@@ -54,17 +60,16 @@ impl Agent {
         Self { llm, tools, max_iterations }
     }
 
-    pub async fn query(&self, user_query: &str) -> Result<QueryResponse> {
+    pub async fn query(&self, user_query: &str, history: &[HistoryMessage]) -> Result<QueryResponse> {
         let tool_defs: Vec<ToolDefinition> =
             self.tools.iter().map(|t| t.definition()).collect();
 
         let tool_map: HashMap<String, &dyn Tool> =
             self.tools.iter().map(|t| (t.definition().name, t.as_ref())).collect();
 
-        let mut messages = vec![
-            Message::system(prompt::system_prompt()),
-            Message::user(user_query),
-        ];
+        let mut messages = vec![Message::system(prompt::system_prompt())];
+        messages.extend(history_to_messages(history));
+        messages.push(Message::user(user_query));
 
         let mut iterations = 0;
 
@@ -136,17 +141,16 @@ impl Agent {
         }
     }
 
-    pub async fn query_streaming(&self, user_query: &str, tx: mpsc::Sender<AgentEvent>) {
+    pub async fn query_streaming(&self, user_query: &str, history: &[HistoryMessage], tx: mpsc::Sender<AgentEvent>) {
         let tool_defs: Vec<ToolDefinition> =
             self.tools.iter().map(|t| t.definition()).collect();
 
         let tool_map: HashMap<String, &dyn Tool> =
             self.tools.iter().map(|t| (t.definition().name, t.as_ref())).collect();
 
-        let mut messages = vec![
-            Message::system(prompt::system_prompt()),
-            Message::user(user_query),
-        ];
+        let mut messages = vec![Message::system(prompt::system_prompt())];
+        messages.extend(history_to_messages(history));
+        messages.push(Message::user(user_query));
 
         let mut iterations = 0;
 
@@ -261,6 +265,16 @@ impl Agent {
     }
 }
 
+fn history_to_messages(history: &[HistoryMessage]) -> Vec<Message> {
+    history.iter().map(|h| {
+        if h.role == "assistant" {
+            Message::assistant_text(&h.text)
+        } else {
+            Message::user(&h.text)
+        }
+    }).collect()
+}
+
 fn parse_citations(text: &str) -> Vec<Source> {
     let re = Regex::new(r"\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+):(\d+)\]").unwrap();
     let mut seen = HashSet::new();
@@ -351,7 +365,7 @@ mod tests {
     async fn text_on_first_turn_returns_immediately() {
         let llm = MockLlm::new(vec![text("all done")]);
         let agent = agent_with(llm, vec![], 5);
-        let resp = agent.query("hi").await.unwrap();
+        let resp = agent.query("hi", &[]).await.unwrap();
         assert_eq!(resp.answer, "all done");
         assert_eq!(resp.tool_calls_made, 0);
     }
@@ -363,7 +377,7 @@ mod tests {
             text("result arrived"),
         ]);
         let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
-        let resp = agent.query("hi").await.unwrap();
+        let resp = agent.query("hi", &[]).await.unwrap();
         assert_eq!(resp.answer, "result arrived");
         assert_eq!(resp.tool_calls_made, 1);
     }
@@ -376,7 +390,7 @@ mod tests {
             text("done after two rounds"),
         ]);
         let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
-        let resp = agent.query("hi").await.unwrap();
+        let resp = agent.query("hi", &[]).await.unwrap();
         assert_eq!(resp.tool_calls_made, 2);
     }
 
@@ -391,7 +405,7 @@ mod tests {
             vec![],
             0,
         );
-        let resp = agent.query("hi").await.unwrap();
+        let resp = agent.query("hi", &[]).await.unwrap();
         assert_eq!(resp.tool_calls_made, 0);
     }
 
@@ -402,7 +416,7 @@ mod tests {
             text("handled gracefully"),
         ]);
         let agent = agent_with(llm, vec![], 5);
-        let resp = agent.query("hi").await.unwrap();
+        let resp = agent.query("hi", &[]).await.unwrap();
         assert_eq!(resp.answer, "handled gracefully");
     }
 
