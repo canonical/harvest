@@ -614,6 +614,69 @@ pub async fn delete_conversation(
     Ok(Json(json!({ "ok": true })))
 }
 
+// ── Secrets ───────────────────────────────────────────────────────────────────
+
+pub async fn list_secrets(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path(project_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let rows = state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_SECRET]->(s:ProjectSecret)
+         RETURN s.name AS name, s.created_at AS created_at
+         ORDER BY s.name",
+        json!({ "pid": project_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(Json(rows))
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpsertSecretBody {
+    pub name:  String,
+    pub value: String,
+}
+
+pub async fn upsert_secret(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path(project_id): Path<String>,
+    Json(body): Json<UpsertSecretBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let name = body.name.trim().to_uppercase();
+    if name.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
+    }
+    if body.value.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "value cannot be empty"));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    state.neo4j.query_read(
+        "MATCH (p:Project {id: $pid})
+         MERGE (p)-[:HAS_SECRET]->(s:ProjectSecret {name: $name})
+         ON CREATE SET s.value = $value, s.created_at = $now
+         ON MATCH SET s.value = $value
+         RETURN s.name",
+        json!({ "pid": project_id, "name": name, "value": body.value, "now": now }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok((StatusCode::CREATED, Json(json!({ "ok": true }))))
+}
+
+pub async fn delete_secret(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, secret_name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_SECRET]->(s:ProjectSecret {name: $name})
+         DETACH DELETE s",
+        json!({ "pid": project_id, "name": secret_name }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── Non-streaming project query (kept for internal use) ───────────────────────
 
 pub async fn project_query(
