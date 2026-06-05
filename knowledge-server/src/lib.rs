@@ -5,5 +5,6 @@ pub mod auth;
 pub mod config;
 pub mod conversations;
 pub mod llm;
+pub mod machines;
 pub mod neo4j;
 pub mod projects;

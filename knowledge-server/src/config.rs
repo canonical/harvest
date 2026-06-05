@@ -10,6 +10,8 @@ pub struct Config {
     #[serde(default)]
     pub documentation: DocumentationConfig,
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub agents: AgentsConfig,
 }
 
 #[derive(Deserialize)]
@@ -29,6 +31,14 @@ pub struct GoogleConfig {
 #[derive(Deserialize, Default)]
 pub struct DocumentationConfig {
     pub docs_dir: Option<std::path::PathBuf>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+pub struct AgentsConfig {
+    /// Filesystem path to the compiled harvest-agent binary to serve for download.
+    pub binary_path: Option<std::path::PathBuf>,
+    /// Public base URL of this server, used in generated install scripts.
+    pub public_url:  Option<String>,
 }
 
 #[derive(Deserialize)]
