@@ -8,6 +8,7 @@ import {
   getProjectConversation, updateProjectConversation, deleteProjectConversation,
 } from './api.js';
 import { initRepositoriesPage, onRepositoriesPageShow, onRepositoriesPageHide } from './repositories.js';
+import { initAgentsPage, onAgentsPageShow, onAgentsPageHide } from './agents.js';
 import { initDocumentationPage } from './documentation.js';
 import { renderMarkdown, buildFileUrl } from './markdown.js';
 import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
@@ -587,6 +588,7 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
 
     const prevPage = document.querySelector('.page:not([hidden])');
     if (prevPage?.id === 'page-repositories') onRepositoriesPageHide();
+    if (prevPage?.id === 'page-agents')       onAgentsPageHide();
     closeSourcePanel();
     if (page === 'admin' && !isAdmin()) return;
 
@@ -594,6 +596,7 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
     document.getElementById(`page-${page}`).hidden = false;
 
     if (page === 'repositories') onRepositoriesPageShow();
+    if (page === 'agents')       onAgentsPageShow(activeProjectId);
 
     if (window.innerWidth < 620) closeNav();
   });
@@ -610,6 +613,8 @@ const docsPage = initDocumentationPage(
   document.getElementById('page-documentation'),
   [],
 );
+
+initAgentsPage(document.getElementById('page-agents'));
 
 const mainEl    = document.querySelector('.l-main');
 const navEl2    = document.getElementById('app-sidebar');
@@ -656,6 +661,13 @@ async function switchToProject(project) {
   activeConvId    = null;
   state           = createChatState();
   render();
+
+  // Refresh agents page if it is currently visible
+  const agentsPage = document.getElementById('page-agents');
+  if (agentsPage && !agentsPage.hidden) {
+    onAgentsPageHide();
+    onAgentsPageShow(activeProjectId);
+  }
 
   const hasProject = !!activeProjectId;
 
