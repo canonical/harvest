@@ -59,6 +59,8 @@ pub struct Agent {
     llm: Arc<dyn LlmProvider>,
     tools: Vec<Box<dyn Tool>>,
     max_iterations: usize,
+    compaction_threshold_chars: usize,
+    compaction_keep_last: usize,
 }
 
 impl Agent {
@@ -67,7 +69,59 @@ impl Agent {
         tools: Vec<Box<dyn Tool>>,
         max_iterations: usize,
     ) -> Self {
-        Self { llm, tools, max_iterations }
+        Self {
+            llm,
+            tools,
+            max_iterations,
+            compaction_threshold_chars: usize::MAX,
+            compaction_keep_last: 6,
+        }
+    }
+
+    pub fn with_compaction(mut self, threshold_chars: usize, keep_last: usize) -> Self {
+        self.compaction_threshold_chars = threshold_chars;
+        self.compaction_keep_last = keep_last;
+        self
+    }
+
+    pub async fn compact_history(&self, history: &[HistoryMessage]) -> Vec<HistoryMessage> {
+        if history.is_empty() || estimate_history_chars(history) <= self.compaction_threshold_chars {
+            return history.to_vec();
+        }
+        let n = history.len();
+        let keep_last = self.compaction_keep_last.min(n);
+        let old = &history[..n - keep_last];
+        let recent = &history[n - keep_last..];
+
+        let conversation_text = old
+            .iter()
+            .map(|m| format!("[{}]: {}", m.role, m.text))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prompt = format!(
+            "Summarize the following conversation concisely, preserving key facts, decisions, \
+             and code discussed. This summary will be used as context for continuing the conversation.\n\n\
+             {conversation_text}"
+        );
+
+        let summary = match self.llm.chat(&[Message::user(prompt)], &[]).await {
+            Ok(LlmResponse::Message { text }) => text,
+            _ => {
+                tracing::warn!("compaction LLM call failed — using full history");
+                return history.to_vec();
+            }
+        };
+
+        tracing::info!(
+            old_messages = old.len(),
+            kept_messages = keep_last,
+            "compacted conversation history"
+        );
+
+        let mut result = Vec::with_capacity(1 + keep_last);
+        result.push(HistoryMessage { role: "summary".into(), text: summary, attachments: None });
+        result.extend_from_slice(recent);
+        result
     }
 
     pub async fn query(&self, user_query: &str, history: &[HistoryMessage], attachments: &[Attachment]) -> Result<QueryResponse> {
@@ -77,8 +131,9 @@ impl Agent {
         let tool_map: HashMap<String, &dyn Tool> =
             self.tools.iter().map(|t| (t.definition().name, t.as_ref())).collect();
 
+        let compacted = self.compact_history(history).await;
         let mut messages = vec![Message::system(prompt::system_prompt())];
-        messages.extend(history_to_messages(history));
+        messages.extend(history_to_messages(&compacted));
         messages.push(build_user_message(user_query, attachments));
 
         let mut iterations = 0;
@@ -158,8 +213,9 @@ impl Agent {
         let tool_map: HashMap<String, &dyn Tool> =
             self.tools.iter().map(|t| (t.definition().name, t.as_ref())).collect();
 
+        let compacted = self.compact_history(history).await;
         let mut messages = vec![Message::system(prompt::system_prompt())];
-        messages.extend(history_to_messages(history));
+        messages.extend(history_to_messages(&compacted));
         messages.push(build_user_message(user_query, attachments));
 
         let mut iterations = 0;
@@ -290,13 +346,17 @@ pub(crate) fn build_user_message(text: &str, attachments: &[Attachment]) -> Mess
     Message { role: crate::llm::types::Role::User, content: MessageContent::Parts(parts) }
 }
 
+pub(crate) fn estimate_history_chars(history: &[HistoryMessage]) -> usize {
+    history.iter().map(|m| m.text.len()).sum()
+}
+
 fn history_to_messages(history: &[HistoryMessage]) -> Vec<Message> {
     history.iter().map(|h| {
         let atts = h.attachments.as_deref().unwrap_or(&[]);
-        if h.role == "assistant" {
-            Message::assistant_text(&h.text)
-        } else {
-            build_user_message(&h.text, atts)
+        match h.role.as_str() {
+            "assistant" => Message::assistant_text(&h.text),
+            "summary" => Message::user(format!("[Summary of prior conversation]\n{}", h.text)),
+            _ => build_user_message(&h.text, atts),
         }
     }).collect()
 }
@@ -545,5 +605,141 @@ mod tests {
         let sources = parse_citations("[r:v1:f.rs:0]");
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].line, 0);
+    }
+
+    // ── estimate_history_chars ────────────────────────────────────────────────
+
+    #[test]
+    fn estimate_empty_history_is_zero() {
+        assert_eq!(estimate_history_chars(&[]), 0);
+    }
+
+    #[test]
+    fn estimate_counts_text_chars_of_single_message() {
+        let h = HistoryMessage { role: "user".into(), text: "hello".into(), attachments: None };
+        assert_eq!(estimate_history_chars(&[h]), 5);
+    }
+
+    #[test]
+    fn estimate_sums_chars_across_messages() {
+        let msgs = vec![
+            HistoryMessage { role: "user".into(), text: "hi".into(), attachments: None },
+            HistoryMessage { role: "assistant".into(), text: "hello".into(), attachments: None },
+        ];
+        assert_eq!(estimate_history_chars(&msgs), 7);
+    }
+
+    // ── history_to_messages: summary role ────────────────────────────────────
+
+    #[test]
+    fn summary_role_renders_as_user_message_with_prefix() {
+        let h = HistoryMessage { role: "summary".into(), text: "old stuff".into(), attachments: None };
+        let msgs = history_to_messages(&[h]);
+        assert_eq!(msgs.len(), 1);
+        assert!(matches!(msgs[0].role, crate::llm::types::Role::User));
+        match &msgs[0].content {
+            MessageContent::Text(t) => {
+                assert!(t.contains("old stuff"));
+                assert!(t.contains("Summary"));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    // ── compact_history ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn compact_returns_unchanged_when_under_threshold() {
+        let agent = Agent::new(MockLlm::new(vec![]), vec![], 5)
+            .with_compaction(1000, 6);
+        let history = vec![
+            HistoryMessage { role: "user".into(), text: "short".into(), attachments: None },
+        ];
+        let result = agent.compact_history(&history).await;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].role, "user");
+    }
+
+    #[tokio::test]
+    async fn compact_returns_unchanged_for_empty_history() {
+        let agent = Agent::new(MockLlm::new(vec![]), vec![], 5)
+            .with_compaction(0, 6);
+        let result = agent.compact_history(&[]).await;
+        assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compact_calls_llm_and_prepends_summary_message() {
+        let agent = Agent::new(MockLlm::new(vec![text("summary of old stuff")]), vec![], 5)
+            .with_compaction(5, 1);
+        let history = vec![
+            HistoryMessage { role: "user".into(), text: "message one".into(), attachments: None },
+            HistoryMessage { role: "assistant".into(), text: "response one".into(), attachments: None },
+            HistoryMessage { role: "user".into(), text: "recent message".into(), attachments: None },
+        ];
+        let result = agent.compact_history(&history).await;
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].role, "summary");
+        assert_eq!(result[0].text, "summary of old stuff");
+        assert_eq!(result[1].role, "user");
+        assert_eq!(result[1].text, "recent message");
+    }
+
+    #[tokio::test]
+    async fn compact_keeps_exactly_keep_last_recent_messages() {
+        let agent = Agent::new(MockLlm::new(vec![text("summary")]), vec![], 5)
+            .with_compaction(5, 2);
+        let history: Vec<HistoryMessage> = (0..5).map(|i| HistoryMessage {
+            role: "user".into(),
+            text: format!("msg {i}"),
+            attachments: None,
+        }).collect();
+        let result = agent.compact_history(&history).await;
+        assert_eq!(result.len(), 3); // 1 summary + 2 recent
+        assert_eq!(result[0].role, "summary");
+        assert_eq!(result[1].text, "msg 3");
+        assert_eq!(result[2].text, "msg 4");
+    }
+
+    // ── agent auto-compacts ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn query_compacts_history_over_threshold() {
+        // threshold=5: history "message one" + "response one" > 5 chars → compaction
+        let agent = Agent::new(
+            MockLlm::new(vec![text("compact summary"), text("final answer")]),
+            vec![],
+            5,
+        ).with_compaction(5, 1);
+        let history = vec![
+            HistoryMessage { role: "user".into(), text: "message one".into(), attachments: None },
+            HistoryMessage { role: "assistant".into(), text: "response one".into(), attachments: None },
+        ];
+        let resp = agent.query("new question", &history, &[]).await.unwrap();
+        assert_eq!(resp.answer, "final answer");
+    }
+
+    #[tokio::test]
+    async fn query_streaming_compacts_history_over_threshold() {
+        let agent = Arc::new(
+            Agent::new(
+                MockLlm::new(vec![text("compact summary"), text("streaming answer")]),
+                vec![],
+                5,
+            ).with_compaction(5, 1)
+        );
+        let history = vec![
+            HistoryMessage { role: "user".into(), text: "message one".into(), attachments: None },
+            HistoryMessage { role: "assistant".into(), text: "response one".into(), attachments: None },
+        ];
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        agent.query_streaming("new question", &history, &[], tx).await;
+        let mut answer = None;
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::Done { answer: a, .. } = event {
+                answer = Some(a);
+            }
+        }
+        assert_eq!(answer.as_deref(), Some("streaming answer"));
     }
 }
