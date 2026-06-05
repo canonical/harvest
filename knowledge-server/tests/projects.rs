@@ -56,10 +56,12 @@ fn projects_app(neo4j: Arc<Neo4jClient>) -> Router {
     let agent    = Arc::new(Agent::new(Arc::clone(&llm), vec![], 2));
     let registry = MachineRegistry::new();
     let builder  = Arc::new(ProjectAgentBuilder {
-        llm:            Arc::clone(&llm),
-        neo4j:          Arc::clone(&neo4j),
-        registry:       Arc::clone(&registry),
-        max_iterations: 2,
+        llm:                        Arc::clone(&llm),
+        neo4j:                      Arc::clone(&neo4j),
+        registry:                   Arc::clone(&registry),
+        max_iterations:             2,
+        compaction_threshold_chars: usize::MAX,
+        compaction_keep_last:       6,
     });
     let state = Arc::new(ProjectState::new(neo4j, agent, builder));
 

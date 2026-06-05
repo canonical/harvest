@@ -38,12 +38,17 @@ async fn main() -> Result<()> {
     neo4j.run("CREATE CONSTRAINT project_id    IF NOT EXISTS FOR (p:Project)      REQUIRE p.id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT machine_id    IF NOT EXISTS FOR (m:Machine)      REQUIRE m.id IS UNIQUE").await?;
 
-    let llm_provider   = llm::from_config(&config.llm);
-    let max_iterations = config.llm.max_iterations();
+    let llm_provider                = llm::from_config(&config.llm);
+    let max_iterations              = config.llm.max_iterations();
+    let compaction_threshold_chars  = config.llm.compaction_threshold_chars();
+    let compaction_keep_last        = config.llm.compaction_keep_last();
 
     // Global agent (graph tools only, used by the legacy /query endpoint)
     let global_tools = graph_tools::all_tools(Arc::clone(&neo4j));
-    let agent        = Arc::new(Agent::new(Arc::clone(&llm_provider), global_tools, max_iterations));
+    let agent = Arc::new(
+        Agent::new(Arc::clone(&llm_provider), global_tools, max_iterations)
+            .with_compaction(compaction_threshold_chars, compaction_keep_last),
+    );
 
     // Machine registry (in-memory, agents reconnect after restart)
     let machine_registry = MachineRegistry::new();
@@ -54,6 +59,8 @@ async fn main() -> Result<()> {
         neo4j:          Arc::clone(&neo4j),
         registry:       Arc::clone(&machine_registry),
         max_iterations,
+        compaction_threshold_chars,
+        compaction_keep_last,
     });
 
     let docs_dir    = config.documentation.docs_dir.map(Arc::new);

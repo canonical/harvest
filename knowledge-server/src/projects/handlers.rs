@@ -20,7 +20,7 @@ use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio_stream::{wrappers::BroadcastStream, Stream};
 use uuid::Uuid;
 
-use crate::agent::{Agent, AgentEvent, Attachment, HistoryMessage};
+use crate::agent::{Agent, AgentEvent, Attachment, HistoryMessage, Source};
 use crate::api::ProjectAgentBuilder;
 use crate::auth::jwt::Claims;
 use crate::neo4j::Neo4jClient;
@@ -236,12 +236,86 @@ pub async fn project_events(
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
+// ── Project conversation history helpers ──────────────────────────────────────
+
+async fn load_project_history(
+    neo4j: &Neo4jClient,
+    project_id: &str,
+    conv_id: &str,
+) -> Vec<HistoryMessage> {
+    let rows = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
+         RETURN c.messages AS messages",
+        json!({ "pid": project_id, "cid": conv_id }),
+    ).await.unwrap_or_default();
+
+    rows.into_iter().next()
+        .and_then(|r| r.get("messages").and_then(|v| v.as_str()).map(|s| s.to_string()))
+        .and_then(|s| serde_json::from_str::<Vec<HistoryMessage>>(&s).ok())
+        .unwrap_or_default()
+}
+
+async fn save_project_turn(
+    neo4j: &Neo4jClient,
+    project_id: &str,
+    conv_id: &str,
+    user_text: &str,
+    username: &str,
+    attachments_meta: Vec<Value>,
+    compacted_history: &[HistoryMessage],
+    assistant_text: &str,
+    sources: &[Source],
+    tool_calls_made: usize,
+) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let title = if user_text.len() > 60 {
+        format!("{}…", &user_text[..57])
+    } else {
+        user_text.to_string()
+    };
+
+    let mut msgs: Vec<Value> = compacted_history.iter().map(|h| {
+        json!({ "role": h.role, "text": h.text, "attachments": [] })
+    }).collect();
+    msgs.push(json!({
+        "role": "user",
+        "text": user_text,
+        "username": username,
+        "attachments": attachments_meta,
+    }));
+    msgs.push(json!({
+        "role": "assistant",
+        "text": assistant_text,
+        "sources": sources,
+        "tool_calls": [],
+        "tool_calls_made": tool_calls_made,
+    }));
+
+    let messages_json = match serde_json::to_string(&msgs) {
+        Ok(s) => s,
+        Err(e) => { tracing::error!(error=%e, "failed to serialize conversation"); return; }
+    };
+    let count = msgs.len() as i64;
+
+    let _ = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
+         SET c.title = $title, c.messages = $messages,
+             c.message_count = $count, c.updated_at = $now
+         RETURN c.id AS id",
+        json!({
+            "pid": project_id, "cid": conv_id,
+            "title": title, "messages": messages_json,
+            "count": count, "now": now,
+        }),
+    ).await;
+}
+
 // ── Project query (fire-and-forget, results via events SSE) ───────────────────
 
 #[derive(serde::Deserialize)]
 pub struct ProjectQueryBody {
     pub query: String,
-    pub history: Option<Vec<HistoryMessage>>,
+    pub conversation_id: Option<String>,
     pub attachments: Option<Vec<Attachment>>,
 }
 
@@ -264,7 +338,16 @@ pub async fn project_query_stream(
         locks.insert(project_id.clone(), user.name.clone());
     }
 
-    // Broadcast: lock + user's message.
+    // Load and compact history before spawning — so both the agent and the
+    // save step operate on the same (potentially compacted) history.
+    let agent = state.agent_builder.build(project_id.clone());
+    let raw_history = match &body.conversation_id {
+        Some(cid) => load_project_history(&state.neo4j, &project_id, cid).await,
+        None => vec![],
+    };
+    let history = agent.compact_history(&raw_history).await;
+
+    // Broadcast: lock + user's message (include preview URLs for attachments).
     state.broadcast(&project_id, json!({
         "type": "lock",
         "by": user.name,
@@ -289,20 +372,40 @@ pub async fn project_query_stream(
     }).to_string()).await;
 
     // Spawn agent task — all events go to the broadcast channel.
-    let agent    = state.agent_builder.build(project_id.clone());
     let locks    = Arc::clone(&state.locks);
     let channels = Arc::clone(&state.channels);
-    let pid      = project_id.clone();
+    let neo4j    = Arc::clone(&state.neo4j);
+    let pid         = project_id.clone();
     let query       = body.query.clone();
-    let history     = body.history.unwrap_or_default();
+    let conv_id     = body.conversation_id.clone();
+    let username    = user.name.clone();
     let attachments = body.attachments.unwrap_or_default();
+    // Attachment metadata saved to history (name+mime_type only, no base64 data).
+    let att_meta: Vec<Value> = attachments.iter()
+        .map(|a| json!({ "name": a.name, "mime_type": a.mime_type }))
+        .collect();
 
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         let agent_clone = Arc::clone(&agent);
-        tokio::spawn(async move { agent_clone.query_streaming(&query, &history, &attachments, agent_tx).await; });
+        let history_for_agent = history.clone();
+        let query_for_agent   = query.clone();
+        tokio::spawn(async move {
+            agent_clone.query_streaming(&query_for_agent, &history_for_agent, &attachments, agent_tx).await;
+        });
 
         while let Some(event) = agent_rx.recv().await {
+            // Persist the completed turn to Neo4j.
+            if let (AgentEvent::Done { answer, sources, tool_calls_made }, Some(cid)) =
+                (&event, &conv_id)
+            {
+                save_project_turn(
+                    &neo4j, &pid, cid,
+                    &query, &username, att_meta.clone(),
+                    &history,
+                    answer, sources, *tool_calls_made,
+                ).await;
+            }
             if let Ok(data) = serde_json::to_string(&event) {
                 let ch = channels.lock().await;
                 if let Some(tx) = ch.get(&pid) { let _ = tx.send(data); }
@@ -689,9 +792,13 @@ pub async fn project_query(
         return e.into_response();
     }
     let agent = state.agent_builder.build(project_id.clone());
-    let history = body.history.as_deref().unwrap_or(&[]);
+    let raw_history = match &body.conversation_id {
+        Some(cid) => load_project_history(&state.neo4j, &project_id, cid).await,
+        None => vec![],
+    };
+    let history = agent.compact_history(&raw_history).await;
     let attachments = body.attachments.as_deref().unwrap_or(&[]);
-    match agent.query(&body.query, history, attachments).await {
+    match agent.query(&body.query, &history, attachments).await {
         Ok(response) => Json(response).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "project query failed");

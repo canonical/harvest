@@ -5,6 +5,7 @@ pub mod repositories;
 pub mod tool_description;
 
 use axum::{
+    extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
     routing::{delete, get, post, put},
     Json, Router,
@@ -35,6 +36,13 @@ pub struct GraphState {
     pub cache: Arc<GraphCache>,
 }
 
+/// State for the personal query endpoints (`/query` and `/query/stream`).
+#[derive(Clone)]
+pub struct QueryState {
+    pub agent: Arc<Agent>,
+    pub neo4j: Option<Arc<Neo4jClient>>,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub agent:            Arc<Agent>,
@@ -50,10 +58,12 @@ pub struct AppState {
 /// machine tools bound to the given project.
 #[derive(Clone)]
 pub struct ProjectAgentBuilder {
-    pub llm:            Arc<dyn LlmProvider>,
-    pub neo4j:          Arc<Neo4jClient>,
-    pub registry:       Arc<MachineRegistry>,
-    pub max_iterations: usize,
+    pub llm:                        Arc<dyn LlmProvider>,
+    pub neo4j:                      Arc<Neo4jClient>,
+    pub registry:                   Arc<MachineRegistry>,
+    pub max_iterations:             usize,
+    pub compaction_threshold_chars: usize,
+    pub compaction_keep_last:       usize,
 }
 
 impl ProjectAgentBuilder {
@@ -79,7 +89,10 @@ impl ProjectAgentBuilder {
             neo4j:      Arc::clone(&self.neo4j),
             project_id,
         }));
-        Arc::new(Agent::new(Arc::clone(&self.llm), tools, self.max_iterations))
+        Arc::new(
+            Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
+                .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last),
+        )
     }
 }
 
@@ -111,11 +124,15 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
         .route("/auth/google/callback",   get(auth_handlers::google_callback))
         .with_state(Arc::clone(&auth_state));
 
+    let query_state = Arc::new(QueryState {
+        agent: Arc::clone(&state.agent),
+        neo4j: Some(Arc::clone(&state.neo4j)),
+    });
     let agent_router = Router::new()
         .route("/query",            post(query::handle_query))
         .route("/query/stream",     post(query::handle_query_stream))
         .route("/tool-description", post(tool_description::handle_tool_description))
-        .with_state(Arc::clone(&state.agent));
+        .with_state(query_state);
 
     let graph_router = Router::new()
         .route("/repositories",                     get(repositories::handle_list_repositories))
@@ -209,6 +226,7 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
         .merge(machines_public)   // WebSocket + install.sh + binary (no JWT)
         .merge(protected_router)
         .merge(admin_router)
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
 }

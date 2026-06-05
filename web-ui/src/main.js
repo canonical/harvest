@@ -59,6 +59,7 @@ let projectEventSource = null;
 let projectRemoteLocked = false;   // locked by someone else
 let projectLockedBy = '';
 let projectPresence = [];          // [{user_id, name}]
+let lastProjectQuery = '';         // last query sent to project, for conv list update
 
 const messagesEl  = document.getElementById('messages');
 const inputEl     = document.getElementById('query-input');
@@ -339,13 +340,20 @@ async function sendQuery() {
 
   if (activeProjectId) {
     // Project chat: fire-and-forget POST; all events arrive via EventSource.
-    // Capture history and attachments before the POST.
-    const history = getSaveableMessages(state);
+    // Ensure a conversation exists before querying so the server can save the turn.
     const attachments = getPendingAttachments(state).map(toWireAttachment);
     state = clearPendingAttachments(state);
     renderAttachmentTray();
     try {
-      await projectQueryStart(activeProjectId, query, history, attachments);
+      if (!activeConvId) {
+        const title = query.length > 60 ? query.slice(0, 57) + '…' : query;
+        const conv = await createProjectConversation(activeProjectId, { title });
+        activeConvId = conv.id;
+        conversations = [conv, ...conversations];
+        resubscribeProjectEvents();
+      }
+      lastProjectQuery = query;
+      await projectQueryStart(activeProjectId, query, activeConvId, attachments);
     } catch (err) {
       if (err.status === 409) {
         // Already locked — the lock banner will have appeared via EventSource.
@@ -359,8 +367,7 @@ async function sendQuery() {
     return;
   }
 
-  // Personal chat: capture history + attachments before adding the user message.
-  const history = getSaveableMessages(state);
+  // Personal chat: ensure a conversation exists before querying.
   const attachments = getPendingAttachments(state).map(toWireAttachment);
   state = clearPendingAttachments(state);
   renderAttachmentTray();
@@ -369,7 +376,14 @@ async function sendQuery() {
   render();
 
   try {
-    await queryStream(query, history, attachments, (event) => {
+    if (!activeConvId) {
+      const title = query.length > 60 ? query.slice(0, 57) + '…' : query;
+      const conv = await createConversation(title);
+      activeConvId = conv.id;
+      conversations = [conv, ...conversations];
+      refreshConvList();
+    }
+    await queryStream(query, activeConvId, attachments, (event) => {
       if (event.type === 'tool_call') {
         state = addToolCall(state, { name: event.name, input: event.input });
         const tc = getMessages(state).at(-1).tool_calls.at(-1);
@@ -387,12 +401,12 @@ async function sendQuery() {
           sources: event.sources,
           tool_calls_made: event.tool_calls_made,
         });
+        updateConvListEntry(query);
       } else if (event.type === 'error') {
         state = setError(state, event.message);
       }
       render();
     });
-    saveCurrentConversation().catch(() => {});
   } catch (err) {
     state = setError(state, err.message);
     render();
@@ -504,7 +518,7 @@ function handleProjectEvent(event) {
         tool_calls_made: event.tool_calls_made,
       });
       render();
-      saveCurrentConversation().catch(() => {});
+      updateConvListEntry(lastProjectQuery);
       break;
 
     case 'error':
@@ -664,6 +678,18 @@ function refreshConvList() {
     showCreator: !!activeProjectId,
     canDelete:   (c) => !activeProjectId || isAdmin() || c.created_by === user?.id,
   });
+}
+
+function updateConvListEntry(queryText) {
+  if (!activeConvId) return;
+  const idx = conversations.findIndex(c => c.id === activeConvId);
+  if (idx !== -1) {
+    const raw   = queryText ?? conversations[idx].title ?? 'New conversation';
+    const title = raw.length > 60 ? raw.slice(0, 57) + '…' : raw;
+    conversations[idx] = { ...conversations[idx], title, updated_at: new Date().toISOString() };
+    conversations.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  }
+  refreshConvList();
 }
 
 async function switchToProject(project) {

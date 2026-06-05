@@ -71,6 +71,10 @@ pub enum LlmConfig {
         timeout_secs: u64,
         #[serde(default = "default_max_retries")]
         max_retries: u32,
+        #[serde(default = "default_compaction_threshold_chars")]
+        compaction_threshold_chars: usize,
+        #[serde(default = "default_compaction_keep_last")]
+        compaction_keep_last: usize,
     },
     #[serde(rename = "openai-compatible")]
     OpenAiCompat {
@@ -83,12 +87,18 @@ pub enum LlmConfig {
         timeout_secs: u64,
         #[serde(default = "default_max_retries")]
         max_retries: u32,
+        #[serde(default = "default_compaction_threshold_chars")]
+        compaction_threshold_chars: usize,
+        #[serde(default = "default_compaction_keep_last")]
+        compaction_keep_last: usize,
     },
 }
 
 fn default_max_iterations() -> usize { 20 }
 fn default_timeout_secs() -> u64 { 120 }
 fn default_max_retries() -> u32 { 3 }
+fn default_compaction_threshold_chars() -> usize { 40_000 }
+fn default_compaction_keep_last() -> usize { 6 }
 
 impl LlmConfig {
     pub fn max_iterations(&self) -> usize {
@@ -109,6 +119,20 @@ impl LlmConfig {
         match self {
             Self::Anthropic    { max_retries, .. } => *max_retries,
             Self::OpenAiCompat { max_retries, .. } => *max_retries,
+        }
+    }
+
+    pub fn compaction_threshold_chars(&self) -> usize {
+        match self {
+            Self::Anthropic    { compaction_threshold_chars, .. } => *compaction_threshold_chars,
+            Self::OpenAiCompat { compaction_threshold_chars, .. } => *compaction_threshold_chars,
+        }
+    }
+
+    pub fn compaction_keep_last(&self) -> usize {
+        match self {
+            Self::Anthropic    { compaction_keep_last, .. } => *compaction_keep_last,
+            Self::OpenAiCompat { compaction_keep_last, .. } => *compaction_keep_last,
         }
     }
 }

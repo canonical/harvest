@@ -22,8 +22,9 @@ use knowledge_server::{
         query::{handle_query, handle_query_stream},
         repositories::handle_list_repositories,
         tool_description::handle_tool_description,
-        GraphState,
+        GraphState, QueryState,
     },
+    auth::jwt::Claims,
     llm::{
         LlmProvider,
         types::{LlmResponse, Message, ToolDefinition},
@@ -58,12 +59,24 @@ impl LlmProvider for ErrorLlm {
 
 
 fn query_app(agent: Arc<Agent>) -> Router {
+    let qs = Arc::new(QueryState { agent, neo4j: None });
     Router::new()
         .route("/query", post(handle_query))
         .route("/query/stream", post(handle_query_stream))
         .route("/tool-description", post(handle_tool_description))
         .route("/health", get(|| async { Json(json!({ "status": "ok" })) }))
-        .with_state(agent)
+        .with_state(qs)
+        .layer(axum::Extension(test_claims()))
+}
+
+fn test_claims() -> Claims {
+    Claims {
+        sub:   "test-user-id".into(),
+        email: "test@example.com".into(),
+        name:  "Test User".into(),
+        role:  "user".into(),
+        exp:   i64::MAX,
+    }
 }
 
 fn repos_app(neo4j: Arc<Neo4jClient>) -> Router {
