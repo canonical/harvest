@@ -9,6 +9,7 @@ import {
 } from './api.js';
 import { initRepositoriesPage, onRepositoriesPageShow, onRepositoriesPageHide } from './repositories.js';
 import { initAgentsPage, onAgentsPageShow, onAgentsPageHide } from './agents.js';
+import { initSecretsPage, onSecretsPageShow, onSecretsPageHide } from './secrets.js';
 import { initDocumentationPage } from './documentation.js';
 import { renderMarkdown, buildFileUrl } from './markdown.js';
 import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
@@ -80,15 +81,15 @@ function render() {
     )
   );
 
+  const atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+  const prevScrollTop = messagesEl.scrollTop;
+
   const messages = getMessages(state);
   messagesEl.innerHTML = messages.map(renderMessage).join('');
 
   const loading = isLoading(state);
   sendBtn.disabled = !activeProjectId || loading;
   inputEl.disabled = !activeProjectId || loading;
-
-  const atBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
-  if (atBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
 
   [...messagesEl.querySelectorAll('.message--assistant')].forEach((el, i) => {
     const group = el.querySelector('details.tc-group');
@@ -103,6 +104,12 @@ function render() {
       }
     });
   });
+
+  if (atBottom) {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  } else {
+    messagesEl.scrollTop = prevScrollTop;
+  }
 
   messagesEl.querySelectorAll('.tc-step__row--clickable').forEach(row => {
     const toggle = () => {
@@ -589,6 +596,7 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
     const prevPage = document.querySelector('.page:not([hidden])');
     if (prevPage?.id === 'page-repositories') onRepositoriesPageHide();
     if (prevPage?.id === 'page-agents')       onAgentsPageHide();
+    if (prevPage?.id === 'page-secrets')      onSecretsPageHide();
     closeSourcePanel();
     if (page === 'admin' && !isAdmin()) return;
 
@@ -597,6 +605,7 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
 
     if (page === 'repositories') onRepositoriesPageShow();
     if (page === 'agents')       onAgentsPageShow(activeProjectId);
+    if (page === 'secrets')      onSecretsPageShow(activeProjectId);
 
     if (window.innerWidth < 620) closeNav();
   });
@@ -615,6 +624,7 @@ const docsPage = initDocumentationPage(
 );
 
 initAgentsPage(document.getElementById('page-agents'));
+initSecretsPage(document.getElementById('page-secrets'));
 
 const mainEl    = document.querySelector('.l-main');
 const navEl2    = document.getElementById('app-sidebar');
@@ -662,12 +672,13 @@ async function switchToProject(project) {
   state           = createChatState();
   render();
 
-  // Refresh agents page if it is currently visible
+  // Refresh agents/secrets pages if currently visible
   const agentsPage = document.getElementById('page-agents');
   if (agentsPage && !agentsPage.hidden) {
     onAgentsPageHide();
     onAgentsPageShow(activeProjectId);
   }
+  onSecretsPageShow(activeProjectId);
 
   const hasProject = !!activeProjectId;
 
@@ -748,6 +759,7 @@ async function loadConversation(id) {
     activeConvId = id;
     state = loadFromHistory(Array.isArray(conv.messages) ? conv.messages : []);
     render();
+    messagesEl.scrollTop = messagesEl.scrollHeight;
     refreshConvList();
     closeHistoryPanel();
     resubscribeProjectEvents();
