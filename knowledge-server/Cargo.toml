@@ -20,10 +20,14 @@ toml         = "0.8"
 clap         = { version = "4", features = ["derive"] }
 
 # HTTP server
-axum         = { version = "0.7", features = ["json", "macros"] }
+axum         = { version = "0.7", features = ["json", "macros", "ws"] }
 futures      = { version = "0.3", default-features = false, features = ["std"] }
 tower        = { version = "0.4", features = ["util"] }
 tower-http   = { version = "0.5", features = ["cors", "trace"] }
+
+# Machines / agent registry
+dashmap      = "5"
+sha2         = "0.10"
 
 # HTTP client (LLM API calls)
 reqwest      = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -51,8 +55,10 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
-http-body-util = "0.1.3"
-httpmock = "0.8.3"
+http-body-util       = "0.1.3"
+httpmock             = "0.8.3"
 neo4j_testcontainers = "0.3"
-tempfile = "3"
-testcontainers = "0.16"
+tempfile             = "3"
+testcontainers       = "0.16"
+futures-util         = "0.3"
+reqwest              = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

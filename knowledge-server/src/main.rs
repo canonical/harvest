@@ -6,10 +6,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use knowledge_server::agent::{graph_tools, Agent};
-use knowledge_server::api::{AppState, GraphCache};
+use knowledge_server::api::{AppState, GraphCache, ProjectAgentBuilder};
 use knowledge_server::auth;
 use knowledge_server::config::Config;
 use knowledge_server::llm;
+use knowledge_server::machines::MachineRegistry;
 use knowledge_server::neo4j::Neo4jClient;
 
 #[derive(ClapParser)]
@@ -25,7 +26,7 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let cli = Cli::parse();
+    let cli    = Cli::parse();
     let config = Config::from_file(&cli.config)?;
 
     let neo4j = Arc::new(
@@ -34,30 +35,51 @@ async fn main() -> Result<()> {
 
     auth::setup_constraints(&neo4j).await?;
     neo4j.run("CREATE CONSTRAINT conversation_id IF NOT EXISTS FOR (c:Conversation) REQUIRE c.id IS UNIQUE").await?;
-    neo4j.run("CREATE CONSTRAINT project_id IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE").await?;
+    neo4j.run("CREATE CONSTRAINT project_id    IF NOT EXISTS FOR (p:Project)      REQUIRE p.id IS UNIQUE").await?;
+    neo4j.run("CREATE CONSTRAINT machine_id    IF NOT EXISTS FOR (m:Machine)      REQUIRE m.id IS UNIQUE").await?;
 
-    let llm_provider = llm::from_config(&config.llm);
+    let llm_provider   = llm::from_config(&config.llm);
     let max_iterations = config.llm.max_iterations();
-    let tools = graph_tools::all_tools(Arc::clone(&neo4j));
-    let agent = Arc::new(Agent::new(llm_provider, tools, max_iterations));
 
-    let docs_dir = config.documentation.docs_dir.map(Arc::new);
+    // Global agent (graph tools only, used by the legacy /query endpoint)
+    let global_tools = graph_tools::all_tools(Arc::clone(&neo4j));
+    let agent        = Arc::new(Agent::new(Arc::clone(&llm_provider), global_tools, max_iterations));
+
+    // Machine registry (in-memory, agents reconnect after restart)
+    let machine_registry = MachineRegistry::new();
+
+    // Per-project agent builder (graph + machine tools)
+    let agent_builder = Arc::new(ProjectAgentBuilder {
+        llm:            Arc::clone(&llm_provider),
+        neo4j:          Arc::clone(&neo4j),
+        registry:       Arc::clone(&machine_registry),
+        max_iterations,
+    });
+
+    let docs_dir    = config.documentation.docs_dir.map(Arc::new);
+    let server_url  = config.agents.public_url
+        .clone()
+        .unwrap_or_else(|| format!("http://{}:{}", config.server.host, config.server.port));
+    let binary_path = config.agents.binary_path.clone();
+
     let state = AppState {
         agent,
-        neo4j: Arc::clone(&neo4j),
+        neo4j:            Arc::clone(&neo4j),
         docs_dir,
-        auth: Arc::new(config.auth),
+        auth:             Arc::new(config.auth),
+        machine_registry: Arc::clone(&machine_registry),
+        agent_builder,
+        binary_path,
     };
 
     let cache: Arc<GraphCache> = Arc::new(RwLock::new(HashMap::new()));
     tokio::spawn({
-        let neo4j  = Arc::clone(&neo4j);
-        let cache  = Arc::clone(&cache);
+        let neo4j = Arc::clone(&neo4j);
+        let cache = Arc::clone(&cache);
         async move { knowledge_server::api::graph::warm_graph_cache(neo4j, cache).await; }
     });
 
-    let app = knowledge_server::api::router(state, cache);
-
+    let app  = knowledge_server::api::router(state, cache, server_url);
     let addr = format!("{}:{}", config.server.host, config.server.port);
     tracing::info!("listening on {addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
