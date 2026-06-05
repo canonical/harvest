@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub neo4j: Neo4jConfig,
     pub storage: StorageConfig,
+    pub git: Option<GitConfig>,
     pub repositories: Vec<RepoConfig>,
     pub llm: Option<LlmConfig>,
     pub documentation: Option<DocumentationConfig>,
@@ -21,6 +22,12 @@ pub struct Neo4jConfig {
 #[derive(Deserialize)]
 pub struct StorageConfig {
     pub clone_root: PathBuf,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct GitConfig {
+    pub ssh_key_path: PathBuf,
+    pub ssh_passphrase: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -65,8 +72,21 @@ impl Config {
     pub fn from_file(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config file: {}", path.display()))?;
-        toml::from_str(&text).context("parsing config TOML")
+        let mut config: Config = toml::from_str(&text).context("parsing config TOML")?;
+        if let Some(git) = &mut config.git {
+            git.ssh_key_path = expand_tilde(git.ssh_key_path.clone());
+        }
+        Ok(config)
     }
+}
+
+fn expand_tilde(path: PathBuf) -> PathBuf {
+    if let Ok(stripped) = path.strip_prefix("~") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(stripped);
+        }
+    }
+    path
 }
 
 #[cfg(test)]
@@ -208,5 +228,72 @@ model    = "llama-3.3-70b"
         let config: Config = toml::from_str(toml).unwrap();
         let llm = config.llm.as_ref().unwrap();
         assert!(matches!(llm, LlmConfig::OpenAiCompat { model, .. } if model == "llama-3.3-70b"));
+    }
+
+    #[test]
+    fn git_section_is_optional() {
+        let config: Config = toml::from_str(&base_toml("")).unwrap();
+        assert!(config.git.is_none());
+    }
+
+    #[test]
+    fn git_ssh_key_path_parsed() {
+        let toml = r#"
+[neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password = "pass"
+
+[storage]
+clone_root = "/tmp/repos"
+
+[git]
+ssh_key_path = "/home/user/.ssh/id_ed25519"
+
+[[repositories]]
+name = "my-repo"
+url  = "git@github.com:owner/repo.git"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let git = config.git.as_ref().unwrap();
+        assert_eq!(git.ssh_key_path, PathBuf::from("/home/user/.ssh/id_ed25519"));
+        assert!(git.ssh_passphrase.is_none());
+    }
+
+    #[test]
+    fn git_ssh_passphrase_parsed() {
+        let toml = r#"
+[neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password = "pass"
+
+[storage]
+clone_root = "/tmp/repos"
+
+[git]
+ssh_key_path    = "/home/user/.ssh/id_rsa"
+ssh_passphrase  = "hunter2"
+
+[[repositories]]
+name = "my-repo"
+url  = "git@github.com:owner/repo.git"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let git = config.git.as_ref().unwrap();
+        assert_eq!(git.ssh_passphrase.as_deref(), Some("hunter2"));
+    }
+
+    #[test]
+    fn expand_tilde_replaces_home() {
+        std::env::set_var("HOME", "/home/testuser");
+        let expanded = expand_tilde(PathBuf::from("~/.ssh/id_rsa"));
+        assert_eq!(expanded, PathBuf::from("/home/testuser/.ssh/id_rsa"));
+    }
+
+    #[test]
+    fn expand_tilde_leaves_absolute_path_unchanged() {
+        let path = PathBuf::from("/absolute/path/key");
+        assert_eq!(expand_tilde(path.clone()), path);
     }
 }
