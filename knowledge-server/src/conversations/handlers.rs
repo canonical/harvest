@@ -9,10 +9,102 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::agent::HistoryMessage;
 use crate::auth::jwt::Claims;
 use crate::neo4j::Neo4jClient;
 
 type ApiError = (StatusCode, Json<Value>);
+
+// ── Internal helpers for server-side history management ───────────────────────
+
+/// Loads the message history for a user-owned conversation.
+pub async fn load_user_history(
+    neo4j: &Neo4jClient,
+    user_id: &str,
+    conv_id: &str,
+) -> anyhow::Result<Vec<HistoryMessage>> {
+    let rows = neo4j.query_read(
+        "MATCH (:User {id: $uid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
+         RETURN c.messages AS messages",
+        json!({ "uid": user_id, "cid": conv_id }),
+    ).await?;
+    parse_history_from_rows(rows)
+}
+
+/// Appends a user+assistant turn to a user-owned conversation. Creates the
+/// conversation node if it does not exist yet.
+pub async fn append_user_turn(
+    neo4j: &Neo4jClient,
+    user_id: &str,
+    conv_id: &str,
+    user_text: &str,
+    username: &str,
+    attachments_meta: &[Value],
+    compacted_history: &[HistoryMessage],
+    assistant_text: &str,
+    sources: &[crate::agent::Source],
+    tool_calls_made: usize,
+) -> anyhow::Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let title = if user_text.len() > 60 {
+        format!("{}…", &user_text[..57])
+    } else {
+        user_text.to_string()
+    };
+
+    // Build the new full messages array from the (possibly compacted) history
+    // plus the new turn.
+    let mut msgs: Vec<Value> = compacted_history.iter().map(|h| {
+        json!({ "role": h.role, "text": h.text, "attachments": [] })
+    }).collect();
+    msgs.push(json!({
+        "role": "user",
+        "text": user_text,
+        "username": username,
+        "attachments": attachments_meta,
+    }));
+    msgs.push(json!({
+        "role": "assistant",
+        "text": assistant_text,
+        "sources": sources,
+        "tool_calls": [],
+        "tool_calls_made": tool_calls_made,
+    }));
+
+    let messages_json = serde_json::to_string(&msgs)?;
+    let count = msgs.len() as i64;
+
+    neo4j.query_read(
+        "MATCH (u:User {id: $uid})
+         MERGE (u)-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
+         ON CREATE SET c.title = $title, c.messages = $messages,
+                       c.message_count = $count,
+                       c.created_at = $now, c.updated_at = $now
+         ON MATCH  SET c.messages = $messages, c.message_count = $count,
+                       c.updated_at = $now
+         RETURN c.id AS id",
+        json!({
+            "uid": user_id, "cid": conv_id,
+            "title": title, "messages": messages_json,
+            "count": count, "now": now,
+        }),
+    ).await?;
+    Ok(())
+}
+
+fn parse_history_from_rows(rows: Vec<Value>) -> anyhow::Result<Vec<HistoryMessage>> {
+    let row = match rows.into_iter().next() {
+        Some(r) => r,
+        None => return Ok(vec![]),
+    };
+    let messages_str = match row.get("messages").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return Ok(vec![]),
+    };
+    let history: Vec<HistoryMessage> = serde_json::from_str(&messages_str)
+        .unwrap_or_default();
+    Ok(history)
+}
 
 fn err(status: StatusCode, msg: &str) -> ApiError {
     (status, Json(json!({ "error": msg })))
