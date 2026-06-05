@@ -2751,3 +2751,70 @@ a.source-chip:hover .source-chip__name {
   padding: 0.2rem 0.5rem;
   font-size: 0.8rem;
 }
+
+/* ── Agents page ─────────────────────────────────────────────────────────── */
+
+.page--agents { padding: 1.5rem 2rem; }
+
+.agents-wrap { max-width: 900px; }
+
+.agents-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.5rem;
+}
+
+.agents-empty-msg {
+  color: var(--text-muted);
+  margin-top: 1rem;
+}
+
+.agent-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.agent-status__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.agent-status__dot--online  { background: #0e8420; }
+.agent-status__dot--offline { background: #aaa; }
+
+/* Install modal */
+.install-cmd-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--bg-code);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin: 0.75rem 0;
+}
+
+.install-cmd-code {
+  flex: 1;
+  color: #eee;
+  font-size: 0.82rem;
+  word-break: break-all;
+  white-space: pre-wrap;
+  background: none;
+}
+
+.install-cmd-copy {
+  flex-shrink: 0;
+  color: #ccc;
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 4px;
+  padding: 0.25rem 0.6rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.install-security-note { font-size: 0.85rem; }
