@@ -13,7 +13,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::agent::{graph_tools, machine_tools, Agent};
+use crate::agent::{graph_tools, machine_tools, secret_tools, Agent};
 use crate::auth::{self, handlers as auth_handlers, AuthState};
 use crate::config::AuthConfig;
 use crate::conversations::handlers::{self as conv_handlers, ConvState};
@@ -65,6 +65,18 @@ impl ProjectAgentBuilder {
         }));
         tools.push(Box::new(machine_tools::RunCommandTool {
             registry:   Arc::clone(&self.registry),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(secret_tools::ListSecretsTool {
+            neo4j:      Arc::clone(&self.neo4j),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(secret_tools::GetSecretTool {
+            neo4j:      Arc::clone(&self.neo4j),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(secret_tools::SaveSecretTool {
+            neo4j:      Arc::clone(&self.neo4j),
             project_id,
         }));
         Arc::new(Agent::new(Arc::clone(&self.llm), tools, self.max_iterations))
@@ -143,6 +155,10 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
         .route("/projects/:pid/events",        get(proj_handlers::project_events))
         .route("/projects/:pid/query",         post(proj_handlers::project_query))
         .route("/projects/:pid/query/stream",  post(proj_handlers::project_query_stream))
+        .route("/projects/:pid/secrets",
+               get(proj_handlers::list_secrets).post(proj_handlers::upsert_secret))
+        .route("/projects/:pid/secrets/:sname",
+               delete(proj_handlers::delete_secret))
         .with_state(project_state);
 
     // Machine state for routes
