@@ -17,11 +17,13 @@ use uuid::Uuid;
 
 use knowledge_server::{
     agent::Agent,
+    api::ProjectAgentBuilder,
     auth::{self, jwt},
     llm::{
         LlmProvider,
         types::{LlmResponse, Message, ToolDefinition},
     },
+    machines::MachineRegistry,
     neo4j::Neo4jClient,
     projects::handlers::{
         ProjectState,
@@ -49,9 +51,17 @@ const JWT_SECRET: &str = "test-projects-secret";
 // ── app builder ───────────────────────────────────────────────────────────────
 
 fn projects_app(neo4j: Arc<Neo4jClient>) -> Router {
-    let secret = Arc::new(JWT_SECRET.to_string());
-    let agent  = Arc::new(Agent::new(FixedTextLlm::new("stub answer"), vec![], 2));
-    let state  = Arc::new(ProjectState { neo4j, agent });
+    let secret   = Arc::new(JWT_SECRET.to_string());
+    let llm: Arc<dyn knowledge_server::llm::LlmProvider> = FixedTextLlm::new("stub answer");
+    let agent    = Arc::new(Agent::new(Arc::clone(&llm), vec![], 2));
+    let registry = MachineRegistry::new();
+    let builder  = Arc::new(ProjectAgentBuilder {
+        llm:            Arc::clone(&llm),
+        neo4j:          Arc::clone(&neo4j),
+        registry:       Arc::clone(&registry),
+        max_iterations: 2,
+    });
+    let state = Arc::new(ProjectState::new(neo4j, agent, builder));
 
     Router::new()
         .route("/projects",     route_get(list_projects).post(create_project))

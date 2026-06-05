@@ -21,6 +21,7 @@ use tokio_stream::{wrappers::BroadcastStream, Stream};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentEvent, Attachment, HistoryMessage};
+use crate::api::ProjectAgentBuilder;
 use crate::auth::jwt::Claims;
 use crate::neo4j::Neo4jClient;
 
@@ -28,8 +29,9 @@ use crate::neo4j::Neo4jClient;
 
 #[derive(Clone)]
 pub struct ProjectState {
-    pub neo4j:    Arc<Neo4jClient>,
-    pub agent:    Arc<Agent>,
+    pub neo4j:         Arc<Neo4jClient>,
+    pub agent:         Arc<Agent>,
+    pub agent_builder: Arc<ProjectAgentBuilder>,
     /// project_id → name of user currently generating a response
     pub locks:    Arc<RwLock<HashMap<String, String>>>,
     /// project_id → broadcast sender for real-time events
@@ -45,10 +47,11 @@ pub struct UserPresence {
 }
 
 impl ProjectState {
-    pub fn new(neo4j: Arc<Neo4jClient>, agent: Arc<Agent>) -> Self {
+    pub fn new(neo4j: Arc<Neo4jClient>, agent: Arc<Agent>, agent_builder: Arc<ProjectAgentBuilder>) -> Self {
         Self {
             neo4j,
             agent,
+            agent_builder,
             locks:    Arc::new(RwLock::new(HashMap::new())),
             channels: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(RwLock::new(HashMap::new())),
@@ -286,7 +289,7 @@ pub async fn project_query_stream(
     }).to_string()).await;
 
     // Spawn agent task — all events go to the broadcast channel.
-    let agent    = Arc::clone(&state.agent);
+    let agent    = state.agent_builder.build(project_id.clone());
     let locks    = Arc::clone(&state.locks);
     let channels = Arc::clone(&state.channels);
     let pid      = project_id.clone();
@@ -388,13 +391,15 @@ pub async fn create_project(
         }
     }
 
-    let id  = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
+    let id            = Uuid::new_v4().to_string();
+    let install_token = Uuid::new_v4().to_string();
+    let now           = chrono::Utc::now().to_rfc3339();
     let rows = state.neo4j.query_read(
         "MATCH (g:Group {id: $gid})
          CREATE (p:Project {
              id: $id, name: $name, description: $description,
-             group_id: $gid, created_by: $uid, created_at: $now
+             group_id: $gid, created_by: $uid, created_at: $now,
+             install_token: $install_token
          })
          CREATE (g)-[:HAS_PROJECT]->(p)
          RETURN p.id AS id, p.name AS name, p.description AS description,
@@ -403,6 +408,7 @@ pub async fn create_project(
         json!({
             "gid": body.group_id, "id": id, "name": name,
             "description": body.description, "uid": user.sub, "now": now,
+            "install_token": install_token,
         }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -619,9 +625,10 @@ pub async fn project_query(
     if let Err(e) = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await {
         return e.into_response();
     }
+    let agent = state.agent_builder.build(project_id.clone());
     let history = body.history.as_deref().unwrap_or(&[]);
     let attachments = body.attachments.as_deref().unwrap_or(&[]);
-    match state.agent.query(&body.query, history, attachments).await {
+    match agent.query(&body.query, history, attachments).await {
         Ok(response) => Json(response).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "project query failed");
