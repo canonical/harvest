@@ -155,6 +155,13 @@
                   </a>
                 </li>
                 <li class="p-side-navigation__item">
+                  <a href="#" class="p-side-navigation__link" data-page="secrets">
+                    <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                    <span class="p-side-navigation__label">Secrets</span>
+                  </a>
+                </li>
+                <li class="sidenav-separator" role="separator" aria-hidden="true"></li>
+                <li class="p-side-navigation__item">
                   <a href="#" class="p-side-navigation__link" data-page="repositories">
                     <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
                     <span class="p-side-navigation__label">Explore code</span>
@@ -398,6 +405,54 @@
             </div>
           </div>
 
+        </div>
+      </section>
+
+      <section class="page page--secrets" id="page-secrets" hidden>
+        <div class="secrets-wrap">
+          <div class="secrets-header">
+            <h2 class="p-heading--3 u-no-margin--bottom">Secrets</h2>
+            <button id="add-secret-btn" class="p-button--positive" hidden>Add secret</button>
+          </div>
+          <p id="secrets-no-project" class="secrets-empty-msg">Select a project to manage its secrets.</p>
+          <div id="secrets-content" hidden>
+            <table class="p-table" id="secrets-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Created</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="secrets-tbody"></tbody>
+            </table>
+            <p id="secrets-empty" class="secrets-empty-msg" hidden>No secrets stored for this project yet.</p>
+          </div>
+        </div>
+
+        <!-- Add secret modal -->
+        <div id="add-secret-modal" class="p-modal" hidden role="dialog" aria-modal="true" aria-labelledby="add-secret-modal-title">
+          <div class="p-modal__dialog">
+            <header class="p-modal__header">
+              <h3 class="p-modal__title" id="add-secret-modal-title">Add secret</h3>
+              <button class="p-modal__close" id="add-secret-modal-close" aria-label="Close">&#215;</button>
+            </header>
+            <div class="p-modal__body">
+              <div class="p-form__group row">
+                <label class="p-form__label" for="secret-name-input">Name</label>
+                <input id="secret-name-input" class="p-form__control" type="text" autocomplete="off" placeholder="e.g. GITHUB_TOKEN" />
+              </div>
+              <div class="p-form__group row">
+                <label class="p-form__label" for="secret-value-input">Value</label>
+                <input id="secret-value-input" class="p-form__control" type="password" autocomplete="off" />
+              </div>
+              <p id="add-secret-error" class="auth-error" role="alert"></p>
+            </div>
+            <footer class="p-modal__footer">
+              <button id="add-secret-cancel" class="p-button u-no-margin--bottom" type="button">Cancel</button>
+              <button id="add-secret-submit" class="p-button--positive u-no-margin--bottom" type="button">Save</button>
+            </footer>
+          </div>
         </div>
       </section>
 

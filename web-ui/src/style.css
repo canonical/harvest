@@ -526,6 +526,36 @@ html, body {
   margin-top: 0.25rem;
 }
 
+.sidenav-separator {
+  height: 1px;
+  background: var(--vf-color-border-low-contrast);
+  margin: 0.75rem 1rem;
+  list-style: none;
+}
+
+/* ── Secrets page ───────────────────────────────────────────────────────────── */
+
+.page--secrets {
+  padding: 1.5rem;
+  overflow-y: auto;
+}
+
+.secrets-wrap {
+  max-width: 800px;
+}
+
+.secrets-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.25rem;
+}
+
+.secrets-empty-msg {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
 
 .page {
   flex: 1;
