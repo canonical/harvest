@@ -17,7 +17,10 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub async fn new(config: Config) -> Result<Self> {
-        let git = GitClient::new(config.storage.clone_root.clone());
+        let mut git = GitClient::new(config.storage.clone_root.clone());
+        if let Some(git_cfg) = &config.git {
+            git = git.with_ssh_key(git_cfg.ssh_key_path.clone(), git_cfg.ssh_passphrase.clone());
+        }
         let parsers = Arc::new(ParserRegistry::with_defaults());
         let writer = GraphWriter::new(
             &config.neo4j.uri,

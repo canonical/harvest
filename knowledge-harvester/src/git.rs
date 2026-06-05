@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use git2::{build::RepoBuilder, FetchOptions, Repository};
+use git2::{RemoteCallbacks, build::RepoBuilder, FetchOptions, Repository};
 use std::path::{Path, PathBuf};
 
 use crate::config::RepoConfig;
@@ -13,11 +13,32 @@ pub struct TagInfo {
 
 pub struct GitClient {
     clone_root: PathBuf,
+    ssh_key_path: Option<PathBuf>,
+    ssh_passphrase: Option<String>,
 }
 
 impl GitClient {
     pub fn new(clone_root: PathBuf) -> Self {
-        Self { clone_root }
+        Self { clone_root, ssh_key_path: None, ssh_passphrase: None }
+    }
+
+    pub fn with_ssh_key(mut self, key_path: PathBuf, passphrase: Option<String>) -> Self {
+        self.ssh_key_path = Some(key_path);
+        self.ssh_passphrase = passphrase;
+        self
+    }
+
+    fn make_fetch_options(&self) -> FetchOptions<'static> {
+        let mut fo = FetchOptions::new();
+        if let Some(key_path) = self.ssh_key_path.clone() {
+            let passphrase = self.ssh_passphrase.clone();
+            let mut callbacks = RemoteCallbacks::new();
+            callbacks.credentials(move |_url, username, _allowed| {
+                git2::Cred::ssh_key(username.unwrap_or("git"), None, &key_path, passphrase.as_deref())
+            });
+            fo.remote_callbacks(callbacks);
+        }
+        fo
     }
 
     pub fn repo_path(&self, repo_name: &str) -> PathBuf {
@@ -32,7 +53,7 @@ impl GitClient {
         } else {
             tracing::info!(repo = config.name, url = config.url, "cloning");
             RepoBuilder::new()
-                .fetch_options(FetchOptions::new())
+                .fetch_options(self.make_fetch_options())
                 .clone(&config.url, &path)
                 .with_context(|| format!("cloning {}", config.url))?;
         }
@@ -44,7 +65,7 @@ impl GitClient {
         for remote_name in repo.remotes()?.iter().flatten() {
             repo.find_remote(remote_name)?.fetch(
                 &[] as &[&str],
-                Some(&mut FetchOptions::new()),
+                Some(&mut self.make_fetch_options()),
                 None,
             )?;
         }
