@@ -23,6 +23,8 @@ export default defineConfig({
       '/health':           'http://localhost:8080',
       '/tool-description': 'http://localhost:8080',
       '/docs':             'http://localhost:8080',
+      '/agents':           'http://localhost:8080',
+      '/agent':            'http://localhost:8080',
     },
     allowedHosts: ["harvest-development.thinking-dragon.net"]
   },

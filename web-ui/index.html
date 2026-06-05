@@ -404,7 +404,56 @@
       <section class="page page--docs" id="page-documentation" hidden>
       </section>
 
-      <section class="page" id="page-agents" hidden>
+      <section class="page page--agents" id="page-agents" hidden>
+        <div class="agents-wrap">
+          <div class="agents-header">
+            <h2 class="p-heading--3 u-no-margin--bottom">Agents</h2>
+            <button id="install-agent-btn" class="p-button--positive" hidden>Install agent</button>
+          </div>
+          <p id="agents-no-project" class="agents-empty-msg">Select a project to see its agents.</p>
+          <div id="agents-content" hidden>
+            <div id="agents-list-wrap">
+              <table class="p-table" id="agents-table">
+                <thead>
+                  <tr>
+                    <th>Status</th>
+                    <th>Hostname</th>
+                    <th>Last seen</th>
+                    <th>Connected since</th>
+                  </tr>
+                </thead>
+                <tbody id="agents-tbody"></tbody>
+              </table>
+              <p id="agents-empty" class="agents-empty-msg" hidden>No agents registered for this project yet.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Install agent modal -->
+        <div id="install-modal" class="p-modal" hidden role="dialog" aria-modal="true" aria-labelledby="install-modal-title">
+          <div class="p-modal__dialog">
+            <header class="p-modal__header">
+              <h3 class="p-modal__title" id="install-modal-title">Install agent</h3>
+              <button class="p-modal__close" id="install-modal-close" aria-label="Close">&#215;</button>
+            </header>
+            <div class="p-modal__body">
+              <p>Run this command on the target machine to install the Harvest agent:</p>
+              <div class="install-cmd-wrap">
+                <code id="install-cmd" class="install-cmd-code"></code>
+                <button class="p-button--base install-cmd-copy" id="copy-install-cmd" title="Copy to clipboard">Copy</button>
+              </div>
+              <p class="u-text--muted install-security-note">
+                The agent connects back to this server using a project-scoped token. Project membership is enforced server-side — editing the config file on the machine cannot redirect the agent to a different project.
+              </p>
+              <p class="u-text--muted">To uninstall, run <code>uninstall-harvest-agent</code> on the machine.</p>
+              <hr />
+              <p class="u-text--muted">
+                <button class="p-button--base is-small" id="rotate-install-token-btn">Rotate install key</button>
+                &nbsp;Generates a new install key. Existing agents are not affected.
+              </p>
+            </div>
+          </div>
+        </div>
       </section>
 
       <section class="page page--admin" id="page-admin" hidden>

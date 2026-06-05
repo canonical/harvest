@@ -207,3 +207,32 @@ export async function projectQueryStream(projectId, query, onEvent) {
     }
   }
 }
+
+// ── Machines / Agents ─────────────────────────────────────────────────────────
+
+export async function listProjectAgents(projectId) {
+  const response = await fetch(`${pid(projectId)}/agents`);
+  handleUnauthorized(response.status);
+  if (!response.ok) throw new Error(`Server error: ${response.status}`);
+  return response.json();
+}
+
+export async function executeAgentCommand(projectId, agentId, command, timeoutSecs = 30) {
+  const response = await fetch(`${pid(projectId)}/agents/${agentId}/execute`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ command, timeout_secs: timeoutSecs }),
+  });
+  handleUnauthorized(response.status);
+  if (!response.ok) throw new Error(`Server error: ${response.status}`);
+  return response.json();
+}
+
+export async function rotateInstallToken(projectId) {
+  const response = await fetch(`${pid(projectId)}/agents/rotate-install-token`, {
+    method: 'POST',
+  });
+  handleUnauthorized(response.status);
+  if (!response.ok) throw new Error(`Server error: ${response.status}`);
+  return response.json();
+}
