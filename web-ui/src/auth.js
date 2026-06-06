@@ -4,15 +4,11 @@ const LOGOUT_URL   = '/auth/logout';
 const ME_URL       = '/auth/me';
 const CONFIG_URL   = '/auth/config';
 
-// ── Auth state ────────────────────────────────────────────────────────────────
-
 let currentUser = null;
 
 export function getUser() { return currentUser; }
 export function setUser(user) { currentUser = user; }
 export function isAdmin() { return currentUser?.role === 'admin'; }
-
-// ── API ───────────────────────────────────────────────────────────────────────
 
 export async function fetchMe() {
   const res = await fetch(ME_URL);
@@ -52,13 +48,10 @@ export async function logout() {
   currentUser = null;
 }
 
-// ── Page init ─────────────────────────────────────────────────────────────────
-
 export function initAuthPages({ onLoginSuccess }) {
   const loginPage    = document.getElementById('page-login');
   const registerPage = document.getElementById('page-register');
 
-  // Hide Google button until we confirm it's enabled server-side
   const googleBtn      = document.getElementById('google-login-btn');
   const googleDivider  = document.getElementById('google-divider');
   googleBtn.hidden    = true;
@@ -73,7 +66,6 @@ export function initAuthPages({ onLoginSuccess }) {
     })
     .catch(() => {});
 
-  // Login form
   const loginForm      = document.getElementById('login-form');
   const loginError     = document.getElementById('login-error');
   const toRegisterLink = document.getElementById('to-register-link');
@@ -105,7 +97,6 @@ export function initAuthPages({ onLoginSuccess }) {
     window.location.href = '/auth/google';
   });
 
-  // Register form
   const registerForm    = document.getElementById('register-form');
   const registerError   = document.getElementById('register-error');
   const toLoginLink     = document.getElementById('to-login-link');

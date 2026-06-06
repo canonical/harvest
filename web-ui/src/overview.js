@@ -1,18 +1,9 @@
 import { renderMarkdown } from './markdown.js';
 import { fetchProjectOverview } from './api.js';
 
-// ── Per-project generation state ──────────────────────────────────────────────
-//
-// _gens holds state for every project that is currently being generated,
-// even when the user has switched away.  Only the project matching _displayPid
-// draws to the DOM; all others keep accumulating step data silently.
-
 const _gens = new Map();
-// projectId → { steps: [], startMs: number, timerHandle: number|null }
 
-let _displayPid = null;   // project whose progress is shown right now
-
-// ── HTML renderer ─────────────────────────────────────────────────────────────
+let _displayPid = null;
 
 function _renderHtml(container, html) {
   const safe = html
@@ -33,8 +24,6 @@ function _renderHtml(container, html) {
   container.innerHTML = markup;
 }
 
-// ── Progress icons ────────────────────────────────────────────────────────────
-
 const ICON_CHAT = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
 const ICON_GRID = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>`;
 
@@ -50,8 +39,6 @@ function _iconSpinner() {
     <path d="M8 1.5 A6.5 6.5 0 0 1 14.5 8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
   </svg>`;
 }
-
-// ── Generation state helpers ──────────────────────────────────────────────────
 
 function _startGen(pid) {
   _gens.set(pid, { steps: [], startMs: Date.now(), timerHandle: null });
@@ -103,8 +90,6 @@ function _markAllDone(pid) {
   if (_displayPid === pid) _drawProgress();
 }
 
-// ── Progress panel renderer ───────────────────────────────────────────────────
-
 function _drawProgress() {
   const el = document.getElementById('overview-progress');
   if (!el || el.hidden) return;
@@ -145,7 +130,6 @@ function _drawProgress() {
   </div>`;
 }
 
-// Show the progress panel for the currently displayed project.
 function _showProgressPanel() {
   _hide('overview-content',    true);
   _hide('overview-empty',      true);
@@ -154,8 +138,6 @@ function _showProgressPanel() {
   _hide('overview-progress',   false);
   _drawProgress();
 }
-
-// ── SSE stream reader (shared by POST /regenerate and GET /events) ────────────
 
 async function _readStream(pid, fetchPromise) {
   try {
@@ -188,10 +170,8 @@ async function _readStream(pid, fetchPromise) {
   }
 }
 
-// ── Regeneration ──────────────────────────────────────────────────────────────
-
 async function _runRegenerate(pid) {
-  if (_gens.has(pid)) return;   // already generating this project
+  if (_gens.has(pid)) return;
 
   _startGen(pid);
   if (_displayPid === pid) {
@@ -209,9 +189,8 @@ async function _runRegenerate(pid) {
   await _finishGen(pid);
 }
 
-// Called when a page-refresh or cross-tab reconnect detects an in-progress generation.
 async function _subscribeToEvents(pid) {
-  if (_gens.has(pid)) return;   // already tracking locally
+  if (_gens.has(pid)) return;
 
   _startGen(pid);
   if (_displayPid === pid) {
@@ -232,7 +211,6 @@ async function _finishGen(pid) {
   _markAllDone(pid);
   if (_displayPid === pid) _drawProgress();
 
-  // Let the user see the completed timeline briefly.
   await _sleep(600);
 
   _stopTimer(pid);
@@ -248,8 +226,6 @@ async function _finishGen(pid) {
     _setSpinning(false);
   }
 }
-
-// ── Page lifecycle ────────────────────────────────────────────────────────────
 
 export function initOverviewPage() {
   const btn = document.getElementById('overview-regenerate-btn');
@@ -279,16 +255,14 @@ export async function onOverviewPageShow(pid) {
   const btn = document.getElementById('overview-regenerate-btn');
   if (btn) { btn.dataset.projectId = pid; btn.hidden = false; }
 
-  // Case 1: generation already tracked in this JS session — resume display.
   if (_gens.has(pid)) {
     _showProgressPanel();
-    _startTimer(pid);          // restart the ticker (was paused on page hide)
+    _startTimer(pid);
     _setSpinning(true);
     _setStatusText('Generating…');
     return;
   }
 
-  // Case 2: no local state — ask the server.
   _hide('overview-loading',    false);
   _hide('overview-content',    true);
   _hide('overview-empty',      true);
@@ -298,11 +272,9 @@ export async function onOverviewPageShow(pid) {
     const data = await fetchProjectOverview(pid);
 
     if (data.generating) {
-      // Case 2a: server says generation is in progress — subscribe.
       _hide('overview-loading', true);
-      _subscribeToEvents(pid);  // intentionally not awaited; runs in background
+      _subscribeToEvents(pid);
     } else {
-      // Case 2b: nothing running, show current overview (or empty state).
       _hide('overview-loading', true);
       renderOverview(data);
     }
@@ -313,7 +285,6 @@ export async function onOverviewPageShow(pid) {
 }
 
 export function onOverviewPageHide() {
-  // Pause the display timer but leave gen state intact.
   if (_displayPid) _stopTimer(_displayPid);
   _displayPid = null;
   document.getElementById('ov-generated-style')?.remove();
@@ -363,8 +334,6 @@ export function formatLastUpdated(isoString) {
   catch { return ''; }
 }
 
-// ── Markdown table layout (legacy fallback) ───────────────────────────────────
-
 function _layoutTables(container) {
   const nodes = [...container.childNodes];
   if (!nodes.some((n, i) => n.nodeName === 'H3' && nodes[i + 1]?.nodeName === 'TABLE')) return;
@@ -387,8 +356,6 @@ function _layoutTables(container) {
   }
   container.appendChild(grid);
 }
-
-// ── DOM helpers ───────────────────────────────────────────────────────────────
 
 function _hide(id, hidden) {
   const el = document.getElementById(id);
