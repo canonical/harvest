@@ -11,6 +11,7 @@ import { initRepositoriesPage, onRepositoriesPageShow, onRepositoriesPageHide } 
 import { initAgentsPage, onAgentsPageShow, onAgentsPageHide } from './agents.js';
 import { initSecretsPage, onSecretsPageShow, onSecretsPageHide } from './secrets.js';
 import { initDocumentationPage } from './documentation.js';
+import { initOverviewPage, onOverviewPageShow, onOverviewPageHide, showOverviewNoProject } from './overview.js';
 import { renderMarkdown, buildFileUrl } from './markdown.js';
 import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
 import { escapeHtml as esc, addCopyButtons, avatarColor, initials } from './utils.js';
@@ -89,8 +90,9 @@ function render() {
   messagesEl.innerHTML = messages.map(renderMessage).join('');
 
   const loading = isLoading(state);
-  sendBtn.disabled = !activeProjectId || loading;
-  inputEl.disabled = !activeProjectId || loading;
+  sendBtn.disabled    = !activeProjectId || loading;
+  inputEl.disabled    = !activeProjectId || loading;
+  if (attachBtnEl) attachBtnEl.disabled = !activeProjectId || loading;
 
   [...messagesEl.querySelectorAll('.message--assistant')].forEach((el, i) => {
     const group = el.querySelector('details.tc-group');
@@ -475,6 +477,7 @@ function handleProjectEvent(event) {
       renderLockBanner();
       sendBtn.disabled = true;
       inputEl.disabled = true;
+      if (attachBtnEl) attachBtnEl.disabled = true;
       break;
 
     case 'unlock':
@@ -484,6 +487,7 @@ function handleProjectEvent(event) {
       if (!isLoading(state)) {
         sendBtn.disabled = false;
         inputEl.disabled = false;
+        if (attachBtnEl) attachBtnEl.disabled = false;
       }
       break;
 
@@ -611,6 +615,7 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
     if (prevPage?.id === 'page-repositories') onRepositoriesPageHide();
     if (prevPage?.id === 'page-agents')       onAgentsPageHide();
     if (prevPage?.id === 'page-secrets')      onSecretsPageHide();
+    if (prevPage?.id === 'page-overview')     onOverviewPageHide();
     closeSourcePanel();
     if (page === 'admin' && !isAdmin()) return;
 
@@ -620,6 +625,14 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
     if (page === 'repositories') onRepositoriesPageShow();
     if (page === 'agents')       onAgentsPageShow(activeProjectId);
     if (page === 'secrets')      onSecretsPageShow(activeProjectId);
+    if (page === 'overview') {
+      if (activeProjectId) {
+        document.getElementById('overview-regenerate-btn').hidden = false;
+        onOverviewPageShow(activeProjectId);
+      } else {
+        showOverviewNoProject();
+      }
+    }
 
     if (window.innerWidth < 620) closeNav();
   });
@@ -639,6 +652,7 @@ const docsPage = initDocumentationPage(
 
 initAgentsPage(document.getElementById('page-agents'));
 initSecretsPage(document.getElementById('page-secrets'));
+initOverviewPage();
 
 const mainEl    = document.querySelector('.l-main');
 const navEl2    = document.getElementById('app-sidebar');
@@ -698,13 +712,24 @@ async function switchToProject(project) {
   state           = createChatState();
   render();
 
-  // Refresh agents/secrets pages if currently visible
-  const agentsPage = document.getElementById('page-agents');
+  // Refresh agents/secrets/overview pages if currently visible
+  const agentsPage   = document.getElementById('page-agents');
+  const overviewPage = document.getElementById('page-overview');
   if (agentsPage && !agentsPage.hidden) {
     onAgentsPageHide();
     onAgentsPageShow(activeProjectId);
   }
   onSecretsPageShow(activeProjectId);
+  if (overviewPage && !overviewPage.hidden) {
+    const regenBtn = document.getElementById('overview-regenerate-btn');
+    if (activeProjectId) {
+      if (regenBtn) regenBtn.hidden = false;
+      onOverviewPageShow(activeProjectId);
+    } else {
+      if (regenBtn) regenBtn.hidden = true;
+      showOverviewNoProject();
+    }
+  }
 
   const hasProject = !!activeProjectId;
 
@@ -720,6 +745,7 @@ async function switchToProject(project) {
 
   inputEl.disabled = !hasProject;
   sendBtn.disabled = !hasProject;
+  if (attachBtnEl) attachBtnEl.disabled = !hasProject;
 
   if (hasProject) {
     openProjectEventStream(activeProjectId);
@@ -840,6 +866,7 @@ function showApp(user) {
   if (historyToggle) historyToggle.hidden = true;
   inputEl.disabled = true;
   sendBtn.disabled = true;
+  if (attachBtnEl) attachBtnEl.disabled = true;
   conversations = [];
   refreshConvList();
 
