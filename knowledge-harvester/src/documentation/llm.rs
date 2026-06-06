@@ -4,6 +4,13 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use crate::config::LlmConfig;
+use super::retry;
+
+const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+const MAX_TOKENS: u32 = 8192;
+const ANTHROPIC_OVERLOAD_CODES: &[u16] = &[529, 503];
+const OPENAI_OVERLOAD_CODES: &[u16] = &[529, 502, 503];
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
@@ -50,7 +57,7 @@ impl AnthropicClient {
             model,
             api_key,
             client,
-            base_url: "https://api.anthropic.com/v1/messages".to_string(),
+            base_url: ANTHROPIC_API_URL.to_string(),
             max_retries,
         }
     }
@@ -66,74 +73,41 @@ impl AnthropicClient {
 impl LlmClient for AnthropicClient {
     async fn complete(&self, system: &str, user: &str) -> Result<String> {
         let body = json!({
-            "model": self.model,
-            "system": system,
+            "model":    self.model,
+            "system":   system,
             "messages": [{"role": "user", "content": user}],
-            "max_tokens": 8192,
+            "max_tokens": MAX_TOKENS,
         });
 
-        let mut attempt = 0u32;
-        loop {
-            let resp = match self.client
+        let response = retry::send_with_retry(
+            self.max_retries,
+            ANTHROPIC_OVERLOAD_CODES,
+            "Anthropic",
+            || self.client
                 .post(&self.base_url)
                 .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01")
+                .header("anthropic-version", ANTHROPIC_VERSION)
                 .header("content-type", "application/json")
                 .json(&body)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) if e.is_timeout() && attempt < self.max_retries => {
-                    attempt += 1;
-                    let delay = 2u64 * (1u64 << attempt.min(4));
-                    tracing::warn!(attempt, delay_secs = delay, "Anthropic request timed out — retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-            };
+                .send(),
+        ).await?;
 
-            let status = resp.status();
+        let status = response.status();
+        let body_text = response.text().await?;
+        let json: Value = serde_json::from_str(&body_text)
+            .map_err(|e| anyhow::anyhow!("Anthropic API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
 
-            match status.as_u16() {
-                429 if attempt < self.max_retries => {
-                    let delay = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(30u64 * (1u64 << attempt.min(4)));
-                    attempt += 1;
-                    tracing::warn!(attempt, delay_secs = delay, "Anthropic rate limited — retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                    continue;
-                }
-                529 | 503 if attempt < self.max_retries => {
-                    attempt += 1;
-                    tracing::warn!(attempt, status = %status, "Anthropic overloaded — retrying in 5s");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-                _ => {}
-            }
-
-            let body_text = resp.text().await?;
-            let json: Value = serde_json::from_str(&body_text)
-                .map_err(|e| anyhow::anyhow!("Anthropic API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
-
-            if !status.is_success() {
-                bail!("Anthropic API error {status}: {json}");
-            }
-
-            let text = json["content"]
-                .as_array()
-                .and_then(|arr| arr.first())
-                .and_then(|block| block["text"].as_str())
-                .unwrap_or("")
-                .to_string();
-            return Ok(text);
+        if !status.is_success() {
+            bail!("Anthropic API error {status}: {json}");
         }
+
+        let text = json["content"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|block| block["text"].as_str())
+            .unwrap_or("")
+            .to_string();
+        Ok(text)
     }
 }
 
@@ -177,68 +151,38 @@ impl LlmClient for OpenAiCompatClient {
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "max_tokens": 8192,
+            "max_tokens": MAX_TOKENS,
         });
 
-        let mut attempt = 0u32;
-        loop {
-            let mut req = self.client.post(&chat_url).json(&body);
-            if !self.api_key.is_empty() {
-                req = req.bearer_auth(&self.api_key);
-            }
-
-            let resp = match req.send().await {
-                Ok(r) => r,
-                Err(e) if e.is_timeout() && attempt < self.max_retries => {
-                    attempt += 1;
-                    let delay = 2u64 * (1u64 << attempt.min(4));
-                    tracing::warn!(attempt, delay_secs = delay, "LLM request timed out — retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                    continue;
+        let response = retry::send_with_retry(
+            self.max_retries,
+            OPENAI_OVERLOAD_CODES,
+            "OpenAI-compat",
+            || {
+                let mut req = self.client.post(&chat_url).json(&body);
+                if !self.api_key.is_empty() {
+                    req = req.bearer_auth(&self.api_key);
                 }
-                Err(e) => return Err(e.into()),
-            };
+                req.send()
+            },
+        ).await?;
 
-            let status = resp.status();
+        let status = response.status();
+        let body_text = response.text().await?;
+        let json: Value = serde_json::from_str(&body_text)
+            .map_err(|e| anyhow::anyhow!("OpenAI-compat API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
 
-            match status.as_u16() {
-                429 if attempt < self.max_retries => {
-                    let delay = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(30u64 * (1u64 << attempt.min(4)));
-                    attempt += 1;
-                    tracing::warn!(attempt, delay_secs = delay, "rate limited — retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                    continue;
-                }
-                529 | 502 | 503 if attempt < self.max_retries => {
-                    attempt += 1;
-                    tracing::warn!(attempt, status = %status, "transient server error — retrying in 5s");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-                _ => {}
-            }
-
-            let body_text = resp.text().await?;
-            let json: Value = serde_json::from_str(&body_text)
-                .map_err(|e| anyhow::anyhow!("OpenAI-compat API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
-
-            if !status.is_success() {
-                bail!("OpenAI-compat API error {status}: {json}");
-            }
-
-            let text = json["choices"]
-                .as_array()
-                .and_then(|arr| arr.first())
-                .and_then(|choice| choice["message"]["content"].as_str())
-                .unwrap_or("")
-                .to_string();
-            return Ok(text);
+        if !status.is_success() {
+            bail!("OpenAI-compat API error {status}: {json}");
         }
+
+        let text = json["choices"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|choice| choice["message"]["content"].as_str())
+            .unwrap_or("")
+            .to_string();
+        Ok(text)
     }
 }
 

@@ -4,12 +4,15 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use super::{
+    retry,
     types::{ContentPart, LlmResponse, Message, MessageContent, Role, ToolCall, ToolDefinition},
     LlmProvider,
 };
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const MAX_TOKENS: u32 = 8192;
+const OVERLOAD_STATUS_CODES: &[u16] = &[529, 503];
 
 pub struct AnthropicProvider {
     model: String,
@@ -56,70 +59,36 @@ impl LlmProvider for AnthropicProvider {
         let api_tools: Vec<Value> = tools.iter().map(to_anthropic_tool).collect();
 
         let body = json!({
-            "model":    self.model,
-            "system":   system_text,
-            "messages": api_messages,
-            "tools":    api_tools,
-            "max_tokens": 8192,
+            "model":      self.model,
+            "system":     system_text,
+            "messages":   api_messages,
+            "tools":      api_tools,
+            "max_tokens": MAX_TOKENS,
         });
 
-        let mut attempt = 0u32;
-        loop {
-            let resp = match self
-                .client
+        let response = retry::send_with_retry(
+            self.max_retries,
+            OVERLOAD_STATUS_CODES,
+            "Anthropic",
+            || self.client
                 .post(&self.base_url)
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .header("content-type", "application/json")
                 .json(&body)
-                .send()
-                .await
-            {
-                Ok(r) => r,
-                Err(e) if e.is_timeout() && attempt < self.max_retries => {
-                    attempt += 1;
-                    let delay = 2u64 * (1u64 << attempt.min(4));
-                    tracing::warn!(attempt, delay_secs = delay, "Anthropic request timed out — retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
-            };
+                .send(),
+        ).await?;
 
-            let status = resp.status();
+        let status = response.status();
+        let body_text = response.text().await?;
+        let json: Value = serde_json::from_str(&body_text)
+            .map_err(|e| anyhow::anyhow!("Anthropic API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
 
-            match status.as_u16() {
-                429 if attempt < self.max_retries => {
-                    let delay = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(30u64 * (1u64 << attempt.min(4)));
-                    attempt += 1;
-                    tracing::warn!(attempt, delay_secs = delay, "Anthropic rate limited — retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                    continue;
-                }
-                529 | 503 if attempt < self.max_retries => {
-                    attempt += 1;
-                    tracing::warn!(attempt, status = %status, "Anthropic overloaded — retrying in 5s");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-                _ => {}
-            }
-
-            let body_text = resp.text().await?;
-            let json: Value = serde_json::from_str(&body_text)
-                .map_err(|e| anyhow::anyhow!("Anthropic API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
-
-            if !status.is_success() {
-                bail!("Anthropic API error {status}: {json}");
-            }
-
-            return parse_anthropic_response(json);
+        if !status.is_success() {
+            bail!("Anthropic API error {status}: {json}");
         }
+
+        parse_anthropic_response(json)
     }
 }
 
@@ -158,11 +127,11 @@ fn to_anthropic_message(msg: &Message) -> Value {
     json!({ "role": role, "content": content })
 }
 
-fn to_anthropic_tool(t: &ToolDefinition) -> Value {
+fn to_anthropic_tool(tool: &ToolDefinition) -> Value {
     json!({
-        "name":         t.name,
-        "description":  t.description,
-        "input_schema": t.parameters,
+        "name":         tool.name,
+        "description":  tool.description,
+        "input_schema": tool.parameters,
     })
 }
 
@@ -198,8 +167,6 @@ mod tests {
     use super::*;
     use httpmock::prelude::*;
     use serde_json::json;
-
-    // ── parse_anthropic_response ──────────────────────────────────────────────
 
     #[test]
     fn parse_end_turn_returns_message() {
@@ -265,8 +232,6 @@ mod tests {
         }
     }
 
-    // ── to_anthropic_message ──────────────────────────────────────────────────
-
     #[test]
     fn user_text_message_serializes_correctly() {
         let msg = Message::user("hello");
@@ -312,8 +277,6 @@ mod tests {
         assert_eq!(parts[0]["content"], "result text");
     }
 
-    // ── image and document content parts ─────────────────────────────────────
-
     #[test]
     fn image_content_part_serializes_for_anthropic() {
         let msg = Message {
@@ -348,8 +311,6 @@ mod tests {
         assert_eq!(parts[0]["source"]["data"], "pdfdata");
     }
 
-    // ── to_anthropic_tool ─────────────────────────────────────────────────────
-
     #[test]
     fn tool_definition_uses_input_schema_key() {
         let def = ToolDefinition {
@@ -363,8 +324,6 @@ mod tests {
         assert!(v.get("input_schema").is_some(), "must use 'input_schema' key");
         assert!(v.get("parameters").is_none(), "must NOT use 'parameters' key");
     }
-
-    // ── HTTP round-trip via httpmock ──────────────────────────────────────────
 
     fn text_response_body() -> serde_json::Value {
         json!({
@@ -453,8 +412,6 @@ mod tests {
     #[tokio::test]
     async fn system_message_goes_into_system_field_not_messages_array() {
         let server = MockServer::start();
-        // The body must contain the "system" key but must NOT contain a role=system entry
-        // in the messages array.
         let mock = server.mock(|when, then| {
             when.method("POST")
                 .path("/v1/messages")
