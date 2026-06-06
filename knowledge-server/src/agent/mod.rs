@@ -5,6 +5,7 @@ pub mod prompt;
 pub mod tool;
 
 use anyhow::Result;
+use futures::future::join_all;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -170,8 +171,12 @@ impl Agent {
                         content: MessageContent::Parts(call_parts),
                     });
 
-                    for call in &calls {
-                        let result = self.execute_tool_call(call, &tool_map).await;
+                    // Run all tool calls in this turn concurrently.
+                    let results = join_all(
+                        calls.iter().map(|c| self.execute_tool_call(c, &tool_map))
+                    ).await;
+
+                    for (call, result) in calls.iter().zip(results) {
                         messages.push(Message {
                             role: crate::llm::types::Role::User,
                             content: MessageContent::Parts(vec![ContentPart::ToolResult {
@@ -260,14 +265,19 @@ impl Agent {
                         content: MessageContent::Parts(call_parts),
                     });
 
+                    // Announce all calls, then execute concurrently, then emit results.
                     for call in &calls {
                         let _ = tx.send(AgentEvent::ToolCall {
                             name: call.name.clone(),
                             input: call.input.clone(),
                         }).await;
+                    }
 
-                        let result = self.execute_tool_call(call, &tool_map).await;
+                    let results = join_all(
+                        calls.iter().map(|c| self.execute_tool_call(c, &tool_map))
+                    ).await;
 
+                    for (call, result) in calls.iter().zip(results) {
                         let preview = tool_map.get(call.name.as_str())
                             .map(|t| t.preview(&result))
                             .unwrap_or_else(|| result.chars().take(3000).collect());
@@ -275,7 +285,6 @@ impl Agent {
                             name: call.name.clone(),
                             preview,
                         }).await;
-
                         messages.push(Message {
                             role: crate::llm::types::Role::User,
                             content: MessageContent::Parts(vec![ContentPart::ToolResult {
@@ -439,6 +448,13 @@ mod tests {
         }])
     }
 
+    fn two_tool_calls(a: &str, b: &str) -> LlmResponse {
+        LlmResponse::ToolCalls(vec![
+            ToolCall { id: "tc_1".into(), name: a.into(), input: serde_json::json!({}) },
+            ToolCall { id: "tc_2".into(), name: b.into(), input: serde_json::json!({}) },
+        ])
+    }
+
     fn text(s: &str) -> LlmResponse {
         LlmResponse::Message { text: s.into() }
     }
@@ -549,6 +565,24 @@ mod tests {
         );
         let resp = agent.query("hi", &[], &[]).await.unwrap();
         assert_eq!(resp.tool_calls_made, 0);
+    }
+
+    #[tokio::test]
+    async fn multiple_tool_calls_in_one_turn_all_executed() {
+        // Both tool calls arrive in the same LlmResponse::ToolCalls batch;
+        // they should all be executed (now concurrently) and both results sent to the LLM.
+        let llm = MockLlm::new(vec![
+            two_tool_calls("tool_a", "tool_b"),
+            text("got both results"),
+        ]);
+        let agent = agent_with(
+            llm,
+            vec![MockTool::new("tool_a", "result_a"), MockTool::new("tool_b", "result_b")],
+            5,
+        );
+        let resp = agent.query("hi", &[], &[]).await.unwrap();
+        assert_eq!(resp.answer, "got both results");
+        assert_eq!(resp.tool_calls_made, 1);
     }
 
     #[tokio::test]
