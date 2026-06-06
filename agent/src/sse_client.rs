@@ -6,7 +6,12 @@ use tokio::sync::Mutex;
 
 use crate::{config::Config, executor};
 
-// ── Server → Agent messages (received as SSE data lines) ─────────────────────
+const PING_INTERVAL_SECS: u64 = 30;
+const PING_TIMEOUT_SECS: u64 = 10;
+const CONNECT_TIMEOUT_SECS: u64 = 30;
+const RESULT_POST_TIMEOUT_SECS: u64 = 30;
+const MAX_RECONNECT_BACKOFF_SECS: u64 = 60;
+const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -16,7 +21,7 @@ enum ServerMsg {
     Execute {
         request_id:   String,
         command:      String,
-        #[serde(default = "default_timeout")]
+        #[serde(default = "default_command_timeout")]
         timeout_secs: u64,
     },
     Error { message: String },
@@ -24,9 +29,7 @@ enum ServerMsg {
     Unknown,
 }
 
-fn default_timeout() -> u64 { 30 }
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
+fn default_command_timeout() -> u64 { DEFAULT_COMMAND_TIMEOUT_SECS }
 
 fn hostname() -> String {
     hostname::get()
@@ -36,17 +39,15 @@ fn hostname() -> String {
 
 fn make_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
         .build()?)
 }
-
-// ── Main reconnect loop ────────────────────────────────────────────────────────
 
 pub async fn run_with_reconnect(config: Arc<Mutex<Config>>, config_path: &Path) {
     let mut backoff = Duration::from_secs(1);
     loop {
-        let cfg = config.lock().await.clone();
-        match connect_and_run(&cfg, Arc::clone(&config), config_path).await {
+        let current_config = config.lock().await.clone();
+        match connect_and_run(&current_config, Arc::clone(&config), config_path).await {
             Ok(()) => tracing::info!("SSE stream ended, reconnecting"),
             Err(e) => tracing::warn!(
                 error = %e,
@@ -55,27 +56,27 @@ pub async fn run_with_reconnect(config: Arc<Mutex<Config>>, config_path: &Path) 
             ),
         }
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(Duration::from_secs(60));
+        backoff = (backoff * 2).min(Duration::from_secs(MAX_RECONNECT_BACKOFF_SECS));
     }
 }
 
 async fn connect_and_run(
-    cfg:           &Config,
+    config:        &Config,
     shared_config: Arc<Mutex<Config>>,
     config_path:   &Path,
 ) -> Result<()> {
     let client      = make_client()?;
     let host        = hostname();
-    let events_url  = format!("{}/agent/events", cfg.server_url);
-    let results_url = format!("{}/agent/results", cfg.server_url);
-    let ping_url    = format!("{}/agent/ping", cfg.server_url);
+    let events_url  = format!("{}/agent/events", config.server_url);
+    let results_url = format!("{}/agent/results", config.server_url);
+    let ping_url    = format!("{}/agent/ping", config.server_url);
 
     tracing::info!(url = %events_url, "connecting via SSE");
 
     let response = client
         .get(&events_url)
         .query(&[("hostname", &host)])
-        .header("Authorization", format!("Bearer {}", cfg.agent_token))
+        .header("Authorization", format!("Bearer {}", config.agent_token))
         .send()
         .await?;
 
@@ -89,42 +90,38 @@ async fn connect_and_run(
 
     tracing::info!("SSE connection established");
 
-    // Shared token — updated when we receive a Registered event.
-    let shared_token = Arc::new(Mutex::new(cfg.agent_token.clone()));
+    let shared_token = Arc::new(Mutex::new(config.agent_token.clone()));
 
-    // Ping task: POST /agent/ping every 30 s.
     let ping_client = client.clone();
     let ping_token  = Arc::clone(&shared_token);
     let ping_task   = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
-        interval.tick().await; // skip first immediate tick
+        let mut interval = tokio::time::interval(Duration::from_secs(PING_INTERVAL_SECS));
+        interval.tick().await;
         loop {
             interval.tick().await;
-            let tok = ping_token.lock().await.clone();
+            let token = ping_token.lock().await.clone();
             let _ = ping_client
                 .post(&ping_url)
-                .header("Authorization", format!("Bearer {}", tok))
-                .timeout(Duration::from_secs(10))
+                .header("Authorization", format!("Bearer {}", token))
+                .timeout(Duration::from_secs(PING_TIMEOUT_SECS))
                 .send()
                 .await;
         }
     });
 
-    // Consume SSE byte stream, parse events.
     let mut stream = response.bytes_stream();
-    let mut buf    = String::new();
+    let mut byte_buffer = String::new();
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        buf.push_str(&String::from_utf8_lossy(&chunk));
+        byte_buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-        // SSE messages are separated by blank lines (\n\n).
-        while let Some(pos) = buf.find("\n\n") {
-            let raw = buf[..pos].to_string();
-            buf.drain(..pos + 2);
+        while let Some(pos) = byte_buffer.find("\n\n") {
+            let raw = byte_buffer[..pos].to_string();
+            byte_buffer.drain(..pos + 2);
 
             for line in raw.lines() {
-                if line.starts_with(':') { continue; } // SSE keep-alive comment
+                if line.starts_with(':') { continue; }
                 let data = match line.strip_prefix("data: ") {
                     Some(d) => d,
                     None    => continue,
@@ -146,9 +143,9 @@ async fn connect_and_run(
                     }
 
                     Ok(ServerMsg::Execute { request_id, command, timeout_secs }) => {
-                        let c2 = client.clone();
-                        let u2 = results_url.clone();
-                        let t2 = Arc::clone(&shared_token);
+                        let command_client = client.clone();
+                        let results_url    = results_url.clone();
+                        let token_ref      = Arc::clone(&shared_token);
                         tokio::spawn(async move {
                             let result = executor::run_command(&command, timeout_secs).await;
                             let body = match result {
@@ -165,11 +162,11 @@ async fn connect_and_run(
                                     "exit_code":  -1,
                                 }),
                             };
-                            let tok = t2.lock().await.clone();
-                            let _ = c2
-                                .post(&u2)
-                                .header("Authorization", format!("Bearer {}", tok))
-                                .timeout(Duration::from_secs(30))
+                            let token = token_ref.lock().await.clone();
+                            let _ = command_client
+                                .post(&results_url)
+                                .header("Authorization", format!("Bearer {}", token))
+                                .timeout(Duration::from_secs(RESULT_POST_TIMEOUT_SECS))
                                 .json(&body)
                                 .send()
                                 .await;
@@ -198,7 +195,6 @@ mod tests {
 
     #[test]
     fn sse_keep_alive_comment_is_skipped() {
-        // Simulate the SSE parser skipping comment lines
         let line = ": keep-alive";
         assert!(line.starts_with(':'));
     }
@@ -215,7 +211,6 @@ mod tests {
     fn unknown_server_message_does_not_panic() {
         let data = r#"{"type":"future_unknown_type","extra":"field"}"#;
         let msg: Result<ServerMsg, _> = serde_json::from_str(data);
-        // Should deserialize to Unknown without panicking
         assert!(matches!(msg, Ok(ServerMsg::Unknown)));
     }
 }

@@ -9,8 +9,6 @@ pub struct CommandResult {
     pub exit_code: i32,
 }
 
-/// Run `command` as a bash one-liner, killing the process if it exceeds
-/// `timeout_secs`. Returns `Err` on timeout or spawn failure.
 pub async fn run_command(command: &str, timeout_secs: u64) -> Result<CommandResult, String> {
     let fut = async {
         let output = Command::new("bash")

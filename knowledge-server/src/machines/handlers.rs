@@ -26,7 +26,9 @@ use uuid::Uuid;
 use crate::{auth::jwt::Claims, neo4j::Neo4jClient};
 use super::{ConnectedAgent, MachineRegistry, ResultBody, ServerToAgent, hash_token};
 
-// ── State ──────────────────────────────────────────────────────────────────────
+const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 25;
+const DEFAULT_EXECUTE_TIMEOUT_SECS: u64 = 30;
+const MAX_EXECUTE_TIMEOUT_SECS: u64 = 300;
 
 pub struct MachineState {
     pub registry:    Arc<MachineRegistry>,
@@ -52,8 +54,6 @@ fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.to_string())
 }
-
-// ── Install-script generation (pure) ──────────────────────────────────────────
 
 pub fn generate_install_script(server_url: &str, install_token: &str) -> String {
     format!(
@@ -129,15 +129,11 @@ echo "Run 'uninstall-harvest-agent' to remove."
     )
 }
 
-// ── Router ─────────────────────────────────────────────────────────────────────
-
 pub fn machines_router(state: Arc<MachineState>) -> Router {
     Router::new()
         .route("/agents/:project_id/install.sh", get(install_script_handler))
         .route("/agents/binary/harvest-agent",   get(binary_handler))
-        // SSE stream: agent connects here; Bearer = install_token or permanent agent_token
         .route("/agent/events",                  get(agent_events_handler))
-        // Results and heartbeat posted back by agent
         .route("/agent/results",                 post(agent_results_handler))
         .route("/agent/ping",                    post(agent_ping_handler))
         .with_state(state)
@@ -150,8 +146,6 @@ pub fn machines_protected_router(state: Arc<MachineState>) -> Router {
         .route("/projects/:pid/agents/rotate-install-token", post(rotate_install_token))
         .with_state(state)
 }
-
-// ── Install script ─────────────────────────────────────────────────────────────
 
 async fn install_script_handler(
     State(state): State<Arc<MachineState>>,
@@ -175,7 +169,6 @@ async fn install_script_handler(
         None    => return err(StatusCode::NOT_FOUND, "project not found").into_response(),
     };
 
-    // Backfill install_token for projects created before this field was added.
     let install_token = match first["install_token"].as_str().map(|s| s.to_string()) {
         Some(t) => t,
         None => {
@@ -194,8 +187,6 @@ async fn install_script_handler(
     (StatusCode::OK, [(header::CONTENT_TYPE, "text/x-shellscript")], script).into_response()
 }
 
-// ── Binary serving ─────────────────────────────────────────────────────────────
-
 async fn binary_handler(State(state): State<Arc<MachineState>>) -> impl IntoResponse {
     let path = match &state.binary_path {
         Some(p) => p.clone(),
@@ -211,9 +202,6 @@ async fn binary_handler(State(state): State<Arc<MachineState>>) -> impl IntoResp
     }
 }
 
-// ── SSE agent connection ───────────────────────────────────────────────────────
-
-/// Removes the agent from the in-memory registry when the SSE stream closes.
 struct AgentGuard {
     agent_id:   String,
     index_hash: String,
@@ -255,7 +243,6 @@ async fn agent_events_handler(
     };
     let hostname = params.get("hostname").cloned().unwrap_or_else(|| "unknown".into());
 
-    // Authenticate: look up by agent_token_hash, then by install_token.
     let token_hash = hash_token(&token);
 
     let machine = neo4j.query_read(
@@ -264,9 +251,7 @@ async fn agent_events_handler(
         json!({ "h": token_hash }),
     ).await.ok().and_then(|r| r.into_iter().next());
 
-    // (agent_id, project_id, index_hash, first_event)
     let (agent_id, project_id, index_hash, first_event) = if let Some(row) = machine {
-        // Reconnect: update hostname + last_seen
         let id  = row["id"].as_str().unwrap_or("").to_string();
         let pid = row["project_id"].as_str().unwrap_or("").to_string();
         let now = chrono::Utc::now().to_rfc3339();
@@ -276,7 +261,6 @@ async fn agent_events_handler(
         ).await;
         (id, pid, token_hash, ServerToAgent::HelloAck)
     } else {
-        // Try install_token
         let project = neo4j.query_read(
             "MATCH (p:Project {install_token: $tok}) RETURN p.id AS id",
             json!({ "tok": token }),
@@ -311,47 +295,41 @@ async fn agent_events_handler(
         (aid, project_id, perm_hash, ServerToAgent::Registered { agent_token: perm_token })
     };
 
-    // Channel: handlers send Execute commands → agent via SSE
-    let (tx, rx) = mpsc::channel::<ServerToAgent>(64);
+    let (command_sender, command_receiver) = mpsc::channel::<ServerToAgent>(64);
 
-    // Register in in-memory state
     state.registry.agents.insert(agent_id.clone(), ConnectedAgent {
         id:           agent_id.clone(),
         project_id,
         hostname:     hostname.clone(),
         connected_at: chrono::Utc::now(),
-        sender:       tx,
+        sender:       command_sender,
     });
     state.registry.token_index.insert(index_hash.clone(), agent_id.clone());
 
     tracing::info!(agent_id, hostname, "agent connected via SSE");
 
-    // First event (registered / hello_ack)
     let first_data  = serde_json::to_string(&first_event).unwrap_or_default();
     let init_stream = tokio_stream::iter(vec![
         Ok::<Event, Infallible>(Event::default().data(first_data)),
     ]);
 
-    // Ongoing command stream, cleaned up on disconnect
     let guard = AgentGuard { agent_id, index_hash, registry: Arc::clone(&state.registry) };
-    let cmd_stream = GuardedStream {
-        inner: ReceiverStream::new(rx).map(|msg| {
+    let command_stream = GuardedStream {
+        inner: ReceiverStream::new(command_receiver).map(|msg| {
             let data = serde_json::to_string(&msg).unwrap_or_default();
             Ok::<Event, Infallible>(Event::default().data(data))
         }),
         _guard: guard,
     };
 
-    Sse::new(init_stream.chain(cmd_stream))
+    Sse::new(init_stream.chain(command_stream))
         .keep_alive(
             KeepAlive::new()
-                .interval(Duration::from_secs(25))
+                .interval(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS))
                 .text("keep-alive"),
         )
         .into_response()
 }
-
-// ── POST /agent/results ────────────────────────────────────────────────────────
 
 async fn agent_results_handler(
     State(state): State<Arc<MachineState>>,
@@ -378,8 +356,6 @@ async fn agent_results_handler(
     StatusCode::OK.into_response()
 }
 
-// ── POST /agent/ping ───────────────────────────────────────────────────────────
-
 async fn agent_ping_handler(
     State(state): State<Arc<MachineState>>,
     headers:      HeaderMap,
@@ -395,7 +371,6 @@ async fn agent_ping_handler(
         None    => return StatusCode::UNAUTHORIZED.into_response(),
     };
 
-    // Update last_seen (fire-and-forget)
     if let Some(neo4j) = &state.neo4j {
         let neo4j = Arc::clone(neo4j);
         tokio::spawn(async move {
@@ -409,8 +384,6 @@ async fn agent_ping_handler(
 
     StatusCode::OK.into_response()
 }
-
-// ── List agents ────────────────────────────────────────────────────────────────
 
 pub async fn list_agents(
     Extension(user):  Extension<Claims>,
@@ -443,16 +416,14 @@ pub async fn list_agents(
     Ok(Json(result))
 }
 
-// ── Execute command ────────────────────────────────────────────────────────────
-
 #[derive(serde::Deserialize)]
 pub struct ExecuteBody {
     pub command:      String,
-    #[serde(default = "default_timeout")]
+    #[serde(default = "default_execute_timeout")]
     pub timeout_secs: u64,
 }
 
-fn default_timeout() -> u64 { 30 }
+fn default_execute_timeout() -> u64 { DEFAULT_EXECUTE_TIMEOUT_SECS }
 
 pub async fn execute_command(
     Extension(user):  Extension<Claims>,
@@ -463,7 +434,7 @@ pub async fn execute_command(
     let neo4j = neo4j_or_err(&state)?;
     require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
 
-    let timeout = body.timeout_secs.min(300);
+    let timeout = body.timeout_secs.min(MAX_EXECUTE_TIMEOUT_SECS);
     match state.registry.execute(&agent_id, body.command, timeout).await {
         Ok(r) => Ok(Json(json!({
             "stdout":    r.stdout,
@@ -473,8 +444,6 @@ pub async fn execute_command(
         Err(e) => Err(err(StatusCode::BAD_GATEWAY, &e)),
     }
 }
-
-// ── Rotate install token ───────────────────────────────────────────────────────
 
 pub async fn rotate_install_token(
     Extension(user):  Extension<Claims>,
@@ -492,8 +461,6 @@ pub async fn rotate_install_token(
 
     Ok(Json(json!({ "ok": true })))
 }
-
-// ── Shared access check ────────────────────────────────────────────────────────
 
 async fn require_project_access(
     neo4j:      &Neo4jClient,

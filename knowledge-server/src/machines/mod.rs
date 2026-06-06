@@ -7,10 +7,6 @@ use std::{sync::Arc, time::Instant};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-
-// ── Wire protocol ──────────────────────────────────────────────────────────────
-
-/// Body of POST /agent/results
 #[derive(Debug, Deserialize)]
 pub struct ResultBody {
     pub request_id: String,
@@ -19,7 +15,6 @@ pub struct ResultBody {
     pub exit_code:  i32,
 }
 
-/// SSE events pushed from server → agent.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerToAgent {
@@ -28,8 +23,6 @@ pub enum ServerToAgent {
     Execute    { request_id: String, command: String, timeout_secs: u64 },
     Error      { message: String },
 }
-
-// ── Registry types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
 pub struct CommandResult {
@@ -51,16 +44,10 @@ pub struct PendingResult {
     pub deadline: Instant,
 }
 
-// ── MachineRegistry ────────────────────────────────────────────────────────────
-
 #[derive(Default)]
 pub struct MachineRegistry {
     pub agents:      DashMap<String, ConnectedAgent>,
     pub pending:     DashMap<String, PendingResult>,
-    /// Maps SHA-256(permanent_agent_token) → agent_id.
-    /// Populated when an agent opens its SSE connection; cleared on disconnect.
-    /// Lets POST /agent/ping and /agent/results identify the caller in O(1)
-    /// without a DB round-trip on every request.
     pub token_index: DashMap<String, String>,
 }
 
@@ -74,18 +61,17 @@ impl MachineRegistry {
             .iter()
             .filter(|e| e.value().project_id == project_id)
             .map(|e| {
-                let a = e.value();
+                let agent = e.value();
                 serde_json::json!({
-                    "id":           a.id,
-                    "hostname":     a.hostname,
+                    "id":           agent.id,
+                    "hostname":     agent.hostname,
                     "online":       true,
-                    "connected_at": a.connected_at.to_rfc3339(),
+                    "connected_at": agent.connected_at.to_rfc3339(),
                 })
             })
             .collect()
     }
 
-    /// Send an execute command to an agent and wait for the result.
     pub async fn execute(
         &self,
         agent_id: &str,
@@ -100,10 +86,10 @@ impl MachineRegistry {
             .clone();
 
         let request_id = Uuid::new_v4().to_string();
-        let (tx, rx)   = oneshot::channel();
+        let (result_tx, result_rx) = oneshot::channel();
 
         self.pending.insert(request_id.clone(), PendingResult {
-            tx,
+            tx:       result_tx,
             deadline: Instant::now() + std::time::Duration::from_secs(timeout_secs + 5),
         });
 
@@ -117,20 +103,18 @@ impl MachineRegistry {
             .map_err(|_| "agent disconnected before send".to_string())?;
 
         let wait = std::time::Duration::from_secs(timeout_secs + 10);
-        tokio::time::timeout(wait, rx)
+        tokio::time::timeout(wait, result_rx)
             .await
             .map_err(|_| "timed out waiting for command result".to_string())?
             .map_err(|_| "result channel closed".to_string())?
     }
 }
 
-// ── Token hashing ──────────────────────────────────────────────────────────────
-
 pub fn hash_token(token: &str) -> String {
     use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(token.as_bytes());
-    h.finalize()
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    hasher.finalize()
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()

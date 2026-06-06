@@ -13,11 +13,11 @@ use crate::agent::HistoryMessage;
 use crate::auth::jwt::Claims;
 use crate::neo4j::Neo4jClient;
 
+const CONVERSATION_TITLE_MAX_CHARS: usize = 60;
+const CONVERSATION_TITLE_TRUNCATE_CHARS: usize = 57;
+
 type ApiError = (StatusCode, Json<Value>);
 
-// ── Internal helpers for server-side history management ───────────────────────
-
-/// Loads the message history for a user-owned conversation.
 pub async fn load_user_history(
     neo4j: &Neo4jClient,
     user_id: &str,
@@ -31,8 +31,6 @@ pub async fn load_user_history(
     parse_history_from_rows(rows)
 }
 
-/// Appends a user+assistant turn to a user-owned conversation. Creates the
-/// conversation node if it does not exist yet.
 pub async fn append_user_turn(
     neo4j: &Neo4jClient,
     user_id: &str,
@@ -46,24 +44,22 @@ pub async fn append_user_turn(
     tool_calls_made: usize,
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
-    let title = if user_text.len() > 60 {
-        format!("{}…", &user_text[..57])
+    let title = if user_text.len() > CONVERSATION_TITLE_MAX_CHARS {
+        format!("{}…", &user_text[..CONVERSATION_TITLE_TRUNCATE_CHARS])
     } else {
         user_text.to_string()
     };
 
-    // Build the new full messages array from the (possibly compacted) history
-    // plus the new turn.
-    let mut msgs: Vec<Value> = compacted_history.iter().map(|h| {
-        json!({ "role": h.role, "text": h.text, "attachments": [] })
+    let mut messages: Vec<Value> = compacted_history.iter().map(|entry| {
+        json!({ "role": entry.role, "text": entry.text, "attachments": [] })
     }).collect();
-    msgs.push(json!({
+    messages.push(json!({
         "role": "user",
         "text": user_text,
         "username": username,
         "attachments": attachments_meta,
     }));
-    msgs.push(json!({
+    messages.push(json!({
         "role": "assistant",
         "text": assistant_text,
         "sources": sources,
@@ -71,8 +67,8 @@ pub async fn append_user_turn(
         "tool_calls_made": tool_calls_made,
     }));
 
-    let messages_json = serde_json::to_string(&msgs)?;
-    let count = msgs.len() as i64;
+    let messages_json = serde_json::to_string(&messages)?;
+    let message_count = messages.len() as i64;
 
     neo4j.query_read(
         "MATCH (u:User {id: $uid})
@@ -86,7 +82,7 @@ pub async fn append_user_turn(
         json!({
             "uid": user_id, "cid": conv_id,
             "title": title, "messages": messages_json,
-            "count": count, "now": now,
+            "count": message_count, "now": now,
         }),
     ).await?;
     Ok(())
@@ -115,8 +111,6 @@ pub struct ConvState {
     pub neo4j: Arc<Neo4jClient>,
 }
 
-// ── List ──────────────────────────────────────────────────────────────────────
-
 pub async fn list(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ConvState>>,
@@ -131,8 +125,6 @@ pub async fn list(
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(rows))
 }
-
-// ── Create ────────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 pub struct CreateBody {
@@ -162,8 +154,6 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(json!({ "id": id, "title": title, "created_at": now }))))
 }
 
-// ── Get ───────────────────────────────────────────────────────────────────────
-
 pub async fn get(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ConvState>>,
@@ -179,7 +169,6 @@ pub async fn get(
     let row = rows.into_iter().next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
 
-    // Parse the stored messages JSON string into an actual array
     let mut obj = row.as_object().cloned().unwrap_or_default();
     if let Some(Value::String(s)) = obj.get("messages") {
         if let Ok(parsed) = serde_json::from_str::<Value>(s) {
@@ -189,8 +178,6 @@ pub async fn get(
 
     Ok(Json(Value::Object(obj)))
 }
-
-// ── Update ────────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 pub struct UpdateBody {
@@ -204,9 +191,9 @@ pub async fn update(
     Path(conv_id): Path<String>,
     Json(body): Json<UpdateBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let now   = chrono::Utc::now().to_rfc3339();
-    let count = body.messages.as_array().map(|a| a.len() as i64).unwrap_or(0);
-    let msgs  = body.messages.to_string();
+    let now           = chrono::Utc::now().to_rfc3339();
+    let message_count = body.messages.as_array().map(|a| a.len() as i64).unwrap_or(0);
+    let messages_json = body.messages.to_string();
 
     state.neo4j.query_read(
         "MATCH (:User {id: $uid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
@@ -215,15 +202,13 @@ pub async fn update(
          RETURN c.id AS id",
         json!({
             "uid": user.sub, "cid": conv_id,
-            "title": body.title, "messages": msgs,
-            "count": count, "now": now,
+            "title": body.title, "messages": messages_json,
+            "count": message_count, "now": now,
         }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     Ok(Json(json!({ "ok": true })))
 }
-
-// ── Delete ────────────────────────────────────────────────────────────────────
 
 pub async fn delete(
     Extension(user): Extension<Claims>,
