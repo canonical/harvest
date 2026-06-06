@@ -75,8 +75,9 @@ async fn main() -> Result<()> {
         docs_dir,
         auth:             Arc::new(config.auth),
         machine_registry: Arc::clone(&machine_registry),
-        agent_builder,
+        agent_builder:    Arc::clone(&agent_builder),
         binary_path,
+        llm:              Arc::clone(&llm_provider),
     };
 
     let cache: Arc<GraphCache> = Arc::new(RwLock::new(HashMap::new()));

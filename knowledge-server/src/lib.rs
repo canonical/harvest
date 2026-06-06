@@ -7,4 +7,5 @@ pub mod conversations;
 pub mod llm;
 pub mod machines;
 pub mod neo4j;
+pub mod overview;
 pub mod projects;

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Harvest — Code Knowledge Chat</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌾</text></svg>" />
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='%23E95420' d='M.81 7.36a1.92 1.92 0 1 1 3.799.572A1.92 1.92 0 0 1 .81 7.36M8.826 3.033a1.92 1.92 0 1 1 3.755.806 1.92 1.92 0 0 1-3.755-.806M7.04 12.585a4.68 4.68 0 0 1-3.19-2.432 2.76 2.76 0 0 1-1.64.202 6.25 6.25 0 0 0 4.498 3.77c.45.098.908.144 1.364.141a2.74 2.74 0 0 1-.562-1.605 5 5 0 0 1-.47-.076M8.394 12.193a1.92 1.92 0 0 1 3.754.805 1.92 1.92 0 1 1-3.754-.805M12.943 11.89a6.3 6.3 0 0 0 1.22-2.587 6.3 6.3 0 0 0-.905-4.782 2.77 2.77 0 0 1-1.08 1.265 4.7 4.7 0 0 1-.154 4.674c.45.37.77.87.919 1.43M2.56 4.892a2.75 2.75 0 0 1 1.603.41 4.68 4.68 0 0 1 3.77-2.015q.012-.218.057-.433c.088-.411.268-.795.525-1.124A6.31 6.31 0 0 0 2.56 4.892'/></svg>" />
   <script>
     (function () {
       var t = localStorage.getItem('theme');
@@ -127,7 +127,7 @@
 
           <div class="p-panel__header is-sticky">
             <a class="p-panel__logo nav-logo" href="#">
-              <img src="/canonical-logo.png" alt="Canonical" class="p-panel__logo-image" height="32" />
+              <img src="/canonical-logo.png" alt="Canonical" class="p-panel__logo-image" />
               <div class="logo-text p-heading--4 is-fading-when-collapsed">Harvest</div>
             </a>
             <div class="p-panel__controls u-hide--medium u-hide--large">
@@ -142,6 +142,12 @@
             <div class="p-side-navigation--icons sidenav-top-container">
               <ul class="p-side-navigation__list">
                 <li id="project-selector-section" class="is-fading-when-collapsed"></li>
+                <li class="p-side-navigation__item">
+                  <a href="#" class="p-side-navigation__link" data-page="overview">
+                    <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                    <span class="p-side-navigation__label">Overview</span>
+                  </a>
+                </li>
                 <li class="p-side-navigation__item">
                   <a href="#" class="p-side-navigation__link" data-page="chat" aria-current="page">
                     <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -212,6 +218,65 @@
     </nav>
 
     <main class="l-main">
+
+      <section class="page page--overview" id="page-overview" hidden>
+
+        <!-- ── Top bar ───────────────────────────────────────────────────── -->
+        <div class="overview-topbar">
+          <div class="overview-topbar__left">
+            <h2 class="overview-topbar__title">Overview</h2>
+            <span id="overview-last-updated" class="overview-topbar__updated"></span>
+          </div>
+          <div class="overview-topbar__right">
+            <span id="overview-status-text" class="overview-status-text" hidden></span>
+            <button id="overview-regenerate-btn"
+                    class="overview-refresh-btn"
+                    title="Regenerate overview"
+                    aria-label="Regenerate overview"
+                    hidden>
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                   stroke-linejoin="round" aria-hidden="true">
+                <polyline points="23 4 23 10 17 10"/>
+                <polyline points="1 20 1 14 7 14"/>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- ── Page body ─────────────────────────────────────────────────── -->
+        <div class="overview-body-wrap">
+
+          <!-- State: no project -->
+          <div id="overview-no-project" class="overview-splash" hidden>
+            <div class="overview-splash__icon">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                <path d="M.81 7.36a1.92 1.92 0 1 1 3.799.572A1.92 1.92 0 0 1 .81 7.36M8.826 3.033a1.92 1.92 0 1 1 3.755.806 1.92 1.92 0 0 1-3.755-.806M7.04 12.585a4.68 4.68 0 0 1-3.19-2.432 2.76 2.76 0 0 1-1.64.202 6.25 6.25 0 0 0 4.498 3.77c.45.098.908.144 1.364.141a2.74 2.74 0 0 1-.562-1.605 5 5 0 0 1-.47-.076M8.394 12.193a1.92 1.92 0 0 1 3.754.805 1.92 1.92 0 1 1-3.754-.805M12.943 11.89a6.3 6.3 0 0 0 1.22-2.587 6.3 6.3 0 0 0-.905-4.782 2.77 2.77 0 0 1-1.08 1.265 4.7 4.7 0 0 1-.154 4.674c.45.37.77.87.919 1.43M2.56 4.892a2.75 2.75 0 0 1 1.603.41 4.68 4.68 0 0 1 3.77-2.015q.012-.218.057-.433c.088-.411.268-.795.525-1.124A6.31 6.31 0 0 0 2.56 4.892"/>
+              </svg>
+            </div>
+            <p class="overview-splash__text">Select a project to view its overview.</p>
+          </div>
+
+          <!-- State: loading -->
+          <div id="overview-loading" class="overview-splash" hidden>
+            <div class="loading-dots"><span></span><span></span><span></span></div>
+            <p class="overview-splash__text">Generating overview…</p>
+          </div>
+
+          <!-- State: empty (no content yet) -->
+          <div id="overview-empty" class="overview-splash" hidden></div>
+
+          <!-- State: generating (live progress timeline) -->
+          <div id="overview-progress" class="overview-progress-wrap" hidden></div>
+
+          <!-- State: content -->
+          <div id="overview-content" class="overview-article-wrap" hidden>
+            <div id="overview-body" class="overview-article"></div>
+          </div>
+
+        </div>
+      </section>
 
       <section class="page" id="page-chat">
         <!-- No-project overlay -->
