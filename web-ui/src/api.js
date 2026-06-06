@@ -13,18 +13,7 @@ function handleUnauthorized(status) {
   if (status === 401 && _onUnauthorized) _onUnauthorized();
 }
 
-export async function queryStream(query, conversationId, attachments, onEvent) {
-  const response = await fetch(QUERY_STREAM_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, conversation_id: conversationId, attachments }),
-  });
-
-  if (!response.ok) {
-    handleUnauthorized(response.status);
-    throw new Error(`Server error: ${response.status}`);
-  }
-
+async function consumeSseStream(response, onEvent) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -41,14 +30,25 @@ export async function queryStream(query, conversationId, attachments, onEvent) {
     for (const block of events) {
       for (const line of block.split('\n')) {
         if (!line.startsWith('data: ')) continue;
-        const raw = line.slice(6).trim();
-        try {
-          onEvent(JSON.parse(raw));
-        } catch {
-        }
+        try { onEvent(JSON.parse(line.slice(6).trim())); } catch {}
       }
     }
   }
+}
+
+export async function queryStream(query, conversationId, attachments, onEvent) {
+  const response = await fetch(QUERY_STREAM_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, conversation_id: conversationId, attachments }),
+  });
+
+  if (!response.ok) {
+    handleUnauthorized(response.status);
+    throw new Error(`Server error: ${response.status}`);
+  }
+
+  await consumeSseStream(response, onEvent);
 }
 
 export async function queryOnce(query) {
@@ -134,25 +134,25 @@ async function projectFetch(url, options = {}) {
   return res.json();
 }
 
-const pid = (id) => `${PROJECTS_URL}/${encodeURIComponent(id)}`;
-const cid = (projectId, convId) =>
+const projectUrl = (id) => `${PROJECTS_URL}/${encodeURIComponent(id)}`;
+const conversationUrl = (projectId, convId) =>
   `${PROJECTS_URL}/${encodeURIComponent(projectId)}/conversations/${encodeURIComponent(convId)}`;
 
 export const fetchMyGroups      = ()         => projectFetch('/groups');
 export const fetchProjects      = ()         => projectFetch(PROJECTS_URL);
 export const createProject      = (body)     => projectFetch(PROJECTS_URL, { method: 'POST', body: JSON.stringify(body) });
-export const getProject         = (id)       => projectFetch(pid(id));
-export const updateProject      = (id, body) => projectFetch(pid(id), { method: 'PUT',  body: JSON.stringify(body) });
-export const deleteProject      = (id)       => projectFetch(pid(id), { method: 'DELETE' });
+export const getProject         = (id)       => projectFetch(projectUrl(id));
+export const updateProject      = (id, body) => projectFetch(projectUrl(id), { method: 'PUT',  body: JSON.stringify(body) });
+export const deleteProject      = (id)       => projectFetch(projectUrl(id), { method: 'DELETE' });
 
-export const listProjectConversations   = (projectId)           => projectFetch(`${pid(projectId)}/conversations`);
-export const createProjectConversation  = (projectId, body)     => projectFetch(`${pid(projectId)}/conversations`, { method: 'POST', body: JSON.stringify(body) });
-export const getProjectConversation     = (projectId, convId)   => projectFetch(cid(projectId, convId));
-export const updateProjectConversation  = (projectId, convId, body) => projectFetch(cid(projectId, convId), { method: 'PUT',  body: JSON.stringify(body) });
-export const deleteProjectConversation  = (projectId, convId)   => projectFetch(cid(projectId, convId), { method: 'DELETE' });
+export const listProjectConversations   = (projectId)           => projectFetch(`${projectUrl(projectId)}/conversations`);
+export const createProjectConversation  = (projectId, body)     => projectFetch(`${projectUrl(projectId)}/conversations`, { method: 'POST', body: JSON.stringify(body) });
+export const getProjectConversation     = (projectId, convId)   => projectFetch(conversationUrl(projectId, convId));
+export const updateProjectConversation  = (projectId, convId, body) => projectFetch(conversationUrl(projectId, convId), { method: 'PUT',  body: JSON.stringify(body) });
+export const deleteProjectConversation  = (projectId, convId)   => projectFetch(conversationUrl(projectId, convId), { method: 'DELETE' });
 
 export async function projectQueryStart(projectId, query, conversationId, attachments) {
-  const url = `${pid(projectId)}/query/stream`;
+  const url = `${projectUrl(projectId)}/query/stream`;
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -168,7 +168,7 @@ export async function projectQueryStart(projectId, query, conversationId, attach
 }
 
 export function openProjectEvents(projectId, convId, onEvent) {
-  const base = `${pid(projectId)}/events`;
+  const base = `${projectUrl(projectId)}/events`;
   const url  = convId ? `${base}?conv=${encodeURIComponent(convId)}` : base;
   const es   = new EventSource(url);
   es.onmessage = (e) => {
@@ -178,7 +178,7 @@ export function openProjectEvents(projectId, convId, onEvent) {
 }
 
 export async function projectQueryStream(projectId, query, onEvent) {
-  const url = `${pid(projectId)}/query/stream`;
+  const url = `${projectUrl(projectId)}/query/stream`;
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -188,37 +188,18 @@ export async function projectQueryStream(projectId, query, onEvent) {
     handleUnauthorized(response.status);
     throw new Error(`Server error: ${response.status}`);
   }
-
-  const reader  = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split('\n\n');
-    buffer = events.pop() ?? '';
-    for (const block of events) {
-      for (const line of block.split('\n')) {
-        if (!line.startsWith('data: ')) continue;
-        try { onEvent(JSON.parse(line.slice(6).trim())); } catch {}
-      }
-    }
-  }
+  await consumeSseStream(response, onEvent);
 }
 
-// ── Machines / Agents ─────────────────────────────────────────────────────────
-
 export async function listProjectAgents(projectId) {
-  const response = await fetch(`${pid(projectId)}/agents`);
+  const response = await fetch(`${projectUrl(projectId)}/agents`);
   handleUnauthorized(response.status);
   if (!response.ok) throw new Error(`Server error: ${response.status}`);
   return response.json();
 }
 
 export async function executeAgentCommand(projectId, agentId, command, timeoutSecs = 30) {
-  const response = await fetch(`${pid(projectId)}/agents/${agentId}/execute`, {
+  const response = await fetch(`${projectUrl(projectId)}/agents/${agentId}/execute`, {
     method:  'POST',
     headers: { 'Content-Type': 'application/json' },
     body:    JSON.stringify({ command, timeout_secs: timeoutSecs }),
@@ -229,7 +210,7 @@ export async function executeAgentCommand(projectId, agentId, command, timeoutSe
 }
 
 export async function rotateInstallToken(projectId) {
-  const response = await fetch(`${pid(projectId)}/agents/rotate-install-token`, {
+  const response = await fetch(`${projectUrl(projectId)}/agents/rotate-install-token`, {
     method: 'POST',
   });
   handleUnauthorized(response.status);
@@ -237,7 +218,5 @@ export async function rotateInstallToken(projectId) {
   return response.json();
 }
 
-// ── Overview ──────────────────────────────────────────────────────────────────
-
-export const fetchProjectOverview      = (projectId) => projectFetch(`${pid(projectId)}/overview`);
-export const regenerateProjectOverview = (projectId) => projectFetch(`${pid(projectId)}/overview/regenerate`, { method: 'POST' });
+export const fetchProjectOverview      = (projectId) => projectFetch(`${projectUrl(projectId)}/overview`);
+export const regenerateProjectOverview = (projectId) => projectFetch(`${projectUrl(projectId)}/overview/regenerate`, { method: 'POST' });

@@ -5,8 +5,6 @@ let _projectId       = null;
 let _serverUrl       = window.location.origin;
 let _refreshInterval = null;
 
-// ── Public API ────────────────────────────────────────────────────────────────
-
 export function initAgentsPage(pageEl) {
   const installBtn      = document.getElementById('install-agent-btn');
   const modal           = document.getElementById('install-modal');
@@ -19,12 +17,10 @@ export function initAgentsPage(pageEl) {
   copyBtn?.addEventListener('click', copyInstallCommand);
   rotateBtn?.addEventListener('click', handleRotate);
 
-  // Close modal on backdrop click
   modal?.addEventListener('click', e => {
     if (e.target === modal) closeInstallModal();
   });
 
-  // Close modal on Escape
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && !modal?.hidden) closeInstallModal();
   });
@@ -57,15 +53,12 @@ export function onAgentsPageHide() {
   _refreshInterval = null;
 }
 
-// ── Rendering ─────────────────────────────────────────────────────────────────
-
 async function loadAndRender() {
   if (!_projectId) return;
   try {
     const agents = await listProjectAgents(_projectId);
     renderAgents(agents);
   } catch {
-    // silently ignore refresh errors
   }
 }
 
@@ -105,8 +98,6 @@ function relativeTime(iso) {
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
 }
-
-// ── Install modal ─────────────────────────────────────────────────────────────
 
 function openInstallModal() {
   if (!_projectId) return;

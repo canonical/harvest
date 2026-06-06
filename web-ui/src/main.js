@@ -53,14 +53,13 @@ let state = createChatState();
 let repoUrlMap = {};
 let activeConvId = null;
 let conversations = [];
-let activeProjectId = null; // null = personal context
+let activeProjectId = null;
 
-// Project real-time collaboration state
 let projectEventSource = null;
-let projectRemoteLocked = false;   // locked by someone else
+let projectRemoteLocked = false;
 let projectLockedBy = '';
-let projectPresence = [];          // [{user_id, name}]
-let lastProjectQuery = '';         // last query sent to project, for conv list update
+let projectPresence = [];
+let lastProjectQuery = '';
 
 const messagesEl  = document.getElementById('messages');
 const inputEl     = document.getElementById('query-input');
@@ -265,8 +264,6 @@ function renderToolCall(tc, i) {
   `;
 }
 
-// ── Attachment helpers ────────────────────────────────────────────────────────
-
 const attachTrayEl   = document.getElementById('attachment-tray');
 const attachInputEl  = document.getElementById('attachment-input');
 const attachBtnEl    = document.getElementById('attach-btn');
@@ -341,8 +338,6 @@ async function sendQuery() {
   inputEl.value = '';
 
   if (activeProjectId) {
-    // Project chat: fire-and-forget POST; all events arrive via EventSource.
-    // Ensure a conversation exists before querying so the server can save the turn.
     const attachments = getPendingAttachments(state).map(toWireAttachment);
     state = clearPendingAttachments(state);
     renderAttachmentTray();
@@ -358,7 +353,6 @@ async function sendQuery() {
       await projectQueryStart(activeProjectId, query, activeConvId, attachments);
     } catch (err) {
       if (err.status === 409) {
-        // Already locked — the lock banner will have appeared via EventSource.
       } else {
         state = addUserMessage(state, query, getUser()?.name ?? null, attachments);
         state = startAssistantMessage(state);
@@ -369,7 +363,6 @@ async function sendQuery() {
     return;
   }
 
-  // Personal chat: ensure a conversation exists before querying.
   const attachments = getPendingAttachments(state).map(toWireAttachment);
   state = clearPendingAttachments(state);
   renderAttachmentTray();
@@ -415,13 +408,10 @@ async function sendQuery() {
   }
 }
 
-// ── Project presence & real-time event handling ───────────────────────────────
-
 function renderPresence() {
   const bar = document.getElementById('project-presence-bar');
   if (!bar) return;
   const me = getUser();
-  // Only show users viewing the exact same conversation.
   const others = projectPresence.filter(u =>
     u.user_id !== me?.id &&
     u.conv_id != null &&
@@ -712,7 +702,6 @@ async function switchToProject(project) {
   state           = createChatState();
   render();
 
-  // Refresh agents/secrets/overview pages if currently visible
   const agentsPage   = document.getElementById('page-agents');
   const overviewPage = document.getElementById('page-overview');
   if (agentsPage && !agentsPage.hidden) {
