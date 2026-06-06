@@ -1,7 +1,5 @@
 const BASE = '/conversations';
 
-// ── API ───────────────────────────────────────────────────────────────────────
-
 async function apiFetch(url, options = {}) {
   const res = await fetch(url, {
     headers: { 'Content-Type': 'application/json' },
@@ -19,8 +17,6 @@ export const createConversation  = (title)       => apiFetch(BASE, { method: 'PO
 export const getConversation     = (id)          => apiFetch(`${BASE}/${id}`);
 export const updateConversation  = (id, payload) => apiFetch(`${BASE}/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
 export const deleteConversation  = (id)          => apiFetch(`${BASE}/${id}`, { method: 'DELETE' });
-
-// ── Date grouping ─────────────────────────────────────────────────────────────
 
 function dayStart(date) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
@@ -49,8 +45,6 @@ function groupConversations(conversations) {
 
   return groups.filter(g => g.items.length > 0);
 }
-
-// ── Render sidebar ────────────────────────────────────────────────────────────
 
 function esc(s) {
   return String(s ?? '')

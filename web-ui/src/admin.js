@@ -3,13 +3,9 @@ import { avatarColor, initials } from './utils.js';
 const USERS_URL  = '/admin/users';
 const GROUPS_URL = '/admin/groups';
 
-// ── State ─────────────────────────────────────────────────────────────────────
-
 let _users  = [];
 let _groups = [];
 let _editingUserId = null;
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function esc(s) {
   return String(s ?? '')
@@ -20,8 +16,6 @@ function esc(s) {
 function memberCount(groupId) {
   return _users.filter(u => (u.group_ids ?? []).filter(Boolean).includes(groupId)).length;
 }
-
-// ── API ───────────────────────────────────────────────────────────────────────
 
 async function apiFetch(url, options = {}) {
   const res = await fetch(url, {
@@ -54,8 +48,6 @@ async function deleteGroup(groupId) {
   return apiFetch(`${GROUPS_URL}/${groupId}`, { method: 'DELETE' });
 }
 
-// ── Toast ─────────────────────────────────────────────────────────────────────
-
 function toast(msg, type = 'positive') {
   const el = document.getElementById('admin-toast');
   el.innerHTML = `
@@ -69,8 +61,6 @@ function toast(msg, type = 'positive') {
   el._timer = setTimeout(() => { el.hidden = true; }, 3500);
 }
 
-// ── Stats ─────────────────────────────────────────────────────────────────────
-
 function renderStats() {
   const el = document.getElementById('admin-stats');
   el.innerHTML = `
@@ -82,8 +72,6 @@ function renderStats() {
     </span>`;
 }
 
-// ── Tabs ──────────────────────────────────────────────────────────────────────
-
 function switchTab(name) {
   ['users', 'groups'].forEach(t => {
     const btn   = document.getElementById(`tab-${t}`);
@@ -94,8 +82,6 @@ function switchTab(name) {
     panel.hidden = !active;
   });
 }
-
-// ── Users table ───────────────────────────────────────────────────────────────
 
 function renderUsers() {
   const container = document.getElementById('admin-users-container');
@@ -170,8 +156,6 @@ function renderUsers() {
   });
 }
 
-// ── Groups table ──────────────────────────────────────────────────────────────
-
 function renderGroups() {
   const container = document.getElementById('admin-groups-container');
 
@@ -240,8 +224,6 @@ function renderGroups() {
   });
 }
 
-// ── Create group modal ────────────────────────────────────────────────────────
-
 function openCreateGroupModal() {
   document.getElementById('group-name-input').value = '';
   document.getElementById('group-desc-input').value = '';
@@ -253,8 +235,6 @@ function openCreateGroupModal() {
 function closeCreateGroupModal() {
   document.getElementById('modal-create-group').hidden = true;
 }
-
-// ── Edit user modal ───────────────────────────────────────────────────────────
 
 function openEditUserModal(userId) {
   const user = _users.find(u => u.id === userId);
@@ -291,14 +271,10 @@ function closeEditUserModal() {
   _editingUserId = null;
 }
 
-// ── Wire up events ────────────────────────────────────────────────────────────
-
 function wireEvents(onUserGroupsChanged) {
-  // Tabs
   document.getElementById('tab-users').addEventListener('click', () => switchTab('users'));
   document.getElementById('tab-groups').addEventListener('click', () => switchTab('groups'));
 
-  // Create group modal
   document.getElementById('add-group-btn').addEventListener('click', openCreateGroupModal);
   document.getElementById('modal-create-group-close').addEventListener('click', closeCreateGroupModal);
   document.getElementById('modal-create-group-cancel').addEventListener('click', closeCreateGroupModal);
@@ -327,7 +303,6 @@ function wireEvents(onUserGroupsChanged) {
     }
   });
 
-  // Edit user modal
   document.getElementById('modal-edit-user-close').addEventListener('click', closeEditUserModal);
   document.getElementById('modal-edit-user-cancel').addEventListener('click', closeEditUserModal);
   document.getElementById('modal-edit-user').addEventListener('click', e => {
@@ -357,20 +332,16 @@ function wireEvents(onUserGroupsChanged) {
     }
   });
 
-  // Enter submits the create-group modal from either input
   ['group-name-input', 'group-desc-input'].forEach(id => {
     document.getElementById(id).addEventListener('keydown', e => {
       if (e.key === 'Enter') document.getElementById('modal-create-group-submit').click();
     });
   });
 
-  // Escape closes any open modal
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') { closeCreateGroupModal(); closeEditUserModal(); }
   });
 }
-
-// ── Init ──────────────────────────────────────────────────────────────────────
 
 export function initAdminPage(_container, { onUserGroupsChanged } = {}) {
   if (_container.dataset.adminInit) {
