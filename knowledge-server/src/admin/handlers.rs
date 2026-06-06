@@ -17,8 +17,6 @@ fn err(status: StatusCode, msg: &str) -> ApiError {
     (status, Json(json!({ "error": msg })))
 }
 
-// ── Users ─────────────────────────────────────────────────────────────────────
-
 pub async fn list_users(
     State(state): State<Arc<AuthState>>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -63,7 +61,6 @@ pub async fn set_user_groups(
     Path(user_id): Path<String>,
     Json(body): Json<SetGroupsBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    // Remove all existing memberships then add new ones
     state.neo4j.query_read(
         "MATCH (u:User {id: $id})
          OPTIONAL MATCH (u)-[r:MEMBER_OF]->()
@@ -85,8 +82,6 @@ pub async fn set_user_groups(
 
     Ok(Json(json!({ "ok": true })))
 }
-
-// ── Groups ────────────────────────────────────────────────────────────────────
 
 pub async fn list_groups(
     State(state): State<Arc<AuthState>>,

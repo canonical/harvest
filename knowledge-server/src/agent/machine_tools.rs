@@ -7,9 +7,11 @@ use crate::llm::types::ToolDefinition;
 use crate::machines::MachineRegistry;
 use super::tool::Tool;
 
-// ── ListAgentsTool ─────────────────────────────────────────────────────────────
+const LIST_AGENTS_PREVIEW_CHARS: usize = 500;
+const RUN_COMMAND_PREVIEW_CHARS: usize = 2000;
+const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
+const MAX_COMMAND_TIMEOUT_SECS: u64 = 300;
 
-/// Lists all connected agent machines in the current project.
 pub struct ListAgentsTool {
     pub registry:   Arc<MachineRegistry>,
     pub project_id: String,
@@ -37,15 +39,10 @@ impl Tool for ListAgentsTool {
     }
 
     fn preview(&self, result: &str) -> String {
-        result.chars().take(500).collect()
+        result.chars().take(LIST_AGENTS_PREVIEW_CHARS).collect()
     }
 }
 
-// ── RunCommandTool ─────────────────────────────────────────────────────────────
-
-/// Runs a bash command on a connected agent machine.
-/// The project_id is bound at construction time so the tool can only
-/// target agents that belong to this project.
 pub struct RunCommandTool {
     pub registry:   Arc<MachineRegistry>,
     pub project_id: String,
@@ -74,7 +71,7 @@ impl Tool for RunCommandTool {
                     "timeout_secs": {
                         "type":        "integer",
                         "description": "Timeout in seconds (default 30, max 300)",
-                        "default":     30
+                        "default":     DEFAULT_COMMAND_TIMEOUT_SECS
                     }
                 },
                 "required": ["agent_id", "command"]
@@ -91,10 +88,9 @@ impl Tool for RunCommandTool {
             .ok_or_else(|| anyhow::anyhow!("command is required"))?;
         let timeout_secs = params["timeout_secs"]
             .as_u64()
-            .unwrap_or(30)
-            .min(300);
+            .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
+            .min(MAX_COMMAND_TIMEOUT_SECS);
 
-        // Security: verify the agent belongs to this project before executing
         let belongs = self.registry
             .agents
             .get(agent_id)
@@ -116,7 +112,7 @@ impl Tool for RunCommandTool {
     }
 
     fn preview(&self, result: &str) -> String {
-        result.chars().take(2000).collect()
+        result.chars().take(RUN_COMMAND_PREVIEW_CHARS).collect()
     }
 }
 
@@ -162,7 +158,6 @@ mod tests {
         let registry = make_registry();
         let (tx, _rx) = mpsc::channel::<ServerToAgent>(8);
 
-        // Agent belongs to proj-2
         registry.agents.insert("agent-x".into(), ConnectedAgent {
             id:           "agent-x".into(),
             project_id:   "proj-2".into(),
@@ -171,7 +166,6 @@ mod tests {
             sender:       tx,
         });
 
-        // Tool is scoped to proj-1 — must not be able to reach proj-2's agent
         let tool = RunCommandTool {
             registry:   Arc::clone(&registry),
             project_id: "proj-1".into(),

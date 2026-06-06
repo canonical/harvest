@@ -25,18 +25,17 @@ use crate::api::ProjectAgentBuilder;
 use crate::auth::jwt::Claims;
 use crate::neo4j::Neo4jClient;
 
-// ── State ─────────────────────────────────────────────────────────────────────
+const CONVERSATION_TITLE_MAX_CHARS: usize = 60;
+const CONVERSATION_TITLE_TRUNCATE_CHARS: usize = 57;
+const PROJECT_NAME_MAX_CHARS: usize = 100;
 
 #[derive(Clone)]
 pub struct ProjectState {
     pub neo4j:         Arc<Neo4jClient>,
     pub agent:         Arc<Agent>,
     pub agent_builder: Arc<ProjectAgentBuilder>,
-    /// project_id → name of user currently generating a response
     pub locks:    Arc<RwLock<HashMap<String, String>>>,
-    /// project_id → broadcast sender for real-time events
     pub channels: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
-    /// project_id → { user_id → UserPresence }
     pub presence: Arc<RwLock<HashMap<String, HashMap<String, UserPresence>>>>,
 }
 
@@ -68,15 +67,12 @@ impl ProjectState {
 
     async fn broadcast(&self, project_id: &str, msg: String) {
         let channels = self.channels.lock().await;
-        if let Some(tx) = channels.get(project_id) {
-            let _ = tx.send(msg);
+        if let Some(sender) = channels.get(project_id) {
+            let _ = sender.send(msg);
         }
     }
 }
 
-// ── Disconnect-detecting stream wrapper ───────────────────────────────────────
-
-/// Holds a `PresenceGuard` alive until the SSE stream is dropped (client disconnects).
 struct GuardedStream<S: Unpin> {
     inner: S,
     _guard: PresenceGuard,
@@ -106,8 +102,8 @@ impl Drop for PresenceGuard {
         let presence   = Arc::clone(&self.presence);
         tokio::spawn(async move {
             {
-                let mut p = presence.write().await;
-                if let Some(users) = p.get_mut(&project_id) {
+                let mut presence_map = presence.write().await;
+                if let Some(users) = presence_map.get_mut(&project_id) {
                     users.remove(&user_id);
                 }
             }
@@ -116,15 +112,13 @@ impl Drop for PresenceGuard {
                 "user_id": user_id,
                 "name": user_name,
             }).to_string();
-            let ch = channels.lock().await;
-            if let Some(tx) = ch.get(&project_id) {
-                let _ = tx.send(leave);
+            let channel_map = channels.lock().await;
+            if let Some(sender) = channel_map.get(&project_id) {
+                let _ = sender.send(leave);
             }
         });
     }
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 type ApiError = (StatusCode, Json<Value>);
 
@@ -152,8 +146,6 @@ pub async fn require_project_access(
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))
 }
 
-// ── Project events SSE ────────────────────────────────────────────────────────
-
 pub async fn project_events(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
@@ -166,12 +158,9 @@ pub async fn project_events(
 
     let conv_id = params.get("conv").cloned();
 
-    // Ensure channel exists and subscribe before mutating presence, so we
-    // don't miss the user_join we're about to send.
-    let tx = state.get_or_create_channel(&project_id).await;
-    let rx = tx.subscribe();
+    let sender = state.get_or_create_channel(&project_id).await;
+    let receiver = sender.subscribe();
 
-    // Add user to presence map.
     {
         let mut presence = state.presence.write().await;
         presence
@@ -183,11 +172,10 @@ pub async fn project_events(
             });
     }
 
-    // Snapshot presence and lock state for the initial burst.
     let presence_users: Vec<Value> = {
-        let p = state.presence.read().await;
-        p.get(&project_id)
-            .map(|m| m.iter().map(|(id, up)| json!({
+        let presence = state.presence.read().await;
+        presence.get(&project_id)
+            .map(|map| map.iter().map(|(id, up)| json!({
                 "user_id": id,
                 "name": up.name,
                 "conv_id": up.conv_id,
@@ -196,15 +184,13 @@ pub async fn project_events(
     };
     let lock_by = state.locks.read().await.get(&project_id).cloned();
 
-    // Broadcast user_join to everyone already connected.
-    let _ = tx.send(json!({
+    let _ = sender.send(json!({
         "type": "user_join",
         "user_id": user.sub,
         "name": user.name,
         "conv_id": conv_id,
     }).to_string());
 
-    // Build initial events sent only to this client.
     let mut init: Vec<Result<Event, Infallible>> = vec![
         Ok(Event::default().data(
             json!({"type": "presence", "users": presence_users}).to_string(),
@@ -224,7 +210,7 @@ pub async fn project_events(
         presence:   Arc::clone(&state.presence),
     };
 
-    let broadcast_stream = BroadcastStream::new(rx).filter_map(|msg| {
+    let broadcast_stream = BroadcastStream::new(receiver).filter_map(|msg| {
         std::future::ready(
             msg.ok().map(|data| Ok::<Event, Infallible>(Event::default().data(data)))
         )
@@ -235,8 +221,6 @@ pub async fn project_events(
 
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
-
-// ── Project conversation history helpers ──────────────────────────────────────
 
 async fn load_project_history(
     neo4j: &Neo4jClient,
@@ -268,22 +252,22 @@ async fn save_project_turn(
     tool_calls_made: usize,
 ) {
     let now = chrono::Utc::now().to_rfc3339();
-    let title = if user_text.len() > 60 {
-        format!("{}…", &user_text[..57])
+    let title = if user_text.len() > CONVERSATION_TITLE_MAX_CHARS {
+        format!("{}…", &user_text[..CONVERSATION_TITLE_TRUNCATE_CHARS])
     } else {
         user_text.to_string()
     };
 
-    let mut msgs: Vec<Value> = compacted_history.iter().map(|h| {
-        json!({ "role": h.role, "text": h.text, "attachments": [] })
+    let mut messages: Vec<Value> = compacted_history.iter().map(|entry| {
+        json!({ "role": entry.role, "text": entry.text, "attachments": [] })
     }).collect();
-    msgs.push(json!({
+    messages.push(json!({
         "role": "user",
         "text": user_text,
         "username": username,
         "attachments": attachments_meta,
     }));
-    msgs.push(json!({
+    messages.push(json!({
         "role": "assistant",
         "text": assistant_text,
         "sources": sources,
@@ -291,11 +275,11 @@ async fn save_project_turn(
         "tool_calls_made": tool_calls_made,
     }));
 
-    let messages_json = match serde_json::to_string(&msgs) {
+    let messages_json = match serde_json::to_string(&messages) {
         Ok(s) => s,
         Err(e) => { tracing::error!(error=%e, "failed to serialize conversation"); return; }
     };
-    let count = msgs.len() as i64;
+    let count = messages.len() as i64;
 
     let _ = neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
@@ -309,8 +293,6 @@ async fn save_project_turn(
         }),
     ).await;
 }
-
-// ── Project query (fire-and-forget, results via events SSE) ───────────────────
 
 #[derive(serde::Deserialize)]
 pub struct ProjectQueryBody {
@@ -329,7 +311,6 @@ pub async fn project_query_stream(
         return e.into_response();
     }
 
-    // Acquire lock — reject if already locked.
     {
         let mut locks = state.locks.write().await;
         if locks.contains_key(&project_id) {
@@ -338,22 +319,19 @@ pub async fn project_query_stream(
         locks.insert(project_id.clone(), user.name.clone());
     }
 
-    // Load and compact history before spawning — so both the agent and the
-    // save step operate on the same (potentially compacted) history.
     let agent = state.agent_builder.build(project_id.clone());
     let raw_history = match &body.conversation_id {
-        Some(cid) => load_project_history(&state.neo4j, &project_id, cid).await,
+        Some(conv_id) => load_project_history(&state.neo4j, &project_id, conv_id).await,
         None => vec![],
     };
     let history = agent.compact_history(&raw_history).await;
 
-    // Broadcast: lock + user's message (include preview URLs for attachments).
     state.broadcast(&project_id, json!({
         "type": "lock",
         "by": user.name,
     }).to_string()).await;
-    let att_for_broadcast: Vec<serde_json::Value> = body.attachments.as_ref()
-        .map(|atts| atts.iter().map(|a| json!({
+    let attachments_for_broadcast: Vec<serde_json::Value> = body.attachments.as_ref()
+        .map(|attachments| attachments.iter().map(|a| json!({
             "name": a.name,
             "mime_type": a.mime_type,
             "data": a.data,
@@ -368,62 +346,58 @@ pub async fn project_query_stream(
         "type": "user_message",
         "query": body.query,
         "username": user.name,
-        "attachments": att_for_broadcast,
+        "attachments": attachments_for_broadcast,
     }).to_string()).await;
 
-    // Spawn agent task — all events go to the broadcast channel.
     let locks    = Arc::clone(&state.locks);
     let channels = Arc::clone(&state.channels);
     let neo4j    = Arc::clone(&state.neo4j);
-    let pid         = project_id.clone();
-    let query       = body.query.clone();
-    let conv_id     = body.conversation_id.clone();
-    let username    = user.name.clone();
-    let attachments = body.attachments.unwrap_or_default();
-    // Attachment metadata saved to history (name+mime_type only, no base64 data).
-    let att_meta: Vec<Value> = attachments.iter()
+    let project_id_owned = project_id.clone();
+    let query            = body.query.clone();
+    let conv_id          = body.conversation_id.clone();
+    let username         = user.name.clone();
+    let attachments      = body.attachments.unwrap_or_default();
+    let attachment_meta: Vec<Value> = attachments.iter()
         .map(|a| json!({ "name": a.name, "mime_type": a.mime_type }))
         .collect();
 
     tokio::spawn(async move {
-        let (agent_tx, mut agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (agent_event_sender, mut agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         let agent_clone = Arc::clone(&agent);
         let history_for_agent = history.clone();
         let query_for_agent   = query.clone();
         tokio::spawn(async move {
-            agent_clone.query_streaming(&query_for_agent, &history_for_agent, &attachments, agent_tx).await;
+            agent_clone.query_streaming(&query_for_agent, &history_for_agent, &attachments, agent_event_sender).await;
         });
 
         while let Some(event) = agent_rx.recv().await {
-            // Persist the completed turn to Neo4j.
             if let (AgentEvent::Done { answer, sources, tool_calls_made }, Some(cid)) =
                 (&event, &conv_id)
             {
                 save_project_turn(
-                    &neo4j, &pid, cid,
-                    &query, &username, att_meta.clone(),
+                    &neo4j, &project_id_owned, cid,
+                    &query, &username, attachment_meta.clone(),
                     &history,
                     answer, sources, *tool_calls_made,
                 ).await;
             }
             if let Ok(data) = serde_json::to_string(&event) {
-                let ch = channels.lock().await;
-                if let Some(tx) = ch.get(&pid) { let _ = tx.send(data); }
+                let channel_map = channels.lock().await;
+                if let Some(sender) = channel_map.get(&project_id_owned) {
+                    let _ = sender.send(data);
+                }
             }
         }
 
-        // Release lock and notify.
-        locks.write().await.remove(&pid);
-        let ch = channels.lock().await;
-        if let Some(tx) = ch.get(&pid) {
-            let _ = tx.send(json!({"type": "unlock"}).to_string());
+        locks.write().await.remove(&project_id_owned);
+        let channel_map = channels.lock().await;
+        if let Some(sender) = channel_map.get(&project_id_owned) {
+            let _ = sender.send(json!({"type": "unlock"}).to_string());
         }
     });
 
     Json(json!({"ok": true})).into_response()
 }
-
-// ── Groups & projects ─────────────────────────────────────────────────────────
 
 pub async fn list_my_groups(
     Extension(user): Extension<Claims>,
@@ -472,7 +446,7 @@ pub async fn create_project(
     if name.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "name is required"));
     }
-    if name.len() > 100 {
+    if name.len() > PROJECT_NAME_MAX_CHARS {
         return Err(err(StatusCode::BAD_REQUEST, "name must be at most 100 characters"));
     }
 
@@ -542,22 +516,22 @@ pub async fn update_project(
     Json(body): Json<UpdateProjectBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    if let Some(ref n) = body.name {
-        if n.trim().is_empty() {
+    if let Some(ref name) = body.name {
+        if name.trim().is_empty() {
             return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
         }
     }
-    let mut sets: Vec<&str> = Vec::new();
-    if body.name.is_some()        { sets.push("p.name = $name"); }
-    if body.description.is_some() { sets.push("p.description = $description"); }
-    if !sets.is_empty() {
+    let mut set_clauses: Vec<&str> = Vec::new();
+    if body.name.is_some()        { set_clauses.push("p.name = $name"); }
+    if body.description.is_some() { set_clauses.push("p.description = $description"); }
+    if !set_clauses.is_empty() {
         let cypher = format!(
             "MATCH (p:Project {{id: $pid}}) SET {} RETURN p.id AS id",
-            sets.join(", ")
+            set_clauses.join(", ")
         );
         let mut params = json!({ "pid": project_id });
-        if let Some(n) = &body.name        { params["name"]        = json!(n.trim()); }
-        if let Some(d) = &body.description { params["description"] = json!(d); }
+        if let Some(name) = &body.name        { params["name"]        = json!(name.trim()); }
+        if let Some(desc) = &body.description { params["description"] = json!(desc); }
         state.neo4j.query_read(&cypher, params)
             .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     }
@@ -580,8 +554,6 @@ pub async fn delete_project(
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
-
-// ── Conversations ─────────────────────────────────────────────────────────────
 
 pub async fn list_conversations(
     Extension(user): Extension<Claims>,
@@ -675,9 +647,9 @@ pub async fn update_conversation(
     if exists.is_empty() {
         return Err(err(StatusCode::NOT_FOUND, "not found"));
     }
-    let now   = chrono::Utc::now().to_rfc3339();
-    let count = body.messages.as_array().map(|a| a.len() as i64).unwrap_or(0);
-    let msgs  = body.messages.to_string();
+    let now           = chrono::Utc::now().to_rfc3339();
+    let message_count = body.messages.as_array().map(|a| a.len() as i64).unwrap_or(0);
+    let messages_json = body.messages.to_string();
     state.neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
          SET c.title = $title, c.messages = $messages,
@@ -685,8 +657,8 @@ pub async fn update_conversation(
          RETURN c.id AS id",
         json!({
             "pid": project_id, "cid": conv_id,
-            "title": body.title, "messages": msgs,
-            "count": count, "now": now,
+            "title": body.title, "messages": messages_json,
+            "count": message_count, "now": now,
         }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
@@ -716,8 +688,6 @@ pub async fn delete_conversation(
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
-
-// ── Secrets ───────────────────────────────────────────────────────────────────
 
 pub async fn list_secrets(
     Extension(user): Extension<Claims>,
@@ -780,8 +750,6 @@ pub async fn delete_secret(
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── Non-streaming project query (kept for internal use) ───────────────────────
-
 pub async fn project_query(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
@@ -793,7 +761,7 @@ pub async fn project_query(
     }
     let agent = state.agent_builder.build(project_id.clone());
     let raw_history = match &body.conversation_id {
-        Some(cid) => load_project_history(&state.neo4j, &project_id, cid).await,
+        Some(conv_id) => load_project_history(&state.neo4j, &project_id, conv_id).await,
         None => vec![],
     };
     let history = agent.compact_history(&raw_history).await;

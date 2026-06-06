@@ -72,7 +72,6 @@ pub async fn conversation_count(neo4j: &Neo4jClient, project_id: &str) -> Result
     Ok(n)
 }
 
-/// Fetch all conversations (concatenated text) for a project.
 pub async fn all_conversations_text(neo4j: &Arc<Neo4jClient>, project_id: &str) -> Result<String> {
     let rows = neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation)

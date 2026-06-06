@@ -38,15 +38,11 @@ fn clear_token_cookie() -> Cookie<'static> {
         .build()
 }
 
-// ── Config (public) ───────────────────────────────────────────────────────────
-
 pub async fn config(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
     Json(serde_json::json!({
         "google": state.config.google.is_some(),
     }))
 }
-
-// ── Register ─────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 pub struct RegisterBody {
@@ -68,7 +64,6 @@ pub async fn register(
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
-    // Atomic: first user becomes admin
     let rows = state.neo4j.query_read(
         "MATCH (existing:User)
          WITH count(existing) AS n
@@ -94,8 +89,6 @@ pub async fn register(
 
     Ok((jar.add(make_token_cookie(token)), Json(json!({ "ok": true }))))
 }
-
-// ── Login ─────────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 pub struct LoginBody {
@@ -128,13 +121,9 @@ pub async fn login(
     Ok((jar.add(make_token_cookie(token)), Json(json!({ "ok": true }))))
 }
 
-// ── Logout ────────────────────────────────────────────────────────────────────
-
 pub async fn logout(jar: CookieJar) -> impl IntoResponse {
     (jar.add(clear_token_cookie()), Json(json!({ "ok": true })))
 }
-
-// ── Me ────────────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
 pub struct MeResponse {
@@ -156,8 +145,6 @@ pub async fn me(
         role: claims.role,
     }))
 }
-
-// ── Google OAuth ──────────────────────────────────────────────────────────────
 
 pub async fn google_redirect(
     State(state): State<Arc<AuthState>>,
@@ -194,7 +181,6 @@ pub async fn google_callback(
 ) -> Result<impl IntoResponse, ApiError> {
     let google = state.config.google.as_ref().ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "Google login not configured"))?;
 
-    // Google returned an error (e.g. redirect_uri_mismatch, access_denied).
     if let Some(e) = params.error {
         let desc = params.error_description.unwrap_or_default();
         tracing::warn!(error = %e, description = %desc, "Google OAuth error");
@@ -204,7 +190,6 @@ pub async fn google_callback(
     let code = params.code.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth code"))?;
     let oauth_state = params.state.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth state"))?;
 
-    // Validate CSRF state
     let stored = jar.get("oauth_state").map(|c| c.value().to_string());
     if stored.as_deref() != Some(oauth_state.as_str()) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid OAuth state"));
@@ -252,8 +237,6 @@ pub async fn google_callback(
         Redirect::to("/"),
     ))
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn extract_claims(secret: &str, jar: &CookieJar) -> Result<jwt::Claims, ApiError> {
     let token = jar

@@ -39,7 +39,6 @@ pub struct GraphState {
     pub cache: Arc<GraphCache>,
 }
 
-/// State for the personal query endpoints (`/query` and `/query/stream`).
 #[derive(Clone)]
 pub struct QueryState {
     pub agent: Arc<Agent>,
@@ -58,8 +57,6 @@ pub struct AppState {
     pub llm:              Arc<dyn LlmProvider>,
 }
 
-/// Creates a project-scoped agent that includes both graph tools and
-/// machine tools bound to the given project.
 #[derive(Clone)]
 pub struct ProjectAgentBuilder {
     pub llm:                        Arc<dyn LlmProvider>,
@@ -196,7 +193,6 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
         .route("/projects/:pid/overview/regenerate", post(regenerate_overview))
         .with_state(overview_state);
 
-    // Machine state for routes
     let machine_state = Arc::new(MachineState {
         registry:    Arc::clone(&state.machine_registry),
         neo4j:       Some(Arc::clone(&state.neo4j)),
@@ -204,10 +200,7 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
         server_url,
     });
 
-    // Public machines routes (install.sh, binary, WebSocket — no JWT)
     let machines_public = machines_router(Arc::clone(&machine_state));
-
-    // Protected machines routes (list agents, execute, rotate token)
     let machines_protected = machines_protected_router(Arc::clone(&machine_state));
 
     let mut protected_router = Router::new()
@@ -242,7 +235,7 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
 
     Router::new()
         .merge(public_router)
-        .merge(machines_public)   // WebSocket + install.sh + binary (no JWT)
+        .merge(machines_public)
         .merge(protected_router)
         .merge(admin_router)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))

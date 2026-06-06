@@ -53,8 +53,6 @@ const STATUS_USER_PREFIX: &str =
      \n\
      Environment context:\n\n";
 
-/// Conversations shorter than this are fed directly to the status agent,
-/// skipping the intermediate env-doc summarisation step (one fewer LLM call).
 const MAX_DIRECT_CHARS: usize = 8_000;
 
 pub async fn run(
@@ -127,16 +125,13 @@ async fn generate_status(
     Ok(strip_code_fence(answer))
 }
 
-/// If the LLM wrapped its HTML output in a markdown code fence, unwrap it.
 fn strip_code_fence(s: String) -> String {
     let trimmed = s.trim();
     let Some(after_ticks) = trimmed.strip_prefix("```") else {
         return s;
     };
-    // Skip optional language hint on the opening fence line
     let content_start = after_ticks.find('\n').map(|i| i + 1).unwrap_or(0);
     let content = &after_ticks[content_start..];
-    // Remove trailing ```
     if let Some(inner) = content.trim_end().strip_suffix("```") {
         inner.trim().to_string()
     } else {
