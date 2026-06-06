@@ -236,3 +236,8 @@ export async function rotateInstallToken(projectId) {
   if (!response.ok) throw new Error(`Server error: ${response.status}`);
   return response.json();
 }
+
+// ── Overview ──────────────────────────────────────────────────────────────────
+
+export const fetchProjectOverview      = (projectId) => projectFetch(`${pid(projectId)}/overview`);
+export const regenerateProjectOverview = (projectId) => projectFetch(`${pid(projectId)}/overview/regenerate`, { method: 'POST' });

@@ -132,7 +132,7 @@ fn err(status: StatusCode, msg: &str) -> ApiError {
     (status, Json(json!({ "error": msg })))
 }
 
-async fn require_project_access(
+pub async fn require_project_access(
     neo4j: &Neo4jClient,
     user_id: &str,
     user_role: &str,
