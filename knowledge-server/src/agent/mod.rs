@@ -89,10 +89,10 @@ impl Agent {
         if history.is_empty() || estimate_history_chars(history) <= self.compaction_threshold_chars {
             return history.to_vec();
         }
-        let n = history.len();
-        let keep_last = self.compaction_keep_last.min(n);
-        let old = &history[..n - keep_last];
-        let recent = &history[n - keep_last..];
+        let total_messages = history.len();
+        let keep_last = self.compaction_keep_last.min(total_messages);
+        let old = &history[..total_messages - keep_last];
+        let recent = &history[total_messages - keep_last..];
 
         let conversation_text = old
             .iter()
@@ -125,77 +125,30 @@ impl Agent {
         result
     }
 
-    pub async fn query(&self, user_query: &str, history: &[HistoryMessage], attachments: &[Attachment]) -> Result<QueryResponse> {
-        let tool_defs: Vec<ToolDefinition> =
-            self.tools.iter().map(|t| t.definition()).collect();
+    pub async fn query(
+        &self,
+        user_query: &str,
+        history: &[HistoryMessage],
+        attachments: &[Attachment],
+    ) -> Result<QueryResponse> {
+        let (event_sender, mut receiver) = mpsc::channel::<AgentEvent>(64);
+        self.query_streaming(user_query, history, attachments, event_sender).await;
 
-        let tool_map: HashMap<String, &dyn Tool> =
-            self.tools.iter().map(|t| (t.definition().name, t.as_ref())).collect();
-
-        let compacted = self.compact_history(history).await;
-        let mut messages = vec![Message::system(prompt::system_prompt())];
-        messages.extend(history_to_messages(&compacted));
-        messages.push(build_user_message(user_query, attachments));
-
-        let mut iterations = 0;
-
-        let final_text = loop {
-            if iterations >= self.max_iterations {
-                tracing::warn!("agent hit max_iterations={} — requesting synthesis", self.max_iterations);
-                messages.push(Message::user(
-                    "You have used the maximum number of tool calls. \
-                     Synthesize what you have gathered so far into a final answer.",
-                ));
-                match self.llm.chat(&messages, &[]).await {
-                    Ok(LlmResponse::Message { text }) => break text,
-                    Ok(LlmResponse::ToolCalls(_)) | Err(_) => break self.last_assistant_text(&messages),
+        let mut response = None;
+        let mut error = None;
+        while let Some(event) = receiver.recv().await {
+            match event {
+                AgentEvent::Done { answer, sources, tool_calls_made } => {
+                    response = Some(QueryResponse { answer, sources, tool_calls_made });
                 }
-            }
-
-            match self.llm.chat(&messages, &tool_defs).await? {
-                LlmResponse::Message { text } => break text,
-
-                LlmResponse::ToolCalls(calls) => {
-                    iterations += 1;
-
-                    let call_parts: Vec<ContentPart> = calls
-                        .iter()
-                        .map(|c| ContentPart::ToolUse {
-                            id: c.id.clone(),
-                            name: c.name.clone(),
-                            input: c.input.clone(),
-                        })
-                        .collect();
-                    messages.push(Message {
-                        role: crate::llm::types::Role::Assistant,
-                        content: MessageContent::Parts(call_parts),
-                    });
-
-                    // Run all tool calls in this turn concurrently.
-                    let results = join_all(
-                        calls.iter().map(|c| self.execute_tool_call(c, &tool_map))
-                    ).await;
-
-                    for (call, result) in calls.iter().zip(results) {
-                        messages.push(Message {
-                            role: crate::llm::types::Role::User,
-                            content: MessageContent::Parts(vec![ContentPart::ToolResult {
-                                tool_use_id: call.id.clone(),
-                                content: result,
-                                is_error: false,
-                            }]),
-                        });
-                    }
+                AgentEvent::Error { message } => {
+                    error = Some(anyhow::anyhow!(message));
                 }
+                _ => {}
             }
-        };
+        }
 
-        let sources = parse_citations(&final_text);
-        Ok(QueryResponse {
-            answer: final_text,
-            sources,
-            tool_calls_made: iterations,
-        })
+        response.ok_or_else(|| error.unwrap_or_else(|| anyhow::anyhow!("agent produced no response")))
     }
 
     pub async fn describe_tool_call(&self, name: &str, input: &serde_json::Value) -> String {
@@ -211,7 +164,13 @@ impl Agent {
         }
     }
 
-    pub async fn query_streaming(&self, user_query: &str, history: &[HistoryMessage], attachments: &[Attachment], tx: mpsc::Sender<AgentEvent>) {
+    pub async fn query_streaming(
+        &self,
+        user_query: &str,
+        history: &[HistoryMessage],
+        attachments: &[Attachment],
+        event_sender: mpsc::Sender<AgentEvent>,
+    ) {
         let tool_defs: Vec<ToolDefinition> =
             self.tools.iter().map(|t| t.definition()).collect();
 
@@ -241,7 +200,7 @@ impl Agent {
             let response = match self.llm.chat(&messages, &tool_defs).await {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = tx.send(AgentEvent::Error { message: e.to_string() }).await;
+                    let _ = event_sender.send(AgentEvent::Error { message: e.to_string() }).await;
                     return;
                 }
             };
@@ -265,9 +224,8 @@ impl Agent {
                         content: MessageContent::Parts(call_parts),
                     });
 
-                    // Announce all calls, then execute concurrently, then emit results.
                     for call in &calls {
-                        let _ = tx.send(AgentEvent::ToolCall {
+                        let _ = event_sender.send(AgentEvent::ToolCall {
                             name: call.name.clone(),
                             input: call.input.clone(),
                         }).await;
@@ -280,8 +238,8 @@ impl Agent {
                     for (call, result) in calls.iter().zip(results) {
                         let preview = tool_map.get(call.name.as_str())
                             .map(|t| t.preview(&result))
-                            .unwrap_or_else(|| result.chars().take(3000).collect());
-                        let _ = tx.send(AgentEvent::ToolResult {
+                            .unwrap_or_else(|| result.chars().take(tool::DEFAULT_PREVIEW_CHARS).collect());
+                        let _ = event_sender.send(AgentEvent::ToolResult {
                             name: call.name.clone(),
                             preview,
                         }).await;
@@ -299,7 +257,7 @@ impl Agent {
         };
 
         let sources = parse_citations(&final_text);
-        let _ = tx.send(AgentEvent::Done {
+        let _ = event_sender.send(AgentEvent::Done {
             answer: final_text,
             sources,
             tool_calls_made: iterations,
@@ -345,11 +303,17 @@ pub(crate) fn build_user_message(text: &str, attachments: &[Attachment]) -> Mess
         return Message::user(text);
     }
     let mut parts = vec![ContentPart::Text { text: text.to_string() }];
-    for att in attachments {
-        if att.mime_type.starts_with("image/") {
-            parts.push(ContentPart::Image { media_type: att.mime_type.clone(), data: att.data.clone() });
+    for attachment in attachments {
+        if attachment.mime_type.starts_with("image/") {
+            parts.push(ContentPart::Image {
+                media_type: attachment.mime_type.clone(),
+                data: attachment.data.clone(),
+            });
         } else {
-            parts.push(ContentPart::Document { media_type: att.mime_type.clone(), data: att.data.clone() });
+            parts.push(ContentPart::Document {
+                media_type: attachment.mime_type.clone(),
+                data: attachment.data.clone(),
+            });
         }
     }
     Message { role: crate::llm::types::Role::User, content: MessageContent::Parts(parts) }
@@ -360,12 +324,12 @@ pub(crate) fn estimate_history_chars(history: &[HistoryMessage]) -> usize {
 }
 
 fn history_to_messages(history: &[HistoryMessage]) -> Vec<Message> {
-    history.iter().map(|h| {
-        let atts = h.attachments.as_deref().unwrap_or(&[]);
-        match h.role.as_str() {
-            "assistant" => Message::assistant_text(&h.text),
-            "summary" => Message::user(format!("[Summary of prior conversation]\n{}", h.text)),
-            _ => build_user_message(&h.text, atts),
+    history.iter().map(|entry| {
+        let attachments = entry.attachments.as_deref().unwrap_or(&[]);
+        match entry.role.as_str() {
+            "assistant" => Message::assistant_text(&entry.text),
+            "summary" => Message::user(format!("[Summary of prior conversation]\n{}", entry.text)),
+            _ => build_user_message(&entry.text, attachments),
         }
     }).collect()
 }
@@ -463,8 +427,6 @@ mod tests {
         Agent::new(llm, tools, max)
     }
 
-    // ── attachment handling ───────────────────────────────────────────────────
-
     #[test]
     fn user_message_with_no_attachments_is_text_content() {
         let msg = build_user_message("hello", &[]);
@@ -504,20 +466,18 @@ mod tests {
     #[test]
     fn history_message_with_image_attachment_becomes_parts() {
         let att = Attachment { name: "img.jpg".into(), mime_type: "image/jpeg".into(), data: "data".into() };
-        let h = HistoryMessage { role: "user".into(), text: "see".into(), attachments: Some(vec![att]) };
-        let msgs = history_to_messages(&[h]);
+        let entry = HistoryMessage { role: "user".into(), text: "see".into(), attachments: Some(vec![att]) };
+        let msgs = history_to_messages(&[entry]);
         assert_eq!(msgs.len(), 1);
         assert!(matches!(msgs[0].content, MessageContent::Parts(_)));
     }
 
     #[test]
     fn history_message_without_attachments_is_text() {
-        let h = HistoryMessage { role: "user".into(), text: "hello".into(), attachments: None };
-        let msgs = history_to_messages(&[h]);
+        let entry = HistoryMessage { role: "user".into(), text: "hello".into(), attachments: None };
+        let msgs = history_to_messages(&[entry]);
         assert!(matches!(msgs[0].content, MessageContent::Text(_)));
     }
-
-    // ── query / streaming ─────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn text_on_first_turn_returns_immediately() {
@@ -554,10 +514,6 @@ mod tests {
 
     #[tokio::test]
     async fn max_iterations_returns_last_assistant_text() {
-        let llm = MockLlm::new(vec![
-            text("partial answer so far"),
-            tool_call("my_tool"),
-        ]);
         let agent = agent_with(
             MockLlm::new(vec![text("partial answer so far")]),
             vec![],
@@ -569,8 +525,6 @@ mod tests {
 
     #[tokio::test]
     async fn multiple_tool_calls_in_one_turn_all_executed() {
-        // Both tool calls arrive in the same LlmResponse::ToolCalls batch;
-        // they should all be executed (now concurrently) and both results sent to the LLM.
         let llm = MockLlm::new(vec![
             two_tool_calls("tool_a", "tool_b"),
             text("got both results"),
@@ -641,8 +595,6 @@ mod tests {
         assert_eq!(sources[0].line, 0);
     }
 
-    // ── estimate_history_chars ────────────────────────────────────────────────
-
     #[test]
     fn estimate_empty_history_is_zero() {
         assert_eq!(estimate_history_chars(&[]), 0);
@@ -650,8 +602,8 @@ mod tests {
 
     #[test]
     fn estimate_counts_text_chars_of_single_message() {
-        let h = HistoryMessage { role: "user".into(), text: "hello".into(), attachments: None };
-        assert_eq!(estimate_history_chars(&[h]), 5);
+        let entry = HistoryMessage { role: "user".into(), text: "hello".into(), attachments: None };
+        assert_eq!(estimate_history_chars(&[entry]), 5);
     }
 
     #[test]
@@ -663,12 +615,10 @@ mod tests {
         assert_eq!(estimate_history_chars(&msgs), 7);
     }
 
-    // ── history_to_messages: summary role ────────────────────────────────────
-
     #[test]
     fn summary_role_renders_as_user_message_with_prefix() {
-        let h = HistoryMessage { role: "summary".into(), text: "old stuff".into(), attachments: None };
-        let msgs = history_to_messages(&[h]);
+        let entry = HistoryMessage { role: "summary".into(), text: "old stuff".into(), attachments: None };
+        let msgs = history_to_messages(&[entry]);
         assert_eq!(msgs.len(), 1);
         assert!(matches!(msgs[0].role, crate::llm::types::Role::User));
         match &msgs[0].content {
@@ -679,8 +629,6 @@ mod tests {
             other => panic!("expected Text, got {other:?}"),
         }
     }
-
-    // ── compact_history ───────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn compact_returns_unchanged_when_under_threshold() {
@@ -729,17 +677,14 @@ mod tests {
             attachments: None,
         }).collect();
         let result = agent.compact_history(&history).await;
-        assert_eq!(result.len(), 3); // 1 summary + 2 recent
+        assert_eq!(result.len(), 3);
         assert_eq!(result[0].role, "summary");
         assert_eq!(result[1].text, "msg 3");
         assert_eq!(result[2].text, "msg 4");
     }
 
-    // ── agent auto-compacts ───────────────────────────────────────────────────
-
     #[tokio::test]
     async fn query_compacts_history_over_threshold() {
-        // threshold=5: history "message one" + "response one" > 5 chars → compaction
         let agent = Agent::new(
             MockLlm::new(vec![text("compact summary"), text("final answer")]),
             vec![],
@@ -766,8 +711,8 @@ mod tests {
             HistoryMessage { role: "user".into(), text: "message one".into(), attachments: None },
             HistoryMessage { role: "assistant".into(), text: "response one".into(), attachments: None },
         ];
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
-        agent.query_streaming("new question", &history, &[], tx).await;
+        let (event_sender, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        agent.query_streaming("new question", &history, &[], event_sender).await;
         let mut answer = None;
         while let Ok(event) = rx.try_recv() {
             if let AgentEvent::Done { answer: a, .. } = event {
