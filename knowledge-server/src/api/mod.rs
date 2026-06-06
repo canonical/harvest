@@ -26,6 +26,9 @@ use crate::machines::{
     MachineRegistry,
 };
 use crate::neo4j::Neo4jClient;
+use crate::overview::handlers::{
+    get_overview, overview_events, regenerate_overview, OverviewState,
+};
 use crate::projects::handlers::{self as proj_handlers, ProjectState};
 
 pub type GraphCache = RwLock<HashMap<String, Arc<String>>>;
@@ -52,6 +55,7 @@ pub struct AppState {
     pub machine_registry: Arc<MachineRegistry>,
     pub agent_builder:    Arc<ProjectAgentBuilder>,
     pub binary_path:      Option<PathBuf>,
+    pub llm:              Arc<dyn LlmProvider>,
 }
 
 /// Creates a project-scoped agent that includes both graph tools and
@@ -157,6 +161,14 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
         Arc::clone(&state.agent_builder),
     ));
 
+    let overview_state = Arc::new(OverviewState {
+        neo4j:         Arc::clone(&state.neo4j),
+        llm:           Arc::clone(&state.llm),
+        agent_builder: Arc::clone(&state.agent_builder),
+        agent:         Arc::clone(&state.agent),
+        generating:    Arc::new(dashmap::DashMap::new()),
+    });
+
     let project_router = Router::new()
         .route("/groups",       get(proj_handlers::list_my_groups))
         .route("/projects",     get(proj_handlers::list_projects).post(proj_handlers::create_project))
@@ -178,6 +190,12 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
                delete(proj_handlers::delete_secret))
         .with_state(project_state);
 
+    let overview_router = Router::new()
+        .route("/projects/:pid/overview",            get(get_overview))
+        .route("/projects/:pid/overview/events",     get(overview_events))
+        .route("/projects/:pid/overview/regenerate", post(regenerate_overview))
+        .with_state(overview_state);
+
     // Machine state for routes
     let machine_state = Arc::new(MachineState {
         registry:    Arc::clone(&state.machine_registry),
@@ -198,6 +216,7 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
         .merge(agent_router)
         .merge(graph_router)
         .merge(project_router)
+        .merge(overview_router)
         .merge(machines_protected);
 
     if let Some(docs_dir) = state.docs_dir {
