@@ -4,9 +4,12 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use super::{
+    retry,
     types::{ContentPart, LlmResponse, Message, MessageContent, Role, ToolCall, ToolDefinition},
     LlmProvider,
 };
+
+const OVERLOAD_STATUS_CODES: &[u16] = &[502, 503];
 
 pub struct OpenAiCompatProvider {
     base_url: String,
@@ -42,59 +45,29 @@ impl LlmProvider for OpenAiCompatProvider {
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
-        let mut attempt = 0u32;
-        loop {
-            let mut req = self.client.post(&url).json(&body);
-            if !self.api_key.is_empty() {
-                req = req.bearer_auth(&self.api_key);
-            }
-
-            let resp = match req.send().await {
-                Ok(r) => r,
-                Err(e) if e.is_timeout() && attempt < self.max_retries => {
-                    attempt += 1;
-                    let delay = 2u64 * (1u64 << attempt.min(4));
-                    tracing::warn!(attempt, delay_secs = delay, "LLM request timed out — retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                    continue;
+        let response = retry::send_with_retry(
+            self.max_retries,
+            OVERLOAD_STATUS_CODES,
+            "OpenAI-compat",
+            || {
+                let mut req = self.client.post(&url).json(&body);
+                if !self.api_key.is_empty() {
+                    req = req.bearer_auth(&self.api_key);
                 }
-                Err(e) => return Err(e.into()),
-            };
+                req.send()
+            },
+        ).await?;
 
-            let status = resp.status();
+        let status = response.status();
+        let body_text = response.text().await?;
+        let json: Value = serde_json::from_str(&body_text)
+            .map_err(|e| anyhow::anyhow!("OpenAI-compat API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
 
-            match status.as_u16() {
-                429 if attempt < self.max_retries => {
-                    let delay = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(30u64 * (1u64 << attempt.min(4)));
-                    attempt += 1;
-                    tracing::warn!(attempt, delay_secs = delay, "rate limited — retrying");
-                    tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                    continue;
-                }
-                502 | 503 if attempt < self.max_retries => {
-                    attempt += 1;
-                    tracing::warn!(attempt, status = %status, "transient server error — retrying in 5s");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
-                _ => {}
-            }
-
-            let body_text = resp.text().await?;
-            let json: Value = serde_json::from_str(&body_text)
-                .map_err(|e| anyhow::anyhow!("OpenAI-compat API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
-
-            if !status.is_success() {
-                bail!("OpenAI-compat API error {status}: {json}");
-            }
-
-            return parse_openai_response(json);
+        if !status.is_success() {
+            bail!("OpenAI-compat API error {status}: {json}");
         }
+
+        parse_openai_response(json)
     }
 }
 
@@ -165,13 +138,13 @@ fn to_openai_message(msg: &Message) -> Value {
     }
 }
 
-fn to_openai_function(t: &ToolDefinition) -> Value {
+fn to_openai_function(tool: &ToolDefinition) -> Value {
     json!({
         "type": "function",
         "function": {
-            "name":        t.name,
-            "description": t.description,
-            "parameters":  t.parameters,
+            "name":        tool.name,
+            "description": tool.description,
+            "parameters":  tool.parameters,
         }
     })
 }
@@ -214,8 +187,6 @@ mod tests {
     fn make_provider(base_url: &str) -> OpenAiCompatProvider {
         OpenAiCompatProvider::new(base_url.into(), "test-key".into(), "test-model".into(), 30, 0)
     }
-
-    // ── parse_openai_response ─────────────────────────────────────────────────
 
     #[test]
     fn parse_stop_returns_message() {
@@ -296,8 +267,6 @@ mod tests {
         }
     }
 
-    // ── to_openai_message ─────────────────────────────────────────────────────
-
     #[test]
     fn system_message_maps_to_system_role() {
         let msg = Message::system("be helpful");
@@ -348,8 +317,6 @@ mod tests {
         assert_eq!(v["content"], "result text");
     }
 
-    // ── image and document content parts ─────────────────────────────────────
-
     #[test]
     fn image_content_part_serializes_as_image_url() {
         let msg = Message {
@@ -379,12 +346,9 @@ mod tests {
         let v = to_openai_message(&msg);
         let content = v["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "text");
-        // Document becomes a text note
         assert_eq!(content[1]["type"], "text");
         assert!(content[1]["text"].as_str().unwrap().contains("PDF"));
     }
-
-    // ── to_openai_function ────────────────────────────────────────────────────
 
     #[test]
     fn tool_definition_has_function_type_wrapper() {
@@ -400,8 +364,6 @@ mod tests {
         assert!(v["function"].get("parameters").is_some());
         assert!(v.get("name").is_none(), "name must be nested, not top-level");
     }
-
-    // ── HTTP round-trip via httpmock ──────────────────────────────────────────
 
     fn text_response() -> serde_json::Value {
         json!({
@@ -486,8 +448,6 @@ mod tests {
     #[tokio::test]
     async fn url_appends_chat_completions_path() {
         let server = MockServer::start();
-        // Only registers a mock on exactly /chat/completions —
-        // if the URL is wrong the request won't match and we'll get a 404 → Err.
         server.mock(|when, then| {
             when.method("POST").path("/chat/completions");
             then.status(200).json_body(text_response());
