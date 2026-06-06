@@ -8,8 +8,6 @@ use crate::llm::types::ToolDefinition;
 use crate::neo4j::Neo4jClient;
 use super::tool::Tool;
 
-// ── ListSecretsTool ───────────────────────────────────────────────────────────
-
 pub struct ListSecretsTool {
     pub neo4j:      Arc<Neo4jClient>,
     pub project_id: String,
@@ -41,8 +39,6 @@ impl Tool for ListSecretsTool {
         Ok(serde_json::to_string_pretty(&rows)?)
     }
 }
-
-// ── GetSecretTool ─────────────────────────────────────────────────────────────
 
 pub struct GetSecretTool {
     pub neo4j:      Arc<Neo4jClient>,
@@ -93,8 +89,6 @@ impl Tool for GetSecretTool {
     }
 }
 
-// ── SaveSecretTool ────────────────────────────────────────────────────────────
-
 pub struct SaveSecretTool {
     pub neo4j:      Arc<Neo4jClient>,
     pub project_id: String,
@@ -143,7 +137,6 @@ impl Tool for SaveSecretTool {
             anyhow::bail!("name cannot be empty");
         }
 
-        // Check for existing secret first to implement the "same value → no-op" rule.
         let existing = self.neo4j.query_read(
             "MATCH (:Project {id: $pid})-[:HAS_SECRET]->(s:ProjectSecret {name: $name})
              RETURN s.value AS value",
@@ -155,7 +148,6 @@ impl Tool for SaveSecretTool {
             if current == value {
                 return Ok(format!("Secret '{name}' already exists with the same value — no change made."));
             }
-            // Different value: overwrite.
             self.neo4j.query_read(
                 "MATCH (:Project {id: $pid})-[:HAS_SECRET]->(s:ProjectSecret {name: $name})
                  SET s.value = $value
@@ -165,7 +157,6 @@ impl Tool for SaveSecretTool {
             return Ok(format!("Secret '{name}' updated with new value."));
         }
 
-        // Does not exist yet: create.
         let now = Utc::now().to_rfc3339();
         self.neo4j.query_read(
             "MATCH (p:Project {id: $pid})

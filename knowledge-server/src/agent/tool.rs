@@ -4,11 +4,13 @@ use serde_json::Value;
 
 use crate::llm::types::ToolDefinition;
 
+pub const DEFAULT_PREVIEW_CHARS: usize = 3000;
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn definition(&self) -> ToolDefinition;
     async fn execute(&self, params: Value) -> Result<String>;
     fn preview(&self, result: &str) -> String {
-        result.chars().take(3000).collect()
+        result.chars().take(DEFAULT_PREVIEW_CHARS).collect()
     }
 }

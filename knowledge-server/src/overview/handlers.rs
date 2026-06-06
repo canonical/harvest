@@ -24,6 +24,8 @@ use crate::{
     projects::handlers::require_project_access,
 };
 
+const OVERVIEW_BROADCAST_BUFFER: usize = 256;
+
 type ApiError = (StatusCode, Json<Value>);
 
 fn err(status: StatusCode, msg: &str) -> ApiError {
@@ -36,11 +38,9 @@ pub struct OverviewState {
     pub llm:           Arc<dyn LlmProvider>,
     pub agent_builder: Arc<ProjectAgentBuilder>,
     pub agent:         Arc<Agent>,
-    /// project_id → broadcast sender for the active generation
     pub generating:    Arc<DashMap<String, broadcast::Sender<String>>>,
 }
 
-/// Wrap a broadcast receiver in an SSE stream.
 fn sse_stream(rx: broadcast::Receiver<String>) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let stream = BroadcastStream::new(rx).filter_map(|msg| {
         std::future::ready(
@@ -49,8 +49,6 @@ fn sse_stream(rx: broadcast::Receiver<String>) -> Sse<impl futures::Stream<Item 
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
-
-// ── GET /projects/:pid/overview ───────────────────────────────────────────────
 
 pub async fn get_overview(
     Extension(user): Extension<Claims>,
@@ -73,11 +71,6 @@ pub async fn get_overview(
     })))
 }
 
-// ── GET /projects/:pid/overview/events ────────────────────────────────────────
-//
-// Lets any client reconnect to an in-progress generation.
-// If no generation is running, returns a single overview_done event immediately.
-
 pub async fn overview_events(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<OverviewState>>,
@@ -88,20 +81,15 @@ pub async fn overview_events(
     }
 
     if let Some(tx) = state.generating.get(&project_id) {
-        // Subscribe before releasing the DashMap read lock so we don't race
-        // with the pipeline sending overview_done and removing the entry.
         let rx = tx.subscribe();
         drop(tx);
         return sse_stream(rx).into_response();
     }
 
-    // Not generating — tell the client immediately so it can show the result.
     let (tx, rx) = broadcast::channel(1);
     let _ = tx.send(json!({"type": "overview_done"}).to_string());
     sse_stream(rx).into_response()
 }
-
-// ── POST /projects/:pid/overview/regenerate ───────────────────────────────────
 
 pub async fn regenerate_overview(
     Extension(user): Extension<Claims>,
@@ -112,34 +100,31 @@ pub async fn regenerate_overview(
         return e.into_response();
     }
 
-    // Already generating? Return a new subscriber to the existing broadcast.
     if let Some(tx) = state.generating.get(&project_id) {
         let rx = tx.subscribe();
         drop(tx);
         return sse_stream(rx).into_response();
     }
 
-    // Start a new generation.
-    // Use a large buffer so late subscribers catch up on buffered messages.
-    let (tx, rx) = broadcast::channel::<String>(256);
+    let (tx, rx) = broadcast::channel::<String>(OVERVIEW_BROADCAST_BUFFER);
     state.generating.insert(project_id.clone(), tx.clone());
 
     let llm           = Arc::clone(&state.llm);
     let agent_builder = Arc::clone(&state.agent_builder);
     let neo4j         = Arc::clone(&state.neo4j);
     let generating    = Arc::clone(&state.generating);
-    let pid           = project_id.clone();
+    let project_id_owned = project_id.clone();
 
     tokio::spawn(async move {
         let result = overview::pipeline::run(
-            llm, agent_builder, neo4j, &pid, tx.clone(),
+            llm, agent_builder, neo4j, &project_id_owned, tx.clone(),
         ).await;
 
         if let Err(e) = result {
-            tracing::error!(project_id = pid, error = %e, "overview pipeline failed");
+            tracing::error!(project_id = project_id_owned, error = %e, "overview pipeline failed");
         }
         let _ = tx.send(json!({"type": "overview_done"}).to_string());
-        generating.remove(&pid);
+        generating.remove(&project_id_owned);
     });
 
     sse_stream(rx).into_response()

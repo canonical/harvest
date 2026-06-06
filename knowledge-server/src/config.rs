@@ -35,9 +35,7 @@ pub struct DocumentationConfig {
 
 #[derive(Deserialize, Default, Clone)]
 pub struct AgentsConfig {
-    /// Filesystem path to the compiled harvest-agent binary to serve for download.
     pub binary_path: Option<std::path::PathBuf>,
-    /// Public base URL of this server, used in generated install scripts.
     pub public_url:  Option<String>,
 }
 

@@ -2,10 +2,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Agent configuration stored at /etc/harvest-agent/config.toml.
-/// Deliberately contains no project_id — the server derives project
-/// membership from the agent_token hash so the config cannot be used
-/// to redirect the agent to a different project.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub server_url:  String,
