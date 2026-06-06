@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod openai_compat;
 pub mod types;
+mod retry;
 
 use anyhow::Result;
 use async_trait::async_trait;
