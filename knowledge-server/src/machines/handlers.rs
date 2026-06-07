@@ -5,7 +5,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
     },
-    routing::{get, post},
+    routing::{delete, get, post},
     Extension, Json, Router,
 };
 use futures::StreamExt as _;
@@ -142,6 +142,7 @@ pub fn machines_router(state: Arc<MachineState>) -> Router {
 pub fn machines_protected_router(state: Arc<MachineState>) -> Router {
     Router::new()
         .route("/projects/:pid/agents",                      get(list_agents))
+        .route("/projects/:pid/agents/:aid",                 delete(delete_agent))
         .route("/projects/:pid/agents/:aid/execute",         post(execute_command))
         .route("/projects/:pid/agents/rotate-install-token", post(rotate_install_token))
         .with_state(state)
@@ -443,6 +444,37 @@ pub async fn execute_command(
         }))),
         Err(e) => Err(err(StatusCode::BAD_GATEWAY, &e)),
     }
+}
+
+pub async fn delete_agent(
+    Extension(user):  Extension<Claims>,
+    State(state):     State<Arc<MachineState>>,
+    Path((project_id, agent_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let neo4j = neo4j_or_err(&state)?;
+    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+
+    let rows = neo4j.query_read(
+        "MATCH (m:Machine {id: $aid, project_id: $pid}) RETURN m.id AS id",
+        json!({ "aid": agent_id, "pid": project_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+
+    if rows.is_empty() {
+        return Err(err(StatusCode::NOT_FOUND, "agent not found"));
+    }
+
+    let sender = state.registry.agents.get(&agent_id).map(|a| a.sender.clone());
+    state.registry.agents.remove(&agent_id);
+    if let Some(sender) = sender {
+        let _ = sender.send(super::ServerToAgent::Uninstall).await;
+    }
+
+    neo4j.query_read(
+        "MATCH (m:Machine {id: $aid, project_id: $pid}) DELETE m",
+        json!({ "aid": agent_id, "pid": project_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+
+    Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn rotate_install_token(
