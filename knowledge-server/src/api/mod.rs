@@ -193,6 +193,12 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
                get(proj_handlers::list_secrets).post(proj_handlers::upsert_secret))
         .route("/projects/:pid/secrets/:sname",
                delete(proj_handlers::delete_secret))
+        .route("/projects/:pid/memories",
+               get(proj_handlers::list_memories).post(proj_handlers::create_memory))
+        .route("/projects/:pid/memories/:mid",
+               get(proj_handlers::get_memory)
+               .put(proj_handlers::update_memory)
+               .delete(proj_handlers::delete_memory))
         .with_state(project_state);
 
     let overview_router = Router::new()
