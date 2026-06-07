@@ -89,6 +89,13 @@ export function finalizeAssistantMessage(state, { answer, sources, tool_calls_ma
   return { ...next, loading: false };
 }
 
+export function setQuestion(state, { question, choices }) {
+  return updateLastAssistant(state, (msg) => ({
+    ...msg,
+    question: { question, choices },
+  }));
+}
+
 export function setError(state, error) {
   const next = updateLastAssistant(state, (msg) => ({
     ...msg,
