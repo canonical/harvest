@@ -222,7 +222,7 @@ impl Agent {
                 ));
                 match self.llm.chat(&messages, &[]).await {
                     Ok(LlmResponse::Message { text }) => break text,
-                    Ok(LlmResponse::ToolCalls(_)) | Err(_) => break self.last_assistant_text(&messages),
+                    Ok(LlmResponse::ToolCalls { .. }) | Err(_) => break self.last_assistant_text(&messages),
                 }
             }
 
@@ -237,7 +237,7 @@ impl Agent {
             match response {
                 LlmResponse::Message { text } => break text,
 
-                LlmResponse::ToolCalls(calls) => {
+                LlmResponse::ToolCalls { calls, preamble } => {
                     iterations += 1;
 
                     if let Some(ask) = calls.iter().find(|c| c.name == "ask_user") {
@@ -248,7 +248,7 @@ impl Agent {
                             .unwrap_or_default();
                         let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
                         let _ = event_sender.send(AgentEvent::Done {
-                            answer: String::new(),
+                            answer: preamble,
                             sources: vec![],
                             tool_calls_made: iterations,
                         }).await;
@@ -449,18 +449,20 @@ mod tests {
     }
 
     fn tool_call(name: &str) -> LlmResponse {
-        LlmResponse::ToolCalls(vec![ToolCall {
-            id: "tc_1".into(),
-            name: name.into(),
-            input: serde_json::json!({}),
-        }])
+        LlmResponse::ToolCalls {
+            calls: vec![ToolCall { id: "tc_1".into(), name: name.into(), input: serde_json::json!({}) }],
+            preamble: String::new(),
+        }
     }
 
     fn two_tool_calls(a: &str, b: &str) -> LlmResponse {
-        LlmResponse::ToolCalls(vec![
-            ToolCall { id: "tc_1".into(), name: a.into(), input: serde_json::json!({}) },
-            ToolCall { id: "tc_2".into(), name: b.into(), input: serde_json::json!({}) },
-        ])
+        LlmResponse::ToolCalls {
+            calls: vec![
+                ToolCall { id: "tc_1".into(), name: a.into(), input: serde_json::json!({}) },
+                ToolCall { id: "tc_2".into(), name: b.into(), input: serde_json::json!({}) },
+            ],
+            preamble: String::new(),
+        }
     }
 
     fn text(s: &str) -> LlmResponse {

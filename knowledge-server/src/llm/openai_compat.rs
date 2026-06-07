@@ -171,7 +171,8 @@ fn parse_openai_response(json: Value) -> Result<LlmResponse> {
                 ).unwrap_or(Value::Null),
             })
             .collect();
-        return Ok(LlmResponse::ToolCalls(calls));
+        let preamble = message["content"].as_str().unwrap_or("").to_string();
+        return Ok(LlmResponse::ToolCalls { calls, preamble });
     }
 
     let text = message["content"].as_str().unwrap_or("").to_string();
@@ -219,7 +220,7 @@ mod tests {
             }]
         });
         match parse_openai_response(json).unwrap() {
-            LlmResponse::ToolCalls(calls) => {
+            LlmResponse::ToolCalls { calls, .. } => {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].id, "call_1");
                 assert_eq!(calls[0].name, "search_symbols");
@@ -243,7 +244,7 @@ mod tests {
             }]
         });
         match parse_openai_response(json).unwrap() {
-            LlmResponse::ToolCalls(calls) => assert_eq!(calls.len(), 2),
+            LlmResponse::ToolCalls { calls, .. } => assert_eq!(calls.len(), 2),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -262,7 +263,7 @@ mod tests {
             }]
         });
         match parse_openai_response(json).unwrap() {
-            LlmResponse::ToolCalls(calls) => assert_eq!(calls[0].input, serde_json::Value::Null),
+            LlmResponse::ToolCalls { calls, .. } => assert_eq!(calls[0].input, serde_json::Value::Null),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -413,7 +414,7 @@ mod tests {
 
         let provider = make_provider(&server.base_url());
         match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
-            LlmResponse::ToolCalls(calls) => assert_eq!(calls[0].name, "list_repositories"),
+            LlmResponse::ToolCalls { calls, .. } => assert_eq!(calls[0].name, "list_repositories"),
             other => panic!("unexpected: {other:?}"),
         }
     }
