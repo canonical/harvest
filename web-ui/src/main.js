@@ -148,31 +148,42 @@ function render() {
 
 function describeToolCall(name, input, { hostname } = {}) {
   switch (name) {
-    case 'list_repositories':     return 'Listing repositories';
-    case 'list_agents':           return 'Listing agents';
-    case 'list_secrets':          return 'Listing secrets';
-    case 'list_skills':           return 'Listing skills';
+    case 'list_repositories': return 'Discovering available repositories';
+    case 'list_agents':       return 'Checking connected agents';
+    case 'list_secrets':      return 'Listing project secrets';
+    case 'list_skills':       return 'Listing available skills';
     case 'search_symbols': {
-      const q = input.query ? `"${input.query}"` : 'symbols';
-      return input.repo ? `Searching for ${q} in ${input.repo}` : `Searching for ${q}`;
+      const q = input.query ?? 'symbols';
+      const kind = input.kind && input.kind !== 'any' ? ` ${input.kind}s` : '';
+      const scope = input.repo ? ` in ${input.repo}` : '';
+      return `Searching for "${q}"${kind}${scope}`;
     }
     case 'get_symbol_source':
       return `Reading source of ${input.name ?? 'symbol'}`;
     case 'get_file_symbols':
-      return `Getting symbols in ${(input.file ?? 'file').split('/').pop()}`;
+      return `Scanning symbols in ${(input.file ?? 'file').split('/').pop()}`;
     case 'find_callers':
-      return `Finding callers of ${input.function_name ?? 'function'}`;
+      return `Tracing callers of ${input.function_name ?? 'function'}`;
     case 'find_callees':
-      return `Finding callees of ${input.function_name ?? 'function'}`;
+      return `Tracing calls made by ${input.function_name ?? 'function'}`;
     case 'get_imports':
-      return `Getting imports of ${(input.file ?? 'file').split('/').pop()}`;
-    case 'compare_symbol_across_versions':
-      return `Comparing ${input.name ?? 'symbol'} across versions`;
-    case 'run_cypher':
-      return 'Running graph query';
+      return `Checking imports in ${(input.file ?? 'file').split('/').pop()}`;
+    case 'compare_symbol_across_versions': {
+      const sym = input.name ?? 'symbol';
+      return (input.version_a && input.version_b)
+        ? `Comparing ${sym} ${input.version_a} → ${input.version_b}`
+        : `Comparing ${sym} across versions`;
+    }
+    case 'run_cypher': {
+      const q = typeof input.query === 'string' ? input.query.trim() : '';
+      const snippet = q.length > 38 ? q.slice(0, 38).trimEnd() + '…' : q;
+      return snippet ? `Graph query: ${snippet}` : 'Running graph query';
+    }
     case 'run_command': {
-      const cmd = typeof input.command === 'string' ? input.command.split(' ')[0] : 'command';
-      return `Running ${cmd} on ${hostname ?? input.agent_id ?? 'agent'}`;
+      const cmd = typeof input.command === 'string'
+        ? (input.command.length > 28 ? input.command.slice(0, 28).trimEnd() + '…' : input.command)
+        : 'command';
+      return `Running "${cmd}" on ${hostname ?? input.agent_id ?? 'agent'}`;
     }
     case 'get_secret':  return `Reading secret ${input.name ?? ''}`.trimEnd();
     case 'save_secret': return `Saving secret ${input.name ?? ''}`.trimEnd();
