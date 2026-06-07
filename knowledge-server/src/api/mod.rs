@@ -14,7 +14,8 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::agent::{graph_tools, machine_tools, secret_tools, Agent};
+use crate::agent::{graph_tools, machine_tools, secret_tools, skill_tools, Agent};
+use crate::skills::SkillRegistry;
 use crate::auth::{self, handlers as auth_handlers, AuthState};
 use crate::config::AuthConfig;
 use crate::conversations::handlers::{self as conv_handlers, ConvState};
@@ -62,6 +63,7 @@ pub struct ProjectAgentBuilder {
     pub llm:                        Arc<dyn LlmProvider>,
     pub neo4j:                      Arc<Neo4jClient>,
     pub registry:                   Arc<MachineRegistry>,
+    pub skills:                     Arc<SkillRegistry>,
     pub max_iterations:             usize,
     pub compaction_threshold_chars: usize,
     pub compaction_keep_last:       usize,
@@ -89,6 +91,12 @@ impl ProjectAgentBuilder {
         tools.push(Box::new(secret_tools::SaveSecretTool {
             neo4j:      Arc::clone(&self.neo4j),
             project_id,
+        }));
+        tools.push(Box::new(skill_tools::ListSkillsTool {
+            registry: Arc::clone(&self.skills),
+        }));
+        tools.push(Box::new(skill_tools::LoadSkillTool {
+            registry: Arc::clone(&self.skills),
         }));
         Arc::new(
             Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)

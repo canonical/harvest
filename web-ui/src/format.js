@@ -1,5 +1,6 @@
 import hljs from 'highlight.js';
 import { escapeHtml as esc } from './utils.js';
+import { renderMarkdown } from './markdown.js';
 
 const EXT_TO_LANG = {
   rs: 'rust', py: 'python', js: 'javascript', ts: 'typescript',
@@ -21,6 +22,9 @@ export function renderPreviewToHtml(text, filePath = null) {
 
   try {
     const parsed = JSON.parse(text);
+    if (parsed?.__type === 'markdown' && typeof parsed.content === 'string') {
+      return `<div class="tool-data__markdown">${renderMarkdown(parsed.content)}</div>`;
+    }
     if (Array.isArray(parsed) && parsed.length === 0) {
       return '<span class="tool-data__empty">No results returned</span>';
     }

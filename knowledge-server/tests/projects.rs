@@ -59,6 +59,7 @@ fn projects_app(neo4j: Arc<Neo4jClient>) -> Router {
         llm:                        Arc::clone(&llm),
         neo4j:                      Arc::clone(&neo4j),
         registry:                   Arc::clone(&registry),
+        skills:                     Arc::new(knowledge_server::skills::SkillRegistry::new()),
         max_iterations:             2,
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,

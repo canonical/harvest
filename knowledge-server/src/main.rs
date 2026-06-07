@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 
 use knowledge_server::agent::{graph_tools, Agent};
 use knowledge_server::api::{AppState, GraphCache, ProjectAgentBuilder};
+use knowledge_server::skills::SkillRegistry;
 use knowledge_server::auth;
 use knowledge_server::config::Config;
 use knowledge_server::llm;
@@ -50,11 +51,13 @@ async fn main() -> Result<()> {
     );
 
     let machine_registry = MachineRegistry::new();
+    let skill_registry   = Arc::new(SkillRegistry::new());
 
     let agent_builder = Arc::new(ProjectAgentBuilder {
         llm:            Arc::clone(&llm_provider),
         neo4j:          Arc::clone(&neo4j),
         registry:       Arc::clone(&machine_registry),
+        skills:         Arc::clone(&skill_registry),
         max_iterations,
         compaction_threshold_chars,
         compaction_keep_last,
