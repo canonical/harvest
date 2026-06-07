@@ -2,7 +2,7 @@ let _nextToolCallId = 1;
 let _nextAttachmentId = 1;
 
 export function createChatState() {
-  return { messages: [], loading: false, pendingAttachments: [] };
+  return { messages: [], loading: false, pendingAttachments: [], suggestions: [] };
 }
 
 export function getMessages(state) {
@@ -16,7 +16,11 @@ export function isLoading(state) {
 export function addUserMessage(state, text, username = null, attachments = []) {
   const msg = { role: 'user', text, attachments };
   if (username) msg.username = username;
-  return { ...state, messages: [...state.messages, msg] };
+  return { ...state, messages: [...state.messages, msg], suggestions: [] };
+}
+
+export function setSuggestions(state, choices) {
+  return { ...state, suggestions: choices };
 }
 
 export function addPendingAttachment(state, attachment) {
