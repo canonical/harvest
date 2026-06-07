@@ -9,6 +9,7 @@ import {
 } from './api.js';
 import { initRepositoriesPage, onRepositoriesPageShow, onRepositoriesPageHide } from './repositories.js';
 import { initAgentsPage, onAgentsPageShow, onAgentsPageHide } from './agents.js';
+import { initMemoriesPage, onMemoriesPageShow, onMemoriesPageHide } from './memories.js';
 import { initSecretsPage, onSecretsPageShow, onSecretsPageHide } from './secrets.js';
 import { initDocumentationPage } from './documentation.js';
 import { initOverviewPage, onOverviewPageShow, onOverviewPageHide, showOverviewNoProject } from './overview.js';
@@ -654,6 +655,7 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
     const prevPage = document.querySelector('.page:not([hidden])');
     if (prevPage?.id === 'page-repositories') onRepositoriesPageHide();
     if (prevPage?.id === 'page-agents')       onAgentsPageHide();
+    if (prevPage?.id === 'page-memories')     onMemoriesPageHide();
     if (prevPage?.id === 'page-secrets')      onSecretsPageHide();
     if (prevPage?.id === 'page-overview')     onOverviewPageHide();
     closeSourcePanel();
@@ -664,6 +666,7 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
 
     if (page === 'repositories') onRepositoriesPageShow();
     if (page === 'agents')       onAgentsPageShow(activeProjectId);
+    if (page === 'memories')     onMemoriesPageShow(activeProjectId);
     if (page === 'secrets')      onSecretsPageShow(activeProjectId);
     if (page === 'overview') {
       if (activeProjectId) {
@@ -691,6 +694,7 @@ const docsPage = initDocumentationPage(
 );
 
 initAgentsPage(document.getElementById('page-agents'));
+initMemoriesPage(document.getElementById('page-memories'));
 initSecretsPage(document.getElementById('page-secrets'));
 initOverviewPage();
 
@@ -753,10 +757,15 @@ async function switchToProject(project) {
   render();
 
   const agentsPage   = document.getElementById('page-agents');
+  const memoriesPage = document.getElementById('page-memories');
   const overviewPage = document.getElementById('page-overview');
   if (agentsPage && !agentsPage.hidden) {
     onAgentsPageHide();
     onAgentsPageShow(activeProjectId);
+  }
+  if (memoriesPage && !memoriesPage.hidden) {
+    onMemoriesPageHide();
+    onMemoriesPageShow(activeProjectId);
   }
   onSecretsPageShow(activeProjectId);
   if (overviewPage && !overviewPage.hidden) {

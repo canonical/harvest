@@ -224,3 +224,18 @@ export async function rotateInstallToken(projectId) {
 
 export const fetchProjectOverview      = (projectId) => projectFetch(`${projectUrl(projectId)}/overview`);
 export const regenerateProjectOverview = (projectId) => projectFetch(`${projectUrl(projectId)}/overview/regenerate`, { method: 'POST' });
+
+const memoryUrl = (projectId, memoryId) =>
+  `${projectUrl(projectId)}/memories/${encodeURIComponent(memoryId)}`;
+
+export const listProjectMemories   = (projectId)            => projectFetch(`${projectUrl(projectId)}/memories`);
+export const createProjectMemory   = (projectId, body)      => projectFetch(`${projectUrl(projectId)}/memories`, { method: 'POST', body: JSON.stringify(body) });
+export const getProjectMemory      = (projectId, memoryId)  => projectFetch(memoryUrl(projectId, memoryId));
+export const updateProjectMemory   = (projectId, memoryId, body) => projectFetch(memoryUrl(projectId, memoryId), { method: 'PUT', body: JSON.stringify(body) });
+export async function deleteProjectMemory(projectId, memoryId) {
+  const res = await fetch(memoryUrl(projectId, memoryId), { method: 'DELETE' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
+}
