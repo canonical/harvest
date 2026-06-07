@@ -1,4 +1,4 @@
-import { listProjectAgents, rotateInstallToken } from './api.js';
+import { deleteAgent, listProjectAgents, rotateInstallToken } from './api.js';
 import { escapeHtml as esc } from './utils.js';
 
 let _projectId       = null;
@@ -23,6 +23,12 @@ export function initAgentsPage(pageEl) {
 
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape' && !modal?.hidden) closeInstallModal();
+  });
+
+  document.getElementById('agents-tbody')?.addEventListener('click', e => {
+    const btn = e.target.closest('.agent-delete-btn');
+    if (!btn) return;
+    handleDeleteAgent(btn.dataset.agentId, btn.dataset.hostname, btn.dataset.online === 'true');
   });
 }
 
@@ -78,16 +84,36 @@ export function renderAgents(agents) {
 }
 
 function agentRow(a) {
-  const dot   = `<span class="agent-status__dot agent-status__dot--${a.online ? 'online' : 'offline'}"></span>`;
-  const label = a.online ? 'Online' : 'Offline';
-  const seen  = a.last_seen ? relativeTime(a.last_seen) : '—';
-  const since = a.connected_at ? relativeTime(a.connected_at) : '—';
+  const dot      = `<span class="agent-status__dot agent-status__dot--${a.online ? 'online' : 'offline'}"></span>`;
+  const label    = a.online ? 'Online' : 'Offline';
+  const seen     = a.last_seen ? relativeTime(a.last_seen) : '—';
+  const since    = a.connected_at ? relativeTime(a.connected_at) : '—';
+  const hostname = esc(a.hostname || a.id);
   return `<tr>
     <td><span class="agent-status">${dot}${esc(label)}</span></td>
-    <td>${esc(a.hostname || a.id)}</td>
+    <td>${hostname}</td>
     <td>${esc(seen)}</td>
     <td>${a.online ? esc(since) : '—'}</td>
+    <td>
+      <button class="p-button--negative is-small agent-delete-btn"
+              data-agent-id="${esc(a.id)}"
+              data-hostname="${hostname}"
+              data-online="${a.online}">Delete</button>
+    </td>
   </tr>`;
+}
+
+async function handleDeleteAgent(agentId, hostname, online) {
+  const msg = online
+    ? `Delete agent "${hostname}"?\n\nThis agent is currently online. An uninstall command will be sent to remove it from the remote machine.`
+    : `Delete agent "${hostname}"?`;
+  if (!confirm(msg)) return;
+  try {
+    await deleteAgent(_projectId, agentId);
+    await loadAndRender();
+  } catch {
+    alert('Failed to delete agent.');
+  }
 }
 
 function relativeTime(iso) {

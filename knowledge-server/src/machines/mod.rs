@@ -21,6 +21,7 @@ pub enum ServerToAgent {
     Registered { agent_token: String },
     HelloAck,
     Execute    { request_id: String, command: String, timeout_secs: u64 },
+    Uninstall,
     Error      { message: String },
 }
 

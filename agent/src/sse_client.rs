@@ -24,6 +24,7 @@ enum ServerMsg {
         #[serde(default = "default_command_timeout")]
         timeout_secs: u64,
     },
+    Uninstall,
     Error { message: String },
     #[serde(other)]
     Unknown,
@@ -171,6 +172,13 @@ async fn connect_and_run(
                                 .send()
                                 .await;
                         });
+                    }
+
+                    Ok(ServerMsg::Uninstall) => {
+                        tracing::info!("uninstall command received — triggering self-removal");
+                        ping_task.abort();
+                        let _ = std::process::Command::new("/usr/local/bin/uninstall-harvest-agent").spawn();
+                        std::process::exit(0);
                     }
 
                     Ok(ServerMsg::Error { message }) => {

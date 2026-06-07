@@ -209,6 +209,10 @@ export async function executeAgentCommand(projectId, agentId, command, timeoutSe
   return response.json();
 }
 
+export async function deleteAgent(projectId, agentId) {
+  return projectFetch(`${projectUrl(projectId)}/agents/${encodeURIComponent(agentId)}`, { method: 'DELETE' });
+}
+
 export async function rotateInstallToken(projectId) {
   const response = await fetch(`${projectUrl(projectId)}/agents/rotate-install-token`, {
     method: 'POST',
