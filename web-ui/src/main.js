@@ -474,7 +474,7 @@ async function sendQuery() {
     }
     await queryStream(query, activeConvId, attachments, (event) => {
       if (event.type === 'tool_call') {
-        state = addToolCall(state, { name: event.name, input: event.input, description: describeToolCall(event.name, event.input, { hostname: event.hostname }) });
+        state = addToolCall(state, { name: event.name, input: event.input, description: event.description ?? describeToolCall(event.name, event.input, { hostname: event.hostname }) });
       } else if (event.type === 'tool_result') {
         state = completeToolCall(state, { name: event.name, preview: event.preview });
       } else if (event.type === 'question') {
@@ -579,7 +579,7 @@ function handleProjectEvent(event) {
     }
 
     case 'tool_call':
-      state = addToolCall(state, { name: event.name, input: event.input, description: describeToolCall(event.name, event.input, { hostname: event.hostname }) });
+      state = addToolCall(state, { name: event.name, input: event.input, description: event.description ?? describeToolCall(event.name, event.input, { hostname: event.hostname }) });
       render();
       break;
 

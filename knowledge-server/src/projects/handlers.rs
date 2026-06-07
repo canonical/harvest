@@ -395,12 +395,18 @@ pub async fn project_query_stream(
                 });
             }
             let data = if let AgentEvent::ToolCall { name, input } = &event {
-                if name == "run_command" {
-                    let hostname = input["agent_id"].as_str()
-                        .and_then(|id| registry.agents.get(id).map(|a| a.hostname.clone()));
+                if name == "run_command" || name == "run_cypher" {
+                    let description = agent.describe_tool_call(name, input).await;
                     let mut v = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
-                    if let (Some(h), Some(obj)) = (hostname, v.as_object_mut()) {
-                        obj.insert("hostname".to_string(), json!(h));
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert("description".to_string(), json!(description));
+                        if name == "run_command" {
+                            if let Some(h) = input["agent_id"].as_str()
+                                .and_then(|id| registry.agents.get(id).map(|a| a.hostname.clone()))
+                            {
+                                obj.insert("hostname".to_string(), json!(h));
+                            }
+                        }
                     }
                     serde_json::to_string(&v).ok()
                 } else {
