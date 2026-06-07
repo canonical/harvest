@@ -95,7 +95,7 @@ async fn generate_env_doc(llm: &dyn LlmProvider, conversations: &str) -> Result<
     let resp      = llm.chat(&messages, &[]).await?;
     Ok(match resp {
         LlmResponse::Message { text } => text,
-        LlmResponse::ToolCalls(_)     => String::new(),
+        LlmResponse::ToolCalls { .. }  => String::new(),
     })
 }
 
