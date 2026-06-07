@@ -750,6 +750,130 @@ pub async fn delete_secret(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn list_memories(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path(project_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let rows = state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_MEMORY]->(m:Memory)
+         RETURN m.id AS id, m.title AS title,
+                m.created_at AS created_at, m.updated_at AS updated_at,
+                m.created_by AS created_by
+         ORDER BY m.created_at DESC",
+        json!({ "pid": project_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(Json(rows))
+}
+
+#[derive(serde::Deserialize)]
+pub struct CreateMemoryBody {
+    pub title:   String,
+    pub content: String,
+}
+
+pub async fn create_memory(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path(project_id): Path<String>,
+    Json(body): Json<CreateMemoryBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let title = body.title.trim().to_string();
+    if title.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "title is required"));
+    }
+    let id  = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    state.neo4j.query_read(
+        "MATCH (p:Project {id: $pid})
+         CREATE (m:Memory {
+             id: $id, title: $title, content: $content,
+             created_by: $uid, created_at: $now, updated_at: $now
+         })
+         CREATE (p)-[:HAS_MEMORY]->(m)
+         RETURN m.id AS id",
+        json!({
+            "pid": project_id, "id": id, "title": title,
+            "content": body.content, "uid": user.sub, "now": now,
+        }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": id, "title": title, "created_at": now }))))
+}
+
+pub async fn get_memory(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, memory_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let rows = state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_MEMORY]->(m:Memory {id: $mid})
+         RETURN m.id AS id, m.title AS title, m.content AS content,
+                m.created_by AS created_by,
+                m.created_at AS created_at, m.updated_at AS updated_at",
+        json!({ "pid": project_id, "mid": memory_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let row = rows.into_iter().next()
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+    Ok(Json(row))
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateMemoryBody {
+    pub title:   Option<String>,
+    pub content: Option<String>,
+}
+
+pub async fn update_memory(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, memory_id)): Path<(String, String)>,
+    Json(body): Json<UpdateMemoryBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    if let Some(ref title) = body.title {
+        if title.trim().is_empty() {
+            return Err(err(StatusCode::BAD_REQUEST, "title cannot be empty"));
+        }
+    }
+    let exists = state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_MEMORY]->(m:Memory {id: $mid}) RETURN 1",
+        json!({ "pid": project_id, "mid": memory_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    if exists.is_empty() {
+        return Err(err(StatusCode::NOT_FOUND, "not found"));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut set_clauses = vec!["m.updated_at = $now"];
+    if body.title.is_some()   { set_clauses.push("m.title = $title"); }
+    if body.content.is_some() { set_clauses.push("m.content = $content"); }
+    let cypher = format!(
+        "MATCH (:Project {{id: $pid}})-[:HAS_MEMORY]->(m:Memory {{id: $mid}}) SET {} RETURN m.id",
+        set_clauses.join(", ")
+    );
+    let mut params = json!({ "pid": project_id, "mid": memory_id, "now": now });
+    if let Some(title)   = &body.title   { params["title"]   = json!(title.trim()); }
+    if let Some(content) = &body.content { params["content"] = json!(content); }
+    state.neo4j.query_read(&cypher, params)
+        .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn delete_memory(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, memory_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_MEMORY]->(m:Memory {id: $mid}) DETACH DELETE m",
+        json!({ "pid": project_id, "mid": memory_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn project_query(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
