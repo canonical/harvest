@@ -1,6 +1,7 @@
 pub mod graph_tools;
 pub mod machine_tools;
 pub mod secret_tools;
+pub mod skill_tools;
 pub mod prompt;
 pub mod tool;
 
@@ -54,6 +55,7 @@ pub enum AgentEvent {
     ToolResult { name: String, preview: String },
     Done { answer: String, sources: Vec<Source>, tool_calls_made: usize },
     Error { message: String },
+    Question { question: String, choices: Vec<String> },
 }
 
 pub struct Agent {
@@ -171,8 +173,35 @@ impl Agent {
         attachments: &[Attachment],
         event_sender: mpsc::Sender<AgentEvent>,
     ) {
-        let tool_defs: Vec<ToolDefinition> =
+        let mut tool_defs: Vec<ToolDefinition> =
             self.tools.iter().map(|t| t.definition()).collect();
+        tool_defs.push(ToolDefinition {
+            name: "ask_user".to_string(),
+            description: "Present a question with predefined choices to the user whenever you \
+                          need information to proceed. Use this instead of asking questions in \
+                          plain text — never end a response with inline questions or a list of \
+                          things you need to know. Call this tool first, then answer once the \
+                          user replies. Only skip this tool if the knowledge graph already \
+                          contains the answer."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The clarifying question to present to the user."
+                    },
+                    "choices": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "2–4 concise answer choices for the user to pick from.",
+                        "minItems": 2,
+                        "maxItems": 4
+                    }
+                },
+                "required": ["question", "choices"]
+            }),
+        });
 
         let tool_map: HashMap<String, &dyn Tool> =
             self.tools.iter().map(|t| (t.definition().name, t.as_ref())).collect();
@@ -210,6 +239,21 @@ impl Agent {
 
                 LlmResponse::ToolCalls(calls) => {
                     iterations += 1;
+
+                    if let Some(ask) = calls.iter().find(|c| c.name == "ask_user") {
+                        let question = ask.input["question"].as_str().unwrap_or("").to_string();
+                        let choices = ask.input["choices"]
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                            .unwrap_or_default();
+                        let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
+                        let _ = event_sender.send(AgentEvent::Done {
+                            answer: String::new(),
+                            sources: vec![],
+                            tool_calls_made: iterations,
+                        }).await;
+                        return;
+                    }
 
                     let call_parts: Vec<ContentPart> = calls
                         .iter()

@@ -31,6 +31,7 @@ import {
   updateToolCallDescription,
   finalizeAssistantMessage,
   setError,
+  setQuestion,
   getMessages,
   isLoading,
   getSaveableMessages,
@@ -86,7 +87,7 @@ function render() {
   const prevScrollTop = messagesEl.scrollTop;
 
   const messages = getMessages(state);
-  messagesEl.innerHTML = messages.map(renderMessage).join('');
+  messagesEl.innerHTML = messages.map((msg, i) => renderMessage(msg, i === messages.length - 1)).join('');
 
   const loading = isLoading(state);
   sendBtn.disabled    = !activeProjectId || loading;
@@ -128,6 +129,21 @@ function render() {
 
   addCopyButtons(messagesEl, '.message__body pre');
   mountInlineGraphs(messagesEl);
+
+  messagesEl.querySelectorAll('.btn-choice[data-choice]').forEach(btn => {
+    btn.addEventListener('click', () => sendQueryWithChoice(btn.dataset.choice));
+  });
+  const otherInput = messagesEl.querySelector('.question-other-input');
+  const otherSubmit = messagesEl.querySelector('.question-other-submit');
+  if (otherInput && otherSubmit) {
+    otherSubmit.addEventListener('click', () => {
+      const val = otherInput.value.trim();
+      if (val) sendQueryWithChoice(val);
+    });
+    otherInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); const val = otherInput.value.trim(); if (val) sendQueryWithChoice(val); }
+    });
+  }
 }
 
 function renderAttachments(attachments) {
@@ -140,7 +156,26 @@ function renderAttachments(attachments) {
   }).join('')}</div>`;
 }
 
-function renderMessage(msg) {
+function renderQuestion(q, interactive) {
+  const choicesHtml = q.choices.map(c =>
+    interactive
+      ? `<button class="btn-choice" data-choice="${esc(c)}">${esc(c)}</button>`
+      : `<span class="choice-chip">${esc(c)}</span>`
+  ).join('');
+  const otherHtml = interactive ? `
+    <div class="question-other">
+      <input type="text" class="question-other-input" placeholder="Other…" aria-label="Custom answer">
+      <button class="question-other-submit">Send</button>
+    </div>` : '';
+  return `
+    <div class="message__question">
+      <div class="message__question-text">${esc(q.question)}</div>
+      <div class="question-choices">${choicesHtml}</div>
+      ${otherHtml}
+    </div>`;
+}
+
+function renderMessage(msg, isLast = false) {
   if (msg.role === 'user') {
     const senderHtml = msg.username ? `
       <div class="message__sender">
@@ -157,7 +192,7 @@ function renderMessage(msg) {
     `;
   }
 
-  if (msg.status === 'loading' && msg.tool_calls.length === 0) {
+  if (msg.status === 'loading' && msg.tool_calls.length === 0 && !msg.question) {
     return `
       <div class="message message--assistant">
         <div class="message__bubble">
@@ -218,11 +253,14 @@ function renderMessage(msg) {
     </div>
   ` : '';
 
+  const questionHtml = msg.question ? renderQuestion(msg.question, isLast && !isLoading(state)) : '';
+
   return `
     <div class="message message--assistant">
       <div class="message__bubble">
         ${toolCallsHtml}
         ${bodyHtml}
+        ${questionHtml}
         ${sourcesHtml}
       </div>
     </div>
@@ -331,6 +369,11 @@ if (attachTrayEl) {
   });
 }
 
+function sendQueryWithChoice(text) {
+  inputEl.value = text;
+  sendQuery();
+}
+
 async function sendQuery() {
   const query = inputEl.value.trim();
   const hasPending = getPendingAttachments(state).length > 0;
@@ -390,6 +433,8 @@ async function sendQuery() {
         });
       } else if (event.type === 'tool_result') {
         state = completeToolCall(state, { name: event.name, preview: event.preview });
+      } else if (event.type === 'question') {
+        state = setQuestion(state, { question: event.question, choices: event.choices });
       } else if (event.type === 'done') {
         state = finalizeAssistantMessage(state, {
           answer: event.answer,
@@ -502,6 +547,11 @@ function handleProjectEvent(event) {
 
     case 'tool_result':
       state = completeToolCall(state, { name: event.name, preview: event.preview });
+      render();
+      break;
+
+    case 'question':
+      state = setQuestion(state, { question: event.question, choices: event.choices });
       render();
       break;
 
