@@ -353,6 +353,7 @@ pub async fn project_query_stream(
     let channels = Arc::clone(&state.channels);
     let neo4j    = Arc::clone(&state.neo4j);
     let llm      = Arc::clone(&state.agent_builder.llm);
+    let registry = Arc::clone(&state.agent_builder.registry);
     let project_id_owned = project_id.clone();
     let query            = body.query.clone();
     let conv_id          = body.conversation_id.clone();
@@ -393,7 +394,22 @@ pub async fn project_query_stream(
                     ).await;
                 });
             }
-            if let Ok(data) = serde_json::to_string(&event) {
+            let data = if let AgentEvent::ToolCall { name, input } = &event {
+                if name == "run_command" {
+                    let hostname = input["agent_id"].as_str()
+                        .and_then(|id| registry.agents.get(id).map(|a| a.hostname.clone()));
+                    let mut v = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
+                    if let (Some(h), Some(obj)) = (hostname, v.as_object_mut()) {
+                        obj.insert("hostname".to_string(), json!(h));
+                    }
+                    serde_json::to_string(&v).ok()
+                } else {
+                    serde_json::to_string(&event).ok()
+                }
+            } else {
+                serde_json::to_string(&event).ok()
+            };
+            if let Some(data) = data {
                 let channel_map = channels.lock().await;
                 if let Some(sender) = channel_map.get(&project_id_owned) {
                     let _ = sender.send(data);
