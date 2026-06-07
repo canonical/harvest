@@ -79,5 +79,5 @@ pub struct ToolCall {
 #[derive(Debug)]
 pub enum LlmResponse {
     Message { text: String },
-    ToolCalls(Vec<ToolCall>),
+    ToolCalls { calls: Vec<ToolCall>, preamble: String },
 }

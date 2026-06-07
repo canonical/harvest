@@ -149,7 +149,13 @@ fn parse_anthropic_response(json: Value) -> Result<LlmResponse> {
                 input: b["input"].clone(),
             })
             .collect();
-        return Ok(LlmResponse::ToolCalls(calls));
+        let preamble = content
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(LlmResponse::ToolCalls { calls, preamble });
     }
 
     let text = content
@@ -192,7 +198,7 @@ mod tests {
             }]
         });
         match parse_anthropic_response(json).unwrap() {
-            LlmResponse::ToolCalls(calls) => {
+            LlmResponse::ToolCalls { calls, .. } => {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].id, "tu_001");
                 assert_eq!(calls[0].name, "search_symbols");
@@ -212,7 +218,7 @@ mod tests {
             ]
         });
         match parse_anthropic_response(json).unwrap() {
-            LlmResponse::ToolCalls(calls) => assert_eq!(calls.len(), 2),
+            LlmResponse::ToolCalls { calls, .. } => assert_eq!(calls.len(), 2),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -371,7 +377,7 @@ mod tests {
         let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0)
             .with_base_url(server.url("/v1/messages"));
         match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
-            LlmResponse::ToolCalls(calls) => {
+            LlmResponse::ToolCalls { calls, .. } => {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].name, "list_repositories");
             }
