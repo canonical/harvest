@@ -32,6 +32,7 @@ import {
   finalizeAssistantMessage,
   setError,
   setQuestion,
+  setSuggestions,
   getMessages,
   isLoading,
   getSaveableMessages,
@@ -87,7 +88,15 @@ function render() {
   const prevScrollTop = messagesEl.scrollTop;
 
   const messages = getMessages(state);
-  messagesEl.innerHTML = messages.map((msg, i) => renderMessage(msg, i === messages.length - 1)).join('');
+  if (messages.length === 0 && activeProjectId) {
+    messagesEl.innerHTML = `
+      <div class="chat-empty-state">
+        <div class="chat-empty-state__icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor"><path d="M.81 7.36a1.92 1.92 0 1 1 3.799.572A1.92 1.92 0 0 1 .81 7.36M8.826 3.033a1.92 1.92 0 1 1 3.755.806 1.92 1.92 0 0 1-3.755-.806M7.04 12.585a4.68 4.68 0 0 1-3.19-2.432 2.76 2.76 0 0 1-1.64.202 6.25 6.25 0 0 0 4.498 3.77c.45.098.908.144 1.364.141a2.74 2.74 0 0 1-.562-1.605 5 5 0 0 1-.47-.076M8.394 12.193a1.92 1.92 0 0 1 3.754.805 1.92 1.92 0 1 1-3.754-.805M12.943 11.89a6.3 6.3 0 0 0 1.22-2.587 6.3 6.3 0 0 0-.905-4.782 2.77 2.77 0 0 1-1.08 1.265 4.7 4.7 0 0 1-.154 4.674c.45.37.77.87.919 1.43M2.56 4.892a2.75 2.75 0 0 1 1.603.41 4.68 4.68 0 0 1 3.77-2.015q.012-.218.057-.433c.088-.411.268-.795.525-1.124A6.31 6.31 0 0 0 2.56 4.892"/></svg></div>
+        <p class="chat-empty-state__text">Ask anything about codebases or control agents</p>
+      </div>`;
+  } else {
+    messagesEl.innerHTML = messages.map((msg, i) => renderMessage(msg, i === messages.length - 1)).join('');
+  }
 
   const loading = isLoading(state);
   sendBtn.disabled    = !activeProjectId || loading;
@@ -132,6 +141,10 @@ function render() {
 
   messagesEl.querySelectorAll('.btn-choice[data-choice]').forEach(btn => {
     btn.addEventListener('click', () => sendQueryWithChoice(btn.dataset.choice));
+  });
+
+  messagesEl.querySelectorAll('.btn-suggestion[data-suggestion]').forEach(btn => {
+    btn.addEventListener('click', () => sendQueryWithChoice(btn.dataset.suggestion));
   });
   const otherInput = messagesEl.querySelector('.question-other-input');
   const otherSubmit = messagesEl.querySelector('.question-other-submit');
@@ -261,15 +274,19 @@ function renderMessage(msg, isLast = false) {
   const n = msg.tool_calls.length;
   const anyRunning = msg.tool_calls.some(tc => tc.status === 'running');
   const runningTc = msg.tool_calls.find(tc => tc.status === 'running');
-  const summaryLabel = anyRunning && runningTc
+  const liveLabel = runningTc
     ? (runningTc.description ?? `${runningTc.name.replace(/_/g, ' ')}…`)
-    : `${n} tool call${n === 1 ? '' : 's'}`;
+    : null;
   const toolCallsHtml = n > 0 ? `
+    ${anyRunning && liveLabel ? `
+    <div class="tc-live-status">
+      <svg class="tc-live-status__spinner" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="5" stroke="var(--border-subtle)"/><path d="M7 2a5 5 0 0 1 5 5" stroke="var(--loading-dot-color)"/></svg>
+      <span class="tc-live-status__text">${esc(liveLabel)}</span>
+    </div>` : ''}
     <details class="tc-group${anyRunning ? ' tc-group--running' : ''}">
       <summary class="tc-group__summary">
         <svg class="tc-group__summary-chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2,3 5,7 8,3"/></svg>
-        ${anyRunning ? `<svg class="tc-group__summary-spinner" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="5" stroke="var(--border-subtle)"/><path d="M7 2a5 5 0 0 1 5 5" stroke="var(--loading-dot-color)"/></svg>` : ''}
-        <span class="${anyRunning ? 'tc-group__summary-text--live' : ''}">${summaryLabel}</span>
+        <span>${n} tool call${n === 1 ? '' : 's'}</span>
       </summary>
       ${msg.tool_calls.map((tc, i) => renderToolCall(tc, i)).join('')}
     </details>
@@ -306,6 +323,14 @@ function renderMessage(msg, isLast = false) {
 
   const questionHtml = msg.question ? renderQuestion(msg.question, isLast && !isLoading(state)) : '';
 
+  const suggestions = isLast && msg.status === 'done' && !msg.question && state.suggestions?.length > 0
+    ? state.suggestions : [];
+  const suggestionsHtml = suggestions.length > 0
+    ? `<div class="message__suggestions">${suggestions.map(s =>
+        `<button class="btn-suggestion" data-suggestion="${esc(s)}">${esc(s)}</button>`
+      ).join('')}</div>`
+    : '';
+
   return `
     <div class="message message--assistant">
       <div class="message__bubble">
@@ -313,6 +338,7 @@ function renderMessage(msg, isLast = false) {
         ${bodyHtml}
         ${questionHtml}
         ${sourcesHtml}
+        ${suggestionsHtml}
       </div>
     </div>
   `;
@@ -484,6 +510,8 @@ async function sendQuery() {
           tool_calls_made: event.tool_calls_made,
         });
         updateConvListEntry(query);
+      } else if (event.type === 'suggestions') {
+        state = setSuggestions(state, event.choices ?? []);
       } else if (event.type === 'error') {
         state = setError(state, event.message);
       }
@@ -599,6 +627,11 @@ function handleProjectEvent(event) {
       });
       render();
       updateConvListEntry(lastProjectQuery);
+      break;
+
+    case 'suggestions':
+      state = setSuggestions(state, event.choices ?? []);
+      render();
       break;
 
     case 'error':
