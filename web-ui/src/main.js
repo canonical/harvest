@@ -146,7 +146,7 @@ function render() {
   }
 }
 
-function describeToolCall(name, input) {
+function describeToolCall(name, input, { hostname } = {}) {
   switch (name) {
     case 'list_repositories':     return 'Listing repositories';
     case 'list_agents':           return 'Listing agents';
@@ -172,7 +172,7 @@ function describeToolCall(name, input) {
       return 'Running graph query';
     case 'run_command': {
       const cmd = typeof input.command === 'string' ? input.command.split(' ')[0] : 'command';
-      return `Running ${cmd} on ${input.agent_id ?? 'agent'}`;
+      return `Running ${cmd} on ${hostname ?? input.agent_id ?? 'agent'}`;
     }
     case 'get_secret':  return `Reading secret ${input.name ?? ''}`.trimEnd();
     case 'save_secret': return `Saving secret ${input.name ?? ''}`.trimEnd();
@@ -463,7 +463,7 @@ async function sendQuery() {
     }
     await queryStream(query, activeConvId, attachments, (event) => {
       if (event.type === 'tool_call') {
-        state = addToolCall(state, { name: event.name, input: event.input, description: describeToolCall(event.name, event.input) });
+        state = addToolCall(state, { name: event.name, input: event.input, description: describeToolCall(event.name, event.input, { hostname: event.hostname }) });
       } else if (event.type === 'tool_result') {
         state = completeToolCall(state, { name: event.name, preview: event.preview });
       } else if (event.type === 'question') {
@@ -568,7 +568,7 @@ function handleProjectEvent(event) {
     }
 
     case 'tool_call':
-      state = addToolCall(state, { name: event.name, input: event.input, description: describeToolCall(event.name, event.input) });
+      state = addToolCall(state, { name: event.name, input: event.input, description: describeToolCall(event.name, event.input, { hostname: event.hostname }) });
       render();
       break;
 
