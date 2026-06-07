@@ -352,6 +352,7 @@ pub async fn project_query_stream(
     let locks    = Arc::clone(&state.locks);
     let channels = Arc::clone(&state.channels);
     let neo4j    = Arc::clone(&state.neo4j);
+    let llm      = Arc::clone(&state.agent_builder.llm);
     let project_id_owned = project_id.clone();
     let query            = body.query.clone();
     let conv_id          = body.conversation_id.clone();
@@ -380,6 +381,17 @@ pub async fn project_query_stream(
                     &history,
                     answer, sources, *tool_calls_made,
                 ).await;
+
+                let neo4j_m  = Arc::clone(&neo4j);
+                let llm_m    = Arc::clone(&llm);
+                let pid_m    = project_id_owned.clone();
+                let query_m  = query.clone();
+                let answer_m = answer.clone();
+                tokio::spawn(async move {
+                    super::memory_gen::maybe_generate_memory(
+                        &neo4j_m, &*llm_m, &pid_m, &query_m, &answer_m,
+                    ).await;
+                });
             }
             if let Ok(data) = serde_json::to_string(&event) {
                 let channel_map = channels.lock().await;
