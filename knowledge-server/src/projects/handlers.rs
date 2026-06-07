@@ -414,6 +414,23 @@ pub async fn project_query_stream(
                         &neo4j_m, &*llm_m, &pid_m, &query_m, &answer_m,
                     ).await;
                 });
+
+                let llm_s      = Arc::clone(&llm);
+                let channels_s = Arc::clone(&channels);
+                let pid_s      = project_id_owned.clone();
+                let query_s    = query.clone();
+                let answer_s   = answer.clone();
+                tokio::spawn(async move {
+                    if let Some(choices) = super::suggestions::generate_suggestions(
+                        &*llm_s, &query_s, &answer_s,
+                    ).await {
+                        let data = json!({ "type": "suggestions", "choices": choices }).to_string();
+                        let ch = channels_s.lock().await;
+                        if let Some(sender) = ch.get(&pid_s) {
+                            let _ = sender.send(data);
+                        }
+                    }
+                });
             }
             let data = if let AgentEvent::ToolCall { name, input } = &event {
                 if name == "run_command" || name == "run_cypher" {
