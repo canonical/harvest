@@ -215,11 +215,16 @@ function renderMessage(msg, isLast = false) {
 
   const n = msg.tool_calls.length;
   const anyRunning = msg.tool_calls.some(tc => tc.status === 'running');
+  const runningTc = msg.tool_calls.find(tc => tc.status === 'running');
+  const summaryLabel = anyRunning && runningTc
+    ? (runningTc.description ?? `${runningTc.name.replace(/_/g, ' ')}…`)
+    : `${n} tool call${n === 1 ? '' : 's'}`;
   const toolCallsHtml = n > 0 ? `
     <details class="tc-group${anyRunning ? ' tc-group--running' : ''}">
       <summary class="tc-group__summary">
         <svg class="tc-group__summary-chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2,3 5,7 8,3"/></svg>
-        <span>${n} tool call${n === 1 ? '' : 's'}</span>
+        ${anyRunning ? `<svg class="tc-group__summary-spinner" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="5" stroke="var(--border-subtle)"/><path d="M7 2a5 5 0 0 1 5 5" stroke="var(--loading-dot-color)"/></svg>` : ''}
+        <span class="${anyRunning ? 'tc-group__summary-text--live' : ''}">${summaryLabel}</span>
       </summary>
       ${msg.tool_calls.map((tc, i) => renderToolCall(tc, i)).join('')}
     </details>

@@ -780,6 +780,18 @@ a.citation {
   transition: transform 0.15s;
 }
 
+.tc-group__summary-spinner {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  animation: spin 0.9s linear infinite;
+}
+
+.tc-group__summary-text--live {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
 details.tc-group[open] .tc-group__summary-chevron {
   transform: rotate(180deg);
 }
