@@ -250,6 +250,7 @@ async fn save_project_turn(
     assistant_text: &str,
     sources: &[Source],
     tool_calls_made: usize,
+    tool_calls: &[Value],
 ) {
     let now = chrono::Utc::now().to_rfc3339();
     let title = if user_text.len() > CONVERSATION_TITLE_MAX_CHARS {
@@ -271,7 +272,7 @@ async fn save_project_turn(
         "role": "assistant",
         "text": assistant_text,
         "sources": sources,
-        "tool_calls": [],
+        "tool_calls": tool_calls,
         "tool_calls_made": tool_calls_made,
     }));
 
@@ -372,7 +373,26 @@ pub async fn project_query_stream(
             agent_clone.query_streaming(&query_for_agent, &history_for_agent, &attachments, agent_event_sender).await;
         });
 
+        let mut tool_calls_log: Vec<Value> = Vec::new();
+
         while let Some(event) = agent_rx.recv().await {
+            match &event {
+                AgentEvent::ToolCall { name, input } => {
+                    tool_calls_log.push(json!({
+                        "name": name, "input": input,
+                        "status": "done", "preview": null,
+                    }));
+                }
+                AgentEvent::ToolResult { name, preview } => {
+                    if let Some(tc) = tool_calls_log.iter_mut().rev()
+                        .find(|tc| tc["name"] == *name && tc["preview"].is_null())
+                    {
+                        tc["preview"] = json!(preview);
+                    }
+                }
+                _ => {}
+            }
+
             if let (AgentEvent::Done { answer, sources, tool_calls_made }, Some(cid)) =
                 (&event, &conv_id)
             {
@@ -381,6 +401,7 @@ pub async fn project_query_stream(
                     &query, &username, attachment_meta.clone(),
                     &history,
                     answer, sources, *tool_calls_made,
+                    &tool_calls_log,
                 ).await;
 
                 let neo4j_m  = Arc::clone(&neo4j);
