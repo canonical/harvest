@@ -45,11 +45,11 @@ export function startAssistantMessage(state) {
   };
 }
 
-export function addToolCall(state, { name, input }) {
+export function addToolCall(state, { name, input, description = null }) {
   const id = _nextToolCallId++;
   return updateLastAssistant(state, (msg) => ({
     ...msg,
-    tool_calls: [...msg.tool_calls, { id, name, input, status: 'running', preview: null, description: null }],
+    tool_calls: [...msg.tool_calls, { id, name, input, status: 'running', preview: null, description }],
   }));
 }
 
