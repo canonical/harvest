@@ -2,7 +2,7 @@ import './vanilla.scss';
 import './style.css';
 import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
 import {
-  queryStream, fetchToolDescription, fetchRepositories, setUnauthorizedHandler,
+  queryStream, fetchRepositories, setUnauthorizedHandler,
   projectQueryStart, openProjectEvents,
   listProjectConversations, createProjectConversation,
   getProjectConversation, updateProjectConversation, deleteProjectConversation,
@@ -29,7 +29,6 @@ import {
   startAssistantMessage,
   addToolCall,
   completeToolCall,
-  updateToolCallDescription,
   finalizeAssistantMessage,
   setError,
   setQuestion,
@@ -144,6 +143,41 @@ function render() {
     otherInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') { e.preventDefault(); const val = otherInput.value.trim(); if (val) sendQueryWithChoice(val); }
     });
+  }
+}
+
+function describeToolCall(name, input) {
+  switch (name) {
+    case 'list_repositories':     return 'Listing repositories';
+    case 'list_agents':           return 'Listing agents';
+    case 'list_secrets':          return 'Listing secrets';
+    case 'list_skills':           return 'Listing skills';
+    case 'search_symbols': {
+      const q = input.query ? `"${input.query}"` : 'symbols';
+      return input.repo ? `Searching for ${q} in ${input.repo}` : `Searching for ${q}`;
+    }
+    case 'get_symbol_source':
+      return `Reading source of ${input.name ?? 'symbol'}`;
+    case 'get_file_symbols':
+      return `Getting symbols in ${(input.file ?? 'file').split('/').pop()}`;
+    case 'find_callers':
+      return `Finding callers of ${input.function_name ?? 'function'}`;
+    case 'find_callees':
+      return `Finding callees of ${input.function_name ?? 'function'}`;
+    case 'get_imports':
+      return `Getting imports of ${(input.file ?? 'file').split('/').pop()}`;
+    case 'compare_symbol_across_versions':
+      return `Comparing ${input.name ?? 'symbol'} across versions`;
+    case 'run_cypher':
+      return 'Running graph query';
+    case 'run_command': {
+      const cmd = typeof input.command === 'string' ? input.command.split(' ')[0] : 'command';
+      return `Running ${cmd} on ${input.agent_id ?? 'agent'}`;
+    }
+    case 'get_secret':  return `Reading secret ${input.name ?? ''}`.trimEnd();
+    case 'save_secret': return `Saving secret ${input.name ?? ''}`.trimEnd();
+    case 'load_skill':  return `Loading skill ${input.name ?? ''}`.trimEnd();
+    default:            return name.replace(/_/g, ' ');
   }
 }
 
@@ -298,7 +332,7 @@ function renderToolCall(tc, i) {
   return `
     <div class="tc-step tc-step--${tc.status}" data-tc-idx="${i}">
       <div class="tc-step__row${hasDetail ? ' tc-step__row--clickable' : ''}" ${hasDetail ? 'role="button" tabindex="0" aria-expanded="false"' : ''}>
-        <i class="p-icon--circle-of-friends tc-step__icon${tc.status === 'running' && !tc.description ? ' tc-step__icon--spinning' : ''}" aria-hidden="true"></i>
+        <i class="p-icon--circle-of-friends tc-step__icon${tc.status === 'running' ? ' tc-step__icon--spinning' : ''}" aria-hidden="true"></i>
         <span class="tc-step__label">${label}</span>
         ${hasDetail ? `
           <svg class="tc-step__chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><polyline points="2,3 5,7 8,3"/></svg>` : ''}
@@ -429,14 +463,7 @@ async function sendQuery() {
     }
     await queryStream(query, activeConvId, attachments, (event) => {
       if (event.type === 'tool_call') {
-        state = addToolCall(state, { name: event.name, input: event.input });
-        const tc = getMessages(state).at(-1).tool_calls.at(-1);
-        fetchToolDescription(event.name, event.input).then((description) => {
-          if (description) {
-            state = updateToolCallDescription(state, { id: tc.id, description });
-            render();
-          }
-        });
+        state = addToolCall(state, { name: event.name, input: event.input, description: describeToolCall(event.name, event.input) });
       } else if (event.type === 'tool_result') {
         state = completeToolCall(state, { name: event.name, preview: event.preview });
       } else if (event.type === 'question') {
@@ -541,13 +568,7 @@ function handleProjectEvent(event) {
     }
 
     case 'tool_call':
-      state = addToolCall(state, { name: event.name, input: event.input });
-      fetchToolDescription(event.name, event.input).then(description => {
-        if (description) {
-          const tc = getMessages(state).at(-1)?.tool_calls?.at(-1);
-          if (tc) { state = updateToolCallDescription(state, { id: tc.id, description }); render(); }
-        }
-      });
+      state = addToolCall(state, { name: event.name, input: event.input, description: describeToolCall(event.name, event.input) });
       render();
       break;
 
