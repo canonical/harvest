@@ -38,7 +38,10 @@ const STATUS_USER_PREFIX: &str =
        and add a @media(prefers-color-scheme:dark) block with brighter variants.\n\
      \n\
      LAYOUT:\n\
-     • Outer wrapper: CSS grid, auto-fit columns min 220px, gap 1rem.\n\
+     • Immediately after the <style> block, include ONE <p class=\"ov-desc\"> element: 1–2 sentences\n\
+       summarising what this environment is (its purpose, stack, or key services). Style it:\n\
+       font-size 0.875rem, color var(--text-secondary), margin 0 0 1rem 0, line-height 1.5.\n\
+     • Then the outer wrapper: CSS grid, auto-fit columns min 220px, gap 1rem.\n\
      • Each section = a card: border 1px solid var(--border-color), border-radius 8px,\n\
        background var(--bg-surface), padding 1rem 1.25rem.\n\
      • Card heading: font-size 0.6875rem, uppercase, font-weight 700, letter-spacing 0.07em,\n\
@@ -48,7 +51,7 @@ const STATUS_USER_PREFIX: &str =
        padding 0.25rem 0, border-bottom 1px solid var(--border-subtle) (omit on last row).\n\
      • Status dot: 8px circle, inline-block, margin-right 0.4rem, vertical-align middle.\n\
      • Row label: color var(--text-secondary). Row value: color var(--text-primary), font-weight 500.\n\
-     • At most 3 cards, at most 6 rows each. Total output ≤ 250 words.\n\
+     • At most 3 cards, at most 6 rows each. Total output ≤ 300 words.\n\
      • Output raw HTML — do NOT wrap in a markdown code fence (no ``` delimiters of any kind).\n\
      \n\
      Environment context:\n\n";
