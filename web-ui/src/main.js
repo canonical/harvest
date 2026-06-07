@@ -319,9 +319,7 @@ function renderMessage(msg, isLast = false) {
 }
 
 function renderToolCall(tc, i) {
-  const label = tc.description
-    ? esc(tc.description)
-    : `<span class="tc-step__name-bare">${esc(tc.name.replace(/_/g, ' '))}</span>`;
+  const label = esc(tc.description || describeToolCall(tc.name, tc.input ?? {}));
 
   const hasDetail = !!(tc.input || tc.preview);
   const detailHtml = hasDetail ? `
