@@ -274,13 +274,15 @@ function renderMessage(msg, isLast = false) {
   const n = msg.tool_calls.length;
   const anyRunning = msg.tool_calls.some(tc => tc.status === 'running');
   const runningTc = msg.tool_calls.find(tc => tc.status === 'running');
-  const liveLabel = runningTc
-    ? (runningTc.description ?? `${runningTc.name.replace(/_/g, ' ')}…`)
+  const activeTc = runningTc ?? (msg.status === 'loading' && n > 0 ? msg.tool_calls[n - 1] : null);
+  const liveLabel = activeTc
+    ? (activeTc.description ?? `${activeTc.name.replace(/_/g, ' ')}…`)
     : null;
+  const showLiveStatus = msg.status === 'loading' && liveLabel;
   const toolCallsHtml = n > 0 ? `
-    ${anyRunning && liveLabel ? `
+    ${showLiveStatus ? `
     <div class="tc-live-status">
-      <svg class="tc-live-status__spinner" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="7" cy="7" r="5" stroke="var(--border-subtle)"/><path d="M7 2a5 5 0 0 1 5 5" stroke="var(--loading-dot-color)"/></svg>
+      <i class="p-icon--circle-of-friends tc-live-status__spinner" aria-hidden="true"></i>
       <span class="tc-live-status__text">${esc(liveLabel)}</span>
     </div>` : ''}
     <details class="tc-group${anyRunning ? ' tc-group--running' : ''}">
