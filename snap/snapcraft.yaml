@@ -1,10 +1,11 @@
-name: harvest
-base: core22
+name: harvest-server
+base: core24
 version: '0.1.0'
-summary: AI-powered code knowledge harvester and chat interface
+summary: AI-powered code knowledge graph server and web interface
 description: |
-  Harvest indexes your git repositories into a Neo4j knowledge graph
-  and exposes an AI-powered chat interface for exploring your codebase.
+  Knowledge Server exposes an AI-powered HTTP API and web interface for
+  querying code knowledge graphs stored in Neo4j.  Agents can connect to
+  it to run commands on remote machines.
 
   Prerequisites
   ─────────────
@@ -12,76 +13,69 @@ description: |
 
   Quick start
   ───────────
-  1. Configure connections and credentials:
-       snap set harvest \
+  1. Set required credentials:
+       snap set harvest-server \
          neo4j.password=<neo4j-password> \
-         llm.api-key=<llm-api-key>
+         llm.api-key=<llm-api-key> \
+         auth.jwt-secret=$(openssl rand -base64 32)
 
-  2. Declare repositories to harvest:
-       $EDITOR /var/snap/harvest/common/repositories.toml
+  2. Start the services:
+       snap start harvest-server.serve
+       snap start harvest-server.ui
 
-  3. Start the API server:
-       harvest.serve
-
-  4. Start the web UI (proxies API calls to the server):
-       harvest.ui start
-
-  5. Harvest your code:
-       harvest run
+  3. Open http://localhost:3000 in your browser.
 
   Snap configuration keys
   ───────────────────────
-  neo4j.host          Neo4j hostname          (default: localhost)
-  neo4j.port          Neo4j bolt port         (default: 7687)
-  neo4j.user          Neo4j username          (default: neo4j)
-  neo4j.password      Neo4j password          (required)
-  storage.clone-root  Git clone directory     (default: $SNAP_COMMON/repos)
-  server.host         API server bind address (default: 127.0.0.1)
-  server.port         API server port         (default: 8080)
-  ui.host             Web UI bind address     (default: 127.0.0.1)
-  ui.port             Web UI port             (default: 3000)
-  llm.provider        LLM provider            (default: anthropic)
-  llm.api-key         LLM API key             (required)
-  llm.model           LLM model name          (default: claude-sonnet-4-6)
-  llm.base-url        LLM base URL            (default: https://api.anthropic.com/v1)
-  llm.max-iterations  Agent iteration limit   (default: 20)
-  llm.timeout-secs    Request timeout         (default: 120)
+  neo4j.host              Neo4j hostname          (default: localhost)
+  neo4j.port              Neo4j bolt port         (default: 7687)
+  neo4j.user              Neo4j username          (default: neo4j)
+  neo4j.password          Neo4j password          (required)
+  server.host             API bind address        (default: 127.0.0.1)
+  server.port             API port                (default: 8080)
+  llm.provider            anthropic or openai-compatible (default: anthropic)
+  llm.api-key             LLM API key             (required)
+  llm.model               LLM model name          (default: claude-sonnet-4-6)
+  llm.base-url            LLM base URL            (default: https://api.anthropic.com/v1)
+  llm.max-iterations      Agent iteration limit   (default: 20)
+  llm.timeout-secs        Per-request timeout     (default: 120)
+  auth.jwt-secret         JWT signing secret      (required)
+  auth.google.client-id   Google OAuth client ID  (optional)
+  auth.google.client-secret  Google OAuth client secret  (optional)
+  auth.google.redirect-uri   Google OAuth redirect URI   (optional)
+  agents.public-url       Public URL agents use to call back (optional)
+  docs.dir                Documentation output directory (default: $SNAP_COMMON/docs)
+  ui.host                 Web UI bind address     (default: 127.0.0.1)
+  ui.port                 Web UI port             (default: 3000)
 
 grade: devel
 confinement: strict
 
 apps:
-  harvest:
-    command: bin/wrapper-harvest
-    plugs:
-      - network          # clone git repos; reach Neo4j
-      - home             # access repos under $HOME
-      - removable-media  # access repos on external media
-
   serve:
     command: bin/wrapper-serve
+    daemon: simple
+    install-mode: disable
+    restart-condition: on-failure
     plugs:
-      - network          # reach Neo4j and the LLM API
-      - network-bind     # bind to server.port
+      - network       # reach Neo4j and the LLM API
+      - network-bind  # bind to server.port
 
   ui:
     command: bin/wrapper-ui
+    daemon: simple
+    install-mode: disable
+    restart-condition: on-failure
     plugs:
-      - network          # nginx proxy to knowledge-server
-      - network-bind     # bind to ui.port
+      - network       # nginx proxy to knowledge-server
+      - network-bind  # bind to ui.port
 
 parts:
-  # ── Rust binaries ───────────────────────────────────────────────────────────
-  # Build both workspace members in one cargo invocation so they share the
-  # Cargo.lock and dependency cache.
-  #
-  # We use plugin: nil with rustc/cargo from apt rather than the rust plugin,
-  # because the rust plugin calls rustup which downloads from
-  # static.rust-lang.org — unreachable in this build environment.
-  # Ubuntu 22.04 apt ships Rust ≥ 1.75, sufficient for edition = "2021".
-  #
-  # rust-toolchain.toml is removed from the build tree before compiling:
-  # without rustup installed, cargo would abort when it finds that file.
+  # ── Rust binaries ──────────────────────────────────────────────────────────
+  # Build knowledge-server and harvest-agent from the workspace.
+  # apt Rust (≥1.75 on Ubuntu 24.04) is used instead of the rust plugin
+  # because the plugin invokes rustup which requires static.rust-lang.org.
+  # rust-toolchain.toml is removed before building to avoid rustup complaints.
   rust-binaries:
     plugin: nil
     source: .
@@ -96,14 +90,13 @@ parts:
     override-build: |
       rm -f rust-toolchain.toml
       cargo build --release --workspace
-      install -Dm755 target/release/knowledge-harvester \
-        "$SNAPCRAFT_PART_INSTALL/bin/knowledge-harvester"
       install -Dm755 target/release/knowledge-server \
         "$SNAPCRAFT_PART_INSTALL/bin/knowledge-server"
+      install -Dm755 target/release/harvest-agent \
+        "$SNAPCRAFT_PART_INSTALL/bin/harvest-agent"
 
-  # ── Web UI static assets ────────────────────────────────────────────────────
-  # Vite produces a self-contained dist/ bundle; no Node runtime is needed in
-  # the snap — nginx serves the files and proxies the API calls.
+  # ── Web UI static assets ───────────────────────────────────────────────────
+  # Vite produces a self-contained dist/ bundle served by nginx at runtime.
   web-ui:
     plugin: nil
     source: web-ui/
@@ -116,23 +109,18 @@ parts:
       mkdir -p "$SNAPCRAFT_PART_INSTALL/share/harvest-ui"
       cp -r dist/. "$SNAPCRAFT_PART_INSTALL/share/harvest-ui/"
 
-  # ── nginx + envsubst ────────────────────────────────────────────────────────
-  # nginx serves the web UI and proxies /query, /repositories, /health, and
-  # /tool-description to the knowledge-server.  envsubst (gettext-base) fills
-  # in the runtime config template.
+  # ── nginx + envsubst ───────────────────────────────────────────────────────
   nginx:
     plugin: nil
     stage-packages:
       - nginx
       - gettext-base
 
-  # ── Wrapper scripts and static config ───────────────────────────────────────
+  # ── Wrapper scripts and static config ─────────────────────────────────────
   wrappers:
     plugin: dump
     source: snap/local/
     organize:
-      wrapper-harvest:            bin/wrapper-harvest
-      wrapper-serve:              bin/wrapper-serve
-      wrapper-ui:                 bin/wrapper-ui
-      nginx.conf.template:        etc/harvest/nginx.conf.template
-      repositories.toml.example:  share/harvest/repositories.toml.example
+      wrapper-serve:           bin/wrapper-serve
+      wrapper-ui:              bin/wrapper-ui
+      nginx.conf.template:     etc/harvest-server/nginx.conf.template

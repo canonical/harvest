@@ -26,8 +26,8 @@ http {
     uwsgi_temp_path        ${SNAP_COMMON}/nginx-tmp/uwsgi;
     scgi_temp_path         ${SNAP_COMMON}/nginx-tmp/scgi;
 
-    sendfile        on;
-    keepalive_timeout  65;
+    sendfile       on;
+    keepalive_timeout 65;
 
     server {
         listen  ${UI_HOST}:${UI_PORT};
@@ -35,21 +35,21 @@ http {
         root   ${SNAP}/share/harvest-ui;
         index  index.html;
 
-        # Reverse-proxy API endpoints to the knowledge-server.
-        # proxy_buffering off is required for the Server-Sent Events stream
-        # used by the /query endpoint.
-        location ~ ^/(query|repositories|health|tool-description) {
-            proxy_pass         http://${SERVER_HOST}:${SERVER_PORT};
-            proxy_http_version 1.1;
-            proxy_set_header   Connection '';
-            proxy_read_timeout 300s;
-            proxy_send_timeout 300s;
-            proxy_buffering    off;
-            proxy_cache        off;
+        # Reverse-proxy all API endpoints to knowledge-server.
+        # proxy_buffering off is required for Server-Sent Events streams.
+        location ~ ^/(auth|admin|conversations|groups|projects|query|repositories|graph|health|tool-description|docs|agents|agent)(/|$) {
+            proxy_pass          http://${SERVER_HOST}:${SERVER_PORT};
+            proxy_http_version  1.1;
+            proxy_set_header    Connection '';
+            proxy_set_header    Host $host;
+            proxy_set_header    X-Real-IP $remote_addr;
+            proxy_read_timeout  300s;
+            proxy_send_timeout  300s;
+            proxy_buffering     off;
+            proxy_cache         off;
         }
 
-        # Serve static assets; fall back to index.html for any unmatched path
-        # so that client-side navigation works correctly.
+        # Serve static assets; fall back to index.html for client-side routing.
         location / {
             try_files $uri $uri/ /index.html;
         }
