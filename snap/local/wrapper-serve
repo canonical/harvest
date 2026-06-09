@@ -1,13 +1,13 @@
 #!/bin/bash
-# Wrapper for the knowledge-server.
-# Passes the snap-generated server.toml config and forwards any extra arguments.
+# Wrapper for knowledge-server.
+# Validates the config is present and exec's the binary.
 set -eu
 
 CONF="$SNAP_COMMON/server.toml"
 
 if [ ! -f "$CONF" ]; then
-  echo "error: Harvest server is not configured." >&2
-  echo "  snap set harvest neo4j.password=<password> llm.api-key=<key>" >&2
+  echo "error: harvest-server is not configured." >&2
+  echo "  snap set harvest-server neo4j.password=<pw> llm.api-key=<key> auth.jwt-secret=<secret>" >&2
   exit 1
 fi
 
