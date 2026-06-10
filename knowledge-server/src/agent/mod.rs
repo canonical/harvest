@@ -1,6 +1,5 @@
 pub mod graph_tools;
 pub mod machine_tools;
-pub mod secret_tools;
 pub mod skill_tools;
 pub mod prompt;
 pub mod tool;
