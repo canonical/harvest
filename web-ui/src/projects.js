@@ -3,6 +3,7 @@ import { fetchProjects, createProject, fetchMyGroups } from './api.js';
 let _projects       = [];
 let _currentProject = null;
 let _onChange       = null;
+let _pendingSelectId = null;
 
 let _container   = null;
 let _toggleBtn   = null;
@@ -11,6 +12,21 @@ let _listGroup   = null;
 let _searchInput = null;
 
 export function getCurrentProject() { return _currentProject; }
+
+export function selectProjectById(id) {
+  if (!id) return;
+  if (_projects.length > 0) {
+    const project = _projects.find(p => p.id === id);
+    if (project) {
+      _currentProject = { id: project.id, name: project.name };
+      _updateLabel();
+      _renderList('');
+      if (_onChange) _onChange(_currentProject);
+    }
+  } else {
+    _pendingSelectId = id;
+  }
+}
 
 export function refreshProjectSelector() {
   _currentProject = null;
@@ -43,6 +59,11 @@ export function initProjectSelector(container, { onChange } = {}) {
       _projects = projects;
       _updateLabel();
       _renderList('');
+      if (_pendingSelectId) {
+        const pending = _pendingSelectId;
+        _pendingSelectId = null;
+        selectProjectById(pending);
+      }
     })
     .catch(() => {});
 }

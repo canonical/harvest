@@ -16,14 +16,27 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use tokio::sync::{broadcast, Mutex, RwLock};
-use tokio_stream::{wrappers::BroadcastStream, Stream};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+use tokio_stream::{wrappers::{BroadcastStream, ReceiverStream}, Stream};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentEvent, Attachment, HistoryMessage, Source};
 use crate::api::ProjectAgentBuilder;
 use crate::auth::jwt::Claims;
 use crate::neo4j::Neo4jClient;
+use crate::projects::task_graph::{TaskNode, collect_subgraph, compute_in_degrees, compute_dependents};
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunEvent {
+    TaskStart   { task_id: String, task_name: String },
+    ToolCall    { task_id: String, name: String, input: Value },
+    ToolResult  { task_id: String, name: String, preview: String },
+    Done        { task_id: String, answer: String },
+    Error       { task_id: String, message: String },
+    TaskSkipped { task_id: String },
+    RunDone,
+}
 
 const CONVERSATION_TITLE_MAX_CHARS: usize = 60;
 const CONVERSATION_TITLE_TRUNCATE_CHARS: usize = 57;
@@ -761,67 +774,6 @@ pub async fn delete_conversation(
     Ok(Json(json!({ "ok": true })))
 }
 
-pub async fn list_secrets(
-    Extension(user): Extension<Claims>,
-    State(state): State<Arc<ProjectState>>,
-    Path(project_id): Path<String>,
-) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let rows = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_SECRET]->(s:ProjectSecret)
-         RETURN s.name AS name, s.created_at AS created_at
-         ORDER BY s.name",
-        json!({ "pid": project_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    Ok(Json(rows))
-}
-
-#[derive(serde::Deserialize)]
-pub struct UpsertSecretBody {
-    pub name:  String,
-    pub value: String,
-}
-
-pub async fn upsert_secret(
-    Extension(user): Extension<Claims>,
-    State(state): State<Arc<ProjectState>>,
-    Path(project_id): Path<String>,
-    Json(body): Json<UpsertSecretBody>,
-) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let name = body.name.trim().to_uppercase();
-    if name.is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
-    }
-    if body.value.is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "value cannot be empty"));
-    }
-    let now = chrono::Utc::now().to_rfc3339();
-    state.neo4j.query_read(
-        "MATCH (p:Project {id: $pid})
-         MERGE (p)-[:HAS_SECRET]->(s:ProjectSecret {name: $name})
-         ON CREATE SET s.value = $value, s.created_at = $now
-         ON MATCH SET s.value = $value
-         RETURN s.name",
-        json!({ "pid": project_id, "name": name, "value": body.value, "now": now }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    Ok((StatusCode::CREATED, Json(json!({ "ok": true }))))
-}
-
-pub async fn delete_secret(
-    Extension(user): Extension<Claims>,
-    State(state): State<Arc<ProjectState>>,
-    Path((project_id, secret_name)): Path<(String, String)>,
-) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_SECRET]->(s:ProjectSecret {name: $name})
-         DETACH DELETE s",
-        json!({ "pid": project_id, "name": secret_name }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 pub async fn list_memories(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
@@ -969,4 +921,389 @@ pub async fn project_query(
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
         }
     }
+}
+
+// ── Tasks ─────────────────────────────────────────────────────────────────────
+
+pub async fn list_tasks(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path(project_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let rows = state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_TASK]->(t:Task)
+         RETURN t.id AS id, t.name AS name, t.prompt AS prompt,
+                t.status AS status, t.created_at AS created_at,
+                COALESCE(t.depends_on, []) AS depends_on
+         ORDER BY t.created_at DESC",
+        json!({ "pid": project_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(Json(rows))
+}
+
+#[derive(serde::Deserialize)]
+pub struct CreateTaskBody {
+    pub name:        String,
+    pub prompt:      String,
+    pub depends_on:  Option<Vec<String>>,
+}
+
+pub async fn create_task(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path(project_id): Path<String>,
+    Json(body): Json<CreateTaskBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let name       = body.name.trim().to_string();
+    let prompt     = body.prompt.trim().to_string();
+    let depends_on = body.depends_on.unwrap_or_default();
+    if name.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "name is required"));
+    }
+    if prompt.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "prompt is required"));
+    }
+
+    // Validate all dependency IDs exist in this project
+    if !depends_on.is_empty() {
+        let dep_vals: Vec<Value> = depends_on.iter().map(|id| Value::String(id.clone())).collect();
+        let found = state.neo4j.query_read(
+            "MATCH (:Project {id: $pid})-[:HAS_TASK]->(t:Task)
+             WHERE t.id IN $ids RETURN t.id AS id",
+            json!({ "pid": project_id, "ids": dep_vals }),
+        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        if found.len() != depends_on.len() {
+            return Err(err(StatusCode::BAD_REQUEST, "one or more dependency IDs not found in this project"));
+        }
+    }
+
+    let id  = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let dep_vals: Vec<Value> = depends_on.iter().map(|id| Value::String(id.clone())).collect();
+    state.neo4j.query_read(
+        "MATCH (p:Project {id: $pid})
+         CREATE (t:Task {
+             id: $id, name: $name, prompt: $prompt,
+             status: 'idle', created_at: $now,
+             depends_on: $depends_on
+         })
+         CREATE (p)-[:HAS_TASK]->(t)
+         RETURN t.id AS id",
+        json!({ "pid": project_id, "id": id, "name": name, "prompt": prompt,
+                "now": now, "depends_on": dep_vals }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let _ = user;
+    Ok((StatusCode::CREATED, Json(json!({
+        "id":         id,
+        "name":       name,
+        "prompt":     prompt,
+        "status":     "idle",
+        "depends_on": depends_on,
+        "created_at": now,
+    }))))
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateTaskBody {
+    pub name:       Option<String>,
+    pub prompt:     Option<String>,
+    pub depends_on: Option<Vec<String>>,
+}
+
+pub async fn update_task(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, task_id)): Path<(String, String)>,
+    Json(body): Json<UpdateTaskBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let _ = user;
+
+    // Validate dep IDs if provided
+    if let Some(ref deps) = body.depends_on {
+        if !deps.is_empty() {
+            let dep_vals: Vec<Value> = deps.iter().map(|id| Value::String(id.clone())).collect();
+            let found = state.neo4j.query_read(
+                "MATCH (:Project {id: $pid})-[:HAS_TASK]->(t:Task)
+                 WHERE t.id IN $ids RETURN t.id AS id",
+                json!({ "pid": project_id, "ids": dep_vals }),
+            ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            if found.len() != deps.len() {
+                return Err(err(StatusCode::BAD_REQUEST, "one or more dependency IDs not found in this project"));
+            }
+        }
+    }
+
+    // Build SET clauses for only the fields provided
+    let mut sets: Vec<&str> = vec![];
+    if body.name.is_some()       { sets.push("t.name = $name"); }
+    if body.prompt.is_some()     { sets.push("t.prompt = $prompt"); }
+    if body.depends_on.is_some() { sets.push("t.depends_on = $depends_on"); }
+
+    if sets.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "nothing to update"));
+    }
+
+    let cypher = format!(
+        "MATCH (:Project {{id: $pid}})-[:HAS_TASK]->(t:Task {{id: $tid}}) SET {} \
+         RETURN t.id AS id, t.name AS name, t.prompt AS prompt, t.status AS status, \
+                t.created_at AS created_at, COALESCE(t.depends_on, []) AS depends_on",
+        sets.join(", ")
+    );
+
+    let dep_vals: Option<Vec<Value>> = body.depends_on.as_ref().map(|d| {
+        d.iter().map(|id| Value::String(id.clone())).collect()
+    });
+
+    let rows = state.neo4j.query_read(
+        &cypher,
+        json!({
+            "pid":        project_id,
+            "tid":        task_id,
+            "name":       body.name.as_deref().unwrap_or(""),
+            "prompt":     body.prompt.as_deref().unwrap_or(""),
+            "depends_on": dep_vals.unwrap_or_default(),
+        }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+
+    rows.into_iter().next()
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "task not found"))
+        .map(|row| Json(row))
+}
+
+pub async fn delete_task(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, task_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let _ = user;
+    state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_TASK]->(t:Task {id: $tid}) DETACH DELETE t",
+        json!({ "pid": project_id, "tid": task_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn run_task(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, task_id)): Path<(String, String)>,
+) -> axum::response::Response {
+    if let Err(e) = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await {
+        return e.into_response();
+    }
+    let _ = user;
+
+    // Load all project tasks (id, name, prompt, depends_on)
+    let all_rows = match state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_TASK]->(t:Task)
+         RETURN t.id AS id, t.name AS name, t.prompt AS prompt,
+                COALESCE(t.depends_on, []) AS depends_on",
+        json!({ "pid": project_id }),
+    ).await {
+        Ok(r) => r,
+        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "server error").into_response(),
+    };
+
+    if !all_rows.iter().any(|r| r["id"].as_str() == Some(&task_id)) {
+        return err(StatusCode::NOT_FOUND, "task not found").into_response();
+    }
+
+    let all_tasks: Vec<TaskNode> = all_rows.iter().map(|r| TaskNode {
+        id:         r["id"].as_str().unwrap_or("").to_string(),
+        name:       r["name"].as_str().unwrap_or("").to_string(),
+        prompt:     r["prompt"].as_str().unwrap_or("").to_string(),
+        depends_on: r["depends_on"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+    }).collect();
+
+    let subgraph = collect_subgraph(&task_id, all_tasks);
+
+    let (sse_tx, sse_rx) = mpsc::channel::<String>(256);
+    let builder = Arc::clone(&state.agent_builder);
+    let neo4j   = Arc::clone(&state.neo4j);
+    let pid     = project_id.clone();
+
+    tokio::spawn(async move {
+        execute_dag(subgraph, builder, neo4j, pid, sse_tx).await;
+    });
+
+    let stream = ReceiverStream::new(sse_rx)
+        .map(|data| Ok::<Event, Infallible>(Event::default().data(data)));
+    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+}
+
+async fn execute_dag(
+    subgraph:   Vec<TaskNode>,
+    builder:    Arc<ProjectAgentBuilder>,
+    neo4j:      Arc<Neo4jClient>,
+    project_id: String,
+    sse_tx:     mpsc::Sender<String>,
+) {
+    let in_deg_init = compute_in_degrees(&subgraph);
+    let dependents  = compute_dependents(&subgraph);
+
+    let by_id: std::collections::HashMap<String, TaskNode> =
+        subgraph.into_iter().map(|t| (t.id.clone(), t)).collect();
+
+    let mut in_degree = in_deg_init;
+    let (done_tx, mut done_rx) = mpsc::channel::<(String, bool)>(64);
+    let mut running = 0usize;
+
+    for (id, task) in &by_id {
+        if in_degree[id] == 0 {
+            running += 1;
+            let t       = task.clone();
+            let b       = Arc::clone(&builder);
+            let n       = Arc::clone(&neo4j);
+            let pid     = project_id.clone();
+            let sse     = sse_tx.clone();
+            let done    = done_tx.clone();
+            tokio::spawn(async move {
+                run_single_task(t, b.build(pid.clone()), n, pid, sse, done).await;
+            });
+        }
+    }
+
+    while running > 0 {
+        let Some((done_id, success)) = done_rx.recv().await else { break };
+        running -= 1;
+        if success {
+            if let Some(deps_list) = dependents.get(&done_id) {
+                for dep_id in deps_list {
+                    if let Some(deg) = in_degree.get_mut(dep_id) {
+                        *deg -= 1;
+                        if *deg == 0 {
+                            if let Some(task) = by_id.get(dep_id) {
+                                running += 1;
+                                let t    = task.clone();
+                                let b    = Arc::clone(&builder);
+                                let n    = Arc::clone(&neo4j);
+                                let pid  = project_id.clone();
+                                let sse  = sse_tx.clone();
+                                let done = done_tx.clone();
+                                tokio::spawn(async move {
+                                    run_single_task(t, b.build(pid.clone()), n, pid, sse, done).await;
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Tasks still with in_degree > 0 were blocked by a failed dependency
+    for (tid, deg) in &in_degree {
+        if *deg > 0 {
+            let event = RunEvent::TaskSkipped { task_id: tid.clone() };
+            if let Ok(data) = serde_json::to_string(&event) {
+                let _ = sse_tx.send(data).await;
+            }
+        }
+    }
+
+    if let Ok(data) = serde_json::to_string(&RunEvent::RunDone) {
+        let _ = sse_tx.send(data).await;
+    }
+}
+
+async fn run_single_task(
+    task:       TaskNode,
+    agent:      Arc<Agent>,
+    neo4j:      Arc<Neo4jClient>,
+    project_id: String,
+    sse_tx:     mpsc::Sender<String>,
+    done_tx:    mpsc::Sender<(String, bool)>,
+) {
+    let tid = task.id.clone();
+
+    // Announce start
+    let start = RunEvent::TaskStart { task_id: tid.clone(), task_name: task.name.clone() };
+    if let Ok(data) = serde_json::to_string(&start) { let _ = sse_tx.send(data).await; }
+
+    // Mark running in DB
+    let _ = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_TASK]->(t:Task {id: $tid}) SET t.status = 'running'",
+        json!({ "pid": project_id, "tid": tid }),
+    ).await;
+
+    // Run agent
+    let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(64);
+    let agent_ref    = Arc::clone(&agent);
+    let prompt_clone = task.prompt.clone();
+    tokio::spawn(async move {
+        agent_ref.query_streaming(&prompt_clone, &[], &[], event_tx).await;
+    });
+
+    let mut output     = String::new();
+    let mut had_error  = false;
+    // Each entry: { name, input, preview } — paired as ToolCall arrives then updated on ToolResult
+    let mut tool_calls: Vec<Value>            = Vec::new();
+    let mut pending:    Option<(String, Value)> = None; // (name, input) awaiting result
+
+    while let Some(event) = event_rx.recv().await {
+        let run_event = match event {
+            AgentEvent::ToolCall { name, input } => {
+                pending = Some((name.clone(), input.clone()));
+                RunEvent::ToolCall { task_id: tid.clone(), name, input }
+            }
+            AgentEvent::ToolResult { name, preview } => {
+                let input = if let Some((pname, pinput)) = pending.take() {
+                    if pname == name { pinput } else { Value::Null }
+                } else { Value::Null };
+                tool_calls.push(json!({ "name": name, "input": input, "preview": preview }));
+                RunEvent::ToolResult { task_id: tid.clone(), name, preview }
+            }
+            AgentEvent::Done { ref answer, .. } => {
+                output = answer.clone();
+                RunEvent::Done { task_id: tid.clone(), answer: answer.clone() }
+            }
+            AgentEvent::Error { ref message } => {
+                had_error = true;
+                RunEvent::Error { task_id: tid.clone(), message: message.clone() }
+            }
+            AgentEvent::Question { .. } => continue,
+        };
+        if let Ok(data) = serde_json::to_string(&run_event) {
+            let _ = sse_tx.send(data).await;
+        }
+    }
+
+    let status          = if had_error { "error" } else { "done" };
+    let tool_calls_json = serde_json::to_string(&tool_calls).unwrap_or_else(|_| "[]".to_string());
+    let _ = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_TASK]->(t:Task {id: $tid})
+         SET t.status = $status, t.output = $output, t.tool_calls = $tool_calls",
+        json!({ "pid": project_id, "tid": tid, "status": status,
+                "output": output, "tool_calls": tool_calls_json }),
+    ).await;
+
+    let _ = done_tx.send((tid, !had_error)).await;
+}
+
+pub async fn get_task_logs(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, task_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let _ = user;
+    let rows = state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_TASK]->(t:Task {id: $tid})
+         RETURN t.output AS output, t.status AS status,
+                COALESCE(t.tool_calls, '[]') AS tool_calls",
+        json!({ "pid": project_id, "tid": task_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let row = rows.into_iter().next()
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "task not found"))?;
+    Ok(Json(json!({
+        "status":     row["status"],
+        "output":     row.get("output").cloned().unwrap_or(Value::Null),
+        "tool_calls": row.get("tool_calls").cloned().unwrap_or(Value::String("[]".into())),
+    })))
 }
