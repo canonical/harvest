@@ -2,22 +2,21 @@ import './vanilla.scss';
 import './style.css';
 import { applyStoredTheme, nextTheme, getTheme, getThemeIcon, getThemeLabel } from './theme.js';
 import {
-  queryStream, fetchRepositories, setUnauthorizedHandler,
+  queryStream, fetchRepositories, setUnauthorizedHandler, updateMe,
   projectQueryStart, openProjectEvents,
   listProjectConversations, createProjectConversation,
   getProjectConversation, updateProjectConversation, deleteProjectConversation,
 } from './api.js';
 import { initRepositoriesPage, onRepositoriesPageShow, onRepositoriesPageHide } from './repositories.js';
 import { initAgentsPage, onAgentsPageShow, onAgentsPageHide } from './agents.js';
+import { initTasksPage, onTasksPageShow, onTasksPageHide } from './tasks.js';
 import { initMemoriesPage, onMemoriesPageShow, onMemoriesPageHide } from './memories.js';
-import { initSecretsPage, onSecretsPageShow, onSecretsPageHide } from './secrets.js';
 import { initDocumentationPage } from './documentation.js';
-import { initOverviewPage, onOverviewPageShow, onOverviewPageHide, showOverviewNoProject } from './overview.js';
 import { renderMarkdown, buildFileUrl } from './markdown.js';
-import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
 import { escapeHtml as esc, addCopyButtons, avatarColor, initials } from './utils.js';
+import { describeToolCall, renderToolCall, attachTcStepHandlers } from './tool-render.js';
 import { initSourcePanel, closeSourcePanel } from './source-panel.js';
-import { initProjectSelector, getCurrentProject, refreshProjectSelector } from './projects.js';
+import { initProjectSelector, getCurrentProject, refreshProjectSelector, selectProjectById } from './projects.js';
 import { mountInlineGraphs } from './inline-graph.js';
 import {
   fetchMe, logout, initAuthPages, showLoginPage, hideAuthPages, isAdmin, setUser, getUser,
@@ -123,18 +122,7 @@ function render() {
     messagesEl.scrollTop = prevScrollTop;
   }
 
-  messagesEl.querySelectorAll('.tc-step__row--clickable').forEach(row => {
-    const toggle = () => {
-      const step = row.closest('.tc-step');
-      const detail = step.querySelector('.tc-step__detail');
-      const willExpand = detail.hidden;
-      detail.hidden = !willExpand;
-      row.setAttribute('aria-expanded', String(willExpand));
-      step.classList.toggle('tc-step--open', willExpand);
-    };
-    row.addEventListener('click', toggle);
-    row.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
-  });
+  attachTcStepHandlers(messagesEl);
 
   addCopyButtons(messagesEl, '.message__body pre');
   mountInlineGraphs(messagesEl);
@@ -159,51 +147,6 @@ function render() {
   }
 }
 
-function describeToolCall(name, input, { hostname } = {}) {
-  switch (name) {
-    case 'list_repositories': return 'Discovering available repositories';
-    case 'list_agents':       return 'Checking connected agents';
-    case 'list_secrets':      return 'Listing project secrets';
-    case 'list_skills':       return 'Listing available skills';
-    case 'search_symbols': {
-      const q = input.query ?? 'symbols';
-      const kind = input.kind && input.kind !== 'any' ? ` ${input.kind}s` : '';
-      const scope = input.repo ? ` in ${input.repo}` : '';
-      return `Searching for "${q}"${kind}${scope}`;
-    }
-    case 'get_symbol_source':
-      return `Reading source of ${input.name ?? 'symbol'}`;
-    case 'get_file_symbols':
-      return `Scanning symbols in ${(input.file ?? 'file').split('/').pop()}`;
-    case 'find_callers':
-      return `Tracing callers of ${input.function_name ?? 'function'}`;
-    case 'find_callees':
-      return `Tracing calls made by ${input.function_name ?? 'function'}`;
-    case 'get_imports':
-      return `Checking imports in ${(input.file ?? 'file').split('/').pop()}`;
-    case 'compare_symbol_across_versions': {
-      const sym = input.name ?? 'symbol';
-      return (input.version_a && input.version_b)
-        ? `Comparing ${sym} ${input.version_a} → ${input.version_b}`
-        : `Comparing ${sym} across versions`;
-    }
-    case 'run_cypher': {
-      const q = typeof input.query === 'string' ? input.query.trim() : '';
-      const snippet = q.length > 38 ? q.slice(0, 38).trimEnd() + '…' : q;
-      return snippet ? `Graph query: ${snippet}` : 'Running graph query';
-    }
-    case 'run_command': {
-      const cmd = typeof input.command === 'string'
-        ? (input.command.length > 28 ? input.command.slice(0, 28).trimEnd() + '…' : input.command)
-        : 'command';
-      return `Running "${cmd}" on ${hostname ?? input.agent_id ?? 'agent'}`;
-    }
-    case 'get_secret':  return `Reading secret ${input.name ?? ''}`.trimEnd();
-    case 'save_secret': return `Saving secret ${input.name ?? ''}`.trimEnd();
-    case 'load_skill':  return `Loading skill ${input.name ?? ''}`.trimEnd();
-    default:            return name.replace(/_/g, ' ');
-  }
-}
 
 function renderAttachments(attachments) {
   if (!attachments?.length) return '';
@@ -346,38 +289,6 @@ function renderMessage(msg, isLast = false) {
   `;
 }
 
-function renderToolCall(tc, i) {
-  const label = esc(tc.description || describeToolCall(tc.name, tc.input ?? {}));
-
-  const hasDetail = !!(tc.input || tc.preview);
-  const detailHtml = hasDetail ? `
-    <div class="tc-step__detail" hidden>
-      <span class="tc-step__tool-tag">${esc(tc.name)}</span>
-      ${tc.input ? `
-        <div class="tc-step__detail-section">
-          <div class="tc-step__detail-label">Input</div>
-          <div class="tool-data">${renderJsonToHtml(tc.input)}</div>
-        </div>` : ''}
-      ${tc.preview ? `
-        <div class="tc-step__detail-section">
-          <div class="tc-step__detail-label">Result</div>
-          <div class="tool-data">${renderPreviewToHtml(tc.preview, tc.input?.file ?? null)}</div>
-        </div>` : ''}
-    </div>
-  ` : '';
-
-  return `
-    <div class="tc-step tc-step--${tc.status}" data-tc-idx="${i}">
-      <div class="tc-step__row${hasDetail ? ' tc-step__row--clickable' : ''}" ${hasDetail ? 'role="button" tabindex="0" aria-expanded="false"' : ''}>
-        <i class="p-icon--circle-of-friends tc-step__icon${tc.status === 'running' ? ' tc-step__icon--spinning' : ''}" aria-hidden="true"></i>
-        <span class="tc-step__label">${label}</span>
-        ${hasDetail ? `
-          <svg class="tc-step__chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><polyline points="2,3 5,7 8,3"/></svg>` : ''}
-      </div>
-      ${detailHtml}
-    </div>
-  `;
-}
 
 const attachTrayEl   = document.getElementById('attachment-tray');
 const attachInputEl  = document.getElementById('attachment-input');
@@ -725,9 +636,8 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
     const prevPage = document.querySelector('.page:not([hidden])');
     if (prevPage?.id === 'page-repositories') onRepositoriesPageHide();
     if (prevPage?.id === 'page-agents')       onAgentsPageHide();
+    if (prevPage?.id === 'page-tasks')        onTasksPageHide();
     if (prevPage?.id === 'page-memories')     onMemoriesPageHide();
-    if (prevPage?.id === 'page-secrets')      onSecretsPageHide();
-    if (prevPage?.id === 'page-overview')     onOverviewPageHide();
     closeSourcePanel();
     if (page === 'admin' && !isAdmin()) return;
 
@@ -736,17 +646,8 @@ document.querySelectorAll('#app-sidebar .p-side-navigation__link[data-page]').fo
 
     if (page === 'repositories') onRepositoriesPageShow();
     if (page === 'agents')       onAgentsPageShow(activeProjectId);
+    if (page === 'tasks')        onTasksPageShow(activeProjectId);
     if (page === 'memories')     onMemoriesPageShow(activeProjectId);
-    if (page === 'secrets')      onSecretsPageShow(activeProjectId);
-    if (page === 'overview') {
-      if (activeProjectId) {
-        document.getElementById('overview-regenerate-btn').hidden = false;
-        onOverviewPageShow(activeProjectId);
-      } else {
-        showOverviewNoProject();
-      }
-    }
-
     if (window.innerWidth < 620) closeNav();
   });
 });
@@ -764,9 +665,8 @@ const docsPage = initDocumentationPage(
 );
 
 initAgentsPage(document.getElementById('page-agents'));
+initTasksPage(document.getElementById('page-tasks'));
 initMemoriesPage(document.getElementById('page-memories'));
-initSecretsPage(document.getElementById('page-secrets'));
-initOverviewPage();
 
 const mainEl    = document.querySelector('.l-main');
 const navEl2    = document.getElementById('app-sidebar');
@@ -825,28 +725,22 @@ async function switchToProject(project) {
   activeConvId    = null;
   state           = createChatState();
   render();
+  if (project?.id) updateMe({ last_project_id: project.id }).catch(() => {});
 
   const agentsPage   = document.getElementById('page-agents');
+  const tasksPage    = document.getElementById('page-tasks');
   const memoriesPage = document.getElementById('page-memories');
-  const overviewPage = document.getElementById('page-overview');
   if (agentsPage && !agentsPage.hidden) {
     onAgentsPageHide();
     onAgentsPageShow(activeProjectId);
   }
+  if (tasksPage && !tasksPage.hidden) {
+    onTasksPageHide();
+    onTasksPageShow(activeProjectId);
+  }
   if (memoriesPage && !memoriesPage.hidden) {
     onMemoriesPageHide();
     onMemoriesPageShow(activeProjectId);
-  }
-  onSecretsPageShow(activeProjectId);
-  if (overviewPage && !overviewPage.hidden) {
-    const regenBtn = document.getElementById('overview-regenerate-btn');
-    if (activeProjectId) {
-      if (regenBtn) regenBtn.hidden = false;
-      onOverviewPageShow(activeProjectId);
-    } else {
-      if (regenBtn) regenBtn.hidden = true;
-      showOverviewNoProject();
-    }
   }
 
   const hasProject = !!activeProjectId;
@@ -987,6 +881,8 @@ function showApp(user) {
   if (attachBtnEl) attachBtnEl.disabled = true;
   conversations = [];
   refreshConvList();
+
+  if (user.last_project_id) selectProjectById(user.last_project_id);
 
   fetchRepositories().then((repos) => {
     repoUrlMap = Object.fromEntries(

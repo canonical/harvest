@@ -80,6 +80,19 @@ export async function fetchToolDescription(name, input) {
   }
 }
 
+export async function updateMe(body) {
+  const res = await fetch('/auth/me', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    handleUnauthorized(res.status);
+    throw new Error(`Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
 export async function fetchRepositories() {
   try {
     const response = await fetch(REPOSITORIES_URL);
@@ -222,9 +235,6 @@ export async function rotateInstallToken(projectId) {
   return response.json();
 }
 
-export const fetchProjectOverview      = (projectId) => projectFetch(`${projectUrl(projectId)}/overview`);
-export const regenerateProjectOverview = (projectId) => projectFetch(`${projectUrl(projectId)}/overview/regenerate`, { method: 'POST' });
-
 const memoryUrl = (projectId, memoryId) =>
   `${projectUrl(projectId)}/memories/${encodeURIComponent(memoryId)}`;
 
@@ -238,4 +248,29 @@ export async function deleteProjectMemory(projectId, memoryId) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `Request failed (${res.status})`);
   }
+}
+
+const taskUrl = (projectId, taskId) =>
+  `${projectUrl(projectId)}/tasks/${encodeURIComponent(taskId)}`;
+
+export const listProjectTasks   = (projectId)              => projectFetch(`${projectUrl(projectId)}/tasks`);
+export const createProjectTask  = (projectId, body)        => projectFetch(`${projectUrl(projectId)}/tasks`, { method: 'POST',  body: JSON.stringify(body) });
+export const updateProjectTask  = (projectId, taskId, body) => projectFetch(`${taskUrl(projectId, taskId)}`,  { method: 'PATCH', body: JSON.stringify(body) });
+export const getProjectTaskLogs = (projectId, taskId)      => projectFetch(`${taskUrl(projectId, taskId)}/logs`);
+
+export async function deleteProjectTask(projectId, taskId) {
+  const res = await fetch(taskUrl(projectId, taskId), { method: 'DELETE' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
+}
+
+export async function runProjectTaskStream(projectId, taskId, onEvent) {
+  const response = await fetch(`${taskUrl(projectId, taskId)}/run`, { method: 'POST' });
+  if (!response.ok) {
+    handleUnauthorized(response.status);
+    throw new Error(`Server error: ${response.status}`);
+  }
+  await consumeSseStream(response, onEvent);
 }

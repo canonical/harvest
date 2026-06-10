@@ -131,6 +131,7 @@ pub struct MeResponse {
     pub email: String,
     pub name: String,
     pub role: String,
+    pub last_project_id: Option<String>,
 }
 
 pub async fn me(
@@ -138,12 +139,38 @@ pub async fn me(
     jar: CookieJar,
 ) -> Result<impl IntoResponse, ApiError> {
     let claims = extract_claims(&state.config.jwt_secret, &jar)?;
+    let rows = state.neo4j.query_read(
+        "MATCH (u:User {id: $id}) RETURN u.last_project_id AS last_project_id",
+        json!({ "id": claims.sub }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let last_project_id = rows.into_iter()
+        .next()
+        .and_then(|r| r["last_project_id"].as_str().map(String::from));
     Ok(Json(MeResponse {
         id: claims.sub,
         email: claims.email,
         name: claims.name,
         role: claims.role,
+        last_project_id,
     }))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateMeBody {
+    pub last_project_id: String,
+}
+
+pub async fn update_me(
+    State(state): State<Arc<AuthState>>,
+    jar: CookieJar,
+    Json(body): Json<UpdateMeBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let claims = extract_claims(&state.config.jwt_secret, &jar)?;
+    state.neo4j.query_read(
+        "MATCH (u:User {id: $id}) SET u.last_project_id = $pid RETURN u.id",
+        json!({ "id": claims.sub, "pid": body.last_project_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn google_redirect(

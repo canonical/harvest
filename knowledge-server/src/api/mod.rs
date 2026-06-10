@@ -7,14 +7,14 @@ pub mod tool_description;
 use axum::{
     extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
     Json, Router,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::agent::{graph_tools, machine_tools, secret_tools, skill_tools, Agent};
+use crate::agent::{graph_tools, machine_tools, skill_tools, Agent};
 use crate::skills::SkillRegistry;
 use crate::auth::{self, handlers as auth_handlers, AuthState};
 use crate::config::AuthConfig;
@@ -27,9 +27,6 @@ use crate::machines::{
     MachineRegistry,
 };
 use crate::neo4j::Neo4jClient;
-use crate::overview::handlers::{
-    get_overview, overview_events, regenerate_overview, OverviewState,
-};
 use crate::projects::handlers::{self as proj_handlers, ProjectState};
 
 pub type GraphCache = RwLock<HashMap<String, Arc<String>>>;
@@ -79,18 +76,6 @@ impl ProjectAgentBuilder {
         tools.push(Box::new(machine_tools::RunCommandTool {
             registry:   Arc::clone(&self.registry),
             project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(secret_tools::ListSecretsTool {
-            neo4j:      Arc::clone(&self.neo4j),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(secret_tools::GetSecretTool {
-            neo4j:      Arc::clone(&self.neo4j),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(secret_tools::SaveSecretTool {
-            neo4j:      Arc::clone(&self.neo4j),
-            project_id,
         }));
         tools.push(Box::new(skill_tools::ListSkillsTool {
             registry: Arc::clone(&self.skills),
@@ -150,7 +135,7 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
         .with_state(Arc::clone(&graph_state));
 
     let me_router = Router::new()
-        .route("/auth/me", get(auth_handlers::me))
+        .route("/auth/me", get(auth_handlers::me).patch(auth_handlers::update_me))
         .with_state(Arc::clone(&auth_state));
 
     let conv_router = Router::new()
@@ -165,14 +150,6 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
         Arc::clone(&state.agent),
         Arc::clone(&state.agent_builder),
     ));
-
-    let overview_state = Arc::new(OverviewState {
-        neo4j:         Arc::clone(&state.neo4j),
-        llm:           Arc::clone(&state.llm),
-        agent_builder: Arc::clone(&state.agent_builder),
-        agent:         Arc::clone(&state.agent),
-        generating:    Arc::new(dashmap::DashMap::new()),
-    });
 
     let project_router = Router::new()
         .route("/groups",       get(proj_handlers::list_my_groups))
@@ -189,23 +166,21 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
         .route("/projects/:pid/events",        get(proj_handlers::project_events))
         .route("/projects/:pid/query",         post(proj_handlers::project_query))
         .route("/projects/:pid/query/stream",  post(proj_handlers::project_query_stream))
-        .route("/projects/:pid/secrets",
-               get(proj_handlers::list_secrets).post(proj_handlers::upsert_secret))
-        .route("/projects/:pid/secrets/:sname",
-               delete(proj_handlers::delete_secret))
         .route("/projects/:pid/memories",
                get(proj_handlers::list_memories).post(proj_handlers::create_memory))
         .route("/projects/:pid/memories/:mid",
                get(proj_handlers::get_memory)
                .put(proj_handlers::update_memory)
                .delete(proj_handlers::delete_memory))
+        .route("/projects/:pid/tasks",
+               get(proj_handlers::list_tasks).post(proj_handlers::create_task))
+        .route("/projects/:pid/tasks/:tid",
+               patch(proj_handlers::update_task).delete(proj_handlers::delete_task))
+        .route("/projects/:pid/tasks/:tid/run",
+               post(proj_handlers::run_task))
+        .route("/projects/:pid/tasks/:tid/logs",
+               get(proj_handlers::get_task_logs))
         .with_state(project_state);
-
-    let overview_router = Router::new()
-        .route("/projects/:pid/overview",            get(get_overview))
-        .route("/projects/:pid/overview/events",     get(overview_events))
-        .route("/projects/:pid/overview/regenerate", post(regenerate_overview))
-        .with_state(overview_state);
 
     let machine_state = Arc::new(MachineState {
         registry:    Arc::clone(&state.machine_registry),
@@ -223,7 +198,6 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
         .merge(agent_router)
         .merge(graph_router)
         .merge(project_router)
-        .merge(overview_router)
         .merge(machines_protected);
 
     if let Some(docs_dir) = state.docs_dir {

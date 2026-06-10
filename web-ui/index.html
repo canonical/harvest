@@ -143,12 +143,6 @@
               <ul class="p-side-navigation__list">
                 <li id="project-selector-section" class="is-fading-when-collapsed"></li>
                 <li class="p-side-navigation__item">
-                  <a href="#" class="p-side-navigation__link" data-page="overview">
-                    <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-                    <span class="p-side-navigation__label">Overview</span>
-                  </a>
-                </li>
-                <li class="p-side-navigation__item">
                   <a href="#" class="p-side-navigation__link" data-page="chat" aria-current="page">
                     <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                     <span class="p-side-navigation__label">Chat</span>
@@ -161,15 +155,15 @@
                   </a>
                 </li>
                 <li class="p-side-navigation__item">
-                  <a href="#" class="p-side-navigation__link" data-page="memories">
-                    <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2M9 2v2M2 15h2M2 9h2M15 22v-2M9 22v-2M22 15h-2M22 9h-2"/></svg>
-                    <span class="p-side-navigation__label">Memories</span>
+                  <a href="#" class="p-side-navigation__link" data-page="tasks">
+                    <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                    <span class="p-side-navigation__label">Tasks</span>
                   </a>
                 </li>
                 <li class="p-side-navigation__item">
-                  <a href="#" class="p-side-navigation__link" data-page="secrets">
-                    <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                    <span class="p-side-navigation__label">Secrets</span>
+                  <a href="#" class="p-side-navigation__link" data-page="memories">
+                    <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M15 2v2M9 2v2M2 15h2M2 9h2M15 22v-2M9 22v-2M22 15h-2M22 9h-2"/></svg>
+                    <span class="p-side-navigation__label">Memories</span>
                   </a>
                 </li>
                 <li class="sidenav-separator" role="separator" aria-hidden="true"></li>
@@ -224,65 +218,6 @@
     </nav>
 
     <main class="l-main">
-
-      <section class="page page--overview" id="page-overview" hidden>
-
-        <!-- ── Top bar ───────────────────────────────────────────────────── -->
-        <div class="overview-topbar">
-          <div class="overview-topbar__left">
-            <h2 class="overview-topbar__title">Overview</h2>
-            <span id="overview-last-updated" class="overview-topbar__updated"></span>
-          </div>
-          <div class="overview-topbar__right">
-            <span id="overview-status-text" class="overview-status-text" hidden></span>
-            <button id="overview-regenerate-btn"
-                    class="overview-refresh-btn"
-                    title="Regenerate overview"
-                    aria-label="Regenerate overview"
-                    hidden>
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
-                   stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                   stroke-linejoin="round" aria-hidden="true">
-                <polyline points="23 4 23 10 17 10"/>
-                <polyline points="1 20 1 14 7 14"/>
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-              </svg>
-            </button>
-          </div>
-        </div>
-
-        <!-- ── Page body ─────────────────────────────────────────────────── -->
-        <div class="overview-body-wrap">
-
-          <!-- State: no project -->
-          <div id="overview-no-project" class="overview-splash" hidden>
-            <div class="overview-splash__icon">
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                <path d="M.81 7.36a1.92 1.92 0 1 1 3.799.572A1.92 1.92 0 0 1 .81 7.36M8.826 3.033a1.92 1.92 0 1 1 3.755.806 1.92 1.92 0 0 1-3.755-.806M7.04 12.585a4.68 4.68 0 0 1-3.19-2.432 2.76 2.76 0 0 1-1.64.202 6.25 6.25 0 0 0 4.498 3.77c.45.098.908.144 1.364.141a2.74 2.74 0 0 1-.562-1.605 5 5 0 0 1-.47-.076M8.394 12.193a1.92 1.92 0 0 1 3.754.805 1.92 1.92 0 1 1-3.754-.805M12.943 11.89a6.3 6.3 0 0 0 1.22-2.587 6.3 6.3 0 0 0-.905-4.782 2.77 2.77 0 0 1-1.08 1.265 4.7 4.7 0 0 1-.154 4.674c.45.37.77.87.919 1.43M2.56 4.892a2.75 2.75 0 0 1 1.603.41 4.68 4.68 0 0 1 3.77-2.015q.012-.218.057-.433c.088-.411.268-.795.525-1.124A6.31 6.31 0 0 0 2.56 4.892"/>
-              </svg>
-            </div>
-            <p class="overview-splash__text">Select a project to view its overview.</p>
-          </div>
-
-          <!-- State: loading -->
-          <div id="overview-loading" class="overview-splash" hidden>
-            <div class="loading-dots"><span></span><span></span><span></span></div>
-            <p class="overview-splash__text">Generating overview…</p>
-          </div>
-
-          <!-- State: empty (no content yet) -->
-          <div id="overview-empty" class="overview-splash" hidden></div>
-
-          <!-- State: generating (live progress timeline) -->
-          <div id="overview-progress" class="overview-progress-wrap" hidden></div>
-
-          <!-- State: content -->
-          <div id="overview-content" class="overview-article-wrap" hidden>
-            <div id="overview-body" class="overview-article"></div>
-          </div>
-
-        </div>
-      </section>
 
       <section class="page" id="page-chat">
         <!-- No-project overlay -->
@@ -505,55 +440,112 @@
         </div>
       </section>
 
-      <section class="page page--secrets" id="page-secrets" hidden>
-        <div class="secrets-wrap">
-          <div class="secrets-header">
-            <h2 class="p-heading--3 u-no-margin--bottom">Secrets</h2>
-            <button id="add-secret-btn" class="p-button--positive" hidden>Add secret</button>
+      <section class="page page--docs" id="page-documentation" hidden>
+      </section>
+
+      <section class="page page--tasks" id="page-tasks" hidden>
+        <div class="tasks-wrap">
+          <div class="tasks-header">
+            <h2 class="p-heading--3 u-no-margin--bottom">Tasks</h2>
+            <button id="create-task-btn" class="p-button--positive" hidden>Create task</button>
           </div>
-          <p id="secrets-no-project" class="secrets-empty-msg">Select a project to manage its secrets.</p>
-          <div id="secrets-content" hidden>
-            <table class="p-table" id="secrets-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Created</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody id="secrets-tbody"></tbody>
-            </table>
-            <p id="secrets-empty" class="secrets-empty-msg" hidden>No secrets stored for this project yet.</p>
+          <p id="tasks-no-project" class="tasks-empty-msg">Select a project to manage its tasks.</p>
+          <div id="tasks-content" hidden>
+            <div class="tasks-layout">
+              <div class="tasks-graph" id="tasks-graph"></div>
+            </div>
           </div>
         </div>
 
-        <!-- Add secret modal -->
-        <div id="add-secret-modal" class="p-modal" hidden role="dialog" aria-modal="true" aria-labelledby="add-secret-modal-title">
+        <!-- Task detail side panel -->
+        <div id="task-detail-panel" class="task-detail-panel" role="complementary" aria-label="Task details">
+          <div class="task-detail-panel__head">
+            <button class="p-button--base has-icon u-no-margin source-panel-expand" id="task-panel-expand" type="button" aria-label="Expand task panel">
+              <i class="p-icon--chevron-left"></i>
+            </button>
+            <div class="task-detail-panel__title">
+              <span id="task-panel-name" class="task-panel-name"></span>
+              <span id="task-panel-status" class="task-status"></span>
+            </div>
+            <div class="task-detail-panel__ctrl">
+              <button class="p-button--negative is-small" id="task-panel-delete-btn">Delete</button>
+              <button class="source-panel-close" id="task-panel-close" aria-label="Close">&#215;</button>
+            </div>
+          </div>
+          <div class="task-detail-panel__body" id="task-panel-body"></div>
+        </div>
+
+        <!-- Create task modal -->
+        <div id="create-task-modal" class="p-modal" hidden role="dialog" aria-modal="true" aria-labelledby="create-task-modal-title">
           <div class="p-modal__dialog">
             <header class="p-modal__header">
-              <h3 class="p-modal__title" id="add-secret-modal-title">Add secret</h3>
-              <button class="p-modal__close" id="add-secret-modal-close" aria-label="Close">&#215;</button>
+              <h3 class="p-modal__title" id="create-task-modal-title">Create task</h3>
+              <button class="p-modal__close" id="create-task-modal-close" aria-label="Close">&#215;</button>
             </header>
             <div class="p-modal__body">
               <div class="p-form__group row">
-                <label class="p-form__label" for="secret-name-input">Name</label>
-                <input id="secret-name-input" class="p-form__control" type="text" autocomplete="off" placeholder="e.g. GITHUB_TOKEN" />
+                <label class="p-form__label" for="task-name-input">Name</label>
+                <input id="task-name-input" class="p-form__control" type="text" autocomplete="off" placeholder="e.g. Health check" />
               </div>
               <div class="p-form__group row">
-                <label class="p-form__label" for="secret-value-input">Value</label>
-                <input id="secret-value-input" class="p-form__control" type="password" autocomplete="off" />
+                <label class="p-form__label" for="task-prompt-input">Prompt</label>
+                <textarea id="task-prompt-input" class="p-form__control task-prompt-input" rows="4" placeholder="What should the agent do?"></textarea>
               </div>
-              <p id="add-secret-error" class="auth-error" role="alert"></p>
+              <div class="p-form__group row">
+                <label class="p-form__label">Dependencies</label>
+                <div class="p-search-and-filter" id="task-deps-widget">
+                  <div class="p-search-and-filter__search-container" aria-expanded="false" data-active="false" data-empty="true" id="task-deps-container">
+                    <form class="p-search-and-filter__box" onsubmit="return false">
+                      <label class="u-off-screen" for="task-deps-input">Search dependencies</label>
+                      <input autocomplete="off" class="p-search-and-filter__input" id="task-deps-input" placeholder="Add dependencies…" type="search" />
+                    </form>
+                  </div>
+                </div>
+              </div>
+              <p id="create-task-error" class="auth-error" role="alert"></p>
             </div>
             <footer class="p-modal__footer">
-              <button id="add-secret-cancel" class="p-button u-no-margin--bottom" type="button">Cancel</button>
-              <button id="add-secret-submit" class="p-button--positive u-no-margin--bottom" type="button">Save</button>
+              <button id="create-task-cancel" class="p-button u-no-margin--bottom" type="button">Cancel</button>
+              <button id="create-task-submit" class="p-button--positive u-no-margin--bottom" type="button">Create</button>
             </footer>
           </div>
         </div>
-      </section>
 
-      <section class="page page--docs" id="page-documentation" hidden>
+        <!-- Edit task modal -->
+        <div id="edit-task-modal" class="p-modal" hidden role="dialog" aria-modal="true" aria-labelledby="edit-task-modal-title">
+          <div class="p-modal__dialog">
+            <header class="p-modal__header">
+              <h3 class="p-modal__title" id="edit-task-modal-title">Edit task</h3>
+              <button class="p-modal__close" id="edit-task-modal-close" aria-label="Close">&#215;</button>
+            </header>
+            <div class="p-modal__body">
+              <div class="p-form__group row">
+                <label class="p-form__label" for="edit-task-name-input">Name</label>
+                <input id="edit-task-name-input" class="p-form__control" type="text" autocomplete="off" />
+              </div>
+              <div class="p-form__group row">
+                <label class="p-form__label" for="edit-task-prompt-input">Prompt</label>
+                <textarea id="edit-task-prompt-input" class="p-form__control task-prompt-input" rows="4"></textarea>
+              </div>
+              <div class="p-form__group row">
+                <label class="p-form__label">Dependencies</label>
+                <div class="p-search-and-filter" id="edit-task-deps-widget">
+                  <div class="p-search-and-filter__search-container" aria-expanded="false" data-active="false" data-empty="true" id="edit-task-deps-container">
+                    <form class="p-search-and-filter__box" onsubmit="return false">
+                      <label class="u-off-screen" for="edit-task-deps-input">Search dependencies</label>
+                      <input autocomplete="off" class="p-search-and-filter__input" id="edit-task-deps-input" placeholder="Add dependencies…" type="search" />
+                    </form>
+                  </div>
+                </div>
+              </div>
+              <p id="edit-task-error" class="auth-error" role="alert"></p>
+            </div>
+            <footer class="p-modal__footer">
+              <button id="edit-task-cancel" class="p-button u-no-margin--bottom" type="button">Cancel</button>
+              <button id="edit-task-submit" class="p-button--positive u-no-margin--bottom" type="button">Save</button>
+            </footer>
+          </div>
+        </div>
       </section>
 
       <section class="page page--agents" id="page-agents" hidden>
@@ -764,6 +756,20 @@
         <div id="source-relations" class="source-relations"></div>
       </div>
     </aside>
+  </div>
+
+  <!-- Deps panels — position:fixed via JS to escape modal overflow -->
+  <div class="p-search-and-filter__panel task-deps__panel" id="task-deps-panel" aria-hidden="true">
+    <div class="p-filter-panel-section">
+      <h5 class="p-filter-panel-section__heading">Available tasks</h5>
+      <div class="p-filter-panel-section__chips" id="task-deps-options"></div>
+    </div>
+  </div>
+  <div class="p-search-and-filter__panel task-deps__panel" id="edit-task-deps-panel" aria-hidden="true">
+    <div class="p-filter-panel-section">
+      <h5 class="p-filter-panel-section__heading">Available tasks</h5>
+      <div class="p-filter-panel-section__chips" id="edit-task-deps-options"></div>
+    </div>
   </div>
 
   <script type="module" src="/src/main.js"></script>
