@@ -40,11 +40,15 @@ pub enum MessageContent {
 pub enum ContentPart {
     Text {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     ToolUse {
         id: String,
         name: String,
         input: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     ToolResult {
         tool_use_id: String,
@@ -74,6 +78,7 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub input: Value,
+    pub thought_signature: Option<String>,
 }
 
 #[derive(Debug)]
