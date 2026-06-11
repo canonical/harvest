@@ -53,6 +53,14 @@ pub enum LlmConfig {
         #[serde(default = "default_max_retries")]
         max_retries: u32,
     },
+    Gemini {
+        model: String,
+        api_key: String,
+        #[serde(default = "default_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(default = "default_max_retries")]
+        max_retries: u32,
+    },
     #[serde(rename = "openai-compatible")]
     OpenAiCompat {
         base_url: String,
@@ -228,6 +236,31 @@ model    = "llama-3.3-70b"
         let config: Config = toml::from_str(toml).unwrap();
         let llm = config.llm.as_ref().unwrap();
         assert!(matches!(llm, LlmConfig::OpenAiCompat { model, .. } if model == "llama-3.3-70b"));
+    }
+
+    #[test]
+    fn gemini_llm_config_parsed() {
+        let toml = r#"
+[neo4j]
+uri = "bolt://localhost:7687"
+user = "neo4j"
+password = "pass"
+
+[storage]
+clone_root = "/tmp/repos"
+
+[[repositories]]
+name = "my-repo"
+url  = "https://github.com/owner/repo.git"
+
+[llm]
+provider = "gemini"
+model    = "gemini-2.5-flash"
+api_key  = "AIza-test"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let llm = config.llm.as_ref().unwrap();
+        assert!(matches!(llm, LlmConfig::Gemini { model, .. } if model == "gemini-2.5-flash"));
     }
 
     #[test]
