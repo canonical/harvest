@@ -257,9 +257,10 @@ impl Agent {
                     let call_parts: Vec<ContentPart> = calls
                         .iter()
                         .map(|c| ContentPart::ToolUse {
-                            id: c.id.clone(),
-                            name: c.name.clone(),
-                            input: c.input.clone(),
+                            id:                c.id.clone(),
+                            name:              c.name.clone(),
+                            input:             c.input.clone(),
+                            thought_signature: c.thought_signature.clone(),
                         })
                         .collect();
                     messages.push(Message {
@@ -333,7 +334,7 @@ impl Agent {
             .and_then(|m| match &m.content {
                 MessageContent::Text(t) => Some(t.clone()),
                 MessageContent::Parts(parts) => parts.iter().find_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.clone()),
+                    ContentPart::Text { text, .. } => Some(text.clone()),
                     _ => None,
                 }),
             })
@@ -345,7 +346,7 @@ pub(crate) fn build_user_message(text: &str, attachments: &[Attachment]) -> Mess
     if attachments.is_empty() {
         return Message::user(text);
     }
-    let mut parts = vec![ContentPart::Text { text: text.to_string() }];
+    let mut parts = vec![ContentPart::Text { text: text.to_string(), thought_signature: None }];
     for attachment in attachments {
         if attachment.mime_type.starts_with("image/") {
             parts.push(ContentPart::Image {
@@ -449,7 +450,7 @@ mod tests {
 
     fn tool_call(name: &str) -> LlmResponse {
         LlmResponse::ToolCalls {
-            calls: vec![ToolCall { id: "tc_1".into(), name: name.into(), input: serde_json::json!({}) }],
+            calls: vec![ToolCall { id: "tc_1".into(), name: name.into(), input: serde_json::json!({}), thought_signature: None }],
             preamble: String::new(),
         }
     }
@@ -457,8 +458,8 @@ mod tests {
     fn two_tool_calls(a: &str, b: &str) -> LlmResponse {
         LlmResponse::ToolCalls {
             calls: vec![
-                ToolCall { id: "tc_1".into(), name: a.into(), input: serde_json::json!({}) },
-                ToolCall { id: "tc_2".into(), name: b.into(), input: serde_json::json!({}) },
+                ToolCall { id: "tc_1".into(), name: a.into(), input: serde_json::json!({}), thought_signature: None },
+                ToolCall { id: "tc_2".into(), name: b.into(), input: serde_json::json!({}), thought_signature: None },
             ],
             preamble: String::new(),
         }
@@ -488,7 +489,7 @@ mod tests {
         match msg.content {
             MessageContent::Parts(parts) => {
                 assert_eq!(parts.len(), 2);
-                assert!(matches!(&parts[0], ContentPart::Text { text } if text == "check this"));
+                assert!(matches!(&parts[0], ContentPart::Text { text, .. } if text == "check this"));
                 assert!(matches!(&parts[1], ContentPart::Image { media_type, .. } if media_type == "image/png"));
             }
             other => panic!("expected Parts, got {other:?}"),

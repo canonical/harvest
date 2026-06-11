@@ -85,7 +85,7 @@ fn to_openai_message(msg: &Message) -> Value {
             let tool_calls: Vec<Value> = parts
                 .iter()
                 .filter_map(|p| match p {
-                    ContentPart::ToolUse { id, name, input } => Some(json!({
+                    ContentPart::ToolUse { id, name, input, .. } => Some(json!({
                         "id": id,
                         "type": "function",
                         "function": { "name": name, "arguments": input.to_string() }
@@ -112,7 +112,7 @@ fn to_openai_message(msg: &Message) -> Value {
 
             if has_media {
                 let content_items: Vec<Value> = parts.iter().filter_map(|p| match p {
-                    ContentPart::Text { text } =>
+                    ContentPart::Text { text, .. } =>
                         Some(json!({ "type": "text", "text": text })),
                     ContentPart::Image { media_type, data } =>
                         Some(json!({ "type": "image_url", "image_url": {
@@ -128,7 +128,7 @@ fn to_openai_message(msg: &Message) -> Value {
             let text: String = parts
                 .iter()
                 .filter_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
+                    ContentPart::Text { text, .. } => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -164,11 +164,12 @@ fn parse_openai_response(json: Value) -> Result<LlmResponse> {
             .unwrap_or_default()
             .into_iter()
             .map(|tc| ToolCall {
-                id:   tc["id"].as_str().unwrap_or("").to_string(),
-                name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
-                input: serde_json::from_str(
+                id:                tc["id"].as_str().unwrap_or("").to_string(),
+                name:              tc["function"]["name"].as_str().unwrap_or("").to_string(),
+                input:             serde_json::from_str(
                     tc["function"]["arguments"].as_str().unwrap_or("{}"),
                 ).unwrap_or(Value::Null),
+                thought_signature: None,
             })
             .collect();
         let preamble = message["content"].as_str().unwrap_or("").to_string();
@@ -292,6 +293,7 @@ mod tests {
                 id: "call_1".into(),
                 name: "my_tool".into(),
                 input: json!({ "k": "v" }),
+                thought_signature: None,
             }]),
         };
         let v = to_openai_message(&msg);
@@ -323,7 +325,7 @@ mod tests {
         let msg = Message {
             role: Role::User,
             content: MessageContent::Parts(vec![
-                ContentPart::Text { text: "look at this".into() },
+                ContentPart::Text { text: "look at this".into(), thought_signature: None },
                 ContentPart::Image { media_type: "image/jpeg".into(), data: "abc123".into() },
             ]),
         };
@@ -340,7 +342,7 @@ mod tests {
         let msg = Message {
             role: Role::User,
             content: MessageContent::Parts(vec![
-                ContentPart::Text { text: "read this".into() },
+                ContentPart::Text { text: "read this".into(), thought_signature: None },
                 ContentPart::Document { media_type: "application/pdf".into(), data: "pdfdata".into() },
             ]),
         };

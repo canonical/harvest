@@ -104,9 +104,9 @@ fn to_anthropic_message(msg: &Message) -> Value {
         MessageContent::Text(t) => Value::String(t.clone()),
         MessageContent::Parts(parts) => {
             let items: Vec<Value> = parts.iter().map(|p| match p {
-                ContentPart::Text { text } =>
+                ContentPart::Text { text, .. } =>
                     json!({ "type": "text", "text": text }),
-                ContentPart::ToolUse { id, name, input } =>
+                ContentPart::ToolUse { id, name, input, .. } =>
                     json!({ "type": "tool_use", "id": id, "name": name, "input": input }),
                 ContentPart::ToolResult { tool_use_id, content, is_error } =>
                     json!({ "type": "tool_result", "tool_use_id": tool_use_id,
@@ -144,9 +144,10 @@ fn parse_anthropic_response(json: Value) -> Result<LlmResponse> {
             .iter()
             .filter(|b| b["type"] == "tool_use")
             .map(|b| ToolCall {
-                id:    b["id"].as_str().unwrap_or("").to_string(),
-                name:  b["name"].as_str().unwrap_or("").to_string(),
-                input: b["input"].clone(),
+                id:                b["id"].as_str().unwrap_or("").to_string(),
+                name:              b["name"].as_str().unwrap_or("").to_string(),
+                input:             b["input"].clone(),
+                thought_signature: None,
             })
             .collect();
         let preamble = content
@@ -254,6 +255,7 @@ mod tests {
                 id: "tu_1".into(),
                 name: "my_tool".into(),
                 input: json!({ "k": "v" }),
+                thought_signature: None,
             }]),
         };
         let v = to_anthropic_message(&msg);
@@ -288,7 +290,7 @@ mod tests {
         let msg = Message {
             role: Role::User,
             content: MessageContent::Parts(vec![
-                ContentPart::Text { text: "look at this".into() },
+                ContentPart::Text { text: "look at this".into(), thought_signature: None },
                 ContentPart::Image { media_type: "image/png".into(), data: "abc123".into() },
             ]),
         };
