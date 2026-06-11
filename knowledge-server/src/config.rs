@@ -74,6 +74,20 @@ pub enum LlmConfig {
         #[serde(default = "default_compaction_keep_last")]
         compaction_keep_last: usize,
     },
+    Gemini {
+        model: String,
+        api_key: String,
+        #[serde(default = "default_max_iterations")]
+        max_iterations: usize,
+        #[serde(default = "default_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(default = "default_max_retries")]
+        max_retries: u32,
+        #[serde(default = "default_compaction_threshold_chars")]
+        compaction_threshold_chars: usize,
+        #[serde(default = "default_compaction_keep_last")]
+        compaction_keep_last: usize,
+    },
     #[serde(rename = "openai-compatible")]
     OpenAiCompat {
         base_url: String,
@@ -102,6 +116,7 @@ impl LlmConfig {
     pub fn max_iterations(&self) -> usize {
         match self {
             Self::Anthropic    { max_iterations, .. } => *max_iterations,
+            Self::Gemini       { max_iterations, .. } => *max_iterations,
             Self::OpenAiCompat { max_iterations, .. } => *max_iterations,
         }
     }
@@ -109,6 +124,7 @@ impl LlmConfig {
     pub fn timeout_secs(&self) -> u64 {
         match self {
             Self::Anthropic    { timeout_secs, .. } => *timeout_secs,
+            Self::Gemini       { timeout_secs, .. } => *timeout_secs,
             Self::OpenAiCompat { timeout_secs, .. } => *timeout_secs,
         }
     }
@@ -116,6 +132,7 @@ impl LlmConfig {
     pub fn max_retries(&self) -> u32 {
         match self {
             Self::Anthropic    { max_retries, .. } => *max_retries,
+            Self::Gemini       { max_retries, .. } => *max_retries,
             Self::OpenAiCompat { max_retries, .. } => *max_retries,
         }
     }
@@ -123,6 +140,7 @@ impl LlmConfig {
     pub fn compaction_threshold_chars(&self) -> usize {
         match self {
             Self::Anthropic    { compaction_threshold_chars, .. } => *compaction_threshold_chars,
+            Self::Gemini       { compaction_threshold_chars, .. } => *compaction_threshold_chars,
             Self::OpenAiCompat { compaction_threshold_chars, .. } => *compaction_threshold_chars,
         }
     }
@@ -130,6 +148,7 @@ impl LlmConfig {
     pub fn compaction_keep_last(&self) -> usize {
         match self {
             Self::Anthropic    { compaction_keep_last, .. } => *compaction_keep_last,
+            Self::Gemini       { compaction_keep_last, .. } => *compaction_keep_last,
             Self::OpenAiCompat { compaction_keep_last, .. } => *compaction_keep_last,
         }
     }
