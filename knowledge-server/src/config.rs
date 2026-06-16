@@ -19,6 +19,8 @@ pub struct AuthConfig {
     pub jwt_secret: String,
     #[serde(default)]
     pub google: Option<GoogleConfig>,
+    #[serde(default)]
+    pub oidc: Option<OidcConfig>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -26,6 +28,89 @@ pub struct GoogleConfig {
     pub client_id: String,
     pub client_secret: String,
     pub redirect_uri: String,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct OidcConfig {
+    pub issuer_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_uri: String,
+    pub display_name: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_auth(toml: &str) -> AuthConfig {
+        #[derive(serde::Deserialize)]
+        struct Wrapper { auth: AuthConfig }
+        toml::from_str::<Wrapper>(toml).expect("parse failed").auth
+    }
+
+    #[test]
+    fn oidc_config_parses_all_fields() {
+        let cfg = parse_auth(r#"
+            [auth]
+            jwt_secret = "s3cr3t"
+            [auth.oidc]
+            issuer_url   = "https://login.ubuntu.com"
+            client_id    = "harvest"
+            client_secret = "abc123"
+            redirect_uri = "https://harvest.example.com/auth/oidc/callback"
+            display_name = "Ubuntu One"
+        "#);
+        let oidc = cfg.oidc.expect("oidc should be present");
+        assert_eq!(oidc.issuer_url, "https://login.ubuntu.com");
+        assert_eq!(oidc.client_id, "harvest");
+        assert_eq!(oidc.client_secret, "abc123");
+        assert_eq!(oidc.redirect_uri, "https://harvest.example.com/auth/oidc/callback");
+        assert_eq!(oidc.display_name.as_deref(), Some("Ubuntu One"));
+    }
+
+    #[test]
+    fn oidc_display_name_is_optional() {
+        let cfg = parse_auth(r#"
+            [auth]
+            jwt_secret = "s3cr3t"
+            [auth.oidc]
+            issuer_url   = "https://login.ubuntu.com"
+            client_id    = "harvest"
+            client_secret = "abc123"
+            redirect_uri = "https://harvest.example.com/auth/oidc/callback"
+        "#);
+        let oidc = cfg.oidc.expect("oidc should be present");
+        assert!(oidc.display_name.is_none());
+    }
+
+    #[test]
+    fn oidc_absent_gives_none() {
+        let cfg = parse_auth(r#"
+            [auth]
+            jwt_secret = "s3cr3t"
+        "#);
+        assert!(cfg.oidc.is_none());
+    }
+
+    #[test]
+    fn google_and_oidc_can_coexist() {
+        let cfg = parse_auth(r#"
+            [auth]
+            jwt_secret = "s3cr3t"
+            [auth.google]
+            client_id     = "gid"
+            client_secret = "gsec"
+            redirect_uri  = "https://example.com/auth/google/callback"
+            [auth.oidc]
+            issuer_url    = "https://idp.example.com"
+            client_id     = "harvest"
+            client_secret = "oidcsec"
+            redirect_uri  = "https://example.com/auth/oidc/callback"
+        "#);
+        assert!(cfg.google.is_some());
+        assert!(cfg.oidc.is_some());
+    }
 }
 
 #[derive(Deserialize, Default)]
