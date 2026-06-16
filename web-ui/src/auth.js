@@ -60,14 +60,15 @@ export function initAuthPages({ onLoginSuccess }) {
   googleDivider.hidden = true;
   oidcBtn.hidden      = true;
   oidcDivider.hidden  = true;
-  const localSection  = document.getElementById('local-login-section');
   fetch(CONFIG_URL)
     .then(r => r.ok ? r.json() : null)
     .then(cfg => {
       if (cfg?.local_login === false) {
-        const form = document.getElementById('login-form');
-        if (localSection) localSection.hidden = true;
-        else if (form) form.hidden = true;
+        const els = ['login-form', 'local-sso-divider', 'register-switch'];
+        els.forEach(id => {
+          const el = document.getElementById(id);
+          if (el) el.hidden = true;
+        });
       }
       if (cfg?.google) {
         googleBtn.hidden    = false;
