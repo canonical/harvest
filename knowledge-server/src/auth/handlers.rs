@@ -11,8 +11,8 @@ use std::sync::Arc;
 use time::Duration;
 use uuid::Uuid;
 
-use super::{jwt, password, AuthState, TOKEN_COOKIE};
-use crate::config::GoogleConfig;
+use super::{jwt, oidc, password, AuthState, TOKEN_COOKIE};
+use crate::config::{GoogleConfig, OidcConfig};
 
 type ApiError = (StatusCode, Json<Value>);
 
@@ -39,8 +39,12 @@ fn clear_token_cookie() -> Cookie<'static> {
 }
 
 pub async fn config(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
+    let oidc_display_name = state.config.oidc.as_ref()
+        .and_then(|o| o.display_name.clone());
     Json(serde_json::json!({
         "google": state.config.google.is_some(),
+        "oidc":   state.oidc_endpoints.is_some(),
+        "oidc_display_name": oidc_display_name,
     }))
 }
 
@@ -282,6 +286,132 @@ fn issue_token(secret: &str, user: &Value) -> Result<String, ApiError> {
         user["role"].as_str().unwrap_or("regular"),
     )
     .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))
+}
+
+pub async fn oidc_redirect(
+    State(state): State<Arc<AuthState>>,
+    jar: CookieJar,
+) -> Result<impl IntoResponse, ApiError> {
+    let endpoints = state.oidc_endpoints.as_ref()
+        .ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "OIDC login not configured"))?;
+    let oidc_cfg = state.config.oidc.as_ref()
+        .ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "OIDC login not configured"))?;
+
+    let oauth_state = Uuid::new_v4().to_string();
+    let url = build_oidc_auth_url(&endpoints.authorization_endpoint, oidc_cfg, &oauth_state);
+
+    let state_cookie = Cookie::build(("oauth_state", oauth_state))
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .max_age(Duration::minutes(10))
+        .build();
+
+    Ok((jar.add(state_cookie), Redirect::to(&url)))
+}
+
+#[derive(Deserialize)]
+pub struct OidcCallbackParams {
+    pub code:              Option<String>,
+    pub state:             Option<String>,
+    pub error:             Option<String>,
+    pub error_description: Option<String>,
+}
+
+pub async fn oidc_callback(
+    State(state): State<Arc<AuthState>>,
+    Query(params): Query<OidcCallbackParams>,
+    jar: CookieJar,
+) -> Result<impl IntoResponse, ApiError> {
+    let endpoints = state.oidc_endpoints.as_ref()
+        .ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "OIDC login not configured"))?;
+    let oidc_cfg = state.config.oidc.as_ref()
+        .ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "OIDC login not configured"))?;
+
+    if let Some(e) = params.error {
+        let desc = params.error_description.unwrap_or_default();
+        tracing::warn!(error = %e, description = %desc, "OIDC error from provider");
+        return Err(err(StatusCode::BAD_REQUEST, &format!("OIDC error: {e}")));
+    }
+
+    let code = params.code.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth code"))?;
+    let oauth_state = params.state.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth state"))?;
+
+    let stored = jar.get("oauth_state").map(|c| c.value().to_string());
+    if stored.as_deref() != Some(oauth_state.as_str()) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid OAuth state"));
+    }
+
+    let access_token = oidc::exchange_code(
+        &state.http,
+        &endpoints.token_endpoint,
+        &oidc_cfg.client_id,
+        &oidc_cfg.client_secret,
+        &oidc_cfg.redirect_uri,
+        &code,
+    )
+    .await
+    .map_err(|_| err(StatusCode::BAD_GATEWAY, "failed to exchange OIDC code"))?;
+
+    let user_info = oidc::fetch_userinfo(&state.http, &endpoints.userinfo_endpoint, &access_token)
+        .await
+        .map_err(|_| err(StatusCode::BAD_GATEWAY, "failed to fetch OIDC user info"))?;
+
+    let display_name = user_info.name.unwrap_or_else(|| {
+        user_info.email.split('@').next().unwrap_or("user").to_string()
+    });
+
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let rows = state.neo4j.query_read(
+        "MATCH (existing:User)
+         WITH count(existing) AS n
+         MERGE (u:User {oidc_sub: $oidc_sub})
+         ON CREATE SET u.id = $id, u.email = $email, u.name = $name,
+           u.provider = 'oidc', u.created_at = $created_at,
+           u.role = CASE WHEN n = 0 THEN 'admin' ELSE 'regular' END
+         ON MATCH SET u.email = $email, u.name = $name
+         RETURN u.id AS id, u.email AS email, u.name AS name, u.role AS role",
+        serde_json::json!({
+            "oidc_sub": user_info.sub,
+            "id": id,
+            "email": user_info.email,
+            "name": display_name,
+            "created_at": now
+        }),
+    )
+    .await
+    .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+
+    let user = rows.into_iter().next()
+        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let token = issue_token(&state.config.jwt_secret, &user)?;
+
+    let remove_state = Cookie::build(("oauth_state", ""))
+        .path("/")
+        .max_age(Duration::seconds(0))
+        .build();
+
+    Ok((
+        jar.add(make_token_cookie(token)).add(remove_state),
+        Redirect::to("/"),
+    ))
+}
+
+fn build_oidc_auth_url(authorization_endpoint: &str, oidc: &OidcConfig, state: &str) -> String {
+    reqwest::Url::parse_with_params(
+        authorization_endpoint,
+        &[
+            ("client_id", oidc.client_id.as_str()),
+            ("redirect_uri", oidc.redirect_uri.as_str()),
+            ("response_type", "code"),
+            ("scope", "openid email profile"),
+            ("state", state),
+        ],
+    )
+    .expect("valid OIDC auth URL")
+    .to_string()
 }
 
 fn build_google_auth_url(google: &GoogleConfig, state: &str) -> String {
