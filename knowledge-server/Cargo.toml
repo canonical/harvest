@@ -43,6 +43,7 @@ async-trait  = "0.1"
 
 # Auth
 argon2       = "0.5"
+base64       = { version = "0.22", features = ["alloc"] }
 jsonwebtoken = "9"
 axum-extra   = { version = "0.9", features = ["cookie"] }
 rand_core    = { version = "0.6", features = ["getrandom"] }
