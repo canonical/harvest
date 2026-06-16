@@ -50,6 +50,7 @@ pub struct QueryResponse {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    Thinking { text: String },
     ToolCall { name: String, input: serde_json::Value },
     ToolResult { name: String, preview: String },
     Done { answer: String, sources: Vec<Source>, tool_calls_made: usize },
@@ -238,6 +239,10 @@ impl Agent {
 
                 LlmResponse::ToolCalls { calls, preamble } => {
                     iterations += 1;
+
+                    if !preamble.is_empty() {
+                        let _ = event_sender.send(AgentEvent::Thinking { text: preamble.clone() }).await;
+                    }
 
                     if let Some(ask) = calls.iter().find(|c| c.name == "ask_user") {
                         let question = ask.input["question"].as_str().unwrap_or("").to_string();

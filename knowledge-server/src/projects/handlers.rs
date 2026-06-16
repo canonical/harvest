@@ -30,6 +30,7 @@ use crate::projects::task_graph::{TaskNode, collect_subgraph, compute_in_degrees
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunEvent {
     TaskStart   { task_id: String, task_name: String },
+    Thinking    { task_id: String, text: String },
     ToolCall    { task_id: String, name: String, input: Value },
     ToolResult  { task_id: String, name: String, preview: String },
     Done        { task_id: String, answer: String },
@@ -1266,6 +1267,9 @@ async fn run_single_task(
             AgentEvent::Error { ref message } => {
                 had_error = true;
                 RunEvent::Error { task_id: tid.clone(), message: message.clone() }
+            }
+            AgentEvent::Thinking { text } => {
+                RunEvent::Thinking { task_id: tid.clone(), text }
             }
             AgentEvent::Question { .. } => continue,
         };
