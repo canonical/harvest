@@ -229,19 +229,19 @@ function renderPanelOutput(taskId) {
 
   const source = _runState.get(taskId) ?? _taskLogs.get(taskId) ?? null;
 
-  if (!source || (!source.answer && !(source.toolCalls ?? []).length)) {
+  if (!source || (!source.answer && !(source.chain ?? []).length && !(source.toolCalls ?? []).length)) {
     bodyEl.innerHTML = '<div class="task-panel-empty">No output yet.</div>';
     return;
   }
 
-  const tcsHtml = buildToolCallsHtml(source.toolCalls ?? []);
+  const chainHtml = buildChainHtml(source.chain ?? [], source.toolCalls ?? []);
 
   if (source.status === 'error') {
-    bodyEl.innerHTML = tcsHtml + `<div class="tasks-detail-error" style="padding:1rem 1.5rem">Error: ${esc(source.answer ?? 'Unknown error')}</div>`;
+    bodyEl.innerHTML = chainHtml + `<div class="tasks-detail-error" style="padding:1rem 1.5rem">Error: ${esc(source.answer ?? 'Unknown error')}</div>`;
   } else if (source.answer) {
-    bodyEl.innerHTML = tcsHtml + `<div class="tasks-detail-answer">${renderMarkdown(source.answer)}</div>`;
+    bodyEl.innerHTML = chainHtml + `<div class="tasks-detail-answer">${renderMarkdown(source.answer)}</div>`;
   } else {
-    bodyEl.innerHTML = tcsHtml;
+    bodyEl.innerHTML = chainHtml;
   }
 
   attachTcStepHandlers(bodyEl);
@@ -353,13 +353,13 @@ function handleRunEvent(event) {
   const { type, task_id } = event;
 
   if (type === 'task_start') {
-    _runState.set(task_id, { status: 'running', toolCalls: [], answer: null });
+    _runState.set(task_id, { status: 'running', chain: [], toolCalls: [], answer: null });
     const t = _tasks.find(x => x.id === task_id);
     if (t) t.status = 'running';
     return;
   }
   if (type === 'task_skipped') {
-    _runState.set(task_id, { status: 'skipped', toolCalls: [], answer: null });
+    _runState.set(task_id, { status: 'skipped', chain: [], toolCalls: [], answer: null });
     const t = _tasks.find(x => x.id === task_id);
     if (t) t.status = 'skipped';
     return;
@@ -367,16 +367,22 @@ function handleRunEvent(event) {
   if (type === 'run_done') return;
   if (!task_id) return;
 
-  const state = _runState.get(task_id) ?? { status: 'running', toolCalls: [], answer: null };
+  const state = _runState.get(task_id) ?? { status: 'running', chain: [], toolCalls: [], answer: null };
+  if (!state.chain) state.chain = [];
 
-  if (type === 'tool_call') {
-    state.toolCalls.push({
+  if (type === 'thinking') {
+    state.chain.push({ type: 'thinking', text: event.text });
+  } else if (type === 'tool_call') {
+    const tc = {
+      type:        'tool_call',
       name:        event.name,
       input:       event.input ?? null,
       status:      'running',
       description: describeToolCall(event.name, event.input ?? {}),
       preview:     null,
-    });
+    };
+    state.chain.push(tc);
+    state.toolCalls.push(tc);
   } else if (type === 'tool_result') {
     const tc = state.toolCalls.findLast(t => t.name === event.name && t.status === 'running')
             ?? state.toolCalls.findLast(t => t.name === event.name);
@@ -620,19 +626,28 @@ function renderDepsContainer(ctx) {
 }
 
 
-function buildToolCallsHtml(tcs) {
-  if (!tcs.length) return '';
-  const n          = tcs.length;
-  const anyRunning = tcs.some(tc => tc.status === 'running');
+function buildChainHtml(chain, toolCalls) {
+  if (!chain.length && !toolCalls.length) return '';
+  const items = chain.length ? chain : toolCalls;
+  const anyRunning = toolCalls.some(tc => tc.status === 'running');
+  let toolIdx = 0;
   return `
     <div class="tasks-detail-tool-calls">
-      <details class="tc-group${anyRunning ? ' tc-group--running' : ''}" open>
-        <summary class="tc-group__summary">
-          <svg class="tc-group__summary-chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2,3 5,7 8,3"/></svg>
-          <span>${n} tool call${n === 1 ? '' : 's'}</span>
-        </summary>
-        ${tcs.map((tc, i) => renderToolCall(tc, i)).join('')}
-      </details>
+      <div class="tc-chain${anyRunning ? ' tc-chain--running' : ''}">
+        ${items.map(item => {
+          if (item.type === 'thinking') {
+            return `
+              <details class="thinking-group" open>
+                <summary class="thinking-group__summary">
+                  <svg class="tc-group__summary-chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2,3 5,7 8,3"/></svg>
+                  <span>Thinking</span>
+                </summary>
+                <div class="thinking-group__body"><p>${esc(item.text)}</p></div>
+              </details>`;
+          }
+          return renderToolCall(item, toolIdx++);
+        }).join('')}
+      </div>
     </div>
   `;
 }
