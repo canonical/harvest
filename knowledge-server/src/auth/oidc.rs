@@ -70,8 +70,6 @@ pub async fn exchange_code(
     let mut params = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
-        ("client_id", client_id),
-        ("client_secret", client_secret),
         ("redirect_uri", redirect_uri),
     ];
     if let Some(v) = code_verifier {
@@ -79,6 +77,7 @@ pub async fn exchange_code(
     }
     let resp = http
         .post(token_endpoint)
+        .basic_auth(client_id, Some(client_secret))
         .form(&params)
         .send()
         .await
@@ -224,7 +223,8 @@ mod tests {
         server.mock(|when, then| {
             when.method(POST).path("/token")
                 .form_urlencoded_tuple_exists("code")
-                .form_urlencoded_tuple("grant_type", "authorization_code");
+                .form_urlencoded_tuple("grant_type", "authorization_code")
+                .header_exists("Authorization");   // Basic auth
             then.status(200).json_body(json!({ "access_token": "tok_abc" }));
         });
 
