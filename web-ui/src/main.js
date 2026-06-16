@@ -26,6 +26,7 @@ import {
   createChatState,
   addUserMessage,
   startAssistantMessage,
+  addThinking,
   addToolCall,
   completeToolCall,
   finalizeAssistantMessage,
@@ -72,14 +73,14 @@ const navCloseEl  = document.getElementById('nav-close');
 
 function render() {
   const prevAssistantEls = [...messagesEl.querySelectorAll('.message--assistant')];
-  const openGroups = new Set(
-    prevAssistantEls.flatMap((el, i) =>
-      el.querySelector('details.tc-group[open]') ? [i] : []
-    )
-  );
   const openSteps = new Set(
     prevAssistantEls.flatMap((el, i) =>
       [...el.querySelectorAll('.tc-step--open')].map(s => `${i}:${s.dataset.tcIdx}`)
+    )
+  );
+  const closedThinking = new Set(
+    prevAssistantEls.flatMap((el, i) =>
+      [...el.querySelectorAll('details.thinking-group:not([open])')].map(d => `${i}:${d.dataset.thinkIdx}`)
     )
   );
 
@@ -103,8 +104,6 @@ function render() {
   if (attachBtnEl) attachBtnEl.disabled = !activeProjectId || loading;
 
   [...messagesEl.querySelectorAll('.message--assistant')].forEach((el, i) => {
-    const group = el.querySelector('details.tc-group');
-    if (group && openGroups.has(i)) group.open = true;
     el.querySelectorAll('.tc-step').forEach(step => {
       if (openSteps.has(`${i}:${step.dataset.tcIdx}`)) {
         step.classList.add('tc-step--open');
@@ -113,6 +112,9 @@ function render() {
         const row = step.querySelector('.tc-step__row--clickable');
         if (row) row.setAttribute('aria-expanded', 'true');
       }
+    });
+    el.querySelectorAll('details.thinking-group').forEach(d => {
+      if (closedThinking.has(`${i}:${d.dataset.thinkIdx}`)) d.removeAttribute('open');
     });
   });
 
@@ -194,7 +196,7 @@ function renderMessage(msg, isLast = false) {
     `;
   }
 
-  if (msg.status === 'loading' && msg.tool_calls.length === 0 && !msg.question) {
+  if (msg.status === 'loading' && (msg.chain ?? []).length === 0 && !msg.question) {
     return `
       <div class="message message--assistant">
         <div class="message__bubble">
@@ -214,27 +216,41 @@ function renderMessage(msg, isLast = false) {
     `;
   }
 
-  const n = msg.tool_calls.length;
-  const anyRunning = msg.tool_calls.some(tc => tc.status === 'running');
-  const runningTc = msg.tool_calls.find(tc => tc.status === 'running');
-  const activeTc = runningTc ?? (msg.status === 'loading' && n > 0 ? msg.tool_calls[n - 1] : null);
+  const chain = msg.chain ?? [];
+  const toolCallsInChain = chain.filter(c => c.type === 'tool_call');
+  const n = toolCallsInChain.length;
+  const anyRunning = toolCallsInChain.some(tc => tc.status === 'running');
+  const runningTc = toolCallsInChain.find(tc => tc.status === 'running');
+  const activeTc = runningTc ?? (msg.status === 'loading' && n > 0 ? toolCallsInChain[n - 1] : null);
   const liveLabel = activeTc
     ? (activeTc.description ?? `${activeTc.name.replace(/_/g, ' ')}…`)
     : null;
   const showLiveStatus = msg.status === 'loading' && liveLabel;
-  const toolCallsHtml = n > 0 ? `
+
+  let toolIdx = 0;
+  let thinkIdx = 0;
+  const chainHtml = chain.length > 0 ? `
     ${showLiveStatus ? `
     <div class="tc-live-status">
       <i class="p-icon--circle-of-friends tc-live-status__spinner" aria-hidden="true"></i>
       <span class="tc-live-status__text">${esc(liveLabel)}</span>
     </div>` : ''}
-    <details class="tc-group${anyRunning ? ' tc-group--running' : ''}">
-      <summary class="tc-group__summary">
-        <svg class="tc-group__summary-chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2,3 5,7 8,3"/></svg>
-        <span>${n} tool call${n === 1 ? '' : 's'}</span>
-      </summary>
-      ${msg.tool_calls.map((tc, i) => renderToolCall(tc, i)).join('')}
-    </details>
+    <div class="tc-chain${anyRunning ? ' tc-chain--running' : ''}">
+      ${chain.map(item => {
+        if (item.type === 'thinking') {
+          const idx = thinkIdx++;
+          return `
+            <details class="thinking-group" open data-think-idx="${idx}">
+              <summary class="thinking-group__summary">
+                <svg class="tc-group__summary-chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2,3 5,7 8,3"/></svg>
+                <span>Thinking</span>
+              </summary>
+              <div class="thinking-group__body"><p>${esc(item.text)}</p></div>
+            </details>`;
+        }
+        return renderToolCall(item, toolIdx++);
+      }).join('')}
+    </div>
   ` : '';
 
   const citationIndex = Object.fromEntries(
@@ -279,7 +295,7 @@ function renderMessage(msg, isLast = false) {
   return `
     <div class="message message--assistant">
       <div class="message__bubble">
-        ${toolCallsHtml}
+        ${chainHtml}
         ${bodyHtml}
         ${questionHtml}
         ${sourcesHtml}
@@ -410,7 +426,9 @@ async function sendQuery() {
       refreshConvList();
     }
     await queryStream(query, activeConvId, attachments, (event) => {
-      if (event.type === 'tool_call') {
+      if (event.type === 'thinking') {
+        state = addThinking(state, { text: event.text });
+      } else if (event.type === 'tool_call') {
         state = addToolCall(state, { name: event.name, input: event.input, description: event.description ?? describeToolCall(event.name, event.input, { hostname: event.hostname }) });
       } else if (event.type === 'tool_result') {
         state = completeToolCall(state, { name: event.name, preview: event.preview });

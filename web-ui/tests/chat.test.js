@@ -3,6 +3,7 @@ import {
   createChatState,
   addUserMessage,
   startAssistantMessage,
+  addThinking,
   addToolCall,
   completeToolCall,
   updateToolCallDescription,
@@ -437,6 +438,167 @@ describe('loadFromHistory with attachments', () => {
     const history = [{ role: 'user', text: 'hello' }];
     const { messages } = loadFromHistory(history);
     expect(messages[0].attachments).toEqual([]);
+  });
+});
+
+// ── addThinking ───────────────────────────────────────────────────────────────
+
+describe('addThinking', () => {
+  it('adds a thinking item to the chain', () => {
+    const s = pipe(
+      startAssistantMessage(createChatState()),
+      s => addThinking(s, { text: 'Let me think...' }),
+    );
+    const chain = getMessages(s).at(-1).chain;
+    expect(chain).toHaveLength(1);
+    expect(chain[0]).toEqual({ type: 'thinking', text: 'Let me think...' });
+  });
+
+  it('can accumulate multiple thinking items', () => {
+    const s = pipe(
+      startAssistantMessage(createChatState()),
+      s => addThinking(s, { text: 'first thought' }),
+      s => addThinking(s, { text: 'second thought' }),
+    );
+    const chain = getMessages(s).at(-1).chain;
+    expect(chain).toHaveLength(2);
+    expect(chain[0].text).toBe('first thought');
+    expect(chain[1].text).toBe('second thought');
+  });
+
+  it('does not affect tool_calls', () => {
+    const s = pipe(
+      startAssistantMessage(createChatState()),
+      s => addThinking(s, { text: 'hmm' }),
+    );
+    expect(getMessages(s).at(-1).tool_calls).toHaveLength(0);
+  });
+});
+
+// ── chain ordering ────────────────────────────────────────────────────────────
+
+describe('chain ordering', () => {
+  it('starts with an empty chain', () => {
+    const s = startAssistantMessage(createChatState());
+    expect(getMessages(s).at(-1).chain).toEqual([]);
+  });
+
+  it('preserves thinking → tool_call order', () => {
+    const s = pipe(
+      startAssistantMessage(createChatState()),
+      s => addThinking(s, { text: 'I should search first' }),
+      s => addToolCall(s, { name: 'search_symbols', input: {} }),
+    );
+    const chain = getMessages(s).at(-1).chain;
+    expect(chain).toHaveLength(2);
+    expect(chain[0].type).toBe('thinking');
+    expect(chain[1].type).toBe('tool_call');
+  });
+
+  it('interleaves thinking and tool calls across multiple rounds', () => {
+    const s = pipe(
+      startAssistantMessage(createChatState()),
+      s => addThinking(s, { text: 'step 1' }),
+      s => addToolCall(s, { name: 'tool_a', input: {} }),
+      s => addThinking(s, { text: 'step 2' }),
+      s => addToolCall(s, { name: 'tool_b', input: {} }),
+    );
+    const chain = getMessages(s).at(-1).chain;
+    expect(chain.map(c => c.type)).toEqual(['thinking', 'tool_call', 'thinking', 'tool_call']);
+    expect(chain[0].text).toBe('step 1');
+    expect(chain[1].name).toBe('tool_a');
+    expect(chain[2].text).toBe('step 2');
+    expect(chain[3].name).toBe('tool_b');
+  });
+
+  it('tool_calls array mirrors tool_call items in chain order', () => {
+    const s = pipe(
+      startAssistantMessage(createChatState()),
+      s => addThinking(s, { text: 'hmm' }),
+      s => addToolCall(s, { name: 'alpha', input: {} }),
+      s => addThinking(s, { text: 'ok' }),
+      s => addToolCall(s, { name: 'beta', input: {} }),
+    );
+    const msg = getMessages(s).at(-1);
+    expect(msg.tool_calls.map(tc => tc.name)).toEqual(['alpha', 'beta']);
+  });
+
+  it('completeToolCall updates the matching item in chain', () => {
+    const s = pipe(
+      startAssistantMessage(createChatState()),
+      s => addThinking(s, { text: 'thinking' }),
+      s => addToolCall(s, { name: 'search', input: {} }),
+      s => completeToolCall(s, { name: 'search', preview: 'found it' }),
+    );
+    const chain = getMessages(s).at(-1).chain;
+    const tc = chain.find(c => c.type === 'tool_call');
+    expect(tc.status).toBe('done');
+    expect(tc.preview).toBe('found it');
+  });
+});
+
+// ── getSaveableMessages with chain ────────────────────────────────────────────
+
+describe('getSaveableMessages with chain', () => {
+  it('saves chain on the assistant message', () => {
+    const s = pipe(
+      createChatState(),
+      s => addUserMessage(s, 'q'),
+      s => startAssistantMessage(s),
+      s => addThinking(s, { text: 'thinking…' }),
+      s => addToolCall(s, { name: 'search', input: {} }),
+      s => completeToolCall(s, { name: 'search', preview: 'result' }),
+      s => finalizeAssistantMessage(s, { answer: 'done', sources: [], tool_calls_made: 1 }),
+    );
+    const saved = getSaveableMessages(s);
+    const assistant = saved.find(m => m.role === 'assistant');
+    expect(assistant.chain).toBeDefined();
+    expect(assistant.chain).toHaveLength(2);
+    expect(assistant.chain[0]).toEqual({ type: 'thinking', text: 'thinking…' });
+    expect(assistant.chain[1].type).toBe('tool_call');
+    expect(assistant.chain[1].name).toBe('search');
+  });
+});
+
+// ── loadFromHistory with chain ────────────────────────────────────────────────
+
+describe('loadFromHistory with chain', () => {
+  it('restores chain from saved format', () => {
+    const history = [{
+      role: 'assistant', text: 'done', sources: [], tool_calls_made: 1,
+      chain: [
+        { type: 'thinking', text: 'I should search' },
+        { type: 'tool_call', id: 1, name: 'search', input: {}, status: 'done', preview: 'result', description: null },
+      ],
+      tool_calls: [{ name: 'search', input: {}, status: 'done', preview: 'result', description: null }],
+    }];
+    const { messages } = loadFromHistory(history);
+    const msg = messages[0];
+    expect(msg.chain).toHaveLength(2);
+    expect(msg.chain[0].type).toBe('thinking');
+    expect(msg.chain[0].text).toBe('I should search');
+    expect(msg.chain[1].type).toBe('tool_call');
+  });
+
+  it('reconstructs chain from old format (separate thinking + tool_calls)', () => {
+    const history = [{
+      role: 'assistant', text: 'done', sources: [], tool_calls_made: 1,
+      thinking: ['I should search'],
+      tool_calls: [{ name: 'search', input: {}, status: 'done', preview: 'result', description: null }],
+    }];
+    const { messages } = loadFromHistory(history);
+    const msg = messages[0];
+    expect(msg.chain).toBeDefined();
+    const thinkingItems = msg.chain.filter(c => c.type === 'thinking');
+    const toolCallItems = msg.chain.filter(c => c.type === 'tool_call');
+    expect(thinkingItems).toHaveLength(1);
+    expect(toolCallItems).toHaveLength(1);
+  });
+
+  it('produces empty chain when neither chain nor thinking/tool_calls present', () => {
+    const history = [{ role: 'assistant', text: 'hi', sources: [] }];
+    const { messages } = loadFromHistory(history);
+    expect(messages[0].chain).toEqual([]);
   });
 });
 

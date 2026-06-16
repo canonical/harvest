@@ -41,7 +41,7 @@ export function clearPendingAttachments(state) {
 }
 
 export function startAssistantMessage(state) {
-  const msg = { role: 'assistant', status: 'loading', tool_calls: [], answer: null, sources: [], tool_calls_made: 0 };
+  const msg = { role: 'assistant', status: 'loading', chain: [], tool_calls: [], answer: null, sources: [], tool_calls_made: 0 };
   return {
     ...state,
     loading: true,
@@ -49,21 +49,29 @@ export function startAssistantMessage(state) {
   };
 }
 
+export function addThinking(state, { text }) {
+  return updateLastAssistant(state, (msg) => {
+    const chain = [...(msg.chain ?? []), { type: 'thinking', text }];
+    return { ...msg, chain };
+  });
+}
+
 export function addToolCall(state, { name, input, description = null }) {
   const id = _nextToolCallId++;
-  return updateLastAssistant(state, (msg) => ({
-    ...msg,
-    tool_calls: [...msg.tool_calls, { id, name, input, status: 'running', preview: null, description }],
-  }));
+  const tc = { type: 'tool_call', id, name, input, status: 'running', preview: null, description };
+  return updateLastAssistant(state, (msg) => {
+    const chain = [...(msg.chain ?? []), tc];
+    return { ...msg, chain, tool_calls: chain.filter(c => c.type === 'tool_call') };
+  });
 }
 
 export function updateToolCallDescription(state, { id, description }) {
   const messages = state.messages.map((msg) => {
     if (msg.role !== 'assistant') return msg;
-    const tool_calls = msg.tool_calls.map((tc) =>
-      tc.id === id ? { ...tc, description } : tc,
+    const chain = (msg.chain ?? []).map((item) =>
+      item.type === 'tool_call' && item.id === id ? { ...item, description } : item,
     );
-    return { ...msg, tool_calls };
+    return { ...msg, chain, tool_calls: chain.filter(c => c.type === 'tool_call') };
   });
   return { ...state, messages };
 }
@@ -71,14 +79,14 @@ export function updateToolCallDescription(state, { id, description }) {
 export function completeToolCall(state, { name, preview }) {
   return updateLastAssistant(state, (msg) => {
     let marked = false;
-    const tool_calls = msg.tool_calls.map((tc) => {
-      if (!marked && tc.name === name && tc.status === 'running') {
+    const chain = (msg.chain ?? []).map((item) => {
+      if (item.type === 'tool_call' && !marked && item.name === name && item.status === 'running') {
         marked = true;
-        return { ...tc, status: 'done', preview };
+        return { ...item, status: 'done', preview };
       }
-      return tc;
+      return item;
     });
-    return { ...msg, tool_calls };
+    return { ...msg, chain, tool_calls: chain.filter(c => c.type === 'tool_call') };
   });
 }
 
@@ -118,7 +126,9 @@ export function getSaveableMessages(state) {
         if (m.username) saved.username = m.username;
         return saved;
       }
-      return { role: 'assistant', text: m.answer, sources: m.sources ?? [], tool_calls: m.tool_calls ?? [], tool_calls_made: m.tool_calls_made ?? 0 };
+      const chain = m.chain ?? [];
+      const tool_calls = chain.filter(c => c.type === 'tool_call');
+      return { role: 'assistant', text: m.answer, sources: m.sources ?? [], chain, tool_calls, tool_calls_made: m.tool_calls_made ?? 0 };
     });
 }
 
@@ -129,8 +139,19 @@ export function loadFromHistory(messages) {
       if (m.username) msg.username = m.username;
       return msg;
     }
-    const tool_calls = (m.tool_calls ?? []).map(tc => ({ ...tc, status: 'done' }));
-    return { role: 'assistant', status: 'done', tool_calls, answer: m.text, sources: m.sources ?? [], tool_calls_made: m.tool_calls_made ?? 0 };
+    let chain;
+    if (m.chain) {
+      chain = m.chain.map(item =>
+        item.type === 'tool_call' ? { ...item, status: 'done' } : item,
+      );
+    } else {
+      // backward compat: old format has separate thinking[] + tool_calls[]
+      const thinkingItems = (m.thinking ?? []).map(text => ({ type: 'thinking', text }));
+      const toolCallItems = (m.tool_calls ?? []).map(tc => ({ type: 'tool_call', ...tc, status: 'done' }));
+      chain = [...thinkingItems, ...toolCallItems];
+    }
+    const tool_calls = chain.filter(c => c.type === 'tool_call');
+    return { role: 'assistant', status: 'done', chain, tool_calls, answer: m.text, sources: m.sources ?? [], tool_calls_made: m.tool_calls_made ?? 0 };
   });
   return { messages: hydrated, loading: false, pendingAttachments: [] };
 }
