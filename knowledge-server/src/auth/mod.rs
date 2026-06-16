@@ -1,5 +1,6 @@
 pub mod handlers;
 pub mod jwt;
+pub mod oidc;
 pub mod password;
 
 use anyhow::Result;
@@ -10,18 +11,22 @@ use std::sync::Arc;
 use crate::config::AuthConfig;
 use crate::neo4j::Neo4jClient;
 
+pub use oidc::OidcEndpoints;
+
 pub const TOKEN_COOKIE: &str = "token";
 
 #[derive(Clone)]
 pub struct AuthState {
-    pub neo4j: Arc<Neo4jClient>,
-    pub config: Arc<AuthConfig>,
-    pub http: reqwest::Client,
+    pub neo4j:          Arc<Neo4jClient>,
+    pub config:         Arc<AuthConfig>,
+    pub http:           reqwest::Client,
+    pub oidc_endpoints: Option<Arc<OidcEndpoints>>,
 }
 
 pub async fn setup_constraints(neo4j: &Neo4jClient) -> Result<()> {
     neo4j.run("CREATE CONSTRAINT user_email IF NOT EXISTS FOR (u:User) REQUIRE u.email IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT user_google_id IF NOT EXISTS FOR (u:User) REQUIRE u.google_id IS UNIQUE").await?;
+    neo4j.run("CREATE CONSTRAINT user_oidc_sub IF NOT EXISTS FOR (u:User) REQUIRE u.oidc_sub IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT group_id IF NOT EXISTS FOR (g:Group) REQUIRE g.id IS UNIQUE").await?;
     Ok(())
 }

@@ -88,7 +88,7 @@ async fn main() -> Result<()> {
         async move { knowledge_server::api::graph::warm_graph_cache(neo4j, cache).await; }
     });
 
-    let app  = knowledge_server::api::router(state, cache, server_url);
+    let app  = knowledge_server::api::router(state, cache, server_url).await;
     let addr = format!("{}:{}", config.server.host, config.server.port);
     tracing::info!("listening on {addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;

@@ -90,16 +90,32 @@ impl ProjectAgentBuilder {
     }
 }
 
-pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Router {
+pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Router {
     let graph_state = Arc::new(GraphState {
         neo4j: Arc::clone(&state.neo4j),
         cache,
     });
 
+    let http = reqwest::Client::new();
+    let oidc_endpoints = if let Some(oidc_cfg) = state.auth.oidc.as_ref() {
+        match auth::oidc::discover_endpoints(&http, &oidc_cfg.issuer_url).await {
+            Ok(ep) => {
+                tracing::info!(issuer = %oidc_cfg.issuer_url, "OIDC endpoints discovered");
+                Some(Arc::new(ep))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "OIDC discovery failed; OIDC login will be unavailable");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let auth_state = Arc::new(AuthState {
-        neo4j:  Arc::clone(&state.neo4j),
-        config: Arc::clone(&state.auth),
-        http:   reqwest::Client::new(),
+        neo4j:          Arc::clone(&state.neo4j),
+        config:         Arc::clone(&state.auth),
+        http,
+        oidc_endpoints,
     });
 
     let jwt_secret = Arc::new(state.auth.jwt_secret.clone());
@@ -116,6 +132,8 @@ pub fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Ro
         .route("/auth/logout",            post(auth_handlers::logout))
         .route("/auth/google",            get(auth_handlers::google_redirect))
         .route("/auth/google/callback",   get(auth_handlers::google_callback))
+        .route("/auth/oidc",              get(auth_handlers::oidc_redirect))
+        .route("/auth/oidc/callback",     get(auth_handlers::oidc_callback))
         .with_state(Arc::clone(&auth_state));
 
     let query_state = Arc::new(QueryState {

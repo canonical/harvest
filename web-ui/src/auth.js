@@ -54,14 +54,25 @@ export function initAuthPages({ onLoginSuccess }) {
 
   const googleBtn      = document.getElementById('google-login-btn');
   const googleDivider  = document.getElementById('google-divider');
+  const oidcBtn        = document.getElementById('oidc-login-btn');
+  const oidcDivider    = document.getElementById('oidc-divider');
   googleBtn.hidden    = true;
   googleDivider.hidden = true;
+  oidcBtn.hidden      = true;
+  oidcDivider.hidden  = true;
   fetch(CONFIG_URL)
     .then(r => r.ok ? r.json() : null)
     .then(cfg => {
       if (cfg?.google) {
         googleBtn.hidden    = false;
         googleDivider.hidden = false;
+      }
+      if (cfg?.oidc) {
+        oidcBtn.hidden     = false;
+        oidcDivider.hidden = false;
+        if (cfg.oidc_display_name) {
+          oidcBtn.textContent = `Sign in with ${cfg.oidc_display_name}`;
+        }
       }
     })
     .catch(() => {});
@@ -95,6 +106,10 @@ export function initAuthPages({ onLoginSuccess }) {
 
   googleBtn.addEventListener('click', () => {
     window.location.href = '/auth/google';
+  });
+
+  oidcBtn.addEventListener('click', () => {
+    window.location.href = '/auth/oidc';
   });
 
   const registerForm    = document.getElementById('register-form');
