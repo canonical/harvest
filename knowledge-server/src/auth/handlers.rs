@@ -391,11 +391,12 @@ pub async fn oidc_callback(
     let rows = state.neo4j.query_read(
         "MATCH (existing:User)
          WITH count(existing) AS n
-         MERGE (u:User {oidc_sub: $oidc_sub})
-         ON CREATE SET u.id = $id, u.email = $email, u.name = $name,
+         MERGE (u:User {email: $email})
+         ON CREATE SET u.id = $id, u.name = $name,
            u.provider = 'oidc', u.created_at = $created_at,
            u.role = CASE WHEN n = 0 THEN 'admin' ELSE 'regular' END
-         ON MATCH SET u.email = $email, u.name = $name
+         ON MATCH SET u.name = $name
+         SET u.oidc_sub = $oidc_sub
          RETURN u.id AS id, u.email AS email, u.name AS name, u.role AS role",
         serde_json::json!({
             "oidc_sub": user_info.sub,
@@ -406,10 +407,16 @@ pub async fn oidc_callback(
         }),
     )
     .await
-    .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    .map_err(|e| {
+        tracing::error!(error = %e, "OIDC user upsert failed");
+        err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
+    })?;
 
     let user = rows.into_iter().next()
-        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        .ok_or_else(|| {
+            tracing::error!("OIDC user upsert returned no rows");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
+        })?;
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
     let remove_state = Cookie::build(("oauth_state", ""))
