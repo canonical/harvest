@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
+use base64::Engine as _;
+use rand_core::{OsRng, RngCore};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone)]
 pub struct OidcEndpoints {
@@ -13,6 +16,17 @@ struct DiscoveryDoc {
     authorization_endpoint: String,
     token_endpoint: String,
     userinfo_endpoint: String,
+}
+
+/// Generates a (verifier, challenge) PKCE pair using S256.
+/// The verifier is stored in a cookie; the challenge goes in the auth URL.
+pub fn generate_pkce_pair() -> (String, String) {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let digest   = Sha256::digest(verifier.as_bytes());
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    (verifier, challenge)
 }
 
 pub async fn discover_endpoints(http: &reqwest::Client, issuer_url: &str) -> Result<OidcEndpoints> {
@@ -51,21 +65,30 @@ pub async fn exchange_code(
     client_secret: &str,
     redirect_uri: &str,
     code: &str,
+    code_verifier: Option<&str>,
 ) -> Result<String> {
+    let mut params = vec![
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+        ("redirect_uri", redirect_uri),
+    ];
+    if let Some(v) = code_verifier {
+        params.push(("code_verifier", v));
+    }
     let resp = http
         .post(token_endpoint)
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", code),
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-            ("redirect_uri", redirect_uri),
-        ])
+        .form(&params)
         .send()
         .await
         .context("posting to OIDC token endpoint")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("OIDC token endpoint returned {}", resp.status());
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        tracing::error!(%status, %body, "OIDC token endpoint error");
+        anyhow::bail!("OIDC token endpoint returned {status}: {body}");
     }
     let token: TokenResponse = resp.json().await.context("parsing token response")?;
     Ok(token.access_token)
@@ -168,6 +191,31 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // ── generate_pkce_pair ────────────────────────────────────────────────
+
+    #[test]
+    fn pkce_verifier_and_challenge_are_different() {
+        let (verifier, challenge) = generate_pkce_pair();
+        assert_ne!(verifier, challenge);
+        assert!(!verifier.is_empty());
+        assert!(!challenge.is_empty());
+    }
+
+    #[test]
+    fn pkce_challenge_is_base64url_sha256_of_verifier() {
+        let (verifier, challenge) = generate_pkce_pair();
+        let digest = sha2::Sha256::digest(verifier.as_bytes());
+        let expected = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+        assert_eq!(challenge, expected);
+    }
+
+    #[test]
+    fn pkce_pairs_are_unique() {
+        let (v1, _) = generate_pkce_pair();
+        let (v2, _) = generate_pkce_pair();
+        assert_ne!(v1, v2);
+    }
+
     // ── exchange_code ─────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -187,6 +235,7 @@ mod tests {
             "client_secret",
             "https://app.example.com/callback",
             "auth_code_123",
+            None,
         )
         .await
         .unwrap();
@@ -204,7 +253,7 @@ mod tests {
         let result = exchange_code(
             &http(),
             &format!("{}/token", server.base_url()),
-            "cid", "csec", "ruri", "bad_code",
+            "cid", "csec", "ruri", "bad_code", None,
         )
         .await;
         assert!(result.is_err());

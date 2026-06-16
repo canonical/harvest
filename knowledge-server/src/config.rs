@@ -17,11 +17,15 @@ pub struct Config {
 #[derive(Deserialize)]
 pub struct AuthConfig {
     pub jwt_secret: String,
+    #[serde(default = "default_true")]
+    pub allow_local_login: bool,
     #[serde(default)]
     pub google: Option<GoogleConfig>,
     #[serde(default)]
     pub oidc: Option<OidcConfig>,
 }
+
+fn default_true() -> bool { true }
 
 #[derive(Deserialize, Clone)]
 pub struct GoogleConfig {
@@ -91,6 +95,25 @@ mod tests {
             jwt_secret = "s3cr3t"
         "#);
         assert!(cfg.oidc.is_none());
+    }
+
+    #[test]
+    fn local_login_defaults_to_true() {
+        let cfg = parse_auth(r#"
+            [auth]
+            jwt_secret = "s3cr3t"
+        "#);
+        assert!(cfg.allow_local_login);
+    }
+
+    #[test]
+    fn local_login_can_be_disabled() {
+        let cfg = parse_auth(r#"
+            [auth]
+            jwt_secret = "s3cr3t"
+            allow_local_login = false
+        "#);
+        assert!(!cfg.allow_local_login);
     }
 
     #[test]
