@@ -42,6 +42,7 @@ pub async fn config(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
     let oidc_display_name = state.config.oidc.as_ref()
         .and_then(|o| o.display_name.clone());
     Json(serde_json::json!({
+        "local_login": state.config.allow_local_login,
         "google": state.config.google.is_some(),
         "oidc":   state.oidc_endpoints.is_some(),
         "oidc_display_name": oidc_display_name,
@@ -60,6 +61,9 @@ pub async fn register(
     jar: CookieJar,
     Json(body): Json<RegisterBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if !state.config.allow_local_login {
+        return Err(err(StatusCode::FORBIDDEN, "local login is disabled"));
+    }
     if body.email.is_empty() || body.password.len() < 8 || body.name.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "invalid input"));
     }
@@ -105,6 +109,9 @@ pub async fn login(
     jar: CookieJar,
     Json(body): Json<LoginBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if !state.config.allow_local_login {
+        return Err(err(StatusCode::FORBIDDEN, "local login is disabled"));
+    }
     let rows = state.neo4j.query_read(
         "MATCH (u:User {email: $email, provider: 'local'})
          RETURN u.id AS id, u.email AS email, u.name AS name,
@@ -298,7 +305,8 @@ pub async fn oidc_redirect(
         .ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "OIDC login not configured"))?;
 
     let oauth_state = Uuid::new_v4().to_string();
-    let url = build_oidc_auth_url(&endpoints.authorization_endpoint, oidc_cfg, &oauth_state);
+    let (pkce_verifier, pkce_challenge) = oidc::generate_pkce_pair();
+    let url = build_oidc_auth_url(&endpoints.authorization_endpoint, oidc_cfg, &oauth_state, &pkce_challenge);
 
     let state_cookie = Cookie::build(("oauth_state", oauth_state))
         .http_only(true)
@@ -307,7 +315,14 @@ pub async fn oidc_redirect(
         .max_age(Duration::minutes(10))
         .build();
 
-    Ok((jar.add(state_cookie), Redirect::to(&url)))
+    let pkce_cookie = Cookie::build(("pkce_verifier", pkce_verifier))
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        .path("/")
+        .max_age(Duration::minutes(10))
+        .build();
+
+    Ok((jar.add(state_cookie).add(pkce_cookie), Redirect::to(&url)))
 }
 
 #[derive(Deserialize)]
@@ -342,6 +357,8 @@ pub async fn oidc_callback(
         return Err(err(StatusCode::BAD_REQUEST, "invalid OAuth state"));
     }
 
+    let pkce_verifier = jar.get("pkce_verifier").map(|c| c.value().to_string());
+
     let access_token = oidc::exchange_code(
         &state.http,
         &endpoints.token_endpoint,
@@ -349,13 +366,20 @@ pub async fn oidc_callback(
         &oidc_cfg.client_secret,
         &oidc_cfg.redirect_uri,
         &code,
+        pkce_verifier.as_deref(),
     )
     .await
-    .map_err(|_| err(StatusCode::BAD_GATEWAY, "failed to exchange OIDC code"))?;
+    .map_err(|e| {
+        tracing::error!(error = %e, "OIDC code exchange failed");
+        err(StatusCode::BAD_GATEWAY, "failed to exchange OIDC code")
+    })?;
 
     let user_info = oidc::fetch_userinfo(&state.http, &endpoints.userinfo_endpoint, &access_token)
         .await
-        .map_err(|_| err(StatusCode::BAD_GATEWAY, "failed to fetch OIDC user info"))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "OIDC userinfo fetch failed");
+            err(StatusCode::BAD_GATEWAY, "failed to fetch OIDC user info")
+        })?;
 
     let display_name = user_info.name.unwrap_or_else(|| {
         user_info.email.split('@').next().unwrap_or("user").to_string()
@@ -389,17 +413,22 @@ pub async fn oidc_callback(
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
     let remove_state = Cookie::build(("oauth_state", ""))
-        .path("/")
-        .max_age(Duration::seconds(0))
-        .build();
+        .path("/").max_age(Duration::seconds(0)).build();
+    let remove_pkce = Cookie::build(("pkce_verifier", ""))
+        .path("/").max_age(Duration::seconds(0)).build();
 
     Ok((
-        jar.add(make_token_cookie(token)).add(remove_state),
+        jar.add(make_token_cookie(token)).add(remove_state).add(remove_pkce),
         Redirect::to("/"),
     ))
 }
 
-fn build_oidc_auth_url(authorization_endpoint: &str, oidc: &OidcConfig, state: &str) -> String {
+fn build_oidc_auth_url(
+    authorization_endpoint: &str,
+    oidc: &OidcConfig,
+    state: &str,
+    pkce_challenge: &str,
+) -> String {
     reqwest::Url::parse_with_params(
         authorization_endpoint,
         &[
@@ -408,6 +437,8 @@ fn build_oidc_auth_url(authorization_endpoint: &str, oidc: &OidcConfig, state: &
             ("response_type", "code"),
             ("scope", "openid email profile"),
             ("state", state),
+            ("code_challenge", pkce_challenge),
+            ("code_challenge_method", "S256"),
         ],
     )
     .expect("valid OIDC auth URL")

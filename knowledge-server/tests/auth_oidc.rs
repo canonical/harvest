@@ -43,17 +43,19 @@ fn endpoints(base: &str) -> OidcEndpoints {
 
 fn auth_config_with_oidc(issuer_url: &str) -> Arc<AuthConfig> {
     Arc::new(AuthConfig {
-        jwt_secret: "test-secret-for-jwt-signing-long-enough".into(),
-        google:     None,
-        oidc:       Some(oidc_config(issuer_url)),
+        jwt_secret:        "test-secret-for-jwt-signing-long-enough".into(),
+        allow_local_login: true,
+        google:            None,
+        oidc:              Some(oidc_config(issuer_url)),
     })
 }
 
 fn auth_config_no_oidc() -> Arc<AuthConfig> {
     Arc::new(AuthConfig {
-        jwt_secret: "test-secret-for-jwt-signing-long-enough".into(),
-        google:     None,
-        oidc:       None,
+        jwt_secret:        "test-secret-for-jwt-signing-long-enough".into(),
+        allow_local_login: true,
+        google:            None,
+        oidc:              None,
     })
 }
 
@@ -125,9 +127,10 @@ async fn config_reports_oidc_disabled_when_not_configured() {
 async fn config_oidc_display_name_null_when_not_set() {
     let server = MockServer::start();
     let cfg = Arc::new(AuthConfig {
-        jwt_secret: "test-secret-for-jwt-signing-long-enough".into(),
-        google:     None,
-        oidc:       Some(OidcConfig {
+        jwt_secret:        "test-secret-for-jwt-signing-long-enough".into(),
+        allow_local_login: true,
+        google:            None,
+        oidc:              Some(OidcConfig {
             issuer_url:    server.base_url(),
             client_id:     "cid".into(),
             client_secret: "csec".into(),
@@ -219,6 +222,8 @@ async fn oidc_redirect_url_contains_required_params() {
     assert_eq!(params.get("scope").map(|s| s.as_ref()), Some("openid email profile"));
     assert!(params.contains_key("state"), "state param must be present");
     assert!(params.contains_key("redirect_uri"), "redirect_uri must be present");
+    assert!(params.contains_key("code_challenge"), "PKCE code_challenge must be present");
+    assert_eq!(params.get("code_challenge_method").map(|s| s.as_ref()), Some("S256"));
 }
 
 #[tokio::test]
