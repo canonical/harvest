@@ -1,7 +1,7 @@
 {
-  "name": "harvest-web-ui",
-  "version": "0.1.0",
+  "name": "harvest-web-ui-vue",
   "private": true,
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,16 +11,21 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@playwright/test": "^1.60.0",
     "cytoscape": "^3.33.4",
     "cytoscape-fcose": "^2.2.0",
     "highlight.js": "^11.0.0",
     "marked": "^15.0.0",
     "marked-highlight": "^2.0.0",
-    "vanilla-framework": "^4.51.0"
+    "pinia": "^2.3.1",
+    "playwright": "^1.61.0",
+    "vanilla-framework": "^4.51.0",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.0"
   },
   "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
     "@vitest/coverage-v8": "^3.0.0",
+    "@vue/test-utils": "^2.4.6",
     "jsdom": "^26.0.0",
     "sass": "^1.100.0",
     "vite": "^6.0.0",

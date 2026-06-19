@@ -1,0 +1,95 @@
+<template>
+  <div class="message" :class="roleClass">
+    <template v-if="msg.role === 'user'">
+      <div class="message__sender">
+        <div class="message-avatar" :style="{ background: senderColor }">{{ senderInitials }}</div>
+        <span class="message__sender-name">{{ msg.username ?? 'You' }}</span>
+      </div>
+      <div class="message__bubble">
+        <div class="message__body">{{ msg.text }}</div>
+        <div v-if="msg.attachments?.length" class="message-attachments">
+          <img
+            v-for="(a, i) in msg.attachments.filter(x => x.preview_url)"
+            :key="i"
+            class="message-attachment-thumb"
+            :src="a.preview_url"
+            :alt="a.name"
+          />
+        </div>
+      </div>
+    </template>
+
+    <template v-else>
+      <template v-for="item in msg.chain" :key="item.id ?? item.type + item.text">
+        <ThinkingBlock v-if="item.type === 'thinking'" :text="item.text" />
+        <ToolCallStep  v-else-if="item.type === 'tool_call'" :step="item" />
+      </template>
+
+      <span v-if="msg.status === 'loading' && !msg.chain?.length && !msg.answer" class="loading-dots">
+        <span>.</span><span>.</span><span>.</span>
+      </span>
+
+      <div v-if="msg.answer" class="message__bubble">
+        <div ref="answerBodyRef" class="message__body" v-html="renderedAnswer" />
+      </div>
+
+      <p v-if="msg.status === 'error'" class="message-error">{{ msg.error }}</p>
+
+      <div v-if="msg.sources?.length" class="source-chips">
+        <a
+          v-for="(src, i) in msg.sources"
+          :key="i"
+          class="source-chip"
+          :href="sourceHref(src)"
+          :title="`${src.file}:${src.line}`"
+          target="_blank"
+          rel="noopener"
+        >
+          <span class="source-chip__num">{{ i + 1 }}</span>
+          <span class="source-chip__name">{{ src.file }}</span>
+        </a>
+      </div>
+    </template>
+  </div>
+</template>
+
+<script setup>
+import { computed, ref, watch, nextTick, onMounted } from 'vue';
+import ThinkingBlock from './ThinkingBlock.vue';
+import ToolCallStep  from './ToolCallStep.vue';
+import { renderMarkdown } from '../../lib/markdown.js';
+import { mountInlineGraphs } from '../../lib/inline-graph.js';
+import { avatarColor, initials } from '../../lib/utils.js';
+
+const answerBodyRef = ref(null);
+
+const props = defineProps({
+  msg:        { type: Object, required: true },
+  repoUrlMap: { type: Object, default: () => ({}) },
+});
+
+const roleClass = computed(() =>
+  props.msg.role === 'user' ? 'message--user' : 'message--assistant'
+);
+
+const senderInitials = computed(() => initials(props.msg.username ?? 'You'));
+const senderColor    = computed(() => avatarColor(props.msg.username ?? 'You'));
+
+const renderedAnswer = computed(() =>
+  props.msg.answer ? renderMarkdown(props.msg.answer) : ''
+);
+
+onMounted(() => {
+  if (answerBodyRef.value) mountInlineGraphs(answerBodyRef.value);
+});
+
+watch(renderedAnswer, () => nextTick(() => {
+  if (answerBodyRef.value) mountInlineGraphs(answerBodyRef.value);
+}));
+
+function sourceHref(src) {
+  const base = props.repoUrlMap[src.repo];
+  if (!base) return '#';
+  return `${base.replace(/\/$/, '')}/blob/${src.version ?? 'main'}/${src.file}#L${src.line}`;
+}
+</script>
