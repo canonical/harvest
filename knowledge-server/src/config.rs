@@ -12,6 +12,14 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default)]
     pub agents: AgentsConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+#[derive(Deserialize, Default, Clone)]
+pub struct UiConfig {
+    #[serde(default)]
+    pub enable_docs: bool,
 }
 
 #[derive(Deserialize)]

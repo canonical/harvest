@@ -17,6 +17,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use crate::agent::{graph_tools, machine_tools, skill_tools, Agent};
 use crate::skills::SkillRegistry;
 use crate::auth::{self, handlers as auth_handlers, AuthState};
+use crate::config::UiConfig;
 use crate::config::AuthConfig;
 use crate::conversations::handlers::{self as conv_handlers, ConvState};
 use crate::llm::LlmProvider;
@@ -49,6 +50,7 @@ pub struct AppState {
     pub neo4j:            Arc<Neo4jClient>,
     pub docs_dir:         Option<Arc<PathBuf>>,
     pub auth:             Arc<AuthConfig>,
+    pub ui:               Arc<UiConfig>,
     pub machine_registry: Arc<MachineRegistry>,
     pub agent_builder:    Arc<ProjectAgentBuilder>,
     pub binary_path:      Option<PathBuf>,
@@ -114,8 +116,10 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let auth_state = Arc::new(AuthState {
         neo4j:          Arc::clone(&state.neo4j),
         config:         Arc::clone(&state.auth),
+        ui:             Arc::clone(&state.ui),
         http,
         oidc_endpoints,
+        oauth_sessions: Arc::new(dashmap::DashMap::new()),
     });
 
     let jwt_secret = Arc::new(state.auth.jwt_secret.clone());

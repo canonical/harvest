@@ -75,6 +75,7 @@ async fn main() -> Result<()> {
         neo4j:            Arc::clone(&neo4j),
         docs_dir,
         auth:             Arc::new(config.auth),
+        ui:               Arc::new(config.ui),
         machine_registry: Arc::clone(&machine_registry),
         agent_builder:    Arc::clone(&agent_builder),
         binary_path,
