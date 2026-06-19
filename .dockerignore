@@ -1,0 +1,27 @@
+# Rust build output — large, never needed in the image
+target/
+
+# Node artifacts — rebuilt inside the container
+web-ui/node_modules/
+web-ui/dist/
+web-ui/.vite/
+
+# Secrets — must never be baked into an image
+knowledge-server/server.toml
+knowledge-harvester/harvester.toml
+*.env
+.env
+.env.*
+
+# Version control
+.git/
+.gitignore
+
+# Editor / OS noise
+.DS_Store
+**/.DS_Store
+Thumbs.db
+
+# Docs and snap (not needed for builds)
+documentation/
+snap/
