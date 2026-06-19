@@ -1,20 +1,85 @@
 services:
+
+  # ── Graph database ─────────────────────────────────────────────────────────
   neo4j:
     image: neo4j:5-community
     ports:
-      - "7474:7474"   # HTTP browser
-      - "7687:7687"   # Bolt (used by the apps)
+      - "7474:7474"   # Browser UI (remove in production)
+      - "7687:7687"   # Bolt — only needed if you connect external tools
     environment:
-      NEO4J_AUTH: neo4j/devpassword
+      NEO4J_AUTH: "${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-devpassword}"
       NEO4J_PLUGINS: '["apoc"]'
       NEO4J_dbms_security_procedures_unrestricted: apoc.*
     volumes:
       - neo4j_data:/data
     healthcheck:
-      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "devpassword", "RETURN 1"]
+      test: ["CMD", "cypher-shell", "-u", "${NEO4J_USER:-neo4j}", "-p", "${NEO4J_PASSWORD:-devpassword}", "RETURN 1"]
       interval: 10s
       timeout: 5s
       retries: 10
+
+  # ── API server ─────────────────────────────────────────────────────────────
+  server:
+    build:
+      context: .
+      dockerfile: knowledge-server/Dockerfile
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    environment:
+      # Neo4j — must match the service name and credentials above.
+      NEO4J_URI:      bolt://neo4j:7687
+      NEO4J_USER:     "${NEO4J_USER:-neo4j}"
+      NEO4J_PASSWORD: "${NEO4J_PASSWORD:-devpassword}"
+
+      # Auth — generate with: openssl rand -base64 32
+      JWT_SECRET: "${JWT_SECRET}"
+
+      # LLM — set PROVIDER to anthropic, gemini, or openai-compatible.
+      LLM_PROVIDER: "${LLM_PROVIDER:-anthropic}"
+      LLM_MODEL:    "${LLM_MODEL:-claude-sonnet-4-6}"
+      LLM_API_KEY:  "${LLM_API_KEY}"
+      # For openai-compatible only:
+      LLM_BASE_URL: "${LLM_BASE_URL:-}"
+
+      # Agents — PUBLIC_URL is embedded in the install script returned to browsers.
+      # Set this to the publicly reachable URL of the web-ui service.
+      PUBLIC_URL: "${PUBLIC_URL:-http://localhost}"
+
+      # Optional feature flags
+      ENABLE_DOCS:       "${ENABLE_DOCS:-false}"
+      ALLOW_LOCAL_LOGIN: "${ALLOW_LOCAL_LOGIN:-true}"
+
+      # Optional: Google OAuth
+      GOOGLE_CLIENT_ID:     "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+      GOOGLE_REDIRECT_URI:  "${GOOGLE_REDIRECT_URI:-}"
+
+      # Optional: OIDC SSO
+      OIDC_ISSUER_URL:    "${OIDC_ISSUER_URL:-}"
+      OIDC_CLIENT_ID:     "${OIDC_CLIENT_ID:-}"
+      OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET:-}"
+      OIDC_REDIRECT_URI:  "${OIDC_REDIRECT_URI:-}"
+      OIDC_DISPLAY_NAME:  "${OIDC_DISPLAY_NAME:-}"
+    # Mount a hand-crafted config instead of using env vars:
+    # volumes:
+    #   - ./server.toml:/etc/harvest/server.toml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Web UI ─────────────────────────────────────────────────────────────────
+  web-ui:
+    build:
+      context: .
+      dockerfile: web-ui/Dockerfile
+    ports:
+      - "${WEB_PORT:-80}:80"
+    depends_on:
+      server:
+        condition: service_healthy
 
 volumes:
   neo4j_data:
