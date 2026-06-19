@@ -18,7 +18,7 @@ use tower::ServiceExt as _;
 
 use knowledge_server::{
     auth::{handlers as auth_handlers, AuthState, OidcEndpoints},
-    config::{AuthConfig, OidcConfig},
+    config::{AuthConfig, OidcConfig, UiConfig},
 };
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -88,8 +88,10 @@ async fn config_reports_oidc_enabled_with_display_name() {
     let auth = Arc::new(AuthState {
         neo4j:          make_stub_neo4j().await,
         config:         cfg,
+        ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
-        oidc_endpoints: Some(ep),
+        oidc_endpoints:  Some(ep),
+        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
     });
     let app  = oidc_router(auth);
 
@@ -109,8 +111,10 @@ async fn config_reports_oidc_disabled_when_not_configured() {
     let auth = Arc::new(AuthState {
         neo4j:          make_stub_neo4j().await,
         config:         auth_config_no_oidc(),
+        ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
-        oidc_endpoints: None,
+        oidc_endpoints:  None,
+        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
     });
     let app = oidc_router(auth);
 
@@ -142,8 +146,10 @@ async fn config_oidc_display_name_null_when_not_set() {
     let auth = Arc::new(AuthState {
         neo4j:          make_stub_neo4j().await,
         config:         cfg,
+        ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
-        oidc_endpoints: Some(ep),
+        oidc_endpoints:  Some(ep),
+        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
     });
 
     let resp = oidc_router(auth)
@@ -163,8 +169,10 @@ async fn oidc_redirect_returns_501_when_not_configured() {
     let auth = Arc::new(AuthState {
         neo4j:          make_stub_neo4j().await,
         config:         auth_config_no_oidc(),
+        ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
-        oidc_endpoints: None,
+        oidc_endpoints:  None,
+        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
     });
     let resp = oidc_router(auth)
         .oneshot(Request::builder().uri("/auth/oidc").body(Body::empty()).unwrap())
@@ -182,8 +190,10 @@ async fn oidc_redirect_returns_302_to_authorization_endpoint() {
     let auth = Arc::new(AuthState {
         neo4j:          make_stub_neo4j().await,
         config:         cfg,
+        ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
-        oidc_endpoints: Some(ep),
+        oidc_endpoints:  Some(ep),
+        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
     });
 
     let resp = oidc_router(auth)
@@ -204,8 +214,10 @@ async fn oidc_redirect_url_contains_required_params() {
     let auth = Arc::new(AuthState {
         neo4j:          make_stub_neo4j().await,
         config:         cfg,
+        ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
-        oidc_endpoints: Some(ep),
+        oidc_endpoints:  Some(ep),
+        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
     });
 
     let resp = oidc_router(auth)
@@ -227,25 +239,44 @@ async fn oidc_redirect_url_contains_required_params() {
 }
 
 #[tokio::test]
-async fn oidc_redirect_sets_oauth_state_cookie() {
+async fn oidc_redirect_stores_session_server_side() {
+    // OAuth state is now stored server-side (DashMap) rather than in cookies,
+    // so the redirect response must NOT set an oauth_state cookie and the
+    // sessions map must contain the state that appears in the redirect URL.
     let server = MockServer::start();
     let cfg = auth_config_with_oidc(&server.base_url());
     let ep  = Arc::new(endpoints(&server.base_url()));
     let auth = Arc::new(AuthState {
         neo4j:          make_stub_neo4j().await,
         config:         cfg,
+        ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
-        oidc_endpoints: Some(ep),
+        oidc_endpoints:  Some(ep),
+        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
     });
+    let auth_ref = Arc::clone(&auth);
 
     let resp = oidc_router(auth)
         .oneshot(Request::builder().uri("/auth/oidc").body(Body::empty()).unwrap())
         .await
         .unwrap();
 
-    let set_cookie = resp_header(&resp, "set-cookie").expect("set-cookie header");
-    assert!(set_cookie.contains("oauth_state="), "state cookie must be set");
-    assert!(set_cookie.contains("HttpOnly"), "state cookie must be HttpOnly");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    // No oauth_state cookie must be set
+    if let Some(sc) = resp_header(&resp, "set-cookie") {
+        assert!(!sc.contains("oauth_state="), "oauth_state must NOT be in a cookie");
+    }
+
+    // The state param from the redirect URL must be in the server-side sessions map
+    let location = resp_header(&resp, "location").expect("location header");
+    let url = reqwest::Url::parse(&location).unwrap();
+    let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
+    let state_val = params.get("state").expect("state param in redirect URL");
+    assert!(
+        auth_ref.oauth_sessions.contains_key(state_val.as_ref()),
+        "session for state={state_val} must be in server-side oauth_sessions map",
+    );
 }
 
 // ─── /auth/oidc/callback ──────────────────────────────────────────────────────
@@ -258,8 +289,10 @@ async fn oidc_callback_returns_400_when_no_code() {
     let auth = Arc::new(AuthState {
         neo4j:          make_stub_neo4j().await,
         config:         cfg,
+        ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
-        oidc_endpoints: Some(ep),
+        oidc_endpoints:  Some(ep),
+        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
     });
 
     let resp = oidc_router(auth)
@@ -283,8 +316,10 @@ async fn oidc_callback_returns_400_on_idp_error_param() {
     let auth = Arc::new(AuthState {
         neo4j:          make_stub_neo4j().await,
         config:         cfg,
+        ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
-        oidc_endpoints: Some(ep),
+        oidc_endpoints:  Some(ep),
+        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
     });
 
     let resp = oidc_router(auth)
@@ -310,8 +345,10 @@ async fn oidc_callback_returns_400_on_state_mismatch() {
     let auth = Arc::new(AuthState {
         neo4j:          make_stub_neo4j().await,
         config:         cfg,
+        ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
-        oidc_endpoints: Some(ep),
+        oidc_endpoints:  Some(ep),
+        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
     });
 
     // Provide a state param but no matching cookie → mismatch
@@ -335,8 +372,10 @@ async fn oidc_callback_returns_501_when_not_configured() {
     let auth = Arc::new(AuthState {
         neo4j:          make_stub_neo4j().await,
         config:         auth_config_no_oidc(),
+        ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
-        oidc_endpoints: None,
+        oidc_endpoints:  None,
+        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
     });
 
     let resp = oidc_router(auth)
