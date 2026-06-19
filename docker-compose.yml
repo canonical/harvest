@@ -1,5 +1,4 @@
 services:
-
   # ── Graph database ─────────────────────────────────────────────────────────
   neo4j:
     image: neo4j:5-community
@@ -84,8 +83,6 @@ services:
       dockerfile: web-ui/Dockerfile
     ports:
       - "${WEB_PORT:-80}:80"
-    # host.docker.internal resolves to the host gateway so nginx can proxy to
-    # the server, which is on the host network rather than the Docker bridge.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
