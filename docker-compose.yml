@@ -23,6 +23,9 @@ services:
     build:
       context: .
       dockerfile: knowledge-server/Dockerfile
+      # host network lets the builder reach crates.io via the same routing
+      # and proxy configuration that the host uses.
+      network: host
     depends_on:
       neo4j:
         condition: service_healthy
