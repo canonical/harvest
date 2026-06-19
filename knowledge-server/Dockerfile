@@ -41,7 +41,7 @@ RUN touch knowledge-server/src/lib.rs knowledge-server/src/main.rs \
  && cargo build --release -p agent
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM ubuntu:26.04
 
 # ca-certificates: TLS to LLM APIs / OIDC providers.
 # curl: used by the Docker healthcheck.
