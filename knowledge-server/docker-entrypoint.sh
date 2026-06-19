@@ -21,7 +21,8 @@ port = 8080
 enable_docs = ${ENABLE_DOCS:-false}
 
 [agents]
-public_url = "${PUBLIC_URL:-}"
+public_url  = "${PUBLIC_URL:-}"
+binary_path = "/usr/local/bin/harvest-agent"
 
 [neo4j]
 uri      = "${NEO4J_URI:-bolt://neo4j:7687}"
