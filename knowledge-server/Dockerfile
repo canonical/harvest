@@ -5,7 +5,11 @@ WORKDIR /build
 
 # Workspace manifests first — lets Docker cache the (slow) dep-compilation
 # layer independently of source changes.
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY Cargo.toml Cargo.lock ./
+# rust-toolchain.toml is intentionally omitted: the rust:slim-bookworm image
+# ships the stable toolchain already. Copying it causes rustup to reach out to
+# static.rust-lang.org to sync the channel manifest, which fails in restricted
+# or slow network environments.
 COPY knowledge-server/Cargo.toml    knowledge-server/Cargo.toml
 COPY knowledge-harvester/Cargo.toml knowledge-harvester/Cargo.toml
 COPY agent/Cargo.toml               agent/Cargo.toml
