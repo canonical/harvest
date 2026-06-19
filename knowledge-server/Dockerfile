@@ -26,14 +26,19 @@ RUN mkdir -p knowledge-server/src knowledge-harvester/src agent/src \
                                   knowledge-harvester/src/main.rs \
                                   agent/src/main.rs > /dev/null
 
-RUN cargo build --release -p knowledge-server
+RUN cargo build --release -p knowledge-server \
+ && cargo build --release -p agent
 
 # Replace stubs with real source — only user code is recompiled from here.
-RUN rm -f knowledge-server/src/lib.rs knowledge-server/src/main.rs
+RUN rm -f knowledge-server/src/lib.rs knowledge-server/src/main.rs \
+          agent/src/main.rs
 COPY knowledge-server/src    knowledge-server/src
 COPY knowledge-server/skills knowledge-server/skills
+COPY agent/src               agent/src
 RUN touch knowledge-server/src/lib.rs knowledge-server/src/main.rs \
- && cargo build --release -p knowledge-server
+          agent/src/main.rs \
+ && cargo build --release -p knowledge-server \
+ && cargo build --release -p agent
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -45,6 +50,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/knowledge-server /usr/local/bin/knowledge-server
+COPY --from=builder /build/target/release/harvest-agent    /usr/local/bin/harvest-agent
 COPY knowledge-server/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
