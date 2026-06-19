@@ -1,6 +1,10 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────────
 FROM rust:slim-bookworm AS builder
 
+# Raise cargo's per-request HTTP timeout (default 30 s is too short on slow
+# or proxied networks when downloading the crates.io index).
+ENV CARGO_HTTP_TIMEOUT=300
+
 WORKDIR /build
 
 # Workspace manifests first — lets Docker cache the (slow) dep-compilation
