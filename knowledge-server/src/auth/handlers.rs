@@ -11,8 +11,10 @@ use std::sync::Arc;
 use time::Duration;
 use uuid::Uuid;
 
-use super::{jwt, oidc, password, AuthState, TOKEN_COOKIE};
+use super::{jwt, oidc, password, AuthState, OAuthSession, TOKEN_COOKIE};
 use crate::config::{GoogleConfig, OidcConfig};
+
+const SESSION_TTL_SECS: u64 = 600; // 10 minutes
 
 type ApiError = (StatusCode, Json<Value>);
 
@@ -46,6 +48,9 @@ pub async fn config(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
         "google": state.config.google.is_some(),
         "oidc":   state.oidc_endpoints.is_some(),
         "oidc_display_name": oidc_display_name,
+        "features": {
+            "docs": state.ui.enable_docs,
+        },
     }))
 }
 
@@ -194,14 +199,12 @@ pub async fn google_redirect(
     let url = build_google_auth_url(google, &oauth_state);
     tracing::info!(redirect_uri = %google.redirect_uri, auth_url = %url, "Initiating Google OAuth");
 
-    let state_cookie = Cookie::build(("oauth_state", oauth_state))
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .path("/")
-        .max_age(Duration::minutes(10))
-        .build();
+    state.oauth_sessions.insert(oauth_state.clone(), OAuthSession {
+        pkce_verifier: None,
+        created_at: std::time::Instant::now(),
+    });
 
-    Ok((jar.add(state_cookie), Redirect::to(&url)))
+    Ok((jar, Redirect::to(&url)))
 }
 
 #[derive(Deserialize)]
@@ -228,10 +231,10 @@ pub async fn google_callback(
     let code = params.code.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth code"))?;
     let oauth_state = params.state.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth state"))?;
 
-    let stored = jar.get("oauth_state").map(|c| c.value().to_string());
-    if stored.as_deref() != Some(oauth_state.as_str()) {
-        return Err(err(StatusCode::BAD_REQUEST, "invalid OAuth state"));
-    }
+    let session = state.oauth_sessions.remove(&oauth_state)
+        .map(|(_, s)| s)
+        .filter(|s| s.created_at.elapsed().as_secs() < SESSION_TTL_SECS)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid OAuth state"))?;
 
     let access_token = exchange_google_code(&state.http, google, &code)
         .await
@@ -265,15 +268,8 @@ pub async fn google_callback(
     let user = rows.into_iter().next().ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
-    let remove_state = Cookie::build(("oauth_state", ""))
-        .path("/")
-        .max_age(Duration::seconds(0))
-        .build();
-
-    Ok((
-        jar.add(make_token_cookie(token)).add(remove_state),
-        Redirect::to("/"),
-    ))
+    let _ = session; // session consumed above to validate state
+    Ok((jar.add(make_token_cookie(token)), Redirect::to("/")))
 }
 
 fn extract_claims(secret: &str, jar: &CookieJar) -> Result<jwt::Claims, ApiError> {
@@ -308,21 +304,12 @@ pub async fn oidc_redirect(
     let (pkce_verifier, pkce_challenge) = oidc::generate_pkce_pair();
     let url = build_oidc_auth_url(&endpoints.authorization_endpoint, oidc_cfg, &oauth_state, &pkce_challenge);
 
-    let state_cookie = Cookie::build(("oauth_state", oauth_state))
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .path("/")
-        .max_age(Duration::minutes(10))
-        .build();
+    state.oauth_sessions.insert(oauth_state.clone(), OAuthSession {
+        pkce_verifier: Some(pkce_verifier),
+        created_at: std::time::Instant::now(),
+    });
 
-    let pkce_cookie = Cookie::build(("pkce_verifier", pkce_verifier))
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        .path("/")
-        .max_age(Duration::minutes(10))
-        .build();
-
-    Ok((jar.add(state_cookie).add(pkce_cookie), Redirect::to(&url)))
+    Ok((jar, Redirect::to(&url)))
 }
 
 #[derive(Deserialize)]
@@ -352,12 +339,12 @@ pub async fn oidc_callback(
     let code = params.code.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth code"))?;
     let oauth_state = params.state.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth state"))?;
 
-    let stored = jar.get("oauth_state").map(|c| c.value().to_string());
-    if stored.as_deref() != Some(oauth_state.as_str()) {
-        return Err(err(StatusCode::BAD_REQUEST, "invalid OAuth state"));
-    }
+    let session = state.oauth_sessions.remove(&oauth_state)
+        .map(|(_, s)| s)
+        .filter(|s| s.created_at.elapsed().as_secs() < SESSION_TTL_SECS)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid OAuth state"))?;
 
-    let pkce_verifier = jar.get("pkce_verifier").map(|c| c.value().to_string());
+    let pkce_verifier = session.pkce_verifier;
 
     let access_token = oidc::exchange_code(
         &state.http,
@@ -419,15 +406,7 @@ pub async fn oidc_callback(
         })?;
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
-    let remove_state = Cookie::build(("oauth_state", ""))
-        .path("/").max_age(Duration::seconds(0)).build();
-    let remove_pkce = Cookie::build(("pkce_verifier", ""))
-        .path("/").max_age(Duration::seconds(0)).build();
-
-    Ok((
-        jar.add(make_token_cookie(token)).add(remove_state).add(remove_pkce),
-        Redirect::to("/"),
-    ))
+    Ok((jar.add(make_token_cookie(token)), Redirect::to("/")))
 }
 
 fn build_oidc_auth_url(

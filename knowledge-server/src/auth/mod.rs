@@ -5,22 +5,36 @@ pub mod password;
 
 use anyhow::Result;
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::IntoResponse, Json};
+use dashmap::DashMap;
 use serde_json::json;
 use std::sync::Arc;
+use std::time::Instant;
 
-use crate::config::AuthConfig;
+use crate::config::{AuthConfig, UiConfig};
 use crate::neo4j::Neo4jClient;
 
 pub use oidc::OidcEndpoints;
 
 pub const TOKEN_COOKIE: &str = "token";
 
+/// Short-lived OAuth session: created on redirect, consumed on callback.
+/// Stored server-side so the flow works regardless of which domain/origin
+/// initiated the request (no cross-domain cookie issues).
+pub struct OAuthSession {
+    pub pkce_verifier: Option<String>,
+    pub created_at:    Instant,
+}
+
+pub type OAuthSessions = Arc<DashMap<String, OAuthSession>>;
+
 #[derive(Clone)]
 pub struct AuthState {
     pub neo4j:          Arc<Neo4jClient>,
     pub config:         Arc<AuthConfig>,
+    pub ui:             Arc<UiConfig>,
     pub http:           reqwest::Client,
     pub oidc_endpoints: Option<Arc<OidcEndpoints>>,
+    pub oauth_sessions: OAuthSessions,
 }
 
 pub async fn setup_constraints(neo4j: &Neo4jClient) -> Result<()> {
