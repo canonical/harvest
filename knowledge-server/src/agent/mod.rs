@@ -22,6 +22,7 @@ use tool::Tool;
 pub struct Attachment {
     pub name: String,
     pub mime_type: String,
+    #[serde(default)]
     pub data: String,
 }
 
