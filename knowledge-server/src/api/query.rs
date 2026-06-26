@@ -78,8 +78,8 @@ pub async fn handle_query_stream(
 
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
-        let query_for_agent   = query.clone();
-        let compacted_for_agent = compacted.clone();
+        let query_for_agent          = query.clone();
+        let compacted_for_agent      = compacted.clone();
         tokio::spawn(async move {
             agent.query_streaming(&query_for_agent, &compacted_for_agent, &attachments, agent_tx).await;
         });
