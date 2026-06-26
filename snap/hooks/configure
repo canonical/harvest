@@ -65,10 +65,15 @@ DEFAULTS = {
 }
 
 try:
-    providers = json.loads(os.environ.get("LLM_JSON", "{}"))
+    data = json.loads(os.environ.get("LLM_JSON", "{}"))
 except Exception:
-    providers = {}
+    data = {}
 
+if not isinstance(data, dict):
+    data = {}
+
+# snapctl get -d llm wraps the result as {"llm": {...}} — unwrap it
+providers = data.get("llm", data)
 if not isinstance(providers, dict):
     providers = {}
 
