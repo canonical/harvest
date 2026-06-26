@@ -5,18 +5,21 @@
         <div class="message-avatar" :style="{ background: senderColor }">{{ senderInitials }}</div>
         <span class="message__sender-name">{{ msg.username ?? 'You' }}</span>
       </div>
+      <div v-if="imageAttachments.length" class="message__img-row">
+        <img
+          v-for="(a, i) in imageAttachments"
+          :key="i"
+          class="message__img-thumb"
+          :src="a.preview_url"
+          :alt="a.name"
+          @click="lightboxSrc = a.preview_url"
+        />
+      </div>
       <div class="message__bubble">
-        <div v-if="msg.attachments?.length" class="message__attachments">
-          <img
-            v-for="(a, i) in msg.attachments.filter(x => x.preview_url)"
-            :key="`img-${i}`"
-            class="message__attachment-img"
-            :src="a.preview_url"
-            :alt="a.name"
-          />
+        <div v-if="fileAttachments.length" class="message__attachments">
           <div
-            v-for="(a, i) in msg.attachments.filter(x => !x.preview_url)"
-            :key="`file-${i}`"
+            v-for="(a, i) in fileAttachments"
+            :key="i"
             class="message__attachment-chip"
           >{{ a.name }}</div>
         </div>
@@ -100,6 +103,13 @@
         </div>
       </div>
     </template>
+
+    <Teleport to="body">
+      <div v-if="lightboxSrc" class="lightbox" @click="lightboxSrc = null">
+        <button class="lightbox__close" type="button" @click="lightboxSrc = null">×</button>
+        <img class="lightbox__img" :src="lightboxSrc" alt="" />
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -113,6 +123,10 @@ import { avatarColor, initials } from '../../lib/utils.js';
 
 const answerBodyRef = ref(null);
 const otherText     = ref('');
+const lightboxSrc   = ref(null);
+
+const imageAttachments = computed(() => (props.msg.attachments ?? []).filter(a => a.preview_url));
+const fileAttachments  = computed(() => (props.msg.attachments ?? []).filter(a => !a.preview_url));
 
 const props = defineProps({
   msg:        { type: Object, required: true },
