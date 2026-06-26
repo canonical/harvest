@@ -260,12 +260,16 @@ function handleProjectEvent(event) {
       presence.value = presence.value.filter(u => u.user_id !== event.user_id);
       break;
     case 'lock':
-      remoteLocked.value = true;
-      lockedBy.value     = event.by ?? '';
+      if (event.conv_id === activeConvId.value) {
+        remoteLocked.value = true;
+        lockedBy.value     = event.by ?? '';
+      }
       break;
     case 'unlock':
-      remoteLocked.value = false;
-      lockedBy.value     = '';
+      if (event.conv_id === activeConvId.value) {
+        remoteLocked.value = false;
+        lockedBy.value     = '';
+      }
       break;
     case 'user_message':
       chat.addUserMessage(event.query ?? '', event.username ?? null, event.attachments ?? []);
