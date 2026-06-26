@@ -40,10 +40,13 @@ async fn main() -> Result<()> {
     neo4j.run("CREATE CONSTRAINT machine_id    IF NOT EXISTS FOR (m:Machine)      REQUIRE m.id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT memory_id     IF NOT EXISTS FOR (m:Memory)       REQUIRE m.id IS UNIQUE").await?;
 
+    if config.llm.is_empty() {
+        anyhow::bail!("at least one [[llm]] provider must be configured in server.toml");
+    }
     let llm_provider                = llm::from_config(&config.llm);
-    let max_iterations              = config.llm.max_iterations();
-    let compaction_threshold_chars  = config.llm.compaction_threshold_chars();
-    let compaction_keep_last        = config.llm.compaction_keep_last();
+    let max_iterations              = config.agent.max_iterations;
+    let compaction_threshold_chars  = config.agent.compaction_threshold_chars;
+    let compaction_keep_last        = config.agent.compaction_keep_last;
 
     let global_tools = graph_tools::all_tools(Arc::clone(&neo4j));
     let agent = Arc::new(

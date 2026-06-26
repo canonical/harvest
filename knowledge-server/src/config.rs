@@ -6,7 +6,9 @@ use std::path::Path;
 pub struct Config {
     pub server: ServerConfig,
     pub neo4j: Neo4jConfig,
-    pub llm: LlmConfig,
+    pub llm: Vec<LlmProviderConfig>,
+    #[serde(default)]
+    pub agent: AgentBehaviorConfig,
     #[serde(default)]
     pub documentation: DocumentationConfig,
     pub auth: AuthConfig,
@@ -51,6 +53,119 @@ pub struct OidcConfig {
     pub display_name: Option<String>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct DocumentationConfig {
+    pub docs_dir: Option<std::path::PathBuf>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+pub struct AgentsConfig {
+    pub binary_path: Option<std::path::PathBuf>,
+    pub public_url:  Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ServerConfig {
+    #[serde(default = "default_host")]
+    pub host: String,
+    #[serde(default = "default_port")]
+    pub port: u16,
+}
+
+fn default_host() -> String { "0.0.0.0".into() }
+fn default_port() -> u16 { 8080 }
+
+#[derive(Deserialize)]
+pub struct Neo4jConfig {
+    pub uri: String,
+    pub user: String,
+    pub password: String,
+}
+
+/// Agent-level behaviour settings, shared across all LLM providers.
+#[derive(Deserialize)]
+pub struct AgentBehaviorConfig {
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+    #[serde(default = "default_compaction_threshold_chars")]
+    pub compaction_threshold_chars: usize,
+    #[serde(default = "default_compaction_keep_last")]
+    pub compaction_keep_last: usize,
+}
+
+impl Default for AgentBehaviorConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: default_max_iterations(),
+            compaction_threshold_chars: default_compaction_threshold_chars(),
+            compaction_keep_last: default_compaction_keep_last(),
+        }
+    }
+}
+
+/// Per-provider LLM configuration.  Define one `[[llm]]` block per provider;
+/// Harvest will try them in ascending `priority` order and cascade on rate limits.
+#[derive(Deserialize)]
+#[serde(tag = "provider", rename_all = "kebab-case")]
+pub enum LlmProviderConfig {
+    Anthropic {
+        model: String,
+        api_key: String,
+        #[serde(default)]
+        priority: u32,
+        #[serde(default = "default_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(default = "default_max_retries")]
+        max_retries: u32,
+    },
+    Gemini {
+        model: String,
+        api_key: String,
+        #[serde(default)]
+        priority: u32,
+        #[serde(default = "default_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(default = "default_max_retries")]
+        max_retries: u32,
+    },
+    #[serde(rename = "openai-compatible")]
+    OpenAiCompat {
+        base_url: String,
+        api_key: String,
+        model: String,
+        #[serde(default)]
+        priority: u32,
+        #[serde(default = "default_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(default = "default_max_retries")]
+        max_retries: u32,
+    },
+}
+
+impl LlmProviderConfig {
+    pub fn priority(&self) -> u32 {
+        match self {
+            Self::Anthropic    { priority, .. } => *priority,
+            Self::Gemini       { priority, .. } => *priority,
+            Self::OpenAiCompat { priority, .. } => *priority,
+        }
+    }
+}
+
+fn default_max_iterations() -> usize { 20 }
+fn default_timeout_secs() -> u64 { 120 }
+fn default_max_retries() -> u32 { 3 }
+fn default_compaction_threshold_chars() -> usize { 40_000 }
+fn default_compaction_keep_last() -> usize { 6 }
+
+impl Config {
+    pub fn from_file(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading config file: {}", path.display()))?;
+        toml::from_str(&text).context("parsing config TOML")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,6 +175,12 @@ mod tests {
         struct Wrapper { auth: AuthConfig }
         toml::from_str::<Wrapper>(toml).expect("parse failed").auth
     }
+
+    fn parse_config(toml: &str) -> Config {
+        toml::from_str::<Config>(toml).expect("parse failed")
+    }
+
+    // ── auth tests (unchanged) ────────────────────────────────────────────────
 
     #[test]
     fn oidc_config_parses_all_fields() {
@@ -142,138 +263,155 @@ mod tests {
         assert!(cfg.google.is_some());
         assert!(cfg.oidc.is_some());
     }
-}
 
-#[derive(Deserialize, Default)]
-pub struct DocumentationConfig {
-    pub docs_dir: Option<std::path::PathBuf>,
-}
+    // ── LLM provider config tests ─────────────────────────────────────────────
 
-#[derive(Deserialize, Default, Clone)]
-pub struct AgentsConfig {
-    pub binary_path: Option<std::path::PathBuf>,
-    pub public_url:  Option<String>,
-}
+    fn minimal_config(llm_block: &str) -> String {
+        format!(r#"
+            [server]
+            [neo4j]
+            uri = "bolt://localhost:7687"
+            user = "neo4j"
+            password = "pw"
+            [auth]
+            jwt_secret = "secret"
+            {llm_block}
+        "#)
+    }
 
-#[derive(Deserialize)]
-pub struct ServerConfig {
-    #[serde(default = "default_host")]
-    pub host: String,
-    #[serde(default = "default_port")]
-    pub port: u16,
-}
-
-fn default_host() -> String { "0.0.0.0".into() }
-fn default_port() -> u16 { 8080 }
-
-#[derive(Deserialize)]
-pub struct Neo4jConfig {
-    pub uri: String,
-    pub user: String,
-    pub password: String,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "provider", rename_all = "kebab-case")]
-pub enum LlmConfig {
-    Anthropic {
-        model: String,
-        api_key: String,
-        #[serde(default = "default_max_iterations")]
-        max_iterations: usize,
-        #[serde(default = "default_timeout_secs")]
-        timeout_secs: u64,
-        #[serde(default = "default_max_retries")]
-        max_retries: u32,
-        #[serde(default = "default_compaction_threshold_chars")]
-        compaction_threshold_chars: usize,
-        #[serde(default = "default_compaction_keep_last")]
-        compaction_keep_last: usize,
-    },
-    Gemini {
-        model: String,
-        api_key: String,
-        #[serde(default = "default_max_iterations")]
-        max_iterations: usize,
-        #[serde(default = "default_timeout_secs")]
-        timeout_secs: u64,
-        #[serde(default = "default_max_retries")]
-        max_retries: u32,
-        #[serde(default = "default_compaction_threshold_chars")]
-        compaction_threshold_chars: usize,
-        #[serde(default = "default_compaction_keep_last")]
-        compaction_keep_last: usize,
-    },
-    #[serde(rename = "openai-compatible")]
-    OpenAiCompat {
-        base_url: String,
-        api_key: String,
-        model: String,
-        #[serde(default = "default_max_iterations")]
-        max_iterations: usize,
-        #[serde(default = "default_timeout_secs")]
-        timeout_secs: u64,
-        #[serde(default = "default_max_retries")]
-        max_retries: u32,
-        #[serde(default = "default_compaction_threshold_chars")]
-        compaction_threshold_chars: usize,
-        #[serde(default = "default_compaction_keep_last")]
-        compaction_keep_last: usize,
-    },
-}
-
-fn default_max_iterations() -> usize { 20 }
-fn default_timeout_secs() -> u64 { 120 }
-fn default_max_retries() -> u32 { 3 }
-fn default_compaction_threshold_chars() -> usize { 40_000 }
-fn default_compaction_keep_last() -> usize { 6 }
-
-impl LlmConfig {
-    pub fn max_iterations(&self) -> usize {
-        match self {
-            Self::Anthropic    { max_iterations, .. } => *max_iterations,
-            Self::Gemini       { max_iterations, .. } => *max_iterations,
-            Self::OpenAiCompat { max_iterations, .. } => *max_iterations,
+    #[test]
+    fn single_gemini_provider_parses() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "gemini-2.5-flash"
+            api_key  = "key1"
+        "#);
+        let cfg = parse_config(&toml);
+        assert_eq!(cfg.llm.len(), 1);
+        match &cfg.llm[0] {
+            LlmProviderConfig::Gemini { model, .. } => assert_eq!(model, "gemini-2.5-flash"),
+            other => panic!("expected Gemini, got something else: {other:?}", other = std::mem::discriminant(other)),
         }
     }
 
-    pub fn timeout_secs(&self) -> u64 {
-        match self {
-            Self::Anthropic    { timeout_secs, .. } => *timeout_secs,
-            Self::Gemini       { timeout_secs, .. } => *timeout_secs,
-            Self::OpenAiCompat { timeout_secs, .. } => *timeout_secs,
+    #[test]
+    fn single_anthropic_provider_parses() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "anthropic"
+            model    = "claude-sonnet-4-6"
+            api_key  = "key2"
+        "#);
+        let cfg = parse_config(&toml);
+        assert_eq!(cfg.llm.len(), 1);
+        match &cfg.llm[0] {
+            LlmProviderConfig::Anthropic { model, .. } => assert_eq!(model, "claude-sonnet-4-6"),
+            other => panic!("expected Anthropic: {other:?}", other = std::mem::discriminant(other)),
         }
     }
 
-    pub fn max_retries(&self) -> u32 {
-        match self {
-            Self::Anthropic    { max_retries, .. } => *max_retries,
-            Self::Gemini       { max_retries, .. } => *max_retries,
-            Self::OpenAiCompat { max_retries, .. } => *max_retries,
+    #[test]
+    fn two_providers_parse_as_vec_of_two() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "gemini-flash"
+            api_key  = "k1"
+            priority = 1
+
+            [[llm]]
+            provider = "anthropic"
+            model    = "claude-sonnet-4-6"
+            api_key  = "k2"
+            priority = 2
+        "#);
+        let cfg = parse_config(&toml);
+        assert_eq!(cfg.llm.len(), 2);
+        assert_eq!(cfg.llm[0].priority(), 1);
+        assert_eq!(cfg.llm[1].priority(), 2);
+    }
+
+    #[test]
+    fn priority_defaults_to_zero() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "gemini-flash"
+            api_key  = "k"
+        "#);
+        let cfg = parse_config(&toml);
+        assert_eq!(cfg.llm[0].priority(), 0);
+    }
+
+    #[test]
+    fn agent_section_uses_defaults_when_absent() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+        "#);
+        let cfg = parse_config(&toml);
+        assert_eq!(cfg.agent.max_iterations, 20);
+        assert_eq!(cfg.agent.compaction_threshold_chars, 40_000);
+        assert_eq!(cfg.agent.compaction_keep_last, 6);
+    }
+
+    #[test]
+    fn agent_section_parses_explicit_values() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+
+            [agent]
+            max_iterations = 10
+            compaction_threshold_chars = 10000
+            compaction_keep_last = 3
+        "#);
+        let cfg = parse_config(&toml);
+        assert_eq!(cfg.agent.max_iterations, 10);
+        assert_eq!(cfg.agent.compaction_threshold_chars, 10_000);
+        assert_eq!(cfg.agent.compaction_keep_last, 3);
+    }
+
+    #[test]
+    fn openai_compat_provider_parses() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "openai-compatible"
+            base_url = "https://openai.example.com"
+            api_key  = "k"
+            model    = "gpt-4o"
+        "#);
+        let cfg = parse_config(&toml);
+        assert_eq!(cfg.llm.len(), 1);
+        match &cfg.llm[0] {
+            LlmProviderConfig::OpenAiCompat { model, base_url, .. } => {
+                assert_eq!(model, "gpt-4o");
+                assert_eq!(base_url, "https://openai.example.com");
+            }
+            other => panic!("expected OpenAiCompat: {other:?}", other = std::mem::discriminant(other)),
         }
     }
 
-    pub fn compaction_threshold_chars(&self) -> usize {
-        match self {
-            Self::Anthropic    { compaction_threshold_chars, .. } => *compaction_threshold_chars,
-            Self::Gemini       { compaction_threshold_chars, .. } => *compaction_threshold_chars,
-            Self::OpenAiCompat { compaction_threshold_chars, .. } => *compaction_threshold_chars,
+    #[test]
+    fn timeout_and_retries_have_defaults() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "anthropic"
+            model    = "m"
+            api_key  = "k"
+        "#);
+        let cfg = parse_config(&toml);
+        match &cfg.llm[0] {
+            LlmProviderConfig::Anthropic { timeout_secs, max_retries, .. } => {
+                assert_eq!(*timeout_secs, 120);
+                assert_eq!(*max_retries, 3);
+            }
+            _ => panic!("expected Anthropic"),
         }
-    }
-
-    pub fn compaction_keep_last(&self) -> usize {
-        match self {
-            Self::Anthropic    { compaction_keep_last, .. } => *compaction_keep_last,
-            Self::Gemini       { compaction_keep_last, .. } => *compaction_keep_last,
-            Self::OpenAiCompat { compaction_keep_last, .. } => *compaction_keep_last,
-        }
-    }
-}
-
-impl Config {
-    pub fn from_file(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading config file: {}", path.display()))?;
-        toml::from_str(&text).context("parsing config TOML")
     }
 }
