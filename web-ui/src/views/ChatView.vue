@@ -333,6 +333,7 @@ async function loadConversation(id) {
       : await getConversation(id);
     activeConvId.value = id;
     chat.loadFromHistory(Array.isArray(conv.messages) ? conv.messages : []);
+    chat.setSuggestions(Array.isArray(conv.suggestions) ? conv.suggestions : []);
     historyOpen.value = false;
     openEventStream();
     await nextTick();
