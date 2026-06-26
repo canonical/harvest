@@ -9,6 +9,7 @@
         <div class="p-panel is-dark nav-panel">
           <div class="p-panel__header">
             <a class="p-panel__logo nav-logo" href="#">
+              <img src="/canonical-logo.png" alt="Canonical" class="p-panel__logo-image" height="32" />
               <span class="p-heading--4">Harvest</span>
             </a>
             <div class="p-panel__controls">
@@ -17,7 +18,9 @@
                 type="button"
                 aria-label="Open navigation"
                 @click="navCollapsed = false"
-              ></button>
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+              </button>
             </div>
           </div>
         </div>
@@ -42,8 +45,10 @@
                   class="p-button--base has-icon u-no-margin"
                   type="button"
                   aria-label="Close navigation"
-                  @click="navCollapsed = true"
-                >✕</button>
+                  @click="closeNav"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                </button>
               </div>
             </div>
 
@@ -169,6 +174,8 @@
         </div>
       </nav>
 
+      <div v-if="!navCollapsed" class="nav-overlay" @click="closeNav" />
+
       <main class="l-main">
         <router-view v-slot="{ Component }" :key="project.selectedProjectId ?? 'no-project'">
           <component :is="Component" :project-id="project.selectedProjectId ?? null" />
@@ -259,8 +266,19 @@ function chooseProject(p) {
   projectDropdownOpen.value = false;
 }
 
+function closeNav(e) {
+  navCollapsed.value = true;
+  // Blur the focused element so Vanilla's .l-navigation.is-collapsed:focus-within
+  // rule doesn't immediately re-open the nav.
+  if (e?.currentTarget) e.currentTarget.blur();
+  else (document.activeElement)?.blur();
+}
+
 function closeNavMobile() {
-  if (window.innerWidth < 620) navCollapsed.value = true;
+  if (window.innerWidth < 620) {
+    navCollapsed.value = true;
+    document.activeElement?.blur();
+  }
 }
 
 async function handleLogout() {
