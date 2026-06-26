@@ -553,6 +553,8 @@ watch(() => props.projectId, async (newId) => {
 
 function onPaste(e) {
   const items = [...(e.clipboardData?.items ?? [])];
+  const hasFile = items.some(i => i.kind === 'file');
+  if (hasFile) e.preventDefault();
   for (const item of items) {
     if (item.kind === 'file') {
       const f = item.getAsFile();
