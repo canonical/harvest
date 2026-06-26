@@ -398,7 +398,9 @@ async function sendQuery() {
         const title = text.length > 60 ? text.slice(0, 57) + '…' : text;
         const conv = await createProjectConversation(props.projectId, { title });
         activeConvId.value = conv.id;
-        conversations.value = [conv, ...conversations.value];
+        if (!conversations.value.some(c => c.id === conv.id)) {
+          conversations.value = [conv, ...conversations.value];
+        }
         openEventStream();
       }
       await projectQueryStart(props.projectId, text, activeConvId.value, attachments);
@@ -421,7 +423,9 @@ async function sendQuery() {
       const title = text.length > 60 ? text.slice(0, 57) + '…' : text;
       const conv = await createConversation(title);
       activeConvId.value = conv.id;
-      conversations.value = [conv, ...conversations.value];
+      if (!conversations.value.some(c => c.id === conv.id)) {
+        conversations.value = [conv, ...conversations.value];
+      }
     }
     await queryStream(text, activeConvId.value, attachments, (event) => {
       handleStreamEvent(event);
