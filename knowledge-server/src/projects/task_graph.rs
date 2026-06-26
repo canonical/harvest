@@ -8,7 +8,6 @@ pub struct TaskNode {
     pub depends_on: Vec<String>,
 }
 
-/// Collect every task reachable (transitively) from `target_id`, inclusive.
 pub fn collect_subgraph(target_id: &str, all_tasks: Vec<TaskNode>) -> Vec<TaskNode> {
     let by_id: HashMap<&str, usize> = all_tasks.iter().enumerate()
         .map(|(i, t)| (t.id.as_str(), i))
@@ -32,7 +31,6 @@ pub fn collect_subgraph(target_id: &str, all_tasks: Vec<TaskNode>) -> Vec<TaskNo
     all_tasks.into_iter().filter(|t| visited.contains(&t.id)).collect()
 }
 
-/// `in_degree[id]` = number of deps *within the subgraph* that must finish first.
 pub fn compute_in_degrees(tasks: &[TaskNode]) -> HashMap<String, usize> {
     let ids: HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
     tasks.iter()
@@ -43,7 +41,6 @@ pub fn compute_in_degrees(tasks: &[TaskNode]) -> HashMap<String, usize> {
         .collect()
 }
 
-/// `dependents[id]` = list of task IDs (within the subgraph) that depend on `id`.
 pub fn compute_dependents(tasks: &[TaskNode]) -> HashMap<String, Vec<String>> {
     let ids: HashSet<&str> = tasks.iter().map(|t| t.id.as_str()).collect();
     let mut map: HashMap<String, Vec<String>> =
@@ -77,7 +74,6 @@ mod tests {
 
     #[test]
     fn linear_chain_subgraph() {
-        // a <- b <- c; collecting from c gives all three
         let tasks = vec![node("a", &[]), node("b", &["a"]), node("c", &["b"])];
         let mut sub = collect_subgraph("c", tasks);
         sub.sort_by(|x, y| x.id.cmp(&y.id));
@@ -87,7 +83,6 @@ mod tests {
     #[test]
     fn excludes_unreachable_tasks() {
         let tasks = vec![node("a", &[]), node("b", &[]), node("c", &["a"])];
-        // collecting from c: only c and a, not b
         let sub = collect_subgraph("c", tasks);
         assert_eq!(sub.len(), 2);
         assert!(sub.iter().any(|t| t.id == "a"));
@@ -105,7 +100,6 @@ mod tests {
 
     #[test]
     fn in_degrees_diamond() {
-        // a <- b, a <- c, b+c <- d
         let tasks = vec![node("a",&[]), node("b",&["a"]), node("c",&["a"]), node("d",&["b","c"])];
         let deg = compute_in_degrees(&tasks);
         assert_eq!(deg["a"], 0);

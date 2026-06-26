@@ -194,7 +194,6 @@ pub async fn project_events(
 
     let conv_id = params.get("conv").cloned();
 
-    // Snapshot in-flight state before subscribing to avoid replaying events twice
     let catchup: Vec<Result<Event, Infallible>> = if let Some(cid) = &conv_id {
         let map = state.in_flight.read().await;
         if let Some(s) = map.get(&project_id).and_then(|m| m.get(cid)) {
@@ -481,7 +480,6 @@ pub async fn project_query_stream(
         let mut tool_calls_log: Vec<Value> = Vec::new();
 
         while let Some(event) = agent_rx.recv().await {
-            // Update tool_calls_log for DB persistence
             match &event {
                 AgentEvent::ToolCall { name, input } => {
                     tool_calls_log.push(json!({
@@ -499,7 +497,6 @@ pub async fn project_query_stream(
                 _ => {}
             }
 
-            // Compute description/hostname for ToolCall (async, must happen before in_flight update)
             let (description, hostname) = if let AgentEvent::ToolCall { name, input } = &event {
                 if name == "run_command" || name == "run_cypher" {
                     let desc = agent.describe_tool_call(name, input).await;
@@ -517,7 +514,6 @@ pub async fn project_query_stream(
                 (None, None)
             };
 
-            // Update in_flight state for catch-up
             {
                 let mut map = in_flight.write().await;
                 if let Some(entry) = map.get_mut(&project_id_owned).and_then(|m| m.get_mut(&conv_id)) {
@@ -601,7 +597,6 @@ pub async fn project_query_stream(
                 });
             }
 
-            // Serialize event, tag with conv_id, and broadcast
             let mut v = if let AgentEvent::ToolCall { .. } = &event {
                 let mut v = serde_json::to_value(&event).unwrap_or(Value::Null);
                 if let Some(obj) = v.as_object_mut() {
@@ -1086,8 +1081,6 @@ pub async fn project_query(
     }
 }
 
-// ── Tasks ─────────────────────────────────────────────────────────────────────
-
 pub async fn list_tasks(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
@@ -1129,7 +1122,6 @@ pub async fn create_task(
         return Err(err(StatusCode::BAD_REQUEST, "prompt is required"));
     }
 
-    // Validate all dependency IDs exist in this project
     if !depends_on.is_empty() {
         let dep_vals: Vec<Value> = depends_on.iter().map(|id| Value::String(id.clone())).collect();
         let found = state.neo4j.query_read(
@@ -1184,7 +1176,6 @@ pub async fn update_task(
     require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let _ = user;
 
-    // Validate dep IDs if provided
     if let Some(ref deps) = body.depends_on {
         if !deps.is_empty() {
             let dep_vals: Vec<Value> = deps.iter().map(|id| Value::String(id.clone())).collect();
@@ -1199,7 +1190,6 @@ pub async fn update_task(
         }
     }
 
-    // Build SET clauses for only the fields provided
     let mut sets: Vec<&str> = vec![];
     if body.name.is_some()       { sets.push("t.name = $name"); }
     if body.prompt.is_some()     { sets.push("t.prompt = $prompt"); }
@@ -1260,7 +1250,6 @@ pub async fn run_task(
     }
     let _ = user;
 
-    // Load all project tasks (id, name, prompt, depends_on)
     let all_rows = match state.neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_TASK]->(t:Task)
          RETURN t.id AS id, t.name AS name, t.prompt AS prompt,
@@ -1360,7 +1349,6 @@ async fn execute_dag(
         }
     }
 
-    // Tasks still with in_degree > 0 were blocked by a failed dependency
     for (tid, deg) in &in_degree {
         if *deg > 0 {
             let event = RunEvent::TaskSkipped { task_id: tid.clone() };
@@ -1385,17 +1373,14 @@ async fn run_single_task(
 ) {
     let tid = task.id.clone();
 
-    // Announce start
     let start = RunEvent::TaskStart { task_id: tid.clone(), task_name: task.name.clone() };
     if let Ok(data) = serde_json::to_string(&start) { let _ = sse_tx.send(data).await; }
 
-    // Mark running in DB
     let _ = neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_TASK]->(t:Task {id: $tid}) SET t.status = 'running'",
         json!({ "pid": project_id, "tid": tid }),
     ).await;
 
-    // Run agent
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(64);
     let agent_ref    = Arc::clone(&agent);
     let prompt_clone = task.prompt.clone();
@@ -1405,10 +1390,8 @@ async fn run_single_task(
 
     let mut output     = String::new();
     let mut had_error  = false;
-    // Each entry: { name, input, preview } — paired as ToolCall arrives then updated on ToolResult
     let mut tool_calls: Vec<Value>            = Vec::new();
-    let mut pending:    Option<(String, Value)> = None; // (name, input) awaiting result
-    // Accumulates streaming preamble text; flushed as a Thinking block before each ToolCall.
+    let mut pending:    Option<(String, Value)> = None;
     let mut preamble_buf = String::new();
 
     while let Some(event) = event_rx.recv().await {

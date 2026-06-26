@@ -1,8 +1,3 @@
-/// Handler-level tests for the generic OIDC SSO flow.
-///
-/// Tests that require Neo4j (callback success path) are in the
-/// integration test section at the bottom and are skipped when
-/// `TEST_NEO4J_URI` is not set.
 use std::sync::Arc;
 
 use axum::{
@@ -20,8 +15,6 @@ use knowledge_server::{
     auth::{handlers as auth_handlers, AuthState, OidcEndpoints},
     config::{AuthConfig, OidcConfig, UiConfig},
 };
-
-// ─── helpers ──────────────────────────────────────────────────────────────────
 
 fn oidc_config(issuer_url: &str) -> OidcConfig {
     OidcConfig {
@@ -59,8 +52,6 @@ fn auth_config_no_oidc() -> Arc<AuthConfig> {
     })
 }
 
-/// Build a minimal router for auth endpoints without a real Neo4j.
-/// The Neo4j client is `None`-equivalent — tests must not reach DB calls.
 fn oidc_router(auth: Arc<AuthState>) -> Router {
     Router::new()
         .route("/auth/config",        get(auth_handlers::config))
@@ -77,8 +68,6 @@ async fn body_json(resp: axum::response::Response) -> Value {
 fn resp_header(resp: &axum::response::Response, name: &str) -> Option<String> {
     resp.headers().get(name).and_then(|v| v.to_str().ok()).map(String::from)
 }
-
-// ─── /auth/config ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn config_reports_oidc_enabled_with_display_name() {
@@ -162,8 +151,6 @@ async fn config_oidc_display_name_null_when_not_set() {
     assert!(body["oidc_display_name"].is_null());
 }
 
-// ─── /auth/oidc redirect ──────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn oidc_redirect_returns_501_when_not_configured() {
     let auth = Arc::new(AuthState {
@@ -240,9 +227,6 @@ async fn oidc_redirect_url_contains_required_params() {
 
 #[tokio::test]
 async fn oidc_redirect_stores_session_server_side() {
-    // OAuth state is now stored server-side (DashMap) rather than in cookies,
-    // so the redirect response must NOT set an oauth_state cookie and the
-    // sessions map must contain the state that appears in the redirect URL.
     let server = MockServer::start();
     let cfg = auth_config_with_oidc(&server.base_url());
     let ep  = Arc::new(endpoints(&server.base_url()));
@@ -263,12 +247,10 @@ async fn oidc_redirect_stores_session_server_side() {
 
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
-    // No oauth_state cookie must be set
     if let Some(sc) = resp_header(&resp, "set-cookie") {
         assert!(!sc.contains("oauth_state="), "oauth_state must NOT be in a cookie");
     }
 
-    // The state param from the redirect URL must be in the server-side sessions map
     let location = resp_header(&resp, "location").expect("location header");
     let url = reqwest::Url::parse(&location).unwrap();
     let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
@@ -278,8 +260,6 @@ async fn oidc_redirect_stores_session_server_side() {
         "session for state={state_val} must be in server-side oauth_sessions map",
     );
 }
-
-// ─── /auth/oidc/callback ──────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn oidc_callback_returns_400_when_no_code() {
@@ -351,7 +331,6 @@ async fn oidc_callback_returns_400_on_state_mismatch() {
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
     });
 
-    // Provide a state param but no matching cookie → mismatch
     let resp = oidc_router(auth)
         .oneshot(
             Request::builder()
@@ -391,11 +370,6 @@ async fn oidc_callback_returns_501_when_not_configured() {
     assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
 }
 
-// ─── stub Neo4j ───────────────────────────────────────────────────────────────
-
-/// Creates a Neo4j client pointing at a non-existent host.
-/// neo4rs uses a lazy connection pool, so construction succeeds;
-/// only actual queries will fail — which is fine for no-DB tests.
 async fn make_stub_neo4j() -> Arc<knowledge_server::neo4j::Neo4jClient> {
     Arc::new(
         knowledge_server::neo4j::Neo4jClient::new("bolt://127.0.0.1:19999", "neo4j", "x")

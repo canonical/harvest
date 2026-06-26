@@ -368,8 +368,6 @@ async fn admin_can_access_any_project_memories() {
     assert_eq!(body, json!([]));
 }
 
-// ── Auto-generation tests ─────────────────────────────────────────────────────
-
 struct JsonLlm(Value);
 impl JsonLlm {
     fn new(v: Value) -> Arc<Self> { Arc::new(Self(v)) }
@@ -482,7 +480,6 @@ async fn auto_generate_passes_existing_memories_to_llm() {
     let app = memories_app(Arc::clone(&neo4j));
     let pid = seed_project(&neo4j, &app, &tok, &gid).await;
 
-    // Seed an existing memory directly in the DB
     let mid = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     neo4j.query_read(
@@ -502,7 +499,6 @@ async fn auto_generate_passes_existing_memories_to_llm() {
         prompts[0].contains("Known issue: auth timeout"),
         "existing memory title should appear in LLM prompt"
     );
-    // Only the original seeded memory should exist
     assert_eq!(count_memories(&neo4j, &pid).await, 1);
 }
 
@@ -516,7 +512,6 @@ async fn auto_generate_does_not_create_duplicate_when_topic_covered() {
     let app = memories_app(Arc::clone(&neo4j));
     let pid = seed_project(&neo4j, &app, &tok, &gid).await;
 
-    // First generation: LLM says yes → creates a memory
     let llm_yes = JsonLlm::new(json!({
         "create": true,
         "title": "Auth timeout root cause",
@@ -525,7 +520,6 @@ async fn auto_generate_does_not_create_duplicate_when_topic_covered() {
     maybe_generate_memory(&neo4j, &*llm_yes, &pid, "Why auth timeout?", "Session store unreachable.").await;
     assert_eq!(count_memories(&neo4j, &pid).await, 1);
 
-    // Second generation on same topic: LLM (seeing existing memory) says no → no duplicate
     let llm_no = JsonLlm::new(json!({ "create": false }));
     maybe_generate_memory(&neo4j, &*llm_no, &pid, "Auth still timing out?", "Same root cause.").await;
     assert_eq!(count_memories(&neo4j, &pid).await, 1);

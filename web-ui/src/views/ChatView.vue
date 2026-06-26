@@ -478,9 +478,6 @@ function scrollToBottom() {
   });
 }
 
-// After a response completes, scroll so the START of the latest assistant message
-// is at the top of the viewport.  This keeps preambles + tool calls visible above
-// the final answer rather than scrolling them off-screen.
 function scrollToLastMessage() {
   nextTick(() => {
     const container = messagesEl.value;

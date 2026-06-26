@@ -30,11 +30,6 @@ where
         let status_code = status.as_u16();
 
         if status_code == 429 && attempt < max_retries {
-            // Only retry when the server tells us exactly how long to wait via
-            // `Retry-After`.  If the header is absent the server is signalling a
-            // permanent quota exhaustion (e.g. a monthly spending cap) — retrying
-            // after an arbitrary delay is pointless and would block the
-            // FallbackProvider from cascading to the next provider.
             if let Some(delay) = response
                 .headers()
                 .get("retry-after")
@@ -46,7 +41,6 @@ where
                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                 continue;
             }
-            // No Retry-After header — fall through and return the 429 response immediately.
             tracing::warn!(provider, "rate limited with no Retry-After — propagating without retry");
         }
 
@@ -106,13 +100,11 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limit_without_retry_after_is_not_retried() {
-        // Simulates quota-exhausted 429 (no Retry-After header) — must cascade
-        // to FallbackProvider immediately without wasting time on backoff.
         let server = MockServer::start();
         let calls = Arc::new(AtomicU32::new(0));
         server.mock(|when, then| {
             when.method("GET").path("/quota");
-            then.status(429); // deliberately no Retry-After header
+            then.status(429);
         });
         let calls2 = Arc::clone(&calls);
         let r = send_with_retry(3, &[], "test", || {
@@ -125,8 +117,6 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limit_with_retry_after_retries() {
-        // Simulates a transient rate limit where the server provides a Retry-After.
-        // We set a 1-second delay so the test doesn't take long.
         let server = MockServer::start();
         let calls = Arc::new(AtomicU32::new(0));
         server.mock(|when, then| {
@@ -134,7 +124,6 @@ mod tests {
             then.status(429).header("retry-after", "1");
         });
         let calls2 = Arc::clone(&calls);
-        // max_retries=1 → should try once, see Retry-After, wait, retry once more.
         let r = send_with_retry(1, &[], "test", || {
             calls2.fetch_add(1, Ordering::SeqCst);
             get(server.url("/transient"))

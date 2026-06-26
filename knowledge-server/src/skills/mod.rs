@@ -88,8 +88,6 @@ impl SkillRegistry {
 mod tests {
     use super::*;
 
-    // ── parse_frontmatter ────────────────────────────────────────────────
-
     #[test]
     fn parse_frontmatter_extracts_name_and_description() {
         let content = "---\nname: juju\ndescription: Juju guide\n---\n\nBody here";
@@ -119,8 +117,6 @@ mod tests {
         assert_eq!(fm.get("name").map(String::as_str), Some("spaced"));
     }
 
-    // ── skill_body ───────────────────────────────────────────────────────
-
     #[test]
     fn skill_body_strips_frontmatter() {
         let content = "---\nname: test\n---\n\n# Heading\nBody text";
@@ -141,8 +137,6 @@ mod tests {
         let body = skill_body(content);
         assert!(body.starts_with("Actual body"));
     }
-
-    // ── SkillRegistry ────────────────────────────────────────────────────
 
     #[test]
     fn registry_list_returns_all_five_skills() {

@@ -1,5 +1,3 @@
-/// Unit/integration tests for GitClient.
-/// All tests run in-process with temporary directories — no Docker or network required.
 use std::path::Path;
 
 use git2::{Repository, Signature};
@@ -7,14 +5,11 @@ use knowledge_harvester::git::GitClient;
 use knowledge_harvester::config::RepoConfig;
 use tempfile::TempDir;
 
-// ── fixture helpers ───────────────────────────────────────────────────────────
-
 struct FixtureRepo {
     dir: TempDir,
 }
 
 impl FixtureRepo {
-    /// Create a git repo with two commits, each tagged, plus a .gitignore.
     fn new() -> Self {
         let dir = TempDir::new().unwrap();
         let path = dir.path();
@@ -22,7 +17,6 @@ impl FixtureRepo {
         let repo = Repository::init(path).unwrap();
         let sig = Signature::now("test", "test@example.com").unwrap();
 
-        // ── commit 1: add a Rust source file and a gitignored file ──
         {
             std::fs::write(path.join("main.rs"), "fn main() {}").unwrap();
             std::fs::write(path.join(".gitignore"), "target/\n*.log\n").unwrap();
@@ -40,11 +34,9 @@ impl FixtureRepo {
                 .unwrap();
         }
 
-        // tag v0.1.0 pointing at first commit
         let head1 = repo.head().unwrap().peel_to_commit().unwrap();
         repo.tag_lightweight("v0.1.0", head1.as_object(), false).unwrap();
 
-        // ── commit 2: add a second file ──
         {
             std::fs::write(path.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 { a + b }").unwrap();
             let mut idx = repo.index().unwrap();
@@ -57,7 +49,6 @@ impl FixtureRepo {
                 .unwrap();
         }
 
-        // tag v0.2.0 pointing at second commit
         let head2 = repo.head().unwrap().peel_to_commit().unwrap();
         repo.tag_lightweight("v0.2.0", head2.as_object(), false).unwrap();
 
@@ -69,7 +60,6 @@ impl FixtureRepo {
     }
 
     fn url(&self) -> String {
-        // git2 accepts local filesystem paths as clone URLs
         self.dir.path().to_string_lossy().into_owned()
     }
 }
@@ -79,8 +69,6 @@ fn make_client() -> (GitClient, TempDir) {
     let client = GitClient::new(clone_root.path().to_path_buf());
     (client, clone_root)
 }
-
-// ── list_tags ─────────────────────────────────────────────────────────────────
 
 #[test]
 fn list_tags_returns_both_tags() {
@@ -99,7 +87,6 @@ fn list_tags_sorted_by_timestamp() {
     let tags = GitClient::new(fixture.path().to_path_buf())
         .list_tags(fixture.path())
         .unwrap();
-    // timestamps must be non-decreasing
     for w in tags.windows(2) {
         assert!(w[0].timestamp <= w[1].timestamp, "tags out of order: {:?}", tags);
     }
@@ -134,8 +121,6 @@ fn list_tags_empty_on_untagged_repo() {
     assert!(tags.is_empty());
 }
 
-// ── checkout ──────────────────────────────────────────────────────────────────
-
 #[test]
 fn checkout_v1_does_not_have_v2_file() {
     let fixture = FixtureRepo::new();
@@ -162,7 +147,6 @@ fn checkout_sets_head_to_correct_commit() {
     let fixture = FixtureRepo::new();
     let client = GitClient::new(fixture.path().to_path_buf());
 
-    // Record the SHA that v0.1.0 resolves to
     let repo = Repository::open(fixture.path()).unwrap();
     let v1_sha = repo.revparse_single("refs/tags/v0.1.0")
         .unwrap()
@@ -184,8 +168,6 @@ fn checkout_unknown_tag_returns_error() {
     assert!(result.is_err());
 }
 
-// ── ensure_cloned ─────────────────────────────────────────────────────────────
-
 #[test]
 fn ensure_cloned_creates_repo_directory() {
     let fixture = FixtureRepo::new();
@@ -204,7 +186,6 @@ fn ensure_cloned_twice_does_not_error() {
     let cfg = RepoConfig { name: "myrepo".into(), url: fixture.url(), refs: None };
 
     client.ensure_cloned(&cfg).unwrap();
-    // Second call should fetch, not re-clone, and succeed
     client.ensure_cloned(&cfg).unwrap();
 }
 
@@ -230,8 +211,6 @@ fn ensure_cloned_repo_has_expected_tags() {
     assert!(names.contains(&"v0.1.0"));
     assert!(names.contains(&"v0.2.0"));
 }
-
-// ── walk_source_files ─────────────────────────────────────────────────────────
 
 #[test]
 fn walk_returns_rs_files() {

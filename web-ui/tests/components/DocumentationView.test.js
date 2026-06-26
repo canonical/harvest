@@ -62,10 +62,8 @@ describe('DocumentationView', () => {
     mockFetch([{ body: DOC_INDEX }]);
     const w = mount(DocumentationView, { global: { plugins: [createPinia()] } });
     await flushPromises();
-    // pick repo
     await w.findAll('select')[0].setValue('myrepo');
     await w.findAll('select')[0].trigger('change');
-    // pick version
     await w.findAll('select')[1].setValue('v1.0');
     await w.findAll('select')[1].trigger('change');
     await flushPromises();

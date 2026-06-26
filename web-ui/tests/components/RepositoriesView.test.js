@@ -3,7 +3,6 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia } from 'pinia';
 import RepositoriesView from '../../src/views/RepositoriesView.vue';
 
-// Cytoscape needs a real DOM canvas — stub it for jsdom
 vi.mock('cytoscape', () => {
   const mockCy = vi.fn(() => ({
     elements: () => ({
