@@ -11,24 +11,6 @@ NEO4J_PASSWORD=$(snapctl get neo4j.password)
 SERVER_HOST=$(snapctl get server.host)
 SERVER_PORT=$(snapctl get server.port)
 
-# Primary LLM provider
-LLM_PROVIDER=$(snapctl get llm.provider)
-LLM_API_KEY=$(snapctl get llm.api-key)
-LLM_MODEL=$(snapctl get llm.model)
-LLM_BASE_URL=$(snapctl get llm.base-url)
-LLM_TIMEOUT=$(snapctl get llm.timeout-secs)
-LLM_MAX_RETRIES=$(snapctl get llm.max-retries)
-LLM_PRIORITY=$(snapctl get llm.priority)
-
-# Optional fallback LLM provider
-LLM2_PROVIDER=$(snapctl get llm2.provider)
-LLM2_API_KEY=$(snapctl get llm2.api-key)
-LLM2_MODEL=$(snapctl get llm2.model)
-LLM2_BASE_URL=$(snapctl get llm2.base-url)
-LLM2_TIMEOUT=$(snapctl get llm2.timeout-secs)
-LLM2_MAX_RETRIES=$(snapctl get llm2.max-retries)
-LLM2_PRIORITY=$(snapctl get llm2.priority)
-
 # Agent behaviour
 AGENT_MAX_ITER=$(snapctl get agent.max-iterations)
 AGENT_COMPACT_CHARS=$(snapctl get agent.compaction-threshold-chars)
@@ -57,12 +39,6 @@ UI_ENABLE_DOCS=$(snapctl get ui.enable-docs)
 : "${NEO4J_USER:=neo4j}"
 : "${SERVER_HOST:=127.0.0.1}"
 : "${SERVER_PORT:=8080}"
-: "${LLM_PROVIDER:=anthropic}"
-: "${LLM_MODEL:=claude-sonnet-4-6}"
-: "${LLM_BASE_URL:=}"
-: "${LLM_TIMEOUT:=120}"
-: "${LLM_MAX_RETRIES:=3}"
-: "${LLM_PRIORITY:=0}"
 : "${AGENT_MAX_ITER:=20}"
 : "${AGENT_COMPACT_CHARS:=40000}"
 : "${AGENT_COMPACT_KEEP:=6}"
@@ -71,23 +47,6 @@ UI_ENABLE_DOCS=$(snapctl get ui.enable-docs)
 : "${UI_ENABLE_DOCS:=false}"
 
 mkdir -p "$SNAP_COMMON" "$DOCS_DIR"
-
-# ── Helper: emit one [[llm]] block ─────────────────────────────────────────
-write_llm_block() {
-  local provider="$1" api_key="$2" model="$3" base_url="$4" \
-        timeout="$5" retries="$6" priority="$7"
-  echo ""
-  echo "[[llm]]"
-  echo "provider     = \"${provider}\""
-  echo "api_key      = \"${api_key}\""
-  echo "model        = \"${model}\""
-  echo "timeout_secs = ${timeout}"
-  echo "max_retries  = ${retries}"
-  echo "priority     = ${priority}"
-  if [ "$provider" = "openai-compatible" ] && [ -n "$base_url" ]; then
-    echo "base_url     = \"${base_url}\""
-  fi
-}
 
 # ── Write server.toml ──────────────────────────────────────────────────────
 {
@@ -102,21 +61,10 @@ user     = "${NEO4J_USER}"
 password = "${NEO4J_PASSWORD}"
 TOML
 
-  write_llm_block \
-    "$LLM_PROVIDER" "$LLM_API_KEY" "$LLM_MODEL" "$LLM_BASE_URL" \
-    "$LLM_TIMEOUT"  "$LLM_MAX_RETRIES" "$LLM_PRIORITY"
-
-  if [ -n "${LLM2_API_KEY:-}" ]; then
-    : "${LLM2_PROVIDER:=anthropic}"
-    : "${LLM2_MODEL:=claude-sonnet-4-6}"
-    : "${LLM2_BASE_URL:=}"
-    : "${LLM2_TIMEOUT:=120}"
-    : "${LLM2_MAX_RETRIES:=3}"
-    : "${LLM2_PRIORITY:=1}"
-    write_llm_block \
-      "$LLM2_PROVIDER" "$LLM2_API_KEY" "$LLM2_MODEL" "$LLM2_BASE_URL" \
-      "$LLM2_TIMEOUT"  "$LLM2_MAX_RETRIES" "$LLM2_PRIORITY"
-  fi
+  # Generate [[llm]] blocks from all named providers under the llm.* namespace.
+  # Providers are sorted by priority (ascending) then by name for stability.
+  snapctl get --document llm 2>/dev/null \
+    | python3 "$SNAP/lib/harvest/gen-llm-config.py"
 
   cat << TOML
 
