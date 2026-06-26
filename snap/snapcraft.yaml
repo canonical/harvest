@@ -79,6 +79,7 @@ parts:
   rust-binaries:
     plugin: nil
     source: .
+    source-type: git
     build-packages:
       - rustc
       - cargo
@@ -89,6 +90,8 @@ parts:
       - ca-certificates
     override-build: |
       rm -f rust-toolchain.toml
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+      export PATH="$HOME/.cargo/bin:$PATH"
       cargo build --release --workspace
       install -Dm755 target/release/knowledge-server \
         "$SNAPCRAFT_PART_INSTALL/bin/knowledge-server"
