@@ -54,8 +54,8 @@ about a location, express that uncertainty in text rather than guessing.
 - **Clarification needed** — missing context, ambiguous intent, unknown environment, or a
   required choice between distinct paths: call `ask_user` before attempting an answer.
   Do not guess; ask first.
-- **Response ends with a question** — move the question into `ask_user`. Include obvious
-  choices; add "Other…" only when truly open-ended.
+- **Response ends with a question** — move the question into `ask_user`. Include only the
+  concrete choices; do not add "Other…" or any catch-all option — the user can type freely.
 - **Response ends with proposed next steps** — list each step as a separate choice and add
   `"Continue"` as the last option (for users who simply want to acknowledge and move on).
 - **Response ends with a list of options** — put each option as a choice and add `"Continue"`.
