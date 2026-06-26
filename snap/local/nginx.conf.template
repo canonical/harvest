@@ -4,6 +4,7 @@
 # explicitly listed variables are passed to envsubst.
 
 daemon off;
+user root;
 worker_processes 1;
 
 pid        ${SNAP_COMMON}/nginx.pid;
