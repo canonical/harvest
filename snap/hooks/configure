@@ -48,6 +48,79 @@ UI_ENABLE_DOCS=$(snapctl get ui.enable-docs)
 
 mkdir -p "$SNAP_COMMON" "$DOCS_DIR"
 
+# ── LLM provider blocks ────────────────────────────────────────────────────
+# Read all named providers under llm.* as a JSON document and emit one
+# [[llm]] TOML block per provider whose api-key is set.
+# The JSON is passed via an environment variable to avoid shell-quoting issues.
+generate_llm_blocks() {
+  local llm_json
+  llm_json=$(snapctl get -d llm 2>/dev/null || echo '{}')
+  LLM_JSON="$llm_json" python3 -c '
+import json, os, sys
+
+DEFAULTS = {
+    "anthropic":         "claude-sonnet-4-6",
+    "gemini":            "gemini-2.5-flash",
+    "openai-compatible": "",
+}
+
+try:
+    providers = json.loads(os.environ.get("LLM_JSON", "{}"))
+except Exception:
+    providers = {}
+
+if not isinstance(providers, dict):
+    providers = {}
+
+def sort_key(kv):
+    _, cfg = kv
+    if not isinstance(cfg, dict):
+        return (999, kv[0])
+    try:
+        return (int(str(cfg.get("priority", 0))), kv[0])
+    except (ValueError, TypeError):
+        return (0, kv[0])
+
+found = 0
+for name, cfg in sorted(providers.items(), key=sort_key):
+    if not isinstance(cfg, dict):
+        continue
+    api_key = cfg.get("api-key", "")
+    if not api_key:
+        continue
+    provider = cfg.get("provider", "anthropic")
+    model    = cfg.get("model", "") or DEFAULTS.get(provider, "")
+    timeout  = cfg.get("timeout-secs", 120)
+    retries  = cfg.get("max-retries", 3)
+    priority = cfg.get("priority", 0)
+    base_url = cfg.get("base-url", "")
+
+    print("")
+    print("[[llm]]")
+    print("provider     = \"%s\"" % provider)
+    print("api_key      = \"%s\"" % api_key)
+    if model:
+        print("model        = \"%s\"" % model)
+    print("timeout_secs = %s" % timeout)
+    print("max_retries  = %s" % retries)
+    print("priority     = %s" % priority)
+    if provider == "openai-compatible" and base_url:
+        print("base_url     = \"%s\"" % base_url)
+    found += 1
+
+if found == 0:
+    sys.exit(1)
+'
+}
+
+# Fail early with a clear message if no LLM providers are configured.
+if ! generate_llm_blocks > /dev/null 2>&1; then
+  echo "error: no LLM providers configured." >&2
+  echo "  Set at least one provider, e.g.:" >&2
+  echo "    snap set harvest llm.primary.provider=anthropic llm.primary.api-key=<key>" >&2
+  exit 1
+fi
+
 # ── Write server.toml ──────────────────────────────────────────────────────
 {
   cat << TOML
@@ -61,10 +134,7 @@ user     = "${NEO4J_USER}"
 password = "${NEO4J_PASSWORD}"
 TOML
 
-  # Generate [[llm]] blocks from all named providers under the llm.* namespace.
-  # Providers are sorted by priority (ascending) then by name for stability.
-  snapctl get --document llm 2>/dev/null \
-    | python3 "$SNAP/lib/harvest/gen-llm-config.py"
+  generate_llm_blocks
 
   cat << TOML
 
