@@ -5,6 +5,20 @@ import { createRouter, createWebHashHistory } from 'vue-router';
 import ChatView from '../../src/views/ChatView.vue';
 import { useChatStore } from '../../src/stores/chat.js';
 
+vi.mock('../../src/lib/api.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    openProjectEvents: vi.fn((projectId, convId, onEvent) => {
+      // Expose the callback so tests can fire fake events.
+      global.__projectEventCallback = onEvent;
+      return { close: vi.fn() };
+    }),
+    listProjectConversations: vi.fn(() => Promise.resolve([])),
+    fetchRepositories:        vi.fn(() => Promise.resolve([])),
+  };
+});
+
 function makeRouter() {
   return createRouter({
     history: createWebHashHistory(),
@@ -29,7 +43,8 @@ function mockFetch(responses) {
 describe('ChatView', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
-    vi.restoreAllMocks();
+    global.__projectEventCallback = null;
+    vi.clearAllMocks();
   });
 
   it('renders message input and send button', () => {
@@ -130,5 +145,63 @@ describe('ChatView', () => {
     });
     await flushPromises();
     expect(w.find('.chat-history-panel__list').exists()).toBe(true);
+  });
+
+  it('project SSE thinking event adds thinking to the chat chain', async () => {
+    const pinia = createPinia();
+    mount(ChatView, {
+      props: { projectId: 'proj-1' },
+      global: { plugins: [pinia, makeRouter()] },
+    });
+    await flushPromises();
+
+    const chat = useChatStore(pinia);
+    chat.startAssistantMessage();
+
+    // Fire a thinking event through the project SSE channel.
+    expect(global.__projectEventCallback).toBeDefined();
+    global.__projectEventCallback({ type: 'thinking', text: 'Analysing the codebase…' });
+
+    const last = chat.messages.at(-1);
+    expect(last.chain.some(item => item.type === 'thinking' && item.text === 'Analysing the codebase…')).toBe(true);
+  });
+
+  it('project SSE thinking_delta event accumulates into a streaming thinking block', async () => {
+    const pinia = createPinia();
+    mount(ChatView, {
+      props: { projectId: 'proj-1' },
+      global: { plugins: [pinia, makeRouter()] },
+    });
+    await flushPromises();
+
+    const chat = useChatStore(pinia);
+    chat.startAssistantMessage();
+
+    global.__projectEventCallback({ type: 'thinking_delta', text: 'Let me ' });
+    global.__projectEventCallback({ type: 'thinking_delta', text: 'think.' });
+
+    const last = chat.messages.at(-1);
+    const item = last.chain.find(c => c.type === 'thinking');
+    expect(item).toBeDefined();
+    expect(item.text).toBe('Let me think.');
+    expect(item.streaming).toBe(true);
+  });
+
+  it('project SSE text_delta event accumulates in pendingAnswer', async () => {
+    const pinia = createPinia();
+    mount(ChatView, {
+      props: { projectId: 'proj-1' },
+      global: { plugins: [pinia, makeRouter()] },
+    });
+    await flushPromises();
+
+    const chat = useChatStore(pinia);
+    chat.startAssistantMessage();
+
+    global.__projectEventCallback({ type: 'text_delta', text: 'The answer ' });
+    global.__projectEventCallback({ type: 'text_delta', text: 'is 42.' });
+
+    const last = chat.messages.at(-1);
+    expect(last.pendingAnswer).toBe('The answer is 42.');
   });
 });

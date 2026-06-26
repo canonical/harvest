@@ -22,7 +22,8 @@ export const useChatStore = defineStore('chat', () => {
   function startAssistantMessage() {
     messages.value.push({
       role: 'assistant', status: 'loading',
-      chain: [], tool_calls: [], answer: null, sources: [], tool_calls_made: 0,
+      chain: [], tool_calls: [], answer: null, pendingAnswer: '',
+      sources: [], tool_calls_made: 0,
     });
     loading.value = true;
   }
@@ -31,7 +32,13 @@ export const useChatStore = defineStore('chat', () => {
     const msg = lastAssistant();
     if (!msg) return;
     msg.status = 'done';
-    msg.answer = answer;
+    // Prefer the server-provided answer; fall back to whatever was accumulated via TextDelta.
+    msg.answer = answer ?? msg.pendingAnswer ?? '';
+    msg.pendingAnswer = '';
+    // Close any still-streaming thinking block.
+    for (const item of msg.chain) {
+      if (item.type === 'thinking' && item.streaming) item.streaming = false;
+    }
     msg.sources = sources ?? [];
     msg.tool_calls_made = tool_calls_made ?? 0;
     loading.value = false;
@@ -48,12 +55,42 @@ export const useChatStore = defineStore('chat', () => {
   function addThinking(text) {
     const msg = lastAssistant();
     if (!msg) return;
-    msg.chain.push({ type: 'thinking', text });
+    // If the last chain item is a streaming thinking block, close it first.
+    const last = msg.chain.at(-1);
+    if (last?.type === 'thinking' && last.streaming) {
+      last.streaming = false;
+    }
+    msg.chain.push({ type: 'thinking', text, streaming: false });
+  }
+
+  function addThinkingDelta(text) {
+    const msg = lastAssistant();
+    if (!msg) return;
+    const last = msg.chain.at(-1);
+    if (last?.type === 'thinking' && last.streaming) {
+      last.text += text;
+    } else {
+      msg.chain.push({ type: 'thinking', text, streaming: true });
+    }
+  }
+
+  function addTextDelta(text) {
+    const msg = lastAssistant();
+    if (!msg) return;
+    msg.pendingAnswer = (msg.pendingAnswer ?? '') + text;
   }
 
   function addToolCall(name, input, description = null) {
     const msg = lastAssistant();
     if (!msg) return;
+    // Preamble text that streamed in before this tool call becomes a Thinking block.
+    if (msg.pendingAnswer) {
+      msg.chain.push({ type: 'thinking', text: msg.pendingAnswer, streaming: false });
+      msg.pendingAnswer = '';
+    }
+    // Close any streaming extended-thinking block.
+    const last = msg.chain.at(-1);
+    if (last?.type === 'thinking' && last.streaming) last.streaming = false;
     const tc = { type: 'tool_call', id: _nextId++, name, input, status: 'running', preview: null, description };
     msg.chain.push(tc);
     msg.tool_calls.push(tc);
@@ -164,7 +201,8 @@ export const useChatStore = defineStore('chat', () => {
   return {
     messages, loading, pendingAttachments, suggestions,
     addUserMessage, startAssistantMessage, finalizeAssistantMessage,
-    setError, addThinking, addToolCall, completeToolCall, updateToolCallDescription,
+    setError, addThinking, addThinkingDelta, addTextDelta, addToolCall,
+    completeToolCall, updateToolCallDescription,
     setQuestion, setSuggestions,
     addPendingAttachment, removePendingAttachment, clearPendingAttachments,
     saveableMessages, loadFromHistory, reset,

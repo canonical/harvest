@@ -65,14 +65,8 @@
               <div class="tasks-detail-tool-calls">
                 <div class="tc-chain">
                   <template v-for="(item, i) in currentChain" :key="i">
-                    <details v-if="item.type === 'thinking'" class="thinking-group" open>
-                      <summary class="thinking-group__summary">
-                        <svg class="tc-group__summary-chevron" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="2,3 5,7 8,3"/></svg>
-                        <span>Thinking</span>
-                      </summary>
-                      <div class="thinking-group__body"><p>{{ item.text }}</p></div>
-                    </details>
-                    <ToolCallStep v-else :step="item" />
+                    <ThinkingBlock v-if="item.type === 'thinking'" :text="item.text" :streaming="item.streaming ?? false" />
+                    <ToolCallStep  v-else :step="item" />
                   </template>
                 </div>
               </div>
@@ -272,7 +266,8 @@ import { ref, reactive, computed, watch, onUnmounted, nextTick } from 'vue';
 import { renderMarkdown } from '../lib/markdown.js';
 import { renderGraph, attachGraphHandlers, updateNodeStatus } from '../lib/task-graph.js';
 import { describeToolCall } from '../lib/tool-render.js';
-import ToolCallStep from '../components/chat/ToolCallStep.vue';
+import ToolCallStep   from '../components/chat/ToolCallStep.vue';
+import ThinkingBlock  from '../components/chat/ThinkingBlock.vue';
 import {
   listProjectTasks,
   createProjectTask,
