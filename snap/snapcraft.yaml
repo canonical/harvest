@@ -148,4 +148,3 @@ parts:
       wrapper-serve:           bin/wrapper-serve
       wrapper-ui:              bin/wrapper-ui
       nginx.conf.template:     etc/harvest/nginx.conf.template
-      gen-llm-config.py:       lib/harvest/gen-llm-config.py
