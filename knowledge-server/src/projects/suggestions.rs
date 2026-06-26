@@ -8,6 +8,7 @@ pub async fn generate_suggestions(
     let messages = vec![Message::user(format!(
         "Based on this exchange, suggest exactly 3 concise follow-up questions or actions \
          the user might want next. Each must be under 10 words. \
+         Do not include generic options like \"Other\" or \"Something else\". \
          Reply ONLY with a JSON array of 3 strings, no prose.\n\n\
          User: {user_query}\nAssistant: {assistant_answer}",
     ))];
@@ -32,5 +33,12 @@ fn parse_json_array(text: &str) -> Option<Vec<String>> {
     let start = trimmed.find('[')?;
     let end   = trimmed.rfind(']')?;
     let choices: Vec<String> = serde_json::from_str(&trimmed[start..=end]).ok()?;
-    if choices.is_empty() { None } else { Some(choices) }
+    let filtered: Vec<String> = choices.into_iter().filter(|s| !is_catchall(s)).collect();
+    if filtered.is_empty() { None } else { Some(filtered) }
+}
+
+fn is_catchall(s: &str) -> bool {
+    let lower = s.trim().to_lowercase();
+    let stripped = lower.trim_end_matches(|c: char| matches!(c, '.' | '?' | '!') || c == '\u{2026}');
+    matches!(stripped.trim(), "other" | "something else" | "none of the above" | "other option")
 }

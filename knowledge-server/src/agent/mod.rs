@@ -289,7 +289,10 @@ impl Agent {
                 let question = ask.input["question"].as_str().unwrap_or("").to_string();
                 let choices = ask.input["choices"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .map(|a| a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .filter(|s| !is_catchall(s))
+                        .collect())
                     .unwrap_or_default();
                 let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
                 let _ = event_sender.send(AgentEvent::Done {
@@ -906,4 +909,10 @@ mod tests {
         });
         assert_eq!(done_answer, Some("The answer is 42"));
     }
+}
+
+fn is_catchall(s: &str) -> bool {
+    let lower = s.trim().to_lowercase();
+    let stripped = lower.trim_end_matches(|c: char| matches!(c, '.' | '?' | '!') || c == '\u{2026}');
+    matches!(stripped.trim(), "other" | "something else" | "none of the above" | "other option")
 }
