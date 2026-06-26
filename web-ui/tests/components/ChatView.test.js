@@ -10,7 +10,6 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
   return {
     ...actual,
     openProjectEvents: vi.fn((projectId, convId, onEvent) => {
-      // Expose the callback so tests can fire fake events.
       global.__projectEventCallback = onEvent;
       return { close: vi.fn() };
     }),
@@ -158,7 +157,6 @@ describe('ChatView', () => {
     const chat = useChatStore(pinia);
     chat.startAssistantMessage();
 
-    // Fire a thinking event through the project SSE channel.
     expect(global.__projectEventCallback).toBeDefined();
     global.__projectEventCallback({ type: 'thinking', text: 'Analysing the codebase…' });
 

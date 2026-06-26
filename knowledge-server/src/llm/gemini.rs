@@ -168,8 +168,6 @@ fn parse_gemini_response(json: Value) -> Result<LlmResponse> {
                 thought_signature: p["thoughtSignature"].as_str().map(|s| s.to_string()),
             }
         }).collect();
-        // Include both normal text parts and thought parts (extended thinking) as preamble.
-        // Thought parts represent the model's reasoning before deciding which tools to call.
         let preamble = parts.iter()
             .filter(|p| p.get("text").is_some())
             .filter_map(|p| p["text"].as_str())
@@ -197,8 +195,6 @@ mod tests {
         GeminiProvider::new("gemini-test".into(), "test-key".into(), 30, 0)
             .with_base_url(base_url)
     }
-
-    // ── parse helpers ────────────────────────────────────────────────────────
 
     #[test]
     fn parse_stop_returns_message() {
@@ -246,7 +242,6 @@ mod tests {
 
     #[test]
     fn parse_function_call_preserves_thought_signature() {
-        // thoughtSignature (camelCase) is at the part level, not inside functionCall
         let json = json!({
             "candidates": [{
                 "content": {
@@ -278,9 +273,7 @@ mod tests {
             }]),
         };
         let v = to_gemini_message(&msg);
-        // signature must be at part level with camelCase key
         assert_eq!(v["parts"][0]["thoughtSignature"], "CsIBCsMB==");
-        // and NOT inside the functionCall object
         assert!(v["parts"][0]["functionCall"].get("thoughtSignature").is_none());
     }
 
@@ -361,8 +354,6 @@ mod tests {
         let json = json!({ "error": { "code": 400, "message": "bad request" } });
         assert!(parse_gemini_response(json).is_err());
     }
-
-    // ── message serialisation ────────────────────────────────────────────────
 
     #[test]
     fn user_text_message_maps_to_user_role_with_parts() {
@@ -454,8 +445,6 @@ mod tests {
         assert_eq!(parts[0]["inlineData"]["data"], "pdfdata");
     }
 
-    // ── tool serialisation ───────────────────────────────────────────────────
-
     #[test]
     fn tool_definition_has_parameters_key() {
         let def = ToolDefinition {
@@ -469,8 +458,6 @@ mod tests {
         assert!(v.get("parameters").is_some(), "must use 'parameters' key");
         assert!(v.get("input_schema").is_none(), "must NOT use anthropic 'input_schema' key");
     }
-
-    // ── HTTP integration ─────────────────────────────────────────────────────
 
     fn text_response_body() -> Value {
         json!({
@@ -593,8 +580,6 @@ mod tests {
         mock.assert();
     }
 
-    // ── extended thinking (thought parts) ────────────────────────────────────
-
     #[test]
     fn thought_part_text_captured_as_preamble() {
         let json = json!({
@@ -666,7 +651,6 @@ mod tests {
 
     #[test]
     fn thought_parts_excluded_from_final_message_text() {
-        // thought parts should NOT appear in the final answer — only in preamble.
         let json = json!({
             "candidates": [{
                 "content": {

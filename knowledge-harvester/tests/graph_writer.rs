@@ -1,14 +1,8 @@
-/// Integration tests for GraphWriter.
-///
-/// Requires a running Docker daemon. Run with:
-///   cargo test --test graph_writer -- --include-ignored
 use knowledge_harvester::graph::{
     model::{ClassNode, FunctionNode, ImportNode, ParsedFile},
     writer::GraphWriter,
 };
 use neo4j_testcontainers::{prelude::*, runners::AsyncRunner as _, Neo4j, Neo4jImageExt as _};
-
-// ── shared setup ──────────────────────────────────────────────────────────────
 
 macro_rules! setup {
     ($writer:ident, $container:ident) => {
@@ -67,8 +61,6 @@ fn make_file(repo: &str, version: &str, path: &str) -> ParsedFile {
     }
 }
 
-// ── upsert_version ────────────────────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn upsert_version_not_yet_ingested() {
@@ -83,11 +75,8 @@ async fn upsert_version_is_idempotent() {
     setup!(writer, container);
     writer.upsert_version("repo", "v1.0", 1_000, false).await.unwrap();
     writer.upsert_version("repo", "v1.0", 1_000, false).await.unwrap();
-    // Second call must not error and must not create duplicates; still not ingested.
     assert!(!writer.is_ingested("repo", "v1.0").await.unwrap());
 }
-
-// ── is_ingested ───────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -113,8 +102,6 @@ async fn is_ingested_false_for_unknown_repo() {
     assert!(!writer.is_ingested("nonexistent", "v1").await.unwrap());
 }
 
-// ── ingested_versions ─────────────────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn ingested_versions_empty_before_any_ingestion() {
@@ -135,8 +122,6 @@ async fn ingested_versions_lists_only_completed_versions() {
     let versions = writer.ingested_versions("r").await.unwrap();
     assert_eq!(versions, vec!["v1".to_string()]);
 }
-
-// ── write_version ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -163,7 +148,6 @@ async fn write_version_is_idempotent() {
     setup!(writer, container);
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
     let file = make_file("r", "v1", "src/lib.rs");
-    // First write marks ingested; upsert resets it so we can call write_version again.
     writer.write_version("r", "v1", &[file.clone()]).await.unwrap();
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
     writer.write_version("r", "v1", &[file]).await.unwrap();

@@ -1,12 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { useChatStore } from '../../src/stores/chat.js';
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-
 function msgs(store) { return store.messages; }
 function last(store) { return store.messages.at(-1); }
-
-// ── initial state ─────────────────────────────────────────────────────────────
 
 describe('initial state', () => {
   it('starts empty', () => {
@@ -16,8 +12,6 @@ describe('initial state', () => {
     expect(s.pendingAttachments).toHaveLength(0);
   });
 });
-
-// ── addUserMessage ────────────────────────────────────────────────────────────
 
 describe('addUserMessage', () => {
   it('appends a user message', () => {
@@ -40,8 +34,6 @@ describe('addUserMessage', () => {
     expect(last(s).attachments).toHaveLength(1);
   });
 });
-
-// ── assistant message lifecycle ───────────────────────────────────────────────
 
 describe('assistant message lifecycle', () => {
   it('startAssistantMessage creates a loading message', () => {
@@ -71,8 +63,6 @@ describe('assistant message lifecycle', () => {
     expect(s.loading).toBe(false);
   });
 });
-
-// ── thinking chain ────────────────────────────────────────────────────────────
 
 describe('addThinking', () => {
   it('adds thinking item to chain', () => {
@@ -106,13 +96,10 @@ describe('addThinking', () => {
     s.addThinkingDelta('partial...');
     expect(last(s).chain[0].streaming).toBe(true);
     s.addThinking('full reasoning');
-    // The streaming block was closed; a new non-streaming block was appended.
     expect(last(s).chain.at(-1).streaming).toBe(false);
     expect(last(s).chain.at(-1).text).toBe('full reasoning');
   });
 });
-
-// ── addThinkingDelta ─────────────────────────────────────────────────────────
 
 describe('addThinkingDelta', () => {
   it('creates a new streaming thinking item on first delta', () => {
@@ -143,8 +130,6 @@ describe('addThinkingDelta', () => {
     expect(last(s).chain[1].type).toBe('thinking');
   });
 });
-
-// ── addTextDelta ──────────────────────────────────────────────────────────────
 
 describe('addTextDelta', () => {
   it('accumulates text in pendingAnswer', () => {
@@ -177,8 +162,6 @@ describe('addTextDelta', () => {
     expect(last(s).answer).toBe('streamed answer');
   });
 });
-
-// ── tool calls ────────────────────────────────────────────────────────────────
 
 describe('tool calls', () => {
   it('addToolCall appends to chain and tool_calls', () => {
@@ -227,7 +210,6 @@ describe('tool calls', () => {
     s.addTextDelta('Let me look that up');
     expect(last(s).pendingAnswer).toBe('Let me look that up');
     s.addToolCall('search', {}, null);
-    // pendingAnswer must be cleared and appear as a thinking block before the tool call
     expect(last(s).pendingAnswer).toBe('');
     expect(last(s).chain).toHaveLength(2);
     expect(last(s).chain[0].type).toBe('thinking');
@@ -255,8 +237,6 @@ describe('tool calls', () => {
   });
 });
 
-// ── question / choices ────────────────────────────────────────────────────────
-
 describe('setQuestion', () => {
   it('attaches question to last assistant message', () => {
     const s = useChatStore();
@@ -266,8 +246,6 @@ describe('setQuestion', () => {
   });
 });
 
-// ── suggestions ──────────────────────────────────────────────────────────────
-
 describe('suggestions', () => {
   it('setSuggestions stores choices', () => {
     const s = useChatStore();
@@ -276,8 +254,6 @@ describe('suggestions', () => {
     expect(s.suggestions).toEqual(['opt1', 'opt2']);
   });
 });
-
-// ── attachments ──────────────────────────────────────────────────────────────
 
 describe('attachments', () => {
   it('addPendingAttachment gives auto-ID', () => {
@@ -303,14 +279,11 @@ describe('attachments', () => {
   });
 });
 
-// ── save & restore ────────────────────────────────────────────────────────────
-
 describe('saveableMessages', () => {
   it('only includes completed messages', () => {
     const s = useChatStore();
     s.addUserMessage('q', null, []);
     s.startAssistantMessage();
-    // still loading — not finalized
     expect(s.saveableMessages).toHaveLength(1);
   });
 
@@ -354,8 +327,6 @@ describe('loadFromHistory', () => {
     expect(chain.some(c => c.type === 'tool_call')).toBe(true);
   });
 });
-
-// ── reset ─────────────────────────────────────────────────────────────────────
 
 describe('reset', () => {
   it('clears all state', () => {

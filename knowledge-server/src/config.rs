@@ -82,7 +82,6 @@ pub struct Neo4jConfig {
     pub password: String,
 }
 
-/// Agent-level behaviour settings, shared across all LLM providers.
 #[derive(Deserialize)]
 pub struct AgentBehaviorConfig {
     #[serde(default = "default_max_iterations")]
@@ -103,8 +102,6 @@ impl Default for AgentBehaviorConfig {
     }
 }
 
-/// Per-provider LLM configuration.  Define one `[[llm]]` block per provider;
-/// Harvest will try them in ascending `priority` order and cascade on rate limits.
 #[derive(Deserialize)]
 #[serde(tag = "provider", rename_all = "kebab-case")]
 pub enum LlmProviderConfig {
@@ -179,8 +176,6 @@ mod tests {
     fn parse_config(toml: &str) -> Config {
         toml::from_str::<Config>(toml).expect("parse failed")
     }
-
-    // ── auth tests (unchanged) ────────────────────────────────────────────────
 
     #[test]
     fn oidc_config_parses_all_fields() {
@@ -263,8 +258,6 @@ mod tests {
         assert!(cfg.google.is_some());
         assert!(cfg.oidc.is_some());
     }
-
-    // ── LLM provider config tests ─────────────────────────────────────────────
 
     fn minimal_config(llm_block: &str) -> String {
         format!(r#"

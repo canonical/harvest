@@ -195,8 +195,6 @@ fn parse_sse_events(bytes: &[u8]) -> Vec<Value> {
     }).collect()
 }
 
-// ── list ──────────────────────────────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn list_tasks_empty_for_new_project() {
@@ -211,8 +209,6 @@ async fn list_tasks_empty_for_new_project() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!([]));
 }
-
-// ── create ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -308,8 +304,6 @@ async fn list_tasks_after_create_returns_summary() {
     assert!(arr[0].get("prompt").is_none(), "list should not expose prompt");
 }
 
-// ── delete ────────────────────────────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn delete_task_removes_it() {
@@ -329,8 +323,6 @@ async fn delete_task_removes_it() {
     assert_eq!(body.as_array().unwrap().len(), 0);
 }
 
-// ── logs (before run) ─────────────────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn get_task_logs_returns_idle_status_before_run() {
@@ -348,8 +340,6 @@ async fn get_task_logs_returns_idle_status_before_run() {
     assert!(body["output"].is_null() || body["output"] == "");
 }
 
-// ── run ───────────────────────────────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn run_task_streams_sse_and_stores_output() {
@@ -361,7 +351,6 @@ async fn run_task_streams_sse_and_stores_output() {
     let pid = seed_project(&app, &tok, &gid).await;
     let tid = seed_task(&app, &tok, &pid).await;
 
-    // Reading body to completion ensures all spawned tasks finish (including DB writes)
     let (status, body_bytes) = send_raw(
         app.clone(),
         req_post_empty(&format!("/projects/{pid}/tasks/{tid}/run"), &tok),
@@ -371,7 +360,6 @@ async fn run_task_streams_sse_and_stores_output() {
     let body_str = std::str::from_utf8(&body_bytes).unwrap();
     assert!(body_str.contains("done"), "SSE body should contain a done event");
 
-    // After stream completes, logs should have output and status=done
     let (status, logs) = send(app, req_get(&format!("/projects/{pid}/tasks/{tid}/logs"), &tok)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(logs["status"], "done");
@@ -395,8 +383,6 @@ async fn run_task_returns_404_for_unknown_task() {
     ).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
-
-// ── access control ────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -428,8 +414,6 @@ async fn admin_can_access_any_project_tasks() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!([]));
 }
-
-// ── depends_on: create ────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -493,16 +477,12 @@ async fn list_tasks_includes_depends_on() {
     assert_eq!(status, StatusCode::OK);
     let arr = body.as_array().unwrap();
     assert_eq!(arr.len(), 2);
-    // Every item must have a depends_on array
     for item in arr {
         assert!(item["depends_on"].is_array(), "depends_on must be an array");
     }
-    // The child task has depends_on = [dep_id]
     let child = arr.iter().find(|t| t["name"] == "Child").unwrap();
     assert_eq!(child["depends_on"].as_array().unwrap().len(), 1);
 }
-
-// ── depends_on: run ───────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -521,11 +501,8 @@ async fn run_task_no_deps_emits_task_id_and_run_done() {
     assert_eq!(status, StatusCode::OK);
 
     let events = parse_sse_events(&bytes);
-    // Must have task_start for the task
     assert!(events.iter().any(|e| e["type"] == "task_start" && e["task_id"] == tid.as_str()));
-    // Must have done event with task_id
     assert!(events.iter().any(|e| e["type"] == "done" && e["task_id"] == tid.as_str()));
-    // Must end with run_done
     assert_eq!(events.last().unwrap()["type"], "run_done");
 }
 
@@ -548,19 +525,16 @@ async fn run_task_runs_dependency_before_target() {
     assert_eq!(status, StatusCode::OK);
 
     let events = parse_sse_events(&bytes);
-    // Both tasks must have task_start and done events
     assert!(events.iter().any(|e| e["type"] == "task_start" && e["task_id"] == dep_id.as_str()));
     assert!(events.iter().any(|e| e["type"] == "done"       && e["task_id"] == dep_id.as_str()));
     assert!(events.iter().any(|e| e["type"] == "task_start" && e["task_id"] == task_id.as_str()));
     assert!(events.iter().any(|e| e["type"] == "done"       && e["task_id"] == task_id.as_str()));
     assert_eq!(events.last().unwrap()["type"], "run_done");
 
-    // dep task_start must appear before child task_start in the event stream
     let dep_start_pos  = events.iter().position(|e| e["type"] == "task_start" && e["task_id"] == dep_id.as_str()).unwrap();
     let task_start_pos = events.iter().position(|e| e["type"] == "task_start" && e["task_id"] == task_id.as_str()).unwrap();
     assert!(dep_start_pos < task_start_pos, "dependency must start before dependent");
 
-    // Both tasks should have status=done in DB
     let (_, dep_logs)  = send(app.clone(), req_get(&format!("/projects/{pid}/tasks/{dep_id}/logs"),  &tok)).await;
     let (_, task_logs) = send(app,         req_get(&format!("/projects/{pid}/tasks/{task_id}/logs"), &tok)).await;
     assert_eq!(dep_logs["status"],  "done");
@@ -576,7 +550,6 @@ async fn run_task_three_level_chain_all_complete() {
     join_group(&neo4j, &uid, &gid).await;
     let app = tasks_app(Arc::clone(&neo4j));
     let pid = seed_project(&app, &tok, &gid).await;
-    // A <- B <- C (C depends on B, B depends on A)
     let a = seed_task_full(&app, &tok, &pid, "A", "task A", &[]).await;
     let b = seed_task_full(&app, &tok, &pid, "B", "task B", &[a.as_str()]).await;
     let c = seed_task_full(&app, &tok, &pid, "C", "task C", &[b.as_str()]).await;
@@ -593,7 +566,6 @@ async fn run_task_three_level_chain_all_complete() {
     }
     assert_eq!(events.last().unwrap()["type"], "run_done");
 
-    // Ordering: A before B before C
     let pos = |tid: &str, etype: &str| -> usize {
         events.iter().position(|e| e["type"] == etype && e["task_id"] == tid).unwrap()
     };
@@ -610,7 +582,6 @@ async fn run_task_parallel_deps_both_complete() {
     join_group(&neo4j, &uid, &gid).await;
     let app = tasks_app(Arc::clone(&neo4j));
     let pid = seed_project(&app, &tok, &gid).await;
-    // dep_a and dep_b are independent, target depends on both
     let dep_a  = seed_task_full(&app, &tok, &pid, "DepA", "task dep_a", &[]).await;
     let dep_b  = seed_task_full(&app, &tok, &pid, "DepB", "task dep_b", &[]).await;
     let target = seed_task_full(&app, &tok, &pid, "Target", "task target",
@@ -626,7 +597,6 @@ async fn run_task_parallel_deps_both_complete() {
         assert!(events.iter().any(|e| e["type"] == "task_start" && e["task_id"] == tid.as_str()));
         assert!(events.iter().any(|e| e["type"] == "done"       && e["task_id"] == tid.as_str()));
     }
-    // Both deps must complete before target starts
     let dep_a_done = events.iter().position(|e| e["type"] == "done" && e["task_id"] == dep_a.as_str()).unwrap();
     let dep_b_done = events.iter().position(|e| e["type"] == "done" && e["task_id"] == dep_b.as_str()).unwrap();
     let target_start = events.iter().position(|e| e["type"] == "task_start" && e["task_id"] == target.as_str()).unwrap();

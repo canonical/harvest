@@ -1,5 +1,3 @@
-/// Integration tests for the machines module.
-/// Tests marked #[ignore = "requires Docker"] need a running Neo4j instance.
 use std::sync::Arc;
 
 use axum::{
@@ -14,8 +12,6 @@ use knowledge_server::machines::{
     handlers::{generate_install_script, machines_router, MachineState},
     MachineRegistry,
 };
-
-// ── Helpers ────────────────────────────────────────────────────────────────────
 
 async fn body_bytes(resp: axum::response::Response) -> Vec<u8> {
     resp.into_body().collect().await.unwrap().to_bytes().to_vec()
@@ -37,8 +33,6 @@ fn make_state(registry: Arc<MachineRegistry>) -> Arc<MachineState> {
         server_url:  "https://harvest.example.com".into(),
     })
 }
-
-// ── Install-script generation (pure, no DB) ───────────────────────────────────
 
 #[test]
 fn install_script_contains_server_url() {
@@ -89,8 +83,6 @@ fn install_script_exits_if_not_root() {
     assert!(s.contains("id -u"), "missing root check");
 }
 
-// ── MachineRegistry unit tests (no DB) ────────────────────────────────────────
-
 #[tokio::test]
 async fn registry_execute_unknown_agent_returns_error() {
     let r = MachineRegistry::new();
@@ -129,8 +121,6 @@ async fn registry_agents_for_project_scoped_correctly() {
     assert_eq!(registry.agents_for_project("proj-2").len(), 1);
     assert!(registry.agents_for_project("proj-3").is_empty());
 }
-
-// ── HTTP endpoint tests (no DB) ───────────────────────────────────────────────
 
 #[tokio::test]
 async fn install_script_endpoint_missing_project_returns_4xx_or_503() {
@@ -198,11 +188,8 @@ async fn agent_ping_invalid_token_returns_401() {
         .header("Authorization", "Bearer bad-token")
         .body(Body::empty()).unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    // token_index is empty — unknown token → 401
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
-
-// ── Docker integration tests ───────────────────────────────────────────────────
 
 #[cfg(test)]
 mod docker_tests {
@@ -259,7 +246,6 @@ mod docker_tests {
         let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
         assert!(ct.contains("text/event-stream"), "content-type: {ct}");
 
-        // Read until we get a complete SSE event
         use futures_util::StreamExt as _;
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
@@ -318,7 +304,6 @@ mod docker_tests {
         let addr = spawn_server(Arc::clone(&neo4j)).await;
         let base = format!("http://127.0.0.1:{}", addr.port());
 
-        // Connect SSE to register
         let client = reqwest::Client::new();
         use futures_util::StreamExt as _;
         let sse_resp = client.get(format!("{base}/agent/events?hostname=ping-host"))
@@ -343,17 +328,14 @@ mod docker_tests {
         let val: serde_json::Value = serde_json::from_str(data).unwrap();
         let perm_token = val["agent_token"].as_str().unwrap().to_string();
 
-        // Wait a tick so token_index is populated
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // POST ping with permanent token
         let ping_resp = client.post(format!("{base}/agent/ping"))
             .header("Authorization", format!("Bearer {perm_token}"))
             .send().await.unwrap();
 
         assert_eq!(ping_resp.status(), 200);
 
-        // Verify last_seen updated in DB
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let rows = neo4j.query_read(
             "MATCH (m:Machine {hostname: 'ping-host'}) RETURN m.last_seen AS last_seen",
