@@ -3119,6 +3119,63 @@ a.source-chip:hover .source-chip__name {
   font-size: 0.8rem;
 }
 
+.message__img-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  max-width: 80%;
+  justify-content: flex-end;
+}
+
+.message__img-thumb {
+  height: 72px;
+  width: auto;
+  object-fit: cover;
+  border-radius: 0.4rem;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.message__img-thumb:hover { opacity: 0.8; }
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+
+.lightbox__img {
+  max-width: 90vw;
+  max-height: 90vh;
+  object-fit: contain;
+  border-radius: 0.5rem;
+}
+
+.lightbox__close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  background: rgba(255, 255, 255, 0.15);
+  border: none;
+  color: #fff;
+  font-size: 1.25rem;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.lightbox__close:hover { background: rgba(255, 255, 255, 0.28); }
+
 .page--agents { padding: 1.5rem 2rem; }
 
 .agents-wrap { max-width: 900px; }
