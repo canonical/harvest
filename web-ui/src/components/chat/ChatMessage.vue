@@ -6,16 +6,21 @@
         <span class="message__sender-name">{{ msg.username ?? 'You' }}</span>
       </div>
       <div class="message__bubble">
-        <div class="message__body">{{ msg.text }}</div>
-        <div v-if="msg.attachments?.length" class="message-attachments">
+        <div v-if="msg.attachments?.length" class="message__attachments">
           <img
             v-for="(a, i) in msg.attachments.filter(x => x.preview_url)"
-            :key="i"
-            class="message-attachment-thumb"
+            :key="`img-${i}`"
+            class="message__attachment-img"
             :src="a.preview_url"
             :alt="a.name"
           />
+          <div
+            v-for="(a, i) in msg.attachments.filter(x => !x.preview_url)"
+            :key="`file-${i}`"
+            class="message__attachment-chip"
+          >{{ a.name }}</div>
         </div>
+        <div class="message__body">{{ msg.text }}</div>
       </div>
     </template>
 
