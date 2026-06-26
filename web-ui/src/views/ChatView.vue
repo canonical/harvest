@@ -271,6 +271,23 @@ function handleProjectEvent(event) {
         lockedBy.value     = '';
       }
       break;
+    case 'conversation_created': {
+      const existing = conversations.value.findIndex(c => c.id === event.conversation.id);
+      if (existing !== -1) {
+        conversations.value[existing] = event.conversation;
+      } else {
+        conversations.value = [event.conversation, ...conversations.value];
+      }
+      break;
+    }
+    case 'conversation_updated': {
+      const idx = conversations.value.findIndex(c => c.id === event.conv_id);
+      if (idx !== -1) {
+        conversations.value[idx] = { ...conversations.value[idx], updated_at: event.updated_at };
+        conversations.value.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+      }
+      break;
+    }
     case 'user_message':
     case 'thinking':
     case 'thinking_delta':
