@@ -34,6 +34,16 @@
           />
         </div>
 
+        <div v-if="chat.suggestions.length && !chat.loading" class="message__suggestions">
+          <button
+            v-for="s in chat.suggestions"
+            :key="s"
+            class="btn-suggestion"
+            type="button"
+            @click="sendWithChoice(s)"
+          >{{ s }}</button>
+        </div>
+
         <div class="input-area">
           <div class="input-area__main">
             <div v-if="pendingAttachments.length" class="attachment-tray">
@@ -430,6 +440,7 @@ function sendWithChoice(text) {
 function handleChatEvent(event) {
   switch (event.type) {
     case 'user_message':
+      chat.setSuggestions([]);
       chat.addUserMessage(event.query ?? '', event.username ?? null, event.attachments ?? []);
       chat.startAssistantMessage();
       break;
