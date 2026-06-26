@@ -73,7 +73,7 @@ pub struct ToolDefinition {
     pub parameters: Value,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -85,4 +85,18 @@ pub struct ToolCall {
 pub enum LlmResponse {
     Message { text: String },
     ToolCalls { calls: Vec<ToolCall>, preamble: String },
+}
+
+/// Events emitted by streaming LLM providers.
+///
+/// `ThinkingDelta` comes from extended-thinking content blocks and is emitted in real time.
+/// `TextDelta` carries the LLM's text output (may be preamble before tools, or the final answer).
+/// `ToolCallReady` is emitted once a tool-use block is fully accumulated.
+/// `Done` carries the stop-reason so callers can tell whether text was an answer or preamble.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    ThinkingDelta { text: String },
+    TextDelta { text: String },
+    ToolCallReady(ToolCall),
+    Done { stop_reason: String },
 }
