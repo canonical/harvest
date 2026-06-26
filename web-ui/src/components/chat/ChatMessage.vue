@@ -20,15 +20,33 @@
     </template>
 
     <template v-else>
-      <template v-for="item in msg.chain" :key="item.id ?? item.type + item.text">
-        <ThinkingBlock v-if="item.type === 'thinking'" :text="item.text" />
-        <ToolCallStep  v-else-if="item.type === 'tool_call'" :step="item" />
-      </template>
-
-      <span v-if="msg.status === 'loading' && !msg.chain?.length && !msg.answer" class="loading-dots">
+      <!-- Loading indicator: only while no activity or answer has arrived yet -->
+      <span v-if="msg.status === 'loading' && !msg.chain?.length && !msg.pendingAnswer" class="loading-dots">
         <span>.</span><span>.</span><span>.</span>
       </span>
 
+      <!-- Activity log: preambles + tool calls, unified left-border track -->
+      <div
+        v-if="msg.chain?.length"
+        class="tc-chain"
+        :class="{ 'tc-chain--running': msg.status === 'loading' }"
+      >
+        <template v-for="item in msg.chain" :key="item.id ?? item.type + item.text">
+          <ThinkingBlock
+            v-if="item.type === 'thinking'"
+            :text="item.text"
+            :streaming="item.streaming ?? false"
+          />
+          <ToolCallStep v-else-if="item.type === 'tool_call'" :step="item" />
+        </template>
+      </div>
+
+      <!-- Final answer: streaming phase (TextDelta before Done fires) -->
+      <div v-if="msg.pendingAnswer && !msg.answer" class="message__bubble message__bubble--streaming">
+        <div class="message__body">{{ msg.pendingAnswer }}<span class="answer-cursor" aria-hidden="true">▋</span></div>
+      </div>
+
+      <!-- Final answer: finalized -->
       <div v-if="msg.answer" class="message__bubble">
         <div ref="answerBodyRef" class="message__body" v-html="renderedAnswer" />
       </div>

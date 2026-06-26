@@ -80,7 +80,9 @@ describe('addThinking', () => {
     s.startAssistantMessage();
     s.addThinking('Let me think…');
     expect(last(s).chain).toHaveLength(1);
-    expect(last(s).chain[0]).toEqual({ type: 'thinking', text: 'Let me think…' });
+    expect(last(s).chain[0].type).toBe('thinking');
+    expect(last(s).chain[0].text).toBe('Let me think…');
+    expect(last(s).chain[0].streaming).toBe(false);
   });
 
   it('does not affect tool_calls array', () => {
@@ -96,6 +98,83 @@ describe('addThinking', () => {
     s.addThinking('a');
     s.addThinking('b');
     expect(last(s).chain).toHaveLength(2);
+  });
+
+  it('closes an active streaming thinking block before adding the consolidated one', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addThinkingDelta('partial...');
+    expect(last(s).chain[0].streaming).toBe(true);
+    s.addThinking('full reasoning');
+    // The streaming block was closed; a new non-streaming block was appended.
+    expect(last(s).chain.at(-1).streaming).toBe(false);
+    expect(last(s).chain.at(-1).text).toBe('full reasoning');
+  });
+});
+
+// ── addThinkingDelta ─────────────────────────────────────────────────────────
+
+describe('addThinkingDelta', () => {
+  it('creates a new streaming thinking item on first delta', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addThinkingDelta('I should');
+    const item = last(s).chain[0];
+    expect(item.type).toBe('thinking');
+    expect(item.text).toBe('I should');
+    expect(item.streaming).toBe(true);
+  });
+
+  it('appends to the current streaming thinking item', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addThinkingDelta('Hello');
+    s.addThinkingDelta(' world');
+    expect(last(s).chain).toHaveLength(1);
+    expect(last(s).chain[0].text).toBe('Hello world');
+  });
+
+  it('creates a new item if the last chain item is not a streaming thinking block', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addToolCall('search', {}, null);
+    s.addThinkingDelta('next thought');
+    expect(last(s).chain).toHaveLength(2);
+    expect(last(s).chain[1].type).toBe('thinking');
+  });
+});
+
+// ── addTextDelta ──────────────────────────────────────────────────────────────
+
+describe('addTextDelta', () => {
+  it('accumulates text in pendingAnswer', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addTextDelta('Hello');
+    s.addTextDelta(' world');
+    expect(last(s).pendingAnswer).toBe('Hello world');
+  });
+
+  it('pendingAnswer starts empty', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    expect(last(s).pendingAnswer).toBe('');
+  });
+
+  it('finalizeAssistantMessage clears pendingAnswer', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addTextDelta('partial text');
+    s.finalizeAssistantMessage({ answer: 'full answer', sources: [], tool_calls_made: 0 });
+    expect(last(s).pendingAnswer).toBe('');
+  });
+
+  it('finalizeAssistantMessage falls back to pendingAnswer when answer is null', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addTextDelta('streamed answer');
+    s.finalizeAssistantMessage({ answer: null, sources: [], tool_calls_made: 0 });
+    expect(last(s).answer).toBe('streamed answer');
   });
 });
 
@@ -140,6 +219,39 @@ describe('tool calls', () => {
     s.addToolCall('tool_b', {}, null);
     const types = last(s).chain.map(c => c.type);
     expect(types).toEqual(['thinking', 'tool_call', 'thinking', 'tool_call']);
+  });
+
+  it('addToolCall promotes streamed preamble text to a Thinking block', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addTextDelta('Let me look that up');
+    expect(last(s).pendingAnswer).toBe('Let me look that up');
+    s.addToolCall('search', {}, null);
+    // pendingAnswer must be cleared and appear as a thinking block before the tool call
+    expect(last(s).pendingAnswer).toBe('');
+    expect(last(s).chain).toHaveLength(2);
+    expect(last(s).chain[0].type).toBe('thinking');
+    expect(last(s).chain[0].text).toBe('Let me look that up');
+    expect(last(s).chain[0].streaming).toBe(false);
+    expect(last(s).chain[1].type).toBe('tool_call');
+  });
+
+  it('addToolCall with no pending text adds only the tool call', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addToolCall('search', {}, null);
+    expect(last(s).chain).toHaveLength(1);
+    expect(last(s).chain[0].type).toBe('tool_call');
+  });
+
+  it('addToolCall closes a streaming ThinkingDelta block before appending tool call', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addThinkingDelta('reasoning...');
+    expect(last(s).chain[0].streaming).toBe(true);
+    s.addToolCall('search', {}, null);
+    expect(last(s).chain[0].streaming).toBe(false);
+    expect(last(s).chain[1].type).toBe('tool_call');
   });
 });
 
