@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::llm::{
-    types::{ContentPart, LlmResponse, Message, MessageContent, ToolCall, ToolDefinition},
+    types::{ContentPart, LlmResponse, Message, MessageContent, StreamEvent, ToolCall, ToolDefinition},
     LlmProvider,
 };
 use tool::Tool;
@@ -50,7 +50,12 @@ pub struct QueryResponse {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    /// Full reasoning text that preceded a round of tool calls (used for history replay).
     Thinking { text: String },
+    /// Real-time streaming chunk of extended-thinking content (arrives before tool calls).
+    ThinkingDelta { text: String },
+    /// Real-time streaming chunk of the final answer text.
+    TextDelta { text: String },
     ToolCall { name: String, input: serde_json::Value },
     ToolResult { name: String, preview: String },
     Done { answer: String, sources: Vec<Source>, tool_calls_made: usize },
@@ -166,6 +171,27 @@ impl Agent {
         }
     }
 
+    /// Generate a one-sentence description of the intent behind a batch of tool calls.
+    /// Used to synthesize a Thinking event when the model produces no preamble text.
+    async fn describe_tool_calls_batch(&self, calls: &[ToolCall]) -> String {
+        if calls.is_empty() {
+            return String::new();
+        }
+        let calls_text = calls
+            .iter()
+            .map(|c| format!("- {}: {}", c.name, c.input))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prompt = format!(
+            "In one sentence, describe what these tool calls are trying to find out. \
+             Be concrete and mention key values. No trailing punctuation.\n{calls_text}"
+        );
+        match self.llm.chat(&[Message::user(prompt)], &[]).await {
+            Ok(LlmResponse::Message { text }) => text.trim().to_string(),
+            _ => String::new(),
+        }
+    }
+
     pub async fn query_streaming(
         &self,
         user_query: &str,
@@ -226,82 +252,115 @@ impl Agent {
                 }
             }
 
-            let response = match self.llm.chat(&messages, &tool_defs).await {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = event_sender.send(AgentEvent::Error { message: e.to_string() }).await;
-                    return;
+            // Stream the LLM response, collecting events as they arrive.
+            let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(64);
+            let llm            = Arc::clone(&self.llm);
+            let msgs_snapshot  = messages.clone();
+            let tools_snapshot = tool_defs.clone();
+            tokio::spawn(async move {
+                if let Err(e) = llm.chat_stream(&msgs_snapshot, &tools_snapshot, stream_tx).await {
+                    tracing::warn!(error = %e, "chat_stream failed");
                 }
-            };
+            });
 
-            match response {
-                LlmResponse::Message { text } => break text,
+            let mut text_buf     = String::new();
+            let mut tool_calls: Vec<ToolCall> = Vec::new();
+            let mut stop_reason  = String::new();
 
-                LlmResponse::ToolCalls { calls, preamble } => {
-                    iterations += 1;
-
-                    if !preamble.is_empty() {
-                        let _ = event_sender.send(AgentEvent::Thinking { text: preamble.clone() }).await;
+            while let Some(ev) = stream_rx.recv().await {
+                match ev {
+                    StreamEvent::ThinkingDelta { text } => {
+                        let _ = event_sender.send(AgentEvent::ThinkingDelta { text }).await;
                     }
-
-                    if let Some(ask) = calls.iter().find(|c| c.name == "ask_user") {
-                        let question = ask.input["question"].as_str().unwrap_or("").to_string();
-                        let choices = ask.input["choices"]
-                            .as_array()
-                            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                            .unwrap_or_default();
-                        let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
-                        let _ = event_sender.send(AgentEvent::Done {
-                            answer: preamble,
-                            sources: vec![],
-                            tool_calls_made: iterations,
-                        }).await;
-                        return;
+                    StreamEvent::TextDelta { text } => {
+                        // Forward immediately so preamble appears live; accumulate for Done.
+                        let _ = event_sender.send(AgentEvent::TextDelta { text: text.clone() }).await;
+                        text_buf.push_str(&text);
                     }
-
-                    let call_parts: Vec<ContentPart> = calls
-                        .iter()
-                        .map(|c| ContentPart::ToolUse {
-                            id:                c.id.clone(),
-                            name:              c.name.clone(),
-                            input:             c.input.clone(),
-                            thought_signature: c.thought_signature.clone(),
-                        })
-                        .collect();
-                    messages.push(Message {
-                        role: crate::llm::types::Role::Assistant,
-                        content: MessageContent::Parts(call_parts),
-                    });
-
-                    for call in &calls {
-                        let _ = event_sender.send(AgentEvent::ToolCall {
-                            name: call.name.clone(),
-                            input: call.input.clone(),
-                        }).await;
+                    StreamEvent::ToolCallReady(call) => {
+                        tool_calls.push(call);
                     }
-
-                    let results = join_all(
-                        calls.iter().map(|c| self.execute_tool_call(c, &tool_map))
-                    ).await;
-
-                    for (call, result) in calls.iter().zip(results) {
-                        let preview = tool_map.get(call.name.as_str())
-                            .map(|t| t.preview(&result))
-                            .unwrap_or_else(|| result.chars().take(tool::DEFAULT_PREVIEW_CHARS).collect());
-                        let _ = event_sender.send(AgentEvent::ToolResult {
-                            name: call.name.clone(),
-                            preview,
-                        }).await;
-                        messages.push(Message {
-                            role: crate::llm::types::Role::User,
-                            content: MessageContent::Parts(vec![ContentPart::ToolResult {
-                                tool_use_id: call.id.clone(),
-                                content: result,
-                                is_error: false,
-                            }]),
-                        });
+                    StreamEvent::Done { stop_reason: sr } => {
+                        stop_reason = sr;
                     }
                 }
+            }
+
+            if stop_reason == "end_turn" || tool_calls.is_empty() {
+                // Text was already streamed as TextDelta events — just finalize.
+                break text_buf;
+            }
+
+            // Tool-use round: preamble was already streamed live as TextDelta events.
+            // The client converts accumulated TextDelta into a Thinking block when the
+            // first ToolCall event arrives.
+            iterations += 1;
+
+            if let Some(ask) = tool_calls.iter().find(|c| c.name == "ask_user") {
+                let question = ask.input["question"].as_str().unwrap_or("").to_string();
+                let choices = ask.input["choices"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
+                let _ = event_sender.send(AgentEvent::Done {
+                    answer: text_buf,
+                    sources: vec![],
+                    tool_calls_made: iterations,
+                }).await;
+                return;
+            }
+
+            let call_parts: Vec<ContentPart> = tool_calls
+                .iter()
+                .map(|c| ContentPart::ToolUse {
+                    id:                c.id.clone(),
+                    name:              c.name.clone(),
+                    input:             c.input.clone(),
+                    thought_signature: c.thought_signature.clone(),
+                })
+                .collect();
+            messages.push(Message {
+                role: crate::llm::types::Role::Assistant,
+                content: MessageContent::Parts(call_parts),
+            });
+
+            // If the model produced no preamble text for this round, synthesize a thinking
+            // block so the UI always shows intent before tool calls.
+            if text_buf.is_empty() {
+                let thinking = self.describe_tool_calls_batch(&tool_calls).await;
+                if !thinking.is_empty() {
+                    let _ = event_sender.send(AgentEvent::Thinking { text: thinking }).await;
+                }
+            }
+
+            for call in &tool_calls {
+                let _ = event_sender.send(AgentEvent::ToolCall {
+                    name:  call.name.clone(),
+                    input: call.input.clone(),
+                }).await;
+            }
+
+            let results = join_all(
+                tool_calls.iter().map(|c| self.execute_tool_call(c, &tool_map))
+            ).await;
+
+            for (call, result) in tool_calls.iter().zip(results) {
+                let preview = tool_map.get(call.name.as_str())
+                    .map(|t| t.preview(&result))
+                    .unwrap_or_else(|| result.chars().take(tool::DEFAULT_PREVIEW_CHARS).collect());
+                let _ = event_sender.send(AgentEvent::ToolResult {
+                    name:    call.name.clone(),
+                    preview,
+                }).await;
+                messages.push(Message {
+                    role: crate::llm::types::Role::User,
+                    content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content:     result,
+                        is_error:    false,
+                    }]),
+                });
             }
         };
 
@@ -543,6 +602,7 @@ mod tests {
     async fn one_tool_call_then_text_counts_one_iteration() {
         let llm = MockLlm::new(vec![
             tool_call("my_tool"),
+            text("Calling my_tool"),   // consumed by describe_tool_calls_batch
             text("result arrived"),
         ]);
         let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
@@ -555,7 +615,9 @@ mod tests {
     async fn two_tool_call_turns_count_two_iterations() {
         let llm = MockLlm::new(vec![
             tool_call("my_tool"),
+            text("Calling my_tool"),   // consumed by describe_tool_calls_batch (round 1)
             tool_call("my_tool"),
+            text("Calling my_tool"),   // consumed by describe_tool_calls_batch (round 2)
             text("done after two rounds"),
         ]);
         let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
@@ -578,6 +640,7 @@ mod tests {
     async fn multiple_tool_calls_in_one_turn_all_executed() {
         let llm = MockLlm::new(vec![
             two_tool_calls("tool_a", "tool_b"),
+            text("Calling tool_a and tool_b"),  // consumed by describe_tool_calls_batch
             text("got both results"),
         ]);
         let agent = agent_with(
@@ -594,6 +657,7 @@ mod tests {
     async fn unknown_tool_name_produces_error_string_not_panic() {
         let llm = MockLlm::new(vec![
             tool_call("nonexistent_tool"),
+            text("Calling nonexistent_tool"),  // consumed by describe_tool_calls_batch
             text("handled gracefully"),
         ]);
         let agent = agent_with(llm, vec![], 5);
@@ -771,5 +835,95 @@ mod tests {
             }
         }
         assert_eq!(answer.as_deref(), Some("streaming answer"));
+    }
+
+    // ── Streaming event tests ──────────────────────────────────────────────────
+
+    async fn collect_agent_events(agent: Arc<Agent>, query: &str) -> Vec<AgentEvent> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(128);
+        agent.query_streaming(query, &[], &[], tx).await;
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() { events.push(e); }
+        events
+    }
+
+    #[tokio::test]
+    async fn text_response_emits_text_delta_then_done() {
+        let agent = Arc::new(agent_with(MockLlm::new(vec![text("hello world")]), vec![], 5));
+        let events = collect_agent_events(agent, "hi").await;
+
+        let deltas: String = events.iter().filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(deltas, "hello world");
+
+        let done = events.iter().any(|e| matches!(e, AgentEvent::Done { .. }));
+        assert!(done, "expected Done event");
+    }
+
+    #[tokio::test]
+    async fn tool_call_preamble_streams_live_as_text_delta() {
+        let llm = MockLlm::new(vec![
+            LlmResponse::ToolCalls {
+                calls: vec![ToolCall { id: "t".into(), name: "my_tool".into(), input: serde_json::json!({}), thought_signature: None }],
+                preamble: "Let me check that".into(),
+            },
+            text("done"),
+        ]);
+        let agent = Arc::new(agent_with(llm, vec![MockTool::new("my_tool", "result")], 5));
+        let events = collect_agent_events(agent, "hi").await;
+
+        // Preamble must stream live as TextDelta, not be batched into a Thinking event.
+        let preamble_pos = events.iter().position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "Let me check that"))
+            .expect("expected TextDelta with preamble text");
+        let tool_pos = events.iter().position(|e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "my_tool"))
+            .expect("expected ToolCall event");
+        assert!(preamble_pos < tool_pos, "preamble TextDelta must arrive before ToolCall");
+
+        let has_thinking = events.iter().any(|e| matches!(e, AgentEvent::Thinking { .. }));
+        assert!(!has_thinking, "no consolidated Thinking event — preamble streams live as TextDelta");
+    }
+
+    #[tokio::test]
+    async fn no_preamble_synthesizes_thinking_event_before_tool_call() {
+        // The LLM returns tool calls with no preamble text; then the describe_tool_calls_batch
+        // call returns a description; then the final text answer arrives.
+        let llm = MockLlm::new(vec![
+            tool_call("my_tool"),
+            text("batch description"),  // used by describe_tool_calls_batch
+            text("done"),
+        ]);
+        let agent = Arc::new(agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5));
+        let events = collect_agent_events(agent, "hi").await;
+
+        // A Thinking event must appear before the ToolCall event.
+        let thinking_pos = events.iter().position(|e| matches!(e, AgentEvent::Thinking { .. }))
+            .expect("expected a synthesized Thinking event when no preamble");
+        let tool_pos = events.iter().position(|e| matches!(e, AgentEvent::ToolCall { .. }))
+            .expect("expected ToolCall event");
+        assert!(thinking_pos < tool_pos, "Thinking must precede ToolCall");
+
+        // No TextDelta should appear before the ToolCall.
+        let has_delta_before_tool = events[..tool_pos].iter().any(|e| matches!(e, AgentEvent::TextDelta { .. }));
+        assert!(!has_delta_before_tool, "no TextDelta expected before tool call when preamble is empty");
+    }
+
+    #[tokio::test]
+    async fn text_delta_events_reassemble_to_full_answer() {
+        let agent = Arc::new(agent_with(MockLlm::new(vec![text("The answer is 42")]), vec![], 5));
+        let events = collect_agent_events(agent, "hi").await;
+
+        let reassembled: String = events.iter().filter_map(|e| match e {
+            AgentEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(reassembled, "The answer is 42");
+
+        let done_answer = events.iter().find_map(|e| match e {
+            AgentEvent::Done { answer, .. } => Some(answer.as_str()),
+            _ => None,
+        });
+        assert_eq!(done_answer, Some("The answer is 42"));
     }
 }

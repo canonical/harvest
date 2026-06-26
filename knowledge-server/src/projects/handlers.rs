@@ -1246,10 +1246,28 @@ async fn run_single_task(
     // Each entry: { name, input, preview } — paired as ToolCall arrives then updated on ToolResult
     let mut tool_calls: Vec<Value>            = Vec::new();
     let mut pending:    Option<(String, Value)> = None; // (name, input) awaiting result
+    // Accumulates streaming preamble text; flushed as a Thinking block before each ToolCall.
+    let mut preamble_buf = String::new();
 
     while let Some(event) = event_rx.recv().await {
         let run_event = match event {
+            AgentEvent::ThinkingDelta { text } => {
+                preamble_buf.push_str(&text);
+                continue;
+            }
+            AgentEvent::TextDelta { text } => {
+                preamble_buf.push_str(&text);
+                continue;
+            }
             AgentEvent::ToolCall { name, input } => {
+                if !preamble_buf.is_empty() {
+                    let text = std::mem::take(&mut preamble_buf);
+                    if let Ok(data) = serde_json::to_string(&RunEvent::Thinking {
+                        task_id: tid.clone(), text,
+                    }) {
+                        let _ = sse_tx.send(data).await;
+                    }
+                }
                 pending = Some((name.clone(), input.clone()));
                 RunEvent::ToolCall { task_id: tid.clone(), name, input }
             }
@@ -1261,6 +1279,7 @@ async fn run_single_task(
                 RunEvent::ToolResult { task_id: tid.clone(), name, preview }
             }
             AgentEvent::Done { ref answer, .. } => {
+                preamble_buf.clear();
                 output = answer.clone();
                 RunEvent::Done { task_id: tid.clone(), answer: answer.clone() }
             }
