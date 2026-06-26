@@ -272,31 +272,18 @@ function handleProjectEvent(event) {
       }
       break;
     case 'user_message':
-      chat.addUserMessage(event.query ?? '', event.username ?? null, event.attachments ?? []);
-      chat.startAssistantMessage();
-      break;
-    case 'thinking':        chat.addThinking(event.text); break;
-    case 'thinking_delta':  chat.addThinkingDelta(event.text); break;
-    case 'text_delta':      chat.addTextDelta(event.text); break;
+    case 'thinking':
+    case 'thinking_delta':
+    case 'text_delta':
     case 'tool_call':
-      chat.addToolCall(event.name, event.input, event.description ?? describeToolCall(event.name, event.input ?? {}, { hostname: event.hostname }));
-      break;
     case 'tool_result':
-      chat.completeToolCall(event.name, event.preview);
-      break;
     case 'question':
-      chat.setQuestion(event.question, event.choices);
-      break;
     case 'done':
-      chat.finalizeAssistantMessage({ answer: event.answer, sources: event.sources, tool_calls_made: event.tool_calls_made });
-      updateConvTitle();
-      scrollToLastMessage();
-      return;
     case 'suggestions':
-      chat.setSuggestions(event.choices ?? []);
-      break;
     case 'error':
-      chat.setError(event.message);
+      if (event.conv_id !== activeConvId.value) break;
+      handleChatEvent(event);
+      if (event.type === 'done') { scrollToLastMessage(); return; }
       break;
   }
   scrollToBottom();
@@ -423,21 +410,29 @@ function sendWithChoice(text) {
   sendQuery();
 }
 
-function handleStreamEvent(event) {
+function handleChatEvent(event) {
   switch (event.type) {
-    case 'thinking':        chat.addThinking(event.text); break;
-    case 'thinking_delta':  chat.addThinkingDelta(event.text); break;
-    case 'text_delta':      chat.addTextDelta(event.text); break;
-    case 'tool_call':  chat.addToolCall(event.name, event.input, event.description ?? describeToolCall(event.name, event.input ?? {}, { hostname: event.hostname })); break;
-    case 'tool_result': chat.completeToolCall(event.name, event.preview); break;
-    case 'question':   chat.setQuestion(event.question, event.choices); break;
+    case 'user_message':
+      chat.addUserMessage(event.query ?? '', event.username ?? null, event.attachments ?? []);
+      chat.startAssistantMessage();
+      break;
+    case 'thinking':       chat.addThinking(event.text); break;
+    case 'thinking_delta': chat.addThinkingDelta(event.text); break;
+    case 'text_delta':     chat.addTextDelta(event.text); break;
+    case 'tool_call':      chat.addToolCall(event.name, event.input, event.description ?? describeToolCall(event.name, event.input ?? {}, { hostname: event.hostname })); break;
+    case 'tool_result':    chat.completeToolCall(event.name, event.preview); break;
+    case 'question':       chat.setQuestion(event.question, event.choices); break;
     case 'done':
       chat.finalizeAssistantMessage({ answer: event.answer, sources: event.sources, tool_calls_made: event.tool_calls_made });
       updateConvTitle();
       break;
-    case 'suggestions': chat.setSuggestions(event.choices ?? []); break;
-    case 'error':      chat.setError(event.message); break;
+    case 'suggestions':    chat.setSuggestions(event.choices ?? []); break;
+    case 'error':          chat.setError(event.message); break;
   }
+}
+
+function handleStreamEvent(event) {
+  handleChatEvent(event);
 }
 
 async function addFile(file) {
