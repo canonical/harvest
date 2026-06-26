@@ -271,6 +271,9 @@ function handleProjectEvent(event) {
       chat.addUserMessage(event.query ?? '', event.username ?? null, event.attachments ?? []);
       chat.startAssistantMessage();
       break;
+    case 'thinking':        chat.addThinking(event.text); break;
+    case 'thinking_delta':  chat.addThinkingDelta(event.text); break;
+    case 'text_delta':      chat.addTextDelta(event.text); break;
     case 'tool_call':
       chat.addToolCall(event.name, event.input, event.description ?? describeToolCall(event.name, event.input ?? {}, { hostname: event.hostname }));
       break;
@@ -283,7 +286,8 @@ function handleProjectEvent(event) {
     case 'done':
       chat.finalizeAssistantMessage({ answer: event.answer, sources: event.sources, tool_calls_made: event.tool_calls_made });
       updateConvTitle();
-      break;
+      scrollToLastMessage();
+      return;
     case 'suggestions':
       chat.setSuggestions(event.choices ?? []);
       break;
@@ -402,7 +406,8 @@ async function sendQuery() {
     }
     await queryStream(text, activeConvId.value, attachments, (event) => {
       handleStreamEvent(event);
-      scrollToBottom();
+      if (event.type === 'done') scrollToLastMessage();
+      else scrollToBottom();
     });
   } catch (err) {
     chat.setError(err.message);
@@ -416,7 +421,9 @@ function sendWithChoice(text) {
 
 function handleStreamEvent(event) {
   switch (event.type) {
-    case 'thinking':   chat.addThinking(event.text); break;
+    case 'thinking':        chat.addThinking(event.text); break;
+    case 'thinking_delta':  chat.addThinkingDelta(event.text); break;
+    case 'text_delta':      chat.addTextDelta(event.text); break;
     case 'tool_call':  chat.addToolCall(event.name, event.input, event.description ?? describeToolCall(event.name, event.input ?? {}, { hostname: event.hostname })); break;
     case 'tool_result': chat.completeToolCall(event.name, event.preview); break;
     case 'question':   chat.setQuestion(event.question, event.choices); break;
@@ -452,6 +459,22 @@ function scrollToBottom() {
     if (messagesEl.value) {
       messagesEl.value.scrollTop = messagesEl.value.scrollHeight;
     }
+  });
+}
+
+// After a response completes, scroll so the START of the latest assistant message
+// is at the top of the viewport.  This keeps preambles + tool calls visible above
+// the final answer rather than scrolling them off-screen.
+function scrollToLastMessage() {
+  nextTick(() => {
+    const container = messagesEl.value;
+    if (!container) return;
+    const msgs = container.querySelectorAll('.message--assistant');
+    if (!msgs.length) { scrollToBottom(); return; }
+    const last = msgs[msgs.length - 1];
+    const containerTop = container.getBoundingClientRect().top;
+    const lastTop      = last.getBoundingClientRect().top;
+    container.scrollTop += lastTop - containerTop - 8;
   });
 }
 

@@ -231,15 +231,39 @@ html, body {
   margin-top: 0;
 }
 
-.l-navigation .p-panel__header,
 .l-navigation-bar .p-panel__header {
+  align-items: flex-start;
+  padding-top: 0;
+  padding-bottom: 0.75rem;
+}
+
+.l-navigation .p-panel__header {
   align-items: flex-start;
   padding-top: 0;
 }
 
-.l-navigation .p-panel__controls,
 .l-navigation-bar .p-panel__controls {
+  align-self: center;
+  margin-top: 0.375rem;
   padding-top: 0;
+}
+
+.l-navigation .p-panel__controls {
+  padding-top: 0;
+}
+
+.nav-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 102;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+@media (max-width: 619px) {
+  .nav-overlay {
+    display: block;
+  }
 }
 
 .l-navigation .p-panel__toggle,
@@ -252,6 +276,11 @@ html, body {
   margin-bottom: 0;
   margin-top: 0;
   transition: background 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--vf-color-text-default);
+  background: none;
 }
 
 .l-navigation .p-panel__toggle:hover,
@@ -766,65 +795,84 @@ a.citation {
   text-decoration: none;
 }
 
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+/* ── Preamble / thinking rows ────────────────────────────────────────────── */
+
 .thinking-group {
-  margin-bottom: 0.625rem;
-  border-left: 2px solid var(--border-subtle);
-  font-style: italic;
+  font-size: 0.8125rem;
 }
 
-.thinking-group__summary {
+.thinking-row {
   display: flex;
-  align-items: center;
-  gap: 0.375rem;
-  padding: 0.15rem 0.5rem;
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-  border-radius: 3px;
-  transition: background 0.12s;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.2rem 0;
+  min-height: 1.625rem;
 }
 
-.thinking-group__summary::-webkit-details-marker { display: none; }
+.thinking-icon {
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  margin-top: 0.175rem;
+}
 
-.thinking-group__summary:hover {
-  background: var(--bg-surface-hover);
+.thinking-text-inline {
+  flex: 1;
   color: var(--text-secondary);
+  line-height: 1.4;
+  word-break: break-word;
 }
 
-details.thinking-group[open] .tc-group__summary-chevron {
-  transform: rotate(180deg);
+.thinking-badge {
+  font-size: 0.65rem;
+  font-style: normal;
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+  align-self: center;
 }
 
-details.thinking-group[open] {
-  padding-left: 0.875rem;
+.thinking-badge--live {
+  background: rgba(0, 102, 204, 0.12);
+  color: #0066cc;
+  animation: cursor-blink 1.2s ease-in-out infinite;
 }
 
-.thinking-group__body {
-  font-size: 0.8rem;
-  color: var(--text-muted);
-  padding: 0.25rem 0;
+.thinking-cursor {
+  animation: cursor-blink 0.8s step-end infinite;
+  color: #0066cc;
 }
 
-.thinking-group__body p {
-  margin: 0.25rem 0;
-  white-space: pre-wrap;
+.answer-cursor {
+  animation: cursor-blink 0.8s step-end infinite;
+  color: var(--text-secondary);
+  font-size: 0.9em;
 }
+
+.message__bubble--streaming .message__body {
+  color: var(--text-primary);
+}
+
+/* ── Activity log (preambles + tool calls unified track) ─────────────────── */
 
 .tc-chain {
   border-left: 2px solid var(--border-subtle);
   padding-left: 0.875rem;
-  margin-bottom: 0.625rem;
+  margin-bottom: 0.75rem;
   transition: border-color 0.3s;
 }
 
 .tc-chain--running {
-  border-left-color: #0066cc;
-}
-
-.tc-chain details.thinking-group[open] {
-  padding-left: 0;
+  border-left-color: var(--loading-dot-color);
 }
 
 .tc-group {
@@ -2625,6 +2673,7 @@ a.source-chip:hover .source-chip__name {
   .chat-history-close-btn { display: flex; }
 
   .chat-history-toggle-btn {
+    align-self: flex-end;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2981,6 +3030,10 @@ a.source-chip:hover .source-chip__name {
   padding-right: 6rem;
   resize: none;
   overflow-y: hidden;
+}
+
+.input-area .p-search-box {
+  align-items: center;
 }
 
 .attach-btn {
