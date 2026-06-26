@@ -33,8 +33,6 @@ use knowledge_server::{
     },
 };
 
-// ── stub LLM ──────────────────────────────────────────────────────────────────
-
 struct FixedTextLlm(String);
 impl FixedTextLlm {
     fn new(t: impl Into<String>) -> Arc<Self> { Arc::new(Self(t.into())) }
@@ -47,8 +45,6 @@ impl LlmProvider for FixedTextLlm {
 }
 
 const JWT_SECRET: &str = "test-projects-secret";
-
-// ── app builder ───────────────────────────────────────────────────────────────
 
 fn projects_app(neo4j: Arc<Neo4jClient>) -> Router {
     let secret   = Arc::new(JWT_SECRET.to_string());
@@ -79,8 +75,6 @@ fn projects_app(neo4j: Arc<Neo4jClient>) -> Router {
         .with_state(state)
         .layer(from_fn_with_state(secret, auth::require_auth))
 }
-
-// ── seed helpers ──────────────────────────────────────────────────────────────
 
 async fn setup_constraints(neo4j: &Neo4jClient) {
     auth::setup_constraints(neo4j).await.unwrap();
@@ -116,8 +110,6 @@ async fn join_group(neo4j: &Neo4jClient, user_id: &str, group_id: &str) {
         json!({"uid":user_id,"gid":group_id}),
     ).await.unwrap();
 }
-
-// ── request builders ──────────────────────────────────────────────────────────
 
 fn cookie(token: &str) -> String { format!("token={token}") }
 
@@ -163,8 +155,6 @@ async fn send(app: Router, req: Request<Body>) -> (StatusCode, Value) {
     (status, json)
 }
 
-// ── auth guard tests (no Docker needed) ──────────────────────────────────────
-
 mod auth_guards {
     use super::*;
 
@@ -199,8 +189,6 @@ mod auth_guards {
     }
 }
 
-// ── Docker integration tests ──────────────────────────────────────────────────
-
 macro_rules! neo4j {
     ($c:ident, $neo4j:ident) => {
         let $c = Neo4j::default().start().await;
@@ -211,8 +199,6 @@ macro_rules! neo4j {
         setup_constraints(&$neo4j).await;
     };
 }
-
-// ── project CRUD ──────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires Docker"]
@@ -396,8 +382,6 @@ async fn admin_can_access_project_in_any_group() {
     assert_eq!(status, StatusCode::OK);
 }
 
-// ── project conversations ─────────────────────────────────────────────────────
-
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn list_project_conversations_returns_404_for_non_member() {
@@ -438,13 +422,11 @@ async fn create_project_conversation_visible_to_all_group_members() {
     assert_eq!(status, StatusCode::CREATED);
     let cid = conv["id"].as_str().unwrap().to_string();
 
-    // Bob can list it
     let (status, list) = send(app.clone(),
         req_get(&format!("/projects/{pid}/conversations"), &bob_tok)).await;
     assert_eq!(status, StatusCode::OK);
     assert!(list.as_array().unwrap().iter().any(|c| c["id"] == cid));
 
-    // Bob can fetch it directly
     let (status, detail) = send(app,
         req_get(&format!("/projects/{pid}/conversations/{cid}"), &bob_tok)).await;
     assert_eq!(status, StatusCode::OK);
@@ -526,12 +508,10 @@ async fn only_creator_can_delete_project_conversation() {
         req_post(&format!("/projects/{pid}/conversations"), &alice_tok, json!({}))).await;
     let cid = conv["id"].as_str().unwrap().to_string();
 
-    // Bob (not creator) is rejected
     let (status, _) = send(app.clone(),
         req_del(&format!("/projects/{pid}/conversations/{cid}"), &bob_tok)).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // Alice (creator) succeeds
     let (status, _) = send(app.clone(),
         req_del(&format!("/projects/{pid}/conversations/{cid}"), &alice_tok)).await;
     assert_eq!(status, StatusCode::OK);
@@ -563,8 +543,6 @@ async fn admin_can_delete_any_project_conversation() {
         req_del(&format!("/projects/{pid}/conversations/{cid}"), &admin_tok)).await;
     assert_eq!(status, StatusCode::OK);
 }
-
-// ── project query ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires Docker"]

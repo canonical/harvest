@@ -1,8 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useSse } from '../../src/composables/useSse.js';
 
-// ── minimal ReadableStream SSE mock ──────────────────────────────────────────
-
 function sseBody(lines) {
   const text = lines.join('\n') + '\n';
   return new ReadableStream({
@@ -80,7 +78,6 @@ describe('useSse', () => {
 
   it('exposes abort() to cancel stream', async () => {
     const events = [];
-    // Infinite stream — we abort immediately
     let controllerRef;
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,

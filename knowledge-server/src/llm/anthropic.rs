@@ -181,16 +181,12 @@ fn parse_anthropic_response(json: Value) -> Result<LlmResponse> {
     Ok(LlmResponse::Message { text })
 }
 
-// ── Streaming ─────────────────────────────────────────────────────────────────
-
-/// Tracks the accumulated state of a single content block during streaming.
 enum BlockAccum {
     Text,
     Thinking,
     ToolUse { id: String, name: String, json_buf: String },
 }
 
-/// Process one parsed SSE event JSON object from Anthropic's streaming API.
 async fn process_stream_event(
     event: &Value,
     blocks: &mut HashMap<usize, BlockAccum>,
@@ -258,14 +254,12 @@ async fn process_stream_event(
                 .to_string();
             let _ = tx.send(StreamEvent::Done { stop_reason }).await;
         }
-        // "message_start", "message_stop", "ping" → nothing to emit
         _ => {}
     }
     Ok(())
 }
 
 impl AnthropicProvider {
-    /// Native Anthropic streaming: POST with `stream: true`, parse SSE events.
     pub async fn stream(
         &self,
         messages: &[Message],
@@ -325,7 +319,6 @@ impl AnthropicProvider {
             let bytes = chunk?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
-            // SSE events are separated by "\n\n"; process all complete ones.
             while let Some(pos) = buffer.find("\n\n") {
                 let event_text = buffer[..pos].to_string();
                 buffer.drain(..pos + 2);
@@ -618,8 +611,6 @@ mod tests {
         }
     }
 
-    // ── Streaming tests ────────────────────────────────────────────────────────
-
     fn sse_body(events: &[Value]) -> String {
         events
             .iter()
@@ -791,7 +782,6 @@ mod tests {
             .with_base_url(server.url("/v1/messages"));
         let events = collect_stream_events(&provider).await;
 
-        // Only TextDelta + Done — no "ping" events
         assert!(events.iter().any(|e| matches!(e, StreamEvent::TextDelta { .. })));
         assert!(events.iter().any(|e| matches!(e, StreamEvent::Done { .. })));
         assert_eq!(events.len(), 2, "unexpected extra events: {events:?}");

@@ -18,8 +18,6 @@ struct DiscoveryDoc {
     userinfo_endpoint: String,
 }
 
-/// Generates a (verifier, challenge) PKCE pair using S256.
-/// The verifier is stored in a cookie; the challenge goes in the auth URL.
 pub fn generate_pkce_pair() -> (String, String) {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
@@ -128,8 +126,6 @@ mod tests {
         reqwest::Client::new()
     }
 
-    // ── discover_endpoints ────────────────────────────────────────────────
-
     #[tokio::test]
     async fn discover_parses_valid_doc() {
         let server = MockServer::start();
@@ -190,8 +186,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── generate_pkce_pair ────────────────────────────────────────────────
-
     #[test]
     fn pkce_verifier_and_challenge_are_different() {
         let (verifier, challenge) = generate_pkce_pair();
@@ -215,8 +209,6 @@ mod tests {
         assert_ne!(v1, v2);
     }
 
-    // ── exchange_code ─────────────────────────────────────────────────────
-
     #[tokio::test]
     async fn exchange_code_returns_access_token() {
         let server = MockServer::start();
@@ -224,7 +216,7 @@ mod tests {
             when.method(POST).path("/token")
                 .form_urlencoded_tuple_exists("code")
                 .form_urlencoded_tuple("grant_type", "authorization_code")
-                .header_exists("Authorization");   // Basic auth
+                .header_exists("Authorization");
             then.status(200).json_body(json!({ "access_token": "tok_abc" }));
         });
 
@@ -258,8 +250,6 @@ mod tests {
         .await;
         assert!(result.is_err());
     }
-
-    // ── fetch_userinfo ────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn fetch_userinfo_returns_user() {

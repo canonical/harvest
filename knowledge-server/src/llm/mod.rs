@@ -20,9 +20,6 @@ pub trait LlmProvider: Send + Sync {
         tools: &[ToolDefinition],
     ) -> Result<LlmResponse>;
 
-    /// Stream LLM output as discrete events.  The default implementation wraps the batch
-    /// `chat()` call so every provider gets streaming for free; providers that support a
-    /// native streaming API (e.g. Anthropic) override this to push tokens in real time.
     async fn chat_stream(
         &self,
         messages: &[Message],
@@ -49,8 +46,6 @@ pub trait LlmProvider: Send + Sync {
     }
 }
 
-/// Wraps an ordered list of providers and cascades to the next one on rate-limit errors.
-/// Providers are tried in the order supplied (callers are expected to sort by priority first).
 struct FallbackProvider {
     providers: Vec<Arc<dyn LlmProvider>>,
 }
@@ -61,9 +56,6 @@ impl FallbackProvider {
         Self { providers }
     }
 
-    /// Returns true when `err` looks like a rate-limit / quota-exhausted response.
-    /// Only these errors trigger a cascade to the next provider; all other errors
-    /// propagate immediately so genuine failures surface quickly.
     fn is_rate_limited(err: &anyhow::Error) -> bool {
         let msg = err.to_string().to_lowercase();
         msg.contains("429") || msg.contains("resource_exhausted")
@@ -93,9 +85,6 @@ impl LlmProvider for FallbackProvider {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
-        // Rate-limit errors from `chat_stream` always occur before any events are sent
-        // (they are HTTP-level failures checked before streaming begins), so it is safe
-        // to retry a fresh provider on the same `tx`.
         let mut last_err = anyhow::anyhow!("no LLM providers configured");
         for provider in &self.providers {
             match provider.chat_stream(messages, tools, tx.clone()).await {
@@ -111,7 +100,6 @@ impl LlmProvider for FallbackProvider {
     }
 }
 
-/// Build an `Arc<dyn LlmProvider>` from one provider config.
 fn build_provider(config: &LlmProviderConfig) -> Arc<dyn LlmProvider> {
     match config {
         LlmProviderConfig::Anthropic { model, api_key, timeout_secs, max_retries, .. } =>
@@ -129,9 +117,6 @@ fn build_provider(config: &LlmProviderConfig) -> Arc<dyn LlmProvider> {
     }
 }
 
-/// Build the LLM provider from a list of provider configs.
-/// Providers are sorted by `priority` (ascending) so lower numbers are tried first.
-/// All providers are wrapped in a `FallbackProvider` that cascades on rate limits.
 pub fn from_config(configs: &[LlmProviderConfig]) -> Arc<dyn LlmProvider> {
     let mut ordered: Vec<&LlmProviderConfig> = configs.iter().collect();
     ordered.sort_by_key(|c| c.priority());
@@ -146,8 +131,6 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::Mutex;
     use std::collections::VecDeque;
-
-    // ── Mock provider ─────────────────────────────────────────────────────────
 
     struct MockProvider {
         responses: Mutex<VecDeque<Result<LlmResponse>>>,
@@ -180,8 +163,6 @@ mod tests {
         FallbackProvider::new(providers)
     }
 
-    // ── is_rate_limited ───────────────────────────────────────────────────────
-
     #[test]
     fn detects_429_in_error_message() {
         assert!(FallbackProvider::is_rate_limited(&anyhow!("error 429 Too Many Requests")));
@@ -198,8 +179,6 @@ mod tests {
         assert!(!FallbackProvider::is_rate_limited(&anyhow!("network timeout")));
         assert!(!FallbackProvider::is_rate_limited(&anyhow!("500 Internal Server Error")));
     }
-
-    // ── chat fallback ─────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn single_provider_returns_its_response() {
@@ -238,18 +217,14 @@ mod tests {
     #[tokio::test]
     async fn first_succeeds_second_not_called() {
         let p1 = MockProvider::new(vec![MockProvider::ok("first wins")]);
-        // p2 has nothing queued — would panic if called
         let p2 = MockProvider::new(vec![]);
         let fb = fallback(vec![p1, p2]);
         let r = fb.chat(&[], &[]).await.unwrap();
         assert!(matches!(r, LlmResponse::Message { text } if text == "first wins"));
     }
 
-    // ── chat_stream fallback ──────────────────────────────────────────────────
-
     #[tokio::test]
     async fn stream_first_rate_limited_falls_back_to_second() {
-        // p1 fails before sending any events (rate limited at HTTP level)
         let p1 = MockProvider::new(vec![MockProvider::rate_limited()]);
         let p2 = MockProvider::new(vec![MockProvider::ok("streamed from second")]);
         let fb = fallback(vec![p1, p2]);
@@ -275,11 +250,8 @@ mod tests {
         assert!(err.to_string().contains("401"));
     }
 
-    // ── from_config sorting ───────────────────────────────────────────────────
-
     #[test]
     fn from_config_handles_single_provider() {
-        // smoke test: doesn't panic
         let cfg = vec![crate::config::LlmProviderConfig::Gemini {
             model:        "m".into(),
             api_key:      "k".into(),

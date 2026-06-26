@@ -126,12 +126,6 @@ describe('ChatMessage — structure', () => {
   });
 });
 
-// ── Inline graph mounting ──────────────────────────────────────────────────────
-// These tests verify that mountInlineGraphs is called in both scenarios that
-// were broken:
-//   1. Component mounts with answer already present (historical chat / loadFromHistory)
-//   2. Answer arrives after mount (streaming new chat, then re-visited as history)
-
 const GRAPH_ANSWER = '```harvest-graph\n{"symbols":[{"name":"Foo","kind":"class","file":"src/foo.rs","start_line":1}],"relations":[]}\n```';
 
 const assistantWithGraph = {
@@ -143,17 +137,12 @@ const assistantWithGraph = {
 
 describe('ChatMessage — inline graph mounting', () => {
   it('calls mountInlineGraphs on mount when answer is already present (historical chat bug)', () => {
-    // This is the primary bug: when a conversation is loaded from history,
-    // ChatMessage mounts with msg.answer already set. The watch() without
-    // immediate:true never fires, so mountInlineGraphs was never called.
     mount(ChatMessage, { props: { msg: assistantWithGraph } });
     expect(mountInlineGraphs).toHaveBeenCalledOnce();
     expect(mountInlineGraphs).toHaveBeenCalledWith(expect.any(HTMLElement));
   });
 
   it('calls mountInlineGraphs when answer is set after mount (streaming case)', async () => {
-    // Answer is null at first (component created by startAssistantMessage),
-    // then set when finalizeAssistantMessage arrives.
     const w = mount(ChatMessage, { props: { msg: { ...assistantLoading } } });
     expect(mountInlineGraphs).not.toHaveBeenCalled();
 

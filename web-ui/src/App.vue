@@ -268,8 +268,6 @@ function chooseProject(p) {
 
 function closeNav(e) {
   navCollapsed.value = true;
-  // Blur the focused element so Vanilla's .l-navigation.is-collapsed:focus-within
-  // rule doesn't immediately re-open the nav.
   if (e?.currentTarget) e.currentTarget.blur();
   else (document.activeElement)?.blur();
 }

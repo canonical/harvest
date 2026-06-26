@@ -50,11 +50,8 @@ pub struct QueryResponse {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
-    /// Full reasoning text that preceded a round of tool calls (used for history replay).
     Thinking { text: String },
-    /// Real-time streaming chunk of extended-thinking content (arrives before tool calls).
     ThinkingDelta { text: String },
-    /// Real-time streaming chunk of the final answer text.
     TextDelta { text: String },
     ToolCall { name: String, input: serde_json::Value },
     ToolResult { name: String, preview: String },
@@ -171,8 +168,6 @@ impl Agent {
         }
     }
 
-    /// Generate a one-sentence description of the intent behind a batch of tool calls.
-    /// Used to synthesize a Thinking event when the model produces no preamble text.
     async fn describe_tool_calls_batch(&self, calls: &[ToolCall]) -> String {
         if calls.is_empty() {
             return String::new();
@@ -252,7 +247,6 @@ impl Agent {
                 }
             }
 
-            // Stream the LLM response, collecting events as they arrive.
             let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(64);
             let llm            = Arc::clone(&self.llm);
             let msgs_snapshot  = messages.clone();
@@ -273,7 +267,6 @@ impl Agent {
                         let _ = event_sender.send(AgentEvent::ThinkingDelta { text }).await;
                     }
                     StreamEvent::TextDelta { text } => {
-                        // Forward immediately so preamble appears live; accumulate for Done.
                         let _ = event_sender.send(AgentEvent::TextDelta { text: text.clone() }).await;
                         text_buf.push_str(&text);
                     }
@@ -287,13 +280,9 @@ impl Agent {
             }
 
             if stop_reason == "end_turn" || tool_calls.is_empty() {
-                // Text was already streamed as TextDelta events — just finalize.
                 break text_buf;
             }
 
-            // Tool-use round: preamble was already streamed live as TextDelta events.
-            // The client converts accumulated TextDelta into a Thinking block when the
-            // first ToolCall event arrives.
             iterations += 1;
 
             if let Some(ask) = tool_calls.iter().find(|c| c.name == "ask_user") {
@@ -325,8 +314,6 @@ impl Agent {
                 content: MessageContent::Parts(call_parts),
             });
 
-            // If the model produced no preamble text for this round, synthesize a thinking
-            // block so the UI always shows intent before tool calls.
             if text_buf.is_empty() {
                 let thinking = self.describe_tool_calls_batch(&tool_calls).await;
                 if !thinking.is_empty() {
@@ -602,7 +589,7 @@ mod tests {
     async fn one_tool_call_then_text_counts_one_iteration() {
         let llm = MockLlm::new(vec![
             tool_call("my_tool"),
-            text("Calling my_tool"),   // consumed by describe_tool_calls_batch
+            text("Calling my_tool"),
             text("result arrived"),
         ]);
         let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
@@ -615,9 +602,9 @@ mod tests {
     async fn two_tool_call_turns_count_two_iterations() {
         let llm = MockLlm::new(vec![
             tool_call("my_tool"),
-            text("Calling my_tool"),   // consumed by describe_tool_calls_batch (round 1)
+            text("Calling my_tool"),
             tool_call("my_tool"),
-            text("Calling my_tool"),   // consumed by describe_tool_calls_batch (round 2)
+            text("Calling my_tool"),
             text("done after two rounds"),
         ]);
         let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
@@ -640,7 +627,7 @@ mod tests {
     async fn multiple_tool_calls_in_one_turn_all_executed() {
         let llm = MockLlm::new(vec![
             two_tool_calls("tool_a", "tool_b"),
-            text("Calling tool_a and tool_b"),  // consumed by describe_tool_calls_batch
+            text("Calling tool_a and tool_b"),
             text("got both results"),
         ]);
         let agent = agent_with(
@@ -657,7 +644,7 @@ mod tests {
     async fn unknown_tool_name_produces_error_string_not_panic() {
         let llm = MockLlm::new(vec![
             tool_call("nonexistent_tool"),
-            text("Calling nonexistent_tool"),  // consumed by describe_tool_calls_batch
+            text("Calling nonexistent_tool"),
             text("handled gracefully"),
         ]);
         let agent = agent_with(llm, vec![], 5);
@@ -837,8 +824,6 @@ mod tests {
         assert_eq!(answer.as_deref(), Some("streaming answer"));
     }
 
-    // ── Streaming event tests ──────────────────────────────────────────────────
-
     async fn collect_agent_events(agent: Arc<Agent>, query: &str) -> Vec<AgentEvent> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(128);
         agent.query_streaming(query, &[], &[], tx).await;
@@ -874,7 +859,6 @@ mod tests {
         let agent = Arc::new(agent_with(llm, vec![MockTool::new("my_tool", "result")], 5));
         let events = collect_agent_events(agent, "hi").await;
 
-        // Preamble must stream live as TextDelta, not be batched into a Thinking event.
         let preamble_pos = events.iter().position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "Let me check that"))
             .expect("expected TextDelta with preamble text");
         let tool_pos = events.iter().position(|e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "my_tool"))
@@ -887,8 +871,6 @@ mod tests {
 
     #[tokio::test]
     async fn no_preamble_synthesizes_thinking_event_before_tool_call() {
-        // The LLM returns tool calls with no preamble text; then the describe_tool_calls_batch
-        // call returns a description; then the final text answer arrives.
         let llm = MockLlm::new(vec![
             tool_call("my_tool"),
             text("batch description"),  // used by describe_tool_calls_batch
@@ -897,14 +879,12 @@ mod tests {
         let agent = Arc::new(agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5));
         let events = collect_agent_events(agent, "hi").await;
 
-        // A Thinking event must appear before the ToolCall event.
         let thinking_pos = events.iter().position(|e| matches!(e, AgentEvent::Thinking { .. }))
             .expect("expected a synthesized Thinking event when no preamble");
         let tool_pos = events.iter().position(|e| matches!(e, AgentEvent::ToolCall { .. }))
             .expect("expected ToolCall event");
         assert!(thinking_pos < tool_pos, "Thinking must precede ToolCall");
 
-        // No TextDelta should appear before the ToolCall.
         let has_delta_before_tool = events[..tool_pos].iter().any(|e| matches!(e, AgentEvent::TextDelta { .. }));
         assert!(!has_delta_before_tool, "no TextDelta expected before tool call when preamble is empty");
     }

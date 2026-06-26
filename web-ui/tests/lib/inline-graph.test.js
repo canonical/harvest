@@ -1,10 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// ── Cytoscape mock ────────────────────────────────────────────────────────────
-// We need a controllable fake so we can simulate node/background taps without
-// a real rendering engine. The factory captures the `on` calls so each test
-// can retrieve the registered handlers by event + selector.
-
 vi.mock('cytoscape-fcose', () => ({ default: {} }));
 
 vi.mock('cytoscape', () => {
@@ -28,8 +23,6 @@ vi.mock('cytoscape', () => {
 import cytoscape from 'cytoscape';
 import { mountInlineGraphs } from '../../src/lib/inline-graph.js';
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 function makeElement(graphDef) {
   const el = document.createElement('div');
   el.className = 'inline-graph';
@@ -45,9 +38,6 @@ function makeContainer(graphDef) {
   return { container, el };
 }
 
-// Returns the handler registered for a given event + optional selector.
-// inline-graph.js calls cy.on(event, selector, fn) for node taps and
-// cy.on(event, fn) for background taps.
 function getHandler(cyInstance, event, selector = null) {
   const call = cyInstance.on.mock.calls.find(([ev, selectorOrFn, fn]) => {
     if (ev !== event) return false;
@@ -58,7 +48,6 @@ function getHandler(cyInstance, event, selector = null) {
   return selector ? call[2] : call[1];
 }
 
-// Minimal fake cytoscape node that satisfies tapNode() and buildSections().
 function fakeNode(overrides = {}) {
   const data = { name: 'MyFunc', kind: 'function', file: 'src/lib.rs', start_line: 5, label: 'MyFunc', ...overrides };
   const emptyCollection = { length: 0 };
@@ -79,8 +68,6 @@ const SIMPLE_GRAPH = {
   symbols:   [{ name: 'MyFunc', kind: 'function', file: 'src/lib.rs', start_line: 5 }],
   relations: [],
 };
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
   vi.clearAllMocks();

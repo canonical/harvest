@@ -32,10 +32,8 @@ export const useChatStore = defineStore('chat', () => {
     const msg = lastAssistant();
     if (!msg) return;
     msg.status = 'done';
-    // Prefer the server-provided answer; fall back to whatever was accumulated via TextDelta.
     msg.answer = answer ?? msg.pendingAnswer ?? '';
     msg.pendingAnswer = '';
-    // Close any still-streaming thinking block.
     for (const item of msg.chain) {
       if (item.type === 'thinking' && item.streaming) item.streaming = false;
     }
@@ -55,7 +53,6 @@ export const useChatStore = defineStore('chat', () => {
   function addThinking(text) {
     const msg = lastAssistant();
     if (!msg) return;
-    // If the last chain item is a streaming thinking block, close it first.
     const last = msg.chain.at(-1);
     if (last?.type === 'thinking' && last.streaming) {
       last.streaming = false;
@@ -83,12 +80,10 @@ export const useChatStore = defineStore('chat', () => {
   function addToolCall(name, input, description = null) {
     const msg = lastAssistant();
     if (!msg) return;
-    // Preamble text that streamed in before this tool call becomes a Thinking block.
     if (msg.pendingAnswer) {
       msg.chain.push({ type: 'thinking', text: msg.pendingAnswer, streaming: false });
       msg.pendingAnswer = '';
     }
-    // Close any streaming extended-thinking block.
     const last = msg.chain.at(-1);
     if (last?.type === 'thinking' && last.streaming) last.streaming = false;
     const tc = { type: 'tool_call', id: _nextId++, name, input, status: 'running', preview: null, description };

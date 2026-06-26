@@ -88,8 +88,6 @@ mod tests {
         Arc::new(SkillRegistry::new())
     }
 
-    // ── definition names ─────────────────────────────────────────────────
-
     #[test]
     fn list_skills_definition_has_correct_name() {
         assert_eq!(ListSkillsTool { registry: registry() }.definition().name, "list_skills");
@@ -99,8 +97,6 @@ mod tests {
     fn load_skill_definition_has_correct_name() {
         assert_eq!(LoadSkillTool { registry: registry() }.definition().name, "load_skill");
     }
-
-    // ── list_skills execute ───────────────────────────────────────────────
 
     #[tokio::test]
     async fn list_skills_returns_json_array() {
@@ -130,8 +126,6 @@ mod tests {
         assert!(names.contains(&"canonical-k8s"), "missing canonical-k8s");
         assert!(names.contains(&"landscape"),     "missing landscape");
     }
-
-    // ── load_skill execute ────────────────────────────────────────────────
 
     #[tokio::test]
     async fn load_skill_returns_body_for_known_skill() {

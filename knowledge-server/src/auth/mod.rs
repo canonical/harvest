@@ -17,9 +17,6 @@ pub use oidc::OidcEndpoints;
 
 pub const TOKEN_COOKIE: &str = "token";
 
-/// Short-lived OAuth session: created on redirect, consumed on callback.
-/// Stored server-side so the flow works regardless of which domain/origin
-/// initiated the request (no cross-domain cookie issues).
 pub struct OAuthSession {
     pub pkce_verifier: Option<String>,
     pub created_at:    Instant,
