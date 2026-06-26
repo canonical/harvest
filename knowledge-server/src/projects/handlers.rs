@@ -43,14 +43,35 @@ const CONVERSATION_TITLE_MAX_CHARS: usize = 60;
 const CONVERSATION_TITLE_TRUNCATE_CHARS: usize = 57;
 const PROJECT_NAME_MAX_CHARS: usize = 100;
 
+#[derive(Clone, Default)]
+struct InFlightState {
+    query:           String,
+    username:        String,
+    attachments:     Vec<Value>,
+    text:            String,
+    thinking_blocks: Vec<String>,
+    current_thinking: String,
+    tool_calls:      Vec<InFlightToolCall>,
+}
+
+#[derive(Clone)]
+struct InFlightToolCall {
+    name:        String,
+    input:       Value,
+    description: Option<String>,
+    preview:     Option<String>,
+    hostname:    Option<String>,
+}
+
 #[derive(Clone)]
 pub struct ProjectState {
     pub neo4j:         Arc<Neo4jClient>,
     pub agent:         Arc<Agent>,
     pub agent_builder: Arc<ProjectAgentBuilder>,
-    pub locks:    Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
-    pub channels: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
-    pub presence: Arc<RwLock<HashMap<String, HashMap<String, UserPresence>>>>,
+    pub locks:     Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
+    pub channels:  Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
+    pub presence:  Arc<RwLock<HashMap<String, HashMap<String, UserPresence>>>>,
+    pub in_flight: Arc<RwLock<HashMap<String, HashMap<String, InFlightState>>>>,
 }
 
 #[derive(Clone)]
@@ -65,9 +86,10 @@ impl ProjectState {
             neo4j,
             agent,
             agent_builder,
-            locks:    Arc::new(RwLock::new(HashMap::new())),
-            channels: Arc::new(Mutex::new(HashMap::new())),
-            presence: Arc::new(RwLock::new(HashMap::new())),
+            locks:     Arc::new(RwLock::new(HashMap::new())),
+            channels:  Arc::new(Mutex::new(HashMap::new())),
+            presence:  Arc::new(RwLock::new(HashMap::new())),
+            in_flight: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -172,6 +194,54 @@ pub async fn project_events(
 
     let conv_id = params.get("conv").cloned();
 
+    // Snapshot in-flight state before subscribing to avoid replaying events twice
+    let catchup: Vec<Result<Event, Infallible>> = if let Some(cid) = &conv_id {
+        let map = state.in_flight.read().await;
+        if let Some(s) = map.get(&project_id).and_then(|m| m.get(cid)) {
+            let mut events = vec![];
+            events.push(Ok(Event::default().data(json!({
+                "type": "user_message",
+                "conv_id": cid,
+                "query": s.query,
+                "username": s.username,
+                "attachments": s.attachments,
+            }).to_string())));
+            for t in &s.thinking_blocks {
+                events.push(Ok(Event::default().data(json!({
+                    "type": "thinking", "conv_id": cid, "text": t,
+                }).to_string())));
+            }
+            if !s.current_thinking.is_empty() {
+                events.push(Ok(Event::default().data(json!({
+                    "type": "thinking", "conv_id": cid, "text": s.current_thinking,
+                }).to_string())));
+            }
+            for tc in &s.tool_calls {
+                events.push(Ok(Event::default().data(json!({
+                    "type": "tool_call", "conv_id": cid,
+                    "name": tc.name, "input": tc.input,
+                    "description": tc.description, "hostname": tc.hostname,
+                }).to_string())));
+                if let Some(preview) = &tc.preview {
+                    events.push(Ok(Event::default().data(json!({
+                        "type": "tool_result", "conv_id": cid,
+                        "name": tc.name, "preview": preview,
+                    }).to_string())));
+                }
+            }
+            if !s.text.is_empty() {
+                events.push(Ok(Event::default().data(json!({
+                    "type": "text_delta", "conv_id": cid, "text": s.text,
+                }).to_string())));
+            }
+            events
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+
     let sender = state.get_or_create_channel(&project_id).await;
     let receiver = sender.subscribe();
 
@@ -218,6 +288,7 @@ pub async fn project_events(
             json!({"type": "lock", "by": by, "conv_id": cid}).to_string(),
         )));
     }
+    init.extend(catchup);
 
     let guard = PresenceGuard {
         project_id: project_id.clone(),
@@ -367,24 +438,36 @@ pub async fn project_query_stream(
         .unwrap_or_default();
     state.broadcast(&project_id, json!({
         "type": "user_message",
+        "conv_id": body.conversation_id,
         "query": body.query,
         "username": user.name,
         "attachments": attachments_for_broadcast,
     }).to_string()).await;
 
-    let locks    = Arc::clone(&state.locks);
-    let channels = Arc::clone(&state.channels);
-    let neo4j    = Arc::clone(&state.neo4j);
-    let llm      = Arc::clone(&state.agent_builder.llm);
-    let registry = Arc::clone(&state.agent_builder.registry);
+    let locks     = Arc::clone(&state.locks);
+    let channels  = Arc::clone(&state.channels);
+    let neo4j     = Arc::clone(&state.neo4j);
+    let llm       = Arc::clone(&state.agent_builder.llm);
+    let registry  = Arc::clone(&state.agent_builder.registry);
+    let in_flight = Arc::clone(&state.in_flight);
     let project_id_owned = project_id.clone();
     let query            = body.query.clone();
-    let conv_id          = body.conversation_id;
+    let conv_id          = body.conversation_id.clone();
     let username         = user.name.clone();
     let attachments      = body.attachments.unwrap_or_default();
     let attachment_meta: Vec<Value> = attachments.iter()
         .map(|a| json!({ "name": a.name, "mime_type": a.mime_type }))
         .collect();
+
+    in_flight.write().await
+        .entry(project_id.clone())
+        .or_default()
+        .insert(conv_id.clone(), InFlightState {
+            query:       body.query.clone(),
+            username:    user.name.clone(),
+            attachments: attachments_for_broadcast,
+            ..Default::default()
+        });
 
     tokio::spawn(async move {
         let (agent_event_sender, mut agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
@@ -398,6 +481,7 @@ pub async fn project_query_stream(
         let mut tool_calls_log: Vec<Value> = Vec::new();
 
         while let Some(event) = agent_rx.recv().await {
+            // Update tool_calls_log for DB persistence
             match &event {
                 AgentEvent::ToolCall { name, input } => {
                     tool_calls_log.push(json!({
@@ -413,6 +497,54 @@ pub async fn project_query_stream(
                     }
                 }
                 _ => {}
+            }
+
+            // Compute description/hostname for ToolCall (async, must happen before in_flight update)
+            let (description, hostname) = if let AgentEvent::ToolCall { name, input } = &event {
+                if name == "run_command" || name == "run_cypher" {
+                    let desc = agent.describe_tool_call(name, input).await;
+                    let host = if name == "run_command" {
+                        input["agent_id"].as_str()
+                            .and_then(|id| registry.agents.get(id).map(|a| a.hostname.clone()))
+                    } else {
+                        None
+                    };
+                    (Some(desc), host)
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
+
+            // Update in_flight state for catch-up
+            {
+                let mut map = in_flight.write().await;
+                if let Some(entry) = map.get_mut(&project_id_owned).and_then(|m| m.get_mut(&conv_id)) {
+                    match &event {
+                        AgentEvent::ThinkingDelta { text } => entry.current_thinking.push_str(text),
+                        AgentEvent::Thinking { text } => {
+                            entry.thinking_blocks.push(text.clone());
+                            entry.current_thinking.clear();
+                        }
+                        AgentEvent::TextDelta { text } => entry.text.push_str(text),
+                        AgentEvent::ToolCall { name, input } => entry.tool_calls.push(InFlightToolCall {
+                            name: name.clone(),
+                            input: input.clone(),
+                            description: description.clone(),
+                            preview: None,
+                            hostname: hostname.clone(),
+                        }),
+                        AgentEvent::ToolResult { name, preview } => {
+                            if let Some(tc) = entry.tool_calls.iter_mut().rev()
+                                .find(|tc| tc.name == *name && tc.preview.is_none())
+                            {
+                                tc.preview = Some(preview.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
 
             if let AgentEvent::Done { answer, sources, tool_calls_made } = &event {
@@ -438,13 +570,18 @@ pub async fn project_query_stream(
                 let llm_s      = Arc::clone(&llm);
                 let channels_s = Arc::clone(&channels);
                 let pid_s      = project_id_owned.clone();
+                let cid_s      = conv_id.clone();
                 let query_s    = query.clone();
                 let answer_s   = answer.clone();
                 tokio::spawn(async move {
                     if let Some(choices) = super::suggestions::generate_suggestions(
                         &*llm_s, &query_s, &answer_s,
                     ).await {
-                        let data = json!({ "type": "suggestions", "choices": choices }).to_string();
+                        let data = json!({
+                            "type": "suggestions",
+                            "conv_id": cid_s,
+                            "choices": choices,
+                        }).to_string();
                         let ch = channels_s.lock().await;
                         if let Some(sender) = ch.get(&pid_s) {
                             let _ = sender.send(data);
@@ -452,28 +589,22 @@ pub async fn project_query_stream(
                     }
                 });
             }
-            let data = if let AgentEvent::ToolCall { name, input } = &event {
-                if name == "run_command" || name == "run_cypher" {
-                    let description = agent.describe_tool_call(name, input).await;
-                    let mut v = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
-                    if let Some(obj) = v.as_object_mut() {
-                        obj.insert("description".to_string(), json!(description));
-                        if name == "run_command" {
-                            if let Some(h) = input["agent_id"].as_str()
-                                .and_then(|id| registry.agents.get(id).map(|a| a.hostname.clone()))
-                            {
-                                obj.insert("hostname".to_string(), json!(h));
-                            }
-                        }
-                    }
-                    serde_json::to_string(&v).ok()
-                } else {
-                    serde_json::to_string(&event).ok()
+
+            // Serialize event, tag with conv_id, and broadcast
+            let mut v = if let AgentEvent::ToolCall { .. } = &event {
+                let mut v = serde_json::to_value(&event).unwrap_or(Value::Null);
+                if let Some(obj) = v.as_object_mut() {
+                    if let Some(d) = &description { obj.insert("description".to_string(), json!(d)); }
+                    if let Some(h) = &hostname    { obj.insert("hostname".to_string(),    json!(h)); }
                 }
+                v
             } else {
-                serde_json::to_string(&event).ok()
+                serde_json::to_value(&event).unwrap_or(Value::Null)
             };
-            if let Some(data) = data {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("conv_id".to_string(), json!(conv_id));
+            }
+            if let Ok(data) = serde_json::to_string(&v) {
                 let channel_map = channels.lock().await;
                 if let Some(sender) = channel_map.get(&project_id_owned) {
                     let _ = sender.send(data);
@@ -481,6 +612,9 @@ pub async fn project_query_stream(
             }
         }
 
+        if let Some(m) = in_flight.write().await.get_mut(&project_id_owned) {
+            m.remove(&conv_id);
+        }
         if let Some(m) = locks.write().await.get_mut(&project_id_owned) {
             m.remove(&conv_id);
         }
