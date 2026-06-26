@@ -28,7 +28,7 @@ mkdir -p \
 # $-variables such as $uri and $host.
 export SNAP SNAP_COMMON UI_HOST UI_PORT SERVER_HOST SERVER_PORT
 envsubst '${SNAP} ${SNAP_COMMON} ${UI_HOST} ${UI_PORT} ${SERVER_HOST} ${SERVER_PORT}' \
-  < "$SNAP/etc/harvest-server/nginx.conf.template" \
+  < "$SNAP/etc/harvest/nginx.conf.template" \
   > "$SNAP_COMMON/nginx.conf"
 
 echo "Harvest UI  →  http://${UI_HOST}:${UI_PORT}"

@@ -6,8 +6,8 @@ set -eu
 CONF="$SNAP_COMMON/server.toml"
 
 if [ ! -f "$CONF" ]; then
-  echo "error: harvest-server is not configured." >&2
-  echo "  snap set harvest-server neo4j.password=<pw> llm.api-key=<key> auth.jwt-secret=<secret>" >&2
+  echo "error: harvest is not configured." >&2
+  echo "  snap set harvest neo4j.password=<pw> llm.api-key=<key> auth.jwt-secret=<secret>" >&2
   exit 1
 fi
 
