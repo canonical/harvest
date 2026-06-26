@@ -16,7 +16,8 @@ description: |
   1. Set required credentials:
        snap set harvest \
          neo4j.password=<neo4j-password> \
-         llm.api-key=<llm-api-key> \
+         llm.primary.provider=anthropic \
+         llm.primary.api-key=<llm-api-key> \
          auth.jwt-secret=$(openssl rand -base64 32)
 
   2. Start the services:
@@ -33,20 +34,22 @@ description: |
   neo4j.password              Neo4j password               (required)
   server.host                 API bind address             (default: 127.0.0.1)
   server.port                 API port                     (default: 8080)
-  llm.provider                anthropic | gemini | openai-compatible  (default: anthropic)
-  llm.api-key                 LLM API key                  (required)
-  llm.model                   LLM model name               (default: claude-sonnet-4-6)
-  llm.base-url                Base URL (openai-compatible only)
-  llm.timeout-secs            Per-request timeout          (default: 120)
-  llm.max-retries             Retry limit per request      (default: 3)
-  llm.priority                Priority order, lower = first  (default: 0)
-  llm2.provider               Fallback provider            (optional)
-  llm2.api-key                Fallback provider API key    (optional)
-  llm2.model                  Fallback provider model      (optional)
-  llm2.base-url               Fallback base URL            (optional)
-  llm2.timeout-secs           Fallback timeout             (default: 120)
-  llm2.max-retries            Fallback retry limit         (default: 3)
-  llm2.priority               Fallback priority            (default: 1)
+
+  LLM providers — define any number with user-chosen names:
+  llm.<name>.provider         anthropic | gemini | openai-compatible
+  llm.<name>.api-key          API key (setting this enables the provider)
+  llm.<name>.model            Model name
+  llm.<name>.base-url         Base URL (openai-compatible only)
+  llm.<name>.timeout-secs     Per-request timeout          (default: 120)
+  llm.<name>.max-retries      Retry limit per request      (default: 3)
+  llm.<name>.priority         Lower = tried first on rate limits  (default: 0)
+
+  Example — Anthropic primary, Gemini fallback:
+    snap set harvest \
+      llm.primary.provider=anthropic llm.primary.api-key=sk-ant-... \
+      llm.fallback.provider=gemini   llm.fallback.api-key=AIza... \
+      llm.fallback.priority=1
+
   agent.max-iterations        Agent iteration limit        (default: 20)
   agent.compaction-threshold-chars  Context compaction trigger  (default: 40000)
   agent.compaction-keep-last  Messages kept after compaction  (default: 6)
@@ -145,3 +148,4 @@ parts:
       wrapper-serve:           bin/wrapper-serve
       wrapper-ui:              bin/wrapper-ui
       nginx.conf.template:     etc/harvest/nginx.conf.template
+      gen-llm-config.py:       lib/harvest/gen-llm-config.py
