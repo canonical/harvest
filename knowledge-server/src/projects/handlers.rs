@@ -347,7 +347,10 @@ async fn save_project_turn(
     };
 
     let mut messages: Vec<Value> = compacted_history.iter().map(|entry| {
-        json!({ "role": entry.role, "text": entry.text, "attachments": [] })
+        let attachments: Vec<Value> = entry.attachments.as_deref().unwrap_or(&[]).iter()
+            .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
+            .collect();
+        json!({ "role": entry.role, "text": entry.text, "attachments": attachments })
     }).collect();
     messages.push(json!({
         "role": "user",
