@@ -455,7 +455,7 @@ pub async fn project_query_stream(
     let username         = user.name.clone();
     let attachments      = body.attachments.unwrap_or_default();
     let attachment_meta: Vec<Value> = attachments.iter()
-        .map(|a| json!({ "name": a.name, "mime_type": a.mime_type }))
+        .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
         .collect();
 
     in_flight.write().await

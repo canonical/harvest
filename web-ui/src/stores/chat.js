@@ -159,7 +159,14 @@ export const useChatStore = defineStore('chat', () => {
     reset();
     for (const m of history) {
       if (m.role === 'user') {
-        const msg = { role: 'user', text: m.text, attachments: m.attachments ?? [] };
+        const attachments = (m.attachments ?? []).map(a => ({
+          ...a,
+          preview_url: a.preview_url
+            ?? (a.data && a.mime_type?.startsWith('image/')
+                ? `data:${a.mime_type};base64,${a.data}`
+                : null),
+        }));
+        const msg = { role: 'user', text: m.text, attachments };
         if (m.username) msg.username = m.username;
         messages.value.push(msg);
       } else {
