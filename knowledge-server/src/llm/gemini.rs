@@ -168,8 +168,10 @@ fn parse_gemini_response(json: Value) -> Result<LlmResponse> {
                 thought_signature: p["thoughtSignature"].as_str().map(|s| s.to_string()),
             }
         }).collect();
+        // Include both normal text parts and thought parts (extended thinking) as preamble.
+        // Thought parts represent the model's reasoning before deciding which tools to call.
         let preamble = parts.iter()
-            .filter(|p| p.get("text").is_some() && p.get("thought").is_none())
+            .filter(|p| p.get("text").is_some())
             .filter_map(|p| p["text"].as_str())
             .collect::<Vec<_>>()
             .join("\n");
@@ -589,5 +591,101 @@ mod tests {
         let provider = make_provider(&server.base_url());
         provider.chat(&[Message::user("hi")], &tools).await.unwrap();
         mock.assert();
+    }
+
+    // ── extended thinking (thought parts) ────────────────────────────────────
+
+    #[test]
+    fn thought_part_text_captured_as_preamble() {
+        let json = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        { "text": "Let me think about this.", "thought": true },
+                        { "functionCall": { "name": "search_symbols", "args": { "query": "foo" } } }
+                    ],
+                    "role": "model"
+                }
+            }]
+        });
+        match parse_gemini_response(json).unwrap() {
+            LlmResponse::ToolCalls { preamble, calls } => {
+                assert_eq!(calls.len(), 1);
+                assert!(preamble.contains("Let me think about this."),
+                    "thought text should appear in preamble, got: {preamble:?}");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multiple_thought_parts_joined_in_preamble() {
+        let json = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        { "text": "First thought.", "thought": true },
+                        { "text": "Second thought.", "thought": true },
+                        { "functionCall": { "name": "my_tool", "args": {} } }
+                    ],
+                    "role": "model"
+                }
+            }]
+        });
+        match parse_gemini_response(json).unwrap() {
+            LlmResponse::ToolCalls { preamble, .. } => {
+                assert!(preamble.contains("First thought."),  "first thought missing");
+                assert!(preamble.contains("Second thought."), "second thought missing");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thought_parts_and_normal_text_both_in_preamble() {
+        let json = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        { "text": "I'll search for X.", "thought": true },
+                        { "text": "Using the search tool." },
+                        { "functionCall": { "name": "search_symbols", "args": {} } }
+                    ],
+                    "role": "model"
+                }
+            }]
+        });
+        match parse_gemini_response(json).unwrap() {
+            LlmResponse::ToolCalls { preamble, .. } => {
+                assert!(preamble.contains("I'll search for X."),   "thought text missing");
+                assert!(preamble.contains("Using the search tool."), "normal text missing");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thought_parts_excluded_from_final_message_text() {
+        // thought parts should NOT appear in the final answer — only in preamble.
+        let json = json!({
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        { "text": "Internal reasoning here.", "thought": true },
+                        { "text": "Here is the answer." }
+                    ],
+                    "role": "model"
+                },
+                "finishReason": "STOP"
+            }]
+        });
+        match parse_gemini_response(json).unwrap() {
+            LlmResponse::Message { text } => {
+                assert!(!text.contains("Internal reasoning here."),
+                    "thought text must not appear in final message");
+                assert!(text.contains("Here is the answer."));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }
