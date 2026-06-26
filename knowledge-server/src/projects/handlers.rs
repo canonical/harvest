@@ -372,7 +372,7 @@ async fn save_project_turn(
     let _ = neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
          SET c.title = $title, c.messages = $messages,
-             c.message_count = $count, c.updated_at = $now
+             c.message_count = $count, c.updated_at = $now, c.suggestions = null
          RETURN c.id AS id",
         json!({
             "pid": project_id, "cid": conv_id,
@@ -575,6 +575,7 @@ pub async fn project_query_stream(
                 });
 
                 let llm_s      = Arc::clone(&llm);
+                let neo4j_s    = Arc::clone(&neo4j);
                 let channels_s = Arc::clone(&channels);
                 let pid_s      = project_id_owned.clone();
                 let cid_s      = conv_id.clone();
@@ -584,6 +585,11 @@ pub async fn project_query_stream(
                     if let Some(choices) = super::suggestions::generate_suggestions(
                         &*llm_s, &query_s, &answer_s,
                     ).await {
+                        let _ = neo4j_s.query_read(
+                            "MATCH (:Project {id:$pid})-[:HAS_CONVERSATION]->(c:Conversation {id:$cid})
+                             SET c.suggestions = $suggestions",
+                            json!({ "pid": pid_s, "cid": cid_s, "suggestions": choices }),
+                        ).await;
                         let data = json!({
                             "type": "suggestions",
                             "conv_id": cid_s,
@@ -855,7 +861,7 @@ pub async fn get_conversation(
     let rows = state.neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
          RETURN c.id AS id, c.title AS title, c.messages AS messages,
-                c.created_by AS created_by,
+                c.suggestions AS suggestions, c.created_by AS created_by,
                 c.created_at AS created_at, c.updated_at AS updated_at",
         json!({ "pid": project_id, "cid": conv_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
