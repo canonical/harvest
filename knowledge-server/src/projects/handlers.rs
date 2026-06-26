@@ -48,7 +48,7 @@ pub struct ProjectState {
     pub neo4j:         Arc<Neo4jClient>,
     pub agent:         Arc<Agent>,
     pub agent_builder: Arc<ProjectAgentBuilder>,
-    pub locks:    Arc<RwLock<HashMap<String, String>>>,
+    pub locks:    Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
     pub channels: Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
     pub presence: Arc<RwLock<HashMap<String, HashMap<String, UserPresence>>>>,
 }
@@ -196,7 +196,10 @@ pub async fn project_events(
             })).collect())
             .unwrap_or_default()
     };
-    let lock_by = state.locks.read().await.get(&project_id).cloned();
+    let project_locks: Vec<(String, String)> = state.locks.read().await
+        .get(&project_id)
+        .map(|m| m.iter().map(|(cid, by)| (cid.clone(), by.clone())).collect())
+        .unwrap_or_default();
 
     let _ = sender.send(json!({
         "type": "user_join",
@@ -210,9 +213,9 @@ pub async fn project_events(
             json!({"type": "presence", "users": presence_users}).to_string(),
         )),
     ];
-    if let Some(by) = lock_by {
+    for (cid, by) in &project_locks {
         init.push(Ok(Event::default().data(
-            json!({"type": "lock", "by": by}).to_string(),
+            json!({"type": "lock", "by": by, "conv_id": cid}).to_string(),
         )));
     }
 
@@ -316,11 +319,18 @@ pub struct ProjectQueryBody {
     pub attachments: Option<Vec<Attachment>>,
 }
 
+#[derive(serde::Deserialize)]
+pub struct ProjectQueryStreamBody {
+    pub query: String,
+    pub conversation_id: String,
+    pub attachments: Option<Vec<Attachment>>,
+}
+
 pub async fn project_query_stream(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
     Path(project_id): Path<String>,
-    Json(body): Json<ProjectQueryBody>,
+    Json(body): Json<ProjectQueryStreamBody>,
 ) -> impl IntoResponse {
     if let Err(e) = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await {
         return e.into_response();
@@ -328,22 +338,20 @@ pub async fn project_query_stream(
 
     {
         let mut locks = state.locks.write().await;
-        if locks.contains_key(&project_id) {
+        if locks.get(&project_id).map_or(false, |m| m.contains_key(&body.conversation_id)) {
             return (StatusCode::CONFLICT, Json(json!({"error": "chat is locked"}))).into_response();
         }
-        locks.insert(project_id.clone(), user.name.clone());
+        locks.entry(project_id.clone()).or_default().insert(body.conversation_id.clone(), user.name.clone());
     }
 
     let agent = state.agent_builder.build(project_id.clone());
-    let raw_history = match &body.conversation_id {
-        Some(conv_id) => load_project_history(&state.neo4j, &project_id, conv_id).await,
-        None => vec![],
-    };
+    let raw_history = load_project_history(&state.neo4j, &project_id, &body.conversation_id).await;
     let history = agent.compact_history(&raw_history).await;
 
     state.broadcast(&project_id, json!({
         "type": "lock",
         "by": user.name,
+        "conv_id": body.conversation_id,
     }).to_string()).await;
     let attachments_for_broadcast: Vec<serde_json::Value> = body.attachments.as_ref()
         .map(|attachments| attachments.iter().map(|a| json!({
@@ -371,7 +379,7 @@ pub async fn project_query_stream(
     let registry = Arc::clone(&state.agent_builder.registry);
     let project_id_owned = project_id.clone();
     let query            = body.query.clone();
-    let conv_id          = body.conversation_id.clone();
+    let conv_id          = body.conversation_id;
     let username         = user.name.clone();
     let attachments      = body.attachments.unwrap_or_default();
     let attachment_meta: Vec<Value> = attachments.iter()
@@ -407,11 +415,9 @@ pub async fn project_query_stream(
                 _ => {}
             }
 
-            if let (AgentEvent::Done { answer, sources, tool_calls_made }, Some(cid)) =
-                (&event, &conv_id)
-            {
+            if let AgentEvent::Done { answer, sources, tool_calls_made } = &event {
                 save_project_turn(
-                    &neo4j, &project_id_owned, cid,
+                    &neo4j, &project_id_owned, &conv_id,
                     &query, &username, attachment_meta.clone(),
                     &history,
                     answer, sources, *tool_calls_made,
@@ -475,10 +481,12 @@ pub async fn project_query_stream(
             }
         }
 
-        locks.write().await.remove(&project_id_owned);
+        if let Some(m) = locks.write().await.get_mut(&project_id_owned) {
+            m.remove(&conv_id);
+        }
         let channel_map = channels.lock().await;
         if let Some(sender) = channel_map.get(&project_id_owned) {
-            let _ = sender.send(json!({"type": "unlock"}).to_string());
+            let _ = sender.send(json!({"type": "unlock", "conv_id": conv_id}).to_string());
         }
     });
 
