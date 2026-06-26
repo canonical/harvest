@@ -1,11 +1,11 @@
-name: harvest-server
+name: harvest
 base: core24
 version: '0.1.0'
 summary: AI-powered code knowledge graph server and web interface
 description: |
-  Knowledge Server exposes an AI-powered HTTP API and web interface for
-  querying code knowledge graphs stored in Neo4j.  Agents can connect to
-  it to run commands on remote machines.
+  Harvest exposes an AI-powered HTTP API and web interface for querying code
+  knowledge graphs stored in Neo4j.  Agents can connect to it to run commands
+  on remote machines.
 
   Prerequisites
   ─────────────
@@ -14,39 +14,57 @@ description: |
   Quick start
   ───────────
   1. Set required credentials:
-       snap set harvest-server \
+       snap set harvest \
          neo4j.password=<neo4j-password> \
          llm.api-key=<llm-api-key> \
          auth.jwt-secret=$(openssl rand -base64 32)
 
   2. Start the services:
-       snap start harvest-server.serve
-       snap start harvest-server.ui
+       snap start harvest.serve
+       snap start harvest.ui
 
   3. Open http://localhost:3000 in your browser.
 
   Snap configuration keys
   ───────────────────────
-  neo4j.host              Neo4j hostname          (default: localhost)
-  neo4j.port              Neo4j bolt port         (default: 7687)
-  neo4j.user              Neo4j username          (default: neo4j)
-  neo4j.password          Neo4j password          (required)
-  server.host             API bind address        (default: 127.0.0.1)
-  server.port             API port                (default: 8080)
-  llm.provider            anthropic or openai-compatible (default: anthropic)
-  llm.api-key             LLM API key             (required)
-  llm.model               LLM model name          (default: claude-sonnet-4-6)
-  llm.base-url            LLM base URL            (default: https://api.anthropic.com/v1)
-  llm.max-iterations      Agent iteration limit   (default: 20)
-  llm.timeout-secs        Per-request timeout     (default: 120)
-  auth.jwt-secret         JWT signing secret      (required)
-  auth.google.client-id   Google OAuth client ID  (optional)
-  auth.google.client-secret  Google OAuth client secret  (optional)
-  auth.google.redirect-uri   Google OAuth redirect URI   (optional)
-  agents.public-url       Public URL agents use to call back (optional)
-  docs.dir                Documentation output directory (default: $SNAP_COMMON/docs)
-  ui.host                 Web UI bind address     (default: 127.0.0.1)
-  ui.port                 Web UI port             (default: 3000)
+  neo4j.host                  Neo4j hostname               (default: localhost)
+  neo4j.port                  Neo4j bolt port              (default: 7687)
+  neo4j.user                  Neo4j username               (default: neo4j)
+  neo4j.password              Neo4j password               (required)
+  server.host                 API bind address             (default: 127.0.0.1)
+  server.port                 API port                     (default: 8080)
+  llm.provider                anthropic | gemini | openai-compatible  (default: anthropic)
+  llm.api-key                 LLM API key                  (required)
+  llm.model                   LLM model name               (default: claude-sonnet-4-6)
+  llm.base-url                Base URL (openai-compatible only)
+  llm.timeout-secs            Per-request timeout          (default: 120)
+  llm.max-retries             Retry limit per request      (default: 3)
+  llm.priority                Priority order, lower = first  (default: 0)
+  llm2.provider               Fallback provider            (optional)
+  llm2.api-key                Fallback provider API key    (optional)
+  llm2.model                  Fallback provider model      (optional)
+  llm2.base-url               Fallback base URL            (optional)
+  llm2.timeout-secs           Fallback timeout             (default: 120)
+  llm2.max-retries            Fallback retry limit         (default: 3)
+  llm2.priority               Fallback priority            (default: 1)
+  agent.max-iterations        Agent iteration limit        (default: 20)
+  agent.compaction-threshold-chars  Context compaction trigger  (default: 40000)
+  agent.compaction-keep-last  Messages kept after compaction  (default: 6)
+  auth.jwt-secret             JWT signing secret           (required)
+  auth.allow-local-login      Enable username/password login  (default: true)
+  auth.google.client-id       Google OAuth client ID       (optional)
+  auth.google.client-secret   Google OAuth client secret   (optional)
+  auth.google.redirect-uri    Google OAuth redirect URI    (optional)
+  auth.oidc.issuer-url        OIDC provider URL            (optional)
+  auth.oidc.client-id         OIDC client ID               (optional)
+  auth.oidc.client-secret     OIDC client secret           (optional)
+  auth.oidc.redirect-uri      OIDC redirect URI            (optional)
+  auth.oidc.display-name      OIDC provider display name   (optional)
+  agents.public-url           Public URL for agent callbacks  (optional)
+  docs.dir                    Documentation directory      (default: $SNAP_COMMON/docs)
+  ui.enable-docs              Show docs page in web UI     (default: false)
+  ui.host                     Web UI bind address          (default: 127.0.0.1)
+  ui.port                     Web UI port                  (default: 3000)
 
 grade: devel
 confinement: strict
@@ -126,4 +144,4 @@ parts:
     organize:
       wrapper-serve:           bin/wrapper-serve
       wrapper-ui:              bin/wrapper-ui
-      nginx.conf.template:     etc/harvest-server/nginx.conf.template
+      nginx.conf.template:     etc/harvest/nginx.conf.template
