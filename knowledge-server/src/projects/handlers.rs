@@ -331,6 +331,7 @@ async fn save_project_turn(
     neo4j: &Neo4jClient,
     project_id: &str,
     conv_id: &str,
+    now: &str,
     user_text: &str,
     username: &str,
     attachments_meta: Vec<Value>,
@@ -340,7 +341,6 @@ async fn save_project_turn(
     tool_calls_made: usize,
     tool_calls: &[Value],
 ) {
-    let now = chrono::Utc::now().to_rfc3339();
     let title = if user_text.len() > CONVERSATION_TITLE_MAX_CHARS {
         format!("{}…", &user_text[..CONVERSATION_TITLE_TRUNCATE_CHARS])
     } else {
@@ -548,13 +548,24 @@ pub async fn project_query_stream(
             }
 
             if let AgentEvent::Done { answer, sources, tool_calls_made } = &event {
+                let save_now = chrono::Utc::now().to_rfc3339();
                 save_project_turn(
-                    &neo4j, &project_id_owned, &conv_id,
+                    &neo4j, &project_id_owned, &conv_id, &save_now,
                     &query, &username, attachment_meta.clone(),
                     &history,
                     answer, sources, *tool_calls_made,
                     &tool_calls_log,
                 ).await;
+                {
+                    let ch = channels.lock().await;
+                    if let Some(sender) = ch.get(&project_id_owned) {
+                        let _ = sender.send(json!({
+                            "type": "conversation_updated",
+                            "conv_id": conv_id,
+                            "updated_at": save_now,
+                        }).to_string());
+                    }
+                }
 
                 let neo4j_m  = Arc::clone(&neo4j);
                 let llm_m    = Arc::clone(&llm);
@@ -828,7 +839,16 @@ pub async fn create_conversation(
          RETURN c.id AS id",
         json!({ "pid": project_id, "id": id, "title": title, "uid": user.sub, "now": now }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": id, "title": title, "created_at": now }))))
+    state.broadcast(&project_id, json!({
+        "type": "conversation_created",
+        "conversation": {
+            "id": id, "title": title,
+            "created_by": user.sub, "created_by_name": user.name,
+            "message_count": 0,
+            "created_at": now, "updated_at": now,
+        },
+    }).to_string()).await;
+    Ok((StatusCode::CREATED, Json(json!({ "id": id, "title": title, "created_at": now, "updated_at": now }))))
 }
 
 pub async fn get_conversation(
