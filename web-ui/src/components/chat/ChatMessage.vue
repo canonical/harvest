@@ -67,6 +67,33 @@
           <span class="source-chip__name">{{ src.file }}</span>
         </a>
       </div>
+
+      <div v-if="msg.question" class="message__question">
+        <p class="message__question-text">{{ msg.question.question }}</p>
+        <div class="question-choices">
+          <template v-if="isLast">
+            <button
+              v-for="c in msg.question.choices"
+              :key="c"
+              class="btn-choice"
+              type="button"
+              @click="$emit('choice', c)"
+            >{{ c }}</button>
+          </template>
+          <template v-else>
+            <span v-for="c in msg.question.choices" :key="c" class="choice-chip">{{ c }}</span>
+          </template>
+        </div>
+        <div v-if="isLast" class="question-other">
+          <input
+            v-model="otherText"
+            class="question-other-input"
+            placeholder="Or type your own…"
+            @keydown.enter.prevent="submitOther"
+          />
+          <button class="question-other-submit" type="button" @click="submitOther">Send</button>
+        </div>
+      </div>
     </template>
   </div>
 </template>
@@ -80,11 +107,15 @@ import { mountInlineGraphs } from '../../lib/inline-graph.js';
 import { avatarColor, initials } from '../../lib/utils.js';
 
 const answerBodyRef = ref(null);
+const otherText     = ref('');
 
 const props = defineProps({
   msg:        { type: Object, required: true },
+  isLast:     { type: Boolean, default: false },
   repoUrlMap: { type: Object, default: () => ({}) },
 });
+
+const emit = defineEmits(['choice']);
 
 const roleClass = computed(() =>
   props.msg.role === 'user' ? 'message--user' : 'message--assistant'
@@ -104,6 +135,13 @@ onMounted(() => {
 watch(renderedAnswer, () => nextTick(() => {
   if (answerBodyRef.value) mountInlineGraphs(answerBodyRef.value);
 }));
+
+function submitOther() {
+  const text = otherText.value.trim();
+  if (!text) return;
+  otherText.value = '';
+  emit('choice', text);
+}
 
 function sourceHref(src) {
   const base = props.repoUrlMap[src.repo];
