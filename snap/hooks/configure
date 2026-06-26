@@ -107,19 +107,8 @@ for name, cfg in sorted(providers.items(), key=sort_key):
     if provider == "openai-compatible" and base_url:
         print("base_url     = \"%s\"" % base_url)
     found += 1
-
-if found == 0:
-    sys.exit(1)
 '
 }
-
-# Fail early with a clear message if no LLM providers are configured.
-if ! generate_llm_blocks > /dev/null 2>&1; then
-  echo "error: no LLM providers configured." >&2
-  echo "  Set at least one provider, e.g.:" >&2
-  echo "    snap set harvest llm.primary.provider=anthropic llm.primary.api-key=<key>" >&2
-  exit 1
-fi
 
 # ── Write server.toml ──────────────────────────────────────────────────────
 {
@@ -134,7 +123,15 @@ user     = "${NEO4J_USER}"
 password = "${NEO4J_PASSWORD}"
 TOML
 
-  generate_llm_blocks
+  # If no providers are configured yet, write an empty array so the TOML is
+  # valid.  The server will refuse to start and print a clear error message.
+  llm_blocks=$(generate_llm_blocks)
+  if [ -n "$llm_blocks" ]; then
+    echo "$llm_blocks"
+  else
+    echo ""
+    echo "llm = []"
+  fi
 
   cat << TOML
 
