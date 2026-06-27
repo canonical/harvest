@@ -3162,7 +3162,6 @@ a.source-chip:hover .source-chip__name {
   display: flex;
   align-items: center;
   justify-content: center;
-  cursor: zoom-out;
 }
 
 .lightbox__img {
