@@ -29,8 +29,21 @@
 
     <template v-else>
       <!-- Loading indicator: only while no activity or answer has arrived yet -->
-      <span v-if="msg.status === 'loading' && !msg.chain?.length && !msg.pendingAnswer" class="loading-dots">
-        <span>.</span><span>.</span><span>.</span>
+      <span v-if="msg.status === 'loading' && !msg.chain?.length && !msg.pendingAnswer" class="loading-orbit">
+        <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <g fill="#E95420">
+            <circle cx="50" cy="8" r="7"/>
+            <path d="M 23.2 27.5 A 35 35 0 0 1 76.8 27.5 L 66.9 35.9 A 22 22 0 0 0 33.1 35.9 Z"/>
+            <g transform="rotate(120 50 50)">
+              <circle cx="50" cy="8" r="7"/>
+              <path d="M 23.2 27.5 A 35 35 0 0 1 76.8 27.5 L 66.9 35.9 A 22 22 0 0 0 33.1 35.9 Z"/>
+            </g>
+            <g transform="rotate(240 50 50)">
+              <circle cx="50" cy="8" r="7"/>
+              <path d="M 23.2 27.5 A 35 35 0 0 1 76.8 27.5 L 66.9 35.9 A 22 22 0 0 0 33.1 35.9 Z"/>
+            </g>
+          </g>
+        </svg>
       </span>
 
       <!-- Activity log: preambles + tool calls, unified left-border track -->
