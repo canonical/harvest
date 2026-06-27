@@ -1338,6 +1338,22 @@ a.source-chip:hover .source-chip__name {
   40%           { transform: scale(1.0); opacity: 1.0; }
 }
 
+.loading-orbit {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin: 0.25rem 0;
+}
+.loading-orbit svg {
+  width: 1.5rem;
+  height: 1.5rem;
+  animation: orbit-spin 1.5s linear infinite;
+}
+
+@keyframes orbit-spin {
+  to { transform: rotate(360deg); }
+}
+
 .message--error .message__bubble {
   background: var(--bg-error);
   border: 1px solid var(--border-error);
