@@ -39,7 +39,7 @@ pub async fn handle_query(
         Ok(response) => {
             if let (Some(neo4j), Some(cid)) = (&qs.neo4j, &req.conversation_id) {
                 let att_meta: Vec<_> = attachments.iter()
-                    .map(|a| json!({ "name": a.name, "mime_type": a.mime_type }))
+                    .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
                     .collect();
                 let _ = append_user_turn(
                     neo4j, &user.sub, cid,
@@ -73,7 +73,7 @@ pub async fn handle_query_stream(
     let query    = req.query.clone();
     let conv_id  = req.conversation_id.clone();
     let att_meta: Vec<_> = attachments.iter()
-        .map(|a| json!({ "name": a.name, "mime_type": a.mime_type }))
+        .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
         .collect();
 
     tokio::spawn(async move {
