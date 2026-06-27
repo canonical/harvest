@@ -118,9 +118,9 @@
     </template>
 
     <Teleport to="body">
-      <div v-if="lightboxSrc" class="lightbox" @click="lightboxSrc = null">
+      <div v-if="lightboxSrc" class="lightbox" @click.self="lightboxSrc = null">
         <button class="lightbox__close" type="button" @click="lightboxSrc = null">×</button>
-        <img class="lightbox__img" :src="lightboxSrc" alt="" />
+        <img class="lightbox__img" :src="lightboxSrc" alt="" @click.stop />
       </div>
     </Teleport>
   </div>
