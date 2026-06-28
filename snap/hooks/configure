@@ -3,11 +3,28 @@
 # Regenerates server.toml from the current snap config values.
 set -eu
 
+# ── Read required keys early so validation and the main block share them ───
+_NEO4J_PASSWORD=$(snapctl get neo4j.password)
+_JWT_SECRET=$(snapctl get auth.jwt-secret)
+
+# ── Validate required keys before touching any config files ────────────────
+# Skip on a fresh install (server.toml not yet written) so the install hook
+# can set empty defaults without triggering an error.
+if [ -f "$SNAP_COMMON/server.toml" ]; then
+  _errors=""
+  [ -z "$_NEO4J_PASSWORD" ] && _errors="${_errors}  neo4j.password is required\n"
+  [ -z "$_JWT_SECRET" ]      && _errors="${_errors}  auth.jwt-secret is required\n"
+  if [ -n "$_errors" ]; then
+    printf "harvest: missing required configuration:\n%b\nRun: snap set harvest neo4j.password=<pw> auth.jwt-secret=\$(openssl rand -base64 32)\n" "$_errors" >&2
+    exit 1
+  fi
+fi
+
 # ── Read snap config ───────────────────────────────────────────────────────
 NEO4J_HOST=$(snapctl get neo4j.host)
 NEO4J_PORT=$(snapctl get neo4j.port)
 NEO4J_USER=$(snapctl get neo4j.user)
-NEO4J_PASSWORD=$(snapctl get neo4j.password)
+NEO4J_PASSWORD="$_NEO4J_PASSWORD"
 SERVER_HOST=$(snapctl get server.host)
 SERVER_PORT=$(snapctl get server.port)
 
@@ -17,7 +34,7 @@ AGENT_COMPACT_CHARS=$(snapctl get agent.compaction-threshold-chars)
 AGENT_COMPACT_KEEP=$(snapctl get agent.compaction-keep-last)
 
 # Auth
-JWT_SECRET=$(snapctl get auth.jwt-secret)
+JWT_SECRET="$_JWT_SECRET"
 AUTH_LOCAL_LOGIN=$(snapctl get auth.allow-local-login)
 GOOGLE_CLIENT_ID=$(snapctl get auth.google.client-id)
 GOOGLE_CLIENT_SECRET=$(snapctl get auth.google.client-secret)
@@ -200,5 +217,85 @@ TOML
 
 } > "$SNAP_COMMON/server.toml"
 
-# Restart the server if it is already running.
+# Restart running services so they pick up the new config.
 snapctl restart harvest.serve 2>/dev/null || true
+snapctl restart harvest.ui   2>/dev/null || true
+
+# ── Write harvester.toml ───────────────────────────────────────────────────
+# Repositories are NOT generated here — they live in $SNAP_COMMON/repositories.toml
+# (user-managed).  The wrapper-ingest-code script merges both files at runtime.
+HARVESTER_CLONE_ROOT=$(snapctl get harvester.clone-root)
+: "${HARVESTER_CLONE_ROOT:=$SNAP_COMMON/repos}"
+mkdir -p "$HARVESTER_CLONE_ROOT"
+
+# Pick the single lowest-priority LLM provider configured for the harvester.
+generate_harvester_llm_block() {
+  local llm_json
+  llm_json=$(snapctl get -d llm 2>/dev/null || echo '{}')
+  LLM_JSON="$llm_json" python3 -c '
+import json, os, sys
+
+DEFAULTS = {
+    "anthropic":         "claude-sonnet-4-6",
+    "gemini":            "gemini-2.5-flash",
+    "openai-compatible": "",
+}
+
+try:
+    data = json.loads(os.environ.get("LLM_JSON", "{}"))
+except Exception:
+    data = {}
+
+providers = data.get("llm", data) if isinstance(data, dict) else {}
+if not isinstance(providers, dict):
+    providers = {}
+
+def sort_key(kv):
+    _, cfg = kv
+    if not isinstance(cfg, dict):
+        return (999, kv[0])
+    try:
+        return (int(str(cfg.get("priority", 0))), kv[0])
+    except (ValueError, TypeError):
+        return (0, kv[0])
+
+for name, cfg in sorted(providers.items(), key=sort_key):
+    if not isinstance(cfg, dict):
+        continue
+    api_key = cfg.get("api-key", "")
+    if not api_key:
+        continue
+    provider = cfg.get("provider", "anthropic")
+    model    = cfg.get("model", "") or DEFAULTS.get(provider, "")
+    timeout  = cfg.get("timeout-secs", 120)
+    retries  = cfg.get("max-retries", 3)
+    base_url = cfg.get("base-url", "")
+
+    print("")
+    print("[llm]")
+    print("provider     = \"%s\"" % provider)
+    print("api_key      = \"%s\"" % api_key)
+    if model:
+        print("model        = \"%s\"" % model)
+    print("timeout_secs = %s" % timeout)
+    print("max_retries  = %s" % retries)
+    if provider == "openai-compatible" and base_url:
+        print("base_url     = \"%s\"" % base_url)
+    break  # single provider only
+'
+}
+
+{
+  cat << TOML
+[neo4j]
+uri      = "bolt://${NEO4J_HOST}:${NEO4J_PORT}"
+user     = "${NEO4J_USER}"
+password = "${NEO4J_PASSWORD}"
+
+[storage]
+clone_root = "${HARVESTER_CLONE_ROOT}"
+TOML
+
+  generate_harvester_llm_block
+
+} > "$SNAP_COMMON/harvester.toml"
