@@ -224,9 +224,6 @@ snapctl restart harvest.ui   2>/dev/null || true
 # ── Write harvester.toml ───────────────────────────────────────────────────
 # Repositories are NOT generated here — they live in $SNAP_COMMON/repositories.toml
 # (user-managed).  The wrapper-ingest-code script merges both files at runtime.
-HARVESTER_CLONE_ROOT=$(snapctl get harvester.clone-root)
-: "${HARVESTER_CLONE_ROOT:=$SNAP_COMMON/repos}"
-mkdir -p "$HARVESTER_CLONE_ROOT"
 
 # Pick the single lowest-priority LLM provider configured for the harvester.
 generate_harvester_llm_block() {
@@ -291,9 +288,6 @@ for name, cfg in sorted(providers.items(), key=sort_key):
 uri      = "bolt://${NEO4J_HOST}:${NEO4J_PORT}"
 user     = "${NEO4J_USER}"
 password = "${NEO4J_PASSWORD}"
-
-[storage]
-clone_root = "${HARVESTER_CLONE_ROOT}"
 TOML
 
   generate_harvester_llm_block
