@@ -1,6 +1,6 @@
 name: harvest
 base: core24
-version: '0.1.0'
+version: '0.3.0'
 summary: AI-powered code knowledge graph server and web interface
 description: |
   Harvest exposes an AI-powered HTTP API and web interface for querying code
@@ -21,10 +21,11 @@ description: |
          auth.jwt-secret=$(openssl rand -base64 32)
 
   2. Start the services:
-       snap start harvest.serve
-       snap start harvest.ui
+       snap start --enable harvest.serve
+       snap start --enable harvest.ui
 
   3. Open http://localhost:3000 in your browser.
+     The first user to register becomes an admin.
 
   Snap configuration keys
   ───────────────────────
@@ -71,7 +72,8 @@ description: |
 
   Harvester (ingest-code command)
   ────────────────────────────────
-  harvester.clone-root        Repo clone directory         (default: $SNAP_COMMON/repos)
+  Reuses neo4j.* and llm.* keys — no separate credentials needed.
+  Repos are cloned to a temporary directory and deleted after ingestion.
 
   Ingest repositories into the knowledge graph:
     1. Write [[repositories]] blocks to $SNAP_COMMON/repositories.toml
