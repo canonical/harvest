@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 #[derive(Deserialize)]
 pub struct Config {
     pub neo4j: Neo4jConfig,
-    pub storage: StorageConfig,
     pub git: Option<GitConfig>,
     pub repositories: Vec<RepoConfig>,
     pub llm: Option<LlmConfig>,
@@ -17,11 +16,6 @@ pub struct Neo4jConfig {
     pub uri: String,
     pub user: String,
     pub password: String,
-}
-
-#[derive(Deserialize)]
-pub struct StorageConfig {
-    pub clone_root: PathBuf,
 }
 
 #[derive(Deserialize, Clone)]
@@ -109,9 +103,6 @@ uri      = "bolt://localhost:7687"
 user     = "neo4j"
 password = "pass"
 
-[storage]
-clone_root = "/tmp/repos"
-
 [[repositories]]
 name = "my-repo"
 url  = "https://github.com/owner/repo.git"
@@ -156,9 +147,6 @@ uri = "bolt://localhost:7687"
 user = "neo4j"
 password = "pass"
 
-[storage]
-clone_root = "/tmp/repos"
-
 [[repositories]]
 name = "repo-a"
 url  = "https://github.com/a.git"
@@ -187,9 +175,6 @@ url  = "https://github.com/b.git"
 uri = "bolt://localhost:7687"
 user = "neo4j"
 password = "pass"
-
-[storage]
-clone_root = "/tmp/repos"
 
 [[repositories]]
 name = "my-repo"
@@ -220,9 +205,6 @@ uri = "bolt://localhost:7687"
 user = "neo4j"
 password = "pass"
 
-[storage]
-clone_root = "/tmp/repos"
-
 [[repositories]]
 name = "my-repo"
 url  = "https://github.com/owner/repo.git"
@@ -245,9 +227,6 @@ model    = "llama-3.3-70b"
 uri = "bolt://localhost:7687"
 user = "neo4j"
 password = "pass"
-
-[storage]
-clone_root = "/tmp/repos"
 
 [[repositories]]
 name = "my-repo"
@@ -277,9 +256,6 @@ uri = "bolt://localhost:7687"
 user = "neo4j"
 password = "pass"
 
-[storage]
-clone_root = "/tmp/repos"
-
 [git]
 ssh_key_path = "/home/user/.ssh/id_ed25519"
 
@@ -300,9 +276,6 @@ url  = "git@github.com:owner/repo.git"
 uri = "bolt://localhost:7687"
 user = "neo4j"
 password = "pass"
-
-[storage]
-clone_root = "/tmp/repos"
 
 [git]
 ssh_key_path    = "/home/user/.ssh/id_rsa"
