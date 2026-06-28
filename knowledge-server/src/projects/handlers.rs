@@ -21,6 +21,7 @@ use tokio_stream::{wrappers::{BroadcastStream, ReceiverStream}, Stream};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentEvent, Attachment, HistoryMessage, Source};
+use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::api::ProjectAgentBuilder;
 use crate::auth::jwt::Claims;
 use crate::neo4j::Neo4jClient;
@@ -39,8 +40,6 @@ pub enum RunEvent {
     RunDone,
 }
 
-const CONVERSATION_TITLE_MAX_CHARS: usize = 60;
-const CONVERSATION_TITLE_TRUNCATE_CHARS: usize = 57;
 const PROJECT_NAME_MAX_CHARS: usize = 100;
 
 #[derive(Clone, Default)]
@@ -340,12 +339,6 @@ async fn save_project_turn(
     tool_calls_made: usize,
     tool_calls: &[Value],
 ) {
-    let title = if user_text.len() > CONVERSATION_TITLE_MAX_CHARS {
-        format!("{}…", &user_text[..CONVERSATION_TITLE_TRUNCATE_CHARS])
-    } else {
-        user_text.to_string()
-    };
-
     let mut messages: Vec<Value> = compacted_history.iter().map(|entry| {
         let attachments: Vec<Value> = entry.attachments.as_deref().unwrap_or(&[]).iter()
             .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
@@ -374,13 +367,12 @@ async fn save_project_turn(
 
     let _ = neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         SET c.title = $title, c.messages = $messages,
-             c.message_count = $count, c.updated_at = $now, c.suggestions = null
+         SET c.messages = $messages, c.message_count = $count,
+             c.updated_at = $now, c.suggestions = null
          RETURN c.id AS id",
         json!({
             "pid": project_id, "cid": conv_id,
-            "title": title, "messages": messages_json,
-            "count": count, "now": now,
+            "messages": messages_json, "count": count, "now": now,
         }),
     ).await;
 }
@@ -575,6 +567,31 @@ pub async fn project_query_stream(
                     super::memory_gen::maybe_generate_memory(
                         &neo4j_m, &*llm_m, &pid_m, &query_m, &answer_m,
                     ).await;
+                });
+
+                let llm_t      = Arc::clone(&llm);
+                let neo4j_t    = Arc::clone(&neo4j);
+                let channels_t = Arc::clone(&channels);
+                let pid_t      = project_id_owned.clone();
+                let cid_t      = conv_id.clone();
+                let query_t    = query.clone();
+                let answer_t   = answer.clone();
+                let prior_t    = history.clone();
+                let count_t    = history.len() + 2;
+                tokio::spawn(async move {
+                    if let Some(new_title) = maybe_regenerate_title(
+                        &neo4j_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, count_t,
+                    ).await {
+                        let data = json!({
+                            "type": "title_updated",
+                            "conv_id": cid_t,
+                            "title": new_title,
+                        }).to_string();
+                        let ch = channels_t.lock().await;
+                        if let Some(sender) = ch.get(&pid_t) {
+                            let _ = sender.send(data);
+                        }
+                    }
                 });
 
                 let llm_s      = Arc::clone(&llm);
@@ -1444,7 +1461,8 @@ async fn run_single_task(
             AgentEvent::Thinking { text } => {
                 RunEvent::Thinking { task_id: tid.clone(), text }
             }
-            AgentEvent::Question { .. } => continue,
+            AgentEvent::Question { .. }      => continue,
+            AgentEvent::TitleUpdated { .. }  => continue,
         };
         if let Ok(data) = serde_json::to_string(&run_event) {
             let _ = sse_tx.send(data).await;

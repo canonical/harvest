@@ -17,6 +17,7 @@ use crate::agent::{AgentEvent, Attachment};
 use crate::api::QueryState;
 use crate::auth::jwt::Claims;
 use crate::conversations::handlers::{append_user_turn, load_user_history};
+use crate::conversations::title_generation::maybe_regenerate_title;
 
 #[derive(Deserialize)]
 pub struct QueryRequest {
@@ -46,6 +47,19 @@ pub async fn handle_query(
                     &req.query, &user.name, &att_meta, &compacted,
                     &response.answer, &response.sources, response.tool_calls_made,
                 ).await;
+
+                let msg_count = compacted.len() + 2;
+                let neo4j_t   = Arc::clone(neo4j);
+                let llm_t     = Arc::clone(qs.agent.llm());
+                let cid_t     = cid.clone();
+                let prior_t   = compacted.clone();
+                let query_t   = req.query.clone();
+                let answer_t  = response.answer.clone();
+                tokio::spawn(async move {
+                    maybe_regenerate_title(
+                        &neo4j_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, msg_count,
+                    ).await;
+                });
             }
             Json(response).into_response()
         }
@@ -66,8 +80,9 @@ pub async fn handle_query_stream(
     let compacted = qs.agent.compact_history(&history).await;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
-    let agent = Arc::clone(&qs.agent);
-    let neo4j = qs.neo4j.clone();
+    let llm      = Arc::clone(qs.agent.llm());
+    let agent    = Arc::clone(&qs.agent);
+    let neo4j    = qs.neo4j.clone();
     let user_id  = user.sub.clone();
     let username = user.name.clone();
     let query    = req.query.clone();
@@ -78,23 +93,33 @@ pub async fn handle_query_stream(
 
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
-        let query_for_agent          = query.clone();
-        let compacted_for_agent      = compacted.clone();
+        let query_for_agent     = query.clone();
+        let compacted_for_agent = compacted.clone();
         tokio::spawn(async move {
             agent.query_streaming(&query_for_agent, &compacted_for_agent, &attachments, agent_tx).await;
         });
 
         while let Some(event) = agent_rx.recv().await {
-            if let (AgentEvent::Done { answer, sources, tool_calls_made }, Some(cid), Some(neo4j)) =
-                (&event, &conv_id, &neo4j)
-            {
+            let new_title = if let (
+                AgentEvent::Done { answer, sources, tool_calls_made },
+                Some(cid),
+                Some(neo4j),
+            ) = (&event, &conv_id, &neo4j) {
                 let _ = append_user_turn(
                     neo4j, &user_id, cid,
                     &query, &username, &att_meta, &compacted,
                     answer, sources, *tool_calls_made,
                 ).await;
-            }
+                let msg_count = compacted.len() + 2;
+                maybe_regenerate_title(neo4j, &*llm, cid, &compacted, &query, answer, msg_count).await
+            } else {
+                None
+            };
+
             let _ = tx.send(event).await;
+            if let Some(title) = new_title {
+                let _ = tx.send(AgentEvent::TitleUpdated { title }).await;
+            }
         }
     });
 
