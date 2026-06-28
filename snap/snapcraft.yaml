@@ -69,6 +69,7 @@ description: |
   ui.enable-docs              Show docs page in web UI     (default: false)
   ui.host                     Web UI bind address          (default: 127.0.0.1)
   ui.port                     Web UI port                  (default: 3000)
+  log.level                   Log verbosity: error|warn|info|debug|trace  (default: warn)
 
   Harvester (ingest-code command)
   ────────────────────────────────

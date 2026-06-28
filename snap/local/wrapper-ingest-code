@@ -31,4 +31,7 @@ TMP=$(mktemp --suffix=.toml)
 trap 'rm -f "$TMP"' EXIT
 cat "$BASE_CONF" "$REPOS_CONF" > "$TMP"
 
+# shellcheck source=/dev/null
+[ -f "$SNAP_COMMON/env" ] && . "$SNAP_COMMON/env"
+
 exec "$SNAP/bin/knowledge-harvester" --config "$TMP" run "$@"

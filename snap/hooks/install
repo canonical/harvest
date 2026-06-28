@@ -28,4 +28,5 @@ snapctl set \
   docs.dir="" \
   ui.enable-docs=false \
   ui.host=127.0.0.1 \
-  ui.port=3000
+  ui.port=3000 \
+  log.level=warn
