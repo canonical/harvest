@@ -29,7 +29,8 @@ sudo systemctl enable --now neo4j
 sudo snap install harvest --edge
 ```
 
-After installation, two daemons are registered but left **disabled** until you configure them, plus one one-shot command:
+After installation, two daemons (serve and ui) are registered but left **disabled** until you configure them.
+A one shot command is also available to ingest code repositories into harvest (ingest-code).
 
 | Service / command | Purpose |
 |-------------------|---------|
@@ -180,16 +181,7 @@ sudo snap set harvest \
 
 ### Harvester (ingest-code)
 
-```bash
-sudo snap set harvest \
-  harvester.clone-root=/var/snap/harvest/common/repos
-```
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `harvester.clone-root` | `$SNAP_COMMON/repos` | Directory where repositories are cloned during ingestion |
-
-The harvester reuses the same `neo4j.*` and `llm.*` keys as the server — no separate credentials are needed.
+The harvester reuses the same `neo4j.*` and `llm.*` keys as the server — no separate credentials are needed. Repositories are cloned to a temporary directory and deleted automatically after ingestion.
 
 ### Documentation (optional)
 
@@ -316,14 +308,6 @@ sudo harvest.ingest-code -f /path/to/repositories.toml
 ```
 
 Once ingestion completes, repositories appear in the web UI immediately.
-
-### Optional: change the clone directory
-
-By default, repositories are cloned to `/var/snap/harvest/common/repos`. Override with:
-
-```bash
-sudo snap set harvest harvester.clone-root=/data/harvest-repos
-```
 
 ---
 
