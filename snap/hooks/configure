@@ -49,6 +49,7 @@ OIDC_DISPLAY_NAME=$(snapctl get auth.oidc.display-name)
 AGENTS_PUBLIC_URL=$(snapctl get agents.public-url)
 DOCS_DIR=$(snapctl get docs.dir)
 UI_ENABLE_DOCS=$(snapctl get ui.enable-docs)
+LOG_LEVEL=$(snapctl get log.level)
 
 # ── Apply defaults ─────────────────────────────────────────────────────────
 : "${NEO4J_HOST:=localhost}"
@@ -62,8 +63,12 @@ UI_ENABLE_DOCS=$(snapctl get ui.enable-docs)
 : "${AUTH_LOCAL_LOGIN:=true}"
 : "${DOCS_DIR:=$SNAP_COMMON/docs}"
 : "${UI_ENABLE_DOCS:=false}"
+: "${LOG_LEVEL:=warn}"
 
 mkdir -p "$SNAP_COMMON" "$DOCS_DIR"
+
+# Write an env file sourced by service/command wrappers at startup.
+printf 'RUST_LOG=%s\n' "$LOG_LEVEL" > "$SNAP_COMMON/env"
 
 # ── LLM provider blocks ────────────────────────────────────────────────────
 # Read all named providers under llm.* as a JSON document and emit one
