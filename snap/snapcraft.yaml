@@ -21,7 +21,7 @@ description: |
          auth.jwt-secret=$(openssl rand -base64 32)
 
   2. Start the services:
-       snap start --enable harvest.serve
+       snap start --enable harvest.server
        snap start --enable harvest.ui
 
   3. Open http://localhost:3000 in your browser.
@@ -83,8 +83,8 @@ grade: devel
 confinement: strict
 
 apps:
-  serve:
-    command: bin/wrapper-serve
+  server:
+    command: bin/wrapper-server
     daemon: simple
     install-mode: disable
     restart-condition: on-failure
@@ -162,7 +162,7 @@ parts:
     plugin: dump
     source: snap/local/
     organize:
-      wrapper-serve:           bin/wrapper-serve
+      wrapper-server:          bin/wrapper-server
       wrapper-ui:              bin/wrapper-ui
       wrapper-ingest-code:     bin/wrapper-ingest-code
       nginx.conf.template:     etc/harvest/nginx.conf.template

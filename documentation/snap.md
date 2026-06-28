@@ -34,7 +34,7 @@ A one shot command is also available to ingest code repositories into harvest (i
 
 | Service / command | Purpose |
 |-------------------|---------|
-| `harvest.serve` | The `knowledge-server` API (port 8080 by default) |
+| `harvest.server` | The `knowledge-server` API (port 8080 by default) |
 | `harvest.ui` | nginx serving the web UI and proxying to the API (port 3000 by default) |
 | `harvest.ingest-code` | One-shot repository ingestion into the knowledge graph |
 
@@ -201,7 +201,7 @@ sudo snap set harvest \
 ## Starting the services
 
 ```bash
-sudo snap start --enable harvest.serve
+sudo snap start --enable harvest.server
 sudo snap start --enable harvest.ui
 ```
 
@@ -220,7 +220,7 @@ curl http://localhost:8080/health
 # → {"status":"ok"}
 
 # Check server logs
-sudo snap logs harvest.serve
+sudo snap logs harvest.server
 
 # Check UI / nginx logs
 sudo snap logs harvest.ui
@@ -253,7 +253,7 @@ Changes made with `snap set` take effect on the next service restart:
 
 ```bash
 sudo snap set harvest server.port=9090
-sudo snap restart harvest.serve
+sudo snap restart harvest.server
 sudo snap restart harvest.ui   # the UI proxy config is regenerated on startup
 ```
 
