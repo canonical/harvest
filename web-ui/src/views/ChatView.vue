@@ -298,6 +298,11 @@ function handleProjectEvent(event) {
       }
       break;
     }
+    case 'title_updated': {
+      const idx = conversations.value.findIndex(c => c.id === event.conv_id);
+      if (idx !== -1) conversations.value[idx] = { ...conversations.value[idx], title: event.title };
+      break;
+    }
     case 'user_message':
     case 'thinking':
     case 'thinking_delta':
@@ -461,6 +466,11 @@ function handleChatEvent(event) {
       break;
     case 'suggestions':    chat.setSuggestions(event.choices ?? []); break;
     case 'error':          chat.setError(event.message); break;
+    case 'title_updated': {
+      const idx = conversations.value.findIndex(c => c.id === activeConvId.value);
+      if (idx !== -1) conversations.value[idx] = { ...conversations.value[idx], title: event.title };
+      break;
+    }
   }
 }
 
