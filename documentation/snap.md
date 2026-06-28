@@ -183,6 +183,16 @@ sudo snap set harvest \
 
 The harvester reuses the same `neo4j.*` and `llm.*` keys as the server — no separate credentials are needed. Repositories are cloned to a temporary directory and deleted automatically after ingestion.
 
+### Logging
+
+```bash
+sudo snap set harvest log.level=info
+```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `log.level` | `warn` | Log verbosity: `error`, `warn`, `info`, `debug`, or `trace` |
+
 ### Documentation (optional)
 
 ```bash
@@ -235,13 +245,38 @@ Log files are also written to:
 
 ---
 
+## Log verbosity
+
+By default, only warnings and errors are logged (`warn`). To see informational or debug output, set the `log.level` key:
+
+```bash
+sudo snap set harvest log.level=info
+sudo snap restart harvest.server
+```
+
+| Value | When to use |
+|-------|-------------|
+| `error` | Errors only |
+| `warn` | Warnings and errors (default) |
+| `info` | Operational progress — connections, queries, ingestion steps |
+| `debug` | Verbose internal state |
+| `trace` | Maximum verbosity |
+
+For the one-shot ingest command you can also override the level inline without restarting any service:
+
+```bash
+RUST_LOG=info sudo harvest.ingest-code
+```
+
+---
+
 ## Stopping and restarting
 
 ```bash
-sudo snap stop harvest.serve
+sudo snap stop harvest.server
 sudo snap stop harvest.ui
 
-sudo snap restart harvest.serve
+sudo snap restart harvest.server
 sudo snap restart harvest.ui
 ```
 
