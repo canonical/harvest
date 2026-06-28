@@ -59,6 +59,7 @@ pub enum AgentEvent {
     Done { answer: String, sources: Vec<Source>, tool_calls_made: usize },
     Error { message: String },
     Question { question: String, choices: Vec<String> },
+    TitleUpdated { title: String },
 }
 
 pub struct Agent {
@@ -82,6 +83,10 @@ impl Agent {
             compaction_threshold_chars: usize::MAX,
             compaction_keep_last: 6,
         }
+    }
+
+    pub fn llm(&self) -> &Arc<dyn LlmProvider> {
+        &self.llm
     }
 
     pub fn with_compaction(mut self, threshold_chars: usize, keep_last: usize) -> Self {
