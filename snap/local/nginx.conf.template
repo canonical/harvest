@@ -27,8 +27,14 @@ http {
     uwsgi_temp_path        ${SNAP_COMMON}/nginx-tmp/uwsgi;
     scgi_temp_path         ${SNAP_COMMON}/nginx-tmp/scgi;
 
-    sendfile       on;
+    sendfile        on;
+    tcp_nodelay     on;
     keepalive_timeout 65;
+
+    # Gzip would buffer the entire response before compressing, which breaks
+    # Server-Sent Events streams. Disable it explicitly even though it is off
+    # by default, because some nginx builds enable it for text/* types.
+    gzip off;
 
     server {
         listen  ${UI_HOST}:${UI_PORT};
@@ -44,8 +50,8 @@ http {
             proxy_set_header    Connection '';
             proxy_set_header    Host $host;
             proxy_set_header    X-Real-IP $remote_addr;
-            proxy_read_timeout  300s;
-            proxy_send_timeout  300s;
+            proxy_read_timeout  3600s;
+            proxy_send_timeout  3600s;
             proxy_buffering     off;
             proxy_cache         off;
         }
