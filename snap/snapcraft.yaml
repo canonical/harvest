@@ -69,6 +69,14 @@ description: |
   ui.host                     Web UI bind address          (default: 127.0.0.1)
   ui.port                     Web UI port                  (default: 3000)
 
+  Harvester (ingest-code command)
+  ────────────────────────────────
+  harvester.clone-root        Repo clone directory         (default: $SNAP_COMMON/repos)
+
+  Ingest repositories into the knowledge graph:
+    1. Write [[repositories]] blocks to $SNAP_COMMON/repositories.toml
+    2. harvest.ingest-code [-f /path/to/repositories.toml] [--force]
+
 grade: devel
 confinement: strict
 
@@ -90,6 +98,11 @@ apps:
     plugs:
       - network       # nginx proxy to knowledge-server
       - network-bind  # bind to ui.port
+
+  ingest-code:
+    command: bin/wrapper-ingest-code
+    plugs:
+      - network       # reach Neo4j and the LLM API
 
 parts:
   # ── Rust binaries ──────────────────────────────────────────────────────────
@@ -118,6 +131,8 @@ parts:
         "$SNAPCRAFT_PART_INSTALL/bin/knowledge-server"
       install -Dm755 target/release/harvest-agent \
         "$SNAPCRAFT_PART_INSTALL/bin/harvest-agent"
+      install -Dm755 target/release/knowledge-harvester \
+        "$SNAPCRAFT_PART_INSTALL/bin/knowledge-harvester"
 
   # ── Web UI static assets ───────────────────────────────────────────────────
   # Vite produces a self-contained dist/ bundle served by nginx at runtime.
@@ -147,4 +162,5 @@ parts:
     organize:
       wrapper-serve:           bin/wrapper-serve
       wrapper-ui:              bin/wrapper-ui
+      wrapper-ingest-code:     bin/wrapper-ingest-code
       nginx.conf.template:     etc/harvest/nginx.conf.template
