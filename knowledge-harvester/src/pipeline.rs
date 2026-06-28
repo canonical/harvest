@@ -17,7 +17,9 @@ pub struct Pipeline {
 
 impl Pipeline {
     pub async fn new(config: Config) -> Result<Self> {
-        let mut git = GitClient::new(config.storage.clone_root.clone());
+        let clone_root = std::env::temp_dir().join("harvest-repos");
+        std::fs::create_dir_all(&clone_root)?;
+        let mut git = GitClient::new(clone_root);
         if let Some(git_cfg) = &config.git {
             git = git.with_ssh_key(git_cfg.ssh_key_path.clone(), git_cfg.ssh_passphrase.clone());
         }
@@ -80,6 +82,10 @@ impl Pipeline {
                 continue;
             }
             self.process_version(&repo_path, &repo.name, &tag.name, tag.timestamp).await?;
+        }
+
+        if let Err(e) = std::fs::remove_dir_all(&repo_path) {
+            tracing::warn!(repo = repo.name, error = %e, "failed to remove cloned repository");
         }
         Ok(())
     }
