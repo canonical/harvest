@@ -1342,12 +1342,17 @@ a.source-chip:hover .source-chip__name {
   display: inline-flex;
   align-items: center;
   vertical-align: middle;
+  gap: 0.5rem;
   margin: 0.25rem 0;
 }
 .loading-orbit svg {
-  width: 1.5rem;
-  height: 1.5rem;
+  width: 2rem;
+  height: 2rem;
   animation: orbit-spin 1.5s linear infinite;
+}
+.loading-orbit__label {
+  font-size: 0.9rem;
+  color: var(--text-muted);
 }
 
 @keyframes orbit-spin {
