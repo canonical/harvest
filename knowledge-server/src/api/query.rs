@@ -1,6 +1,6 @@
 use axum::{
     extract::{Extension, State},
-    http::StatusCode,
+    http::{HeaderName, HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -74,7 +74,7 @@ pub async fn handle_query_stream(
     Extension(user): Extension<Claims>,
     State(qs): State<Arc<QueryState>>,
     Json(req): Json<QueryRequest>,
-) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+) -> impl IntoResponse {
     let attachments = req.attachments.unwrap_or_default();
     let history = load_history_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
     let compacted = qs.agent.compact_history(&history).await;
@@ -128,7 +128,12 @@ pub async fn handle_query_stream(
         Ok::<Event, Infallible>(Event::default().data(data))
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    response
 }
 
 async fn load_history_if_needed(
