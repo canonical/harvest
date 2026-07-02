@@ -1,8 +1,8 @@
 #!/bin/bash
 # Wrapper for the web UI.
-# Generates an nginx config from the snap config values and starts nginx
-# in the foreground.  nginx serves the static Vite build and reverse-proxies
-# all API paths to knowledge-server.
+# Exports snap config values as environment variables and starts Caddy.
+# Caddy serves the static Vite build and reverse-proxies all API paths to
+# knowledge-server using the Caddyfile at $SNAP/etc/harvest/Caddyfile.
 set -eu
 
 UI_HOST=$(snapctl get ui.host)
@@ -15,22 +15,12 @@ SERVER_PORT=$(snapctl get server.port)
 : "${SERVER_HOST:=127.0.0.1}"
 : "${SERVER_PORT:=8080}"
 
-# nginx requires writable temp directories.
-mkdir -p \
-  "$SNAP_COMMON/nginx-tmp/client_body" \
-  "$SNAP_COMMON/nginx-tmp/proxy" \
-  "$SNAP_COMMON/nginx-tmp/fastcgi" \
-  "$SNAP_COMMON/nginx-tmp/uwsgi" \
-  "$SNAP_COMMON/nginx-tmp/scgi"
-
-# Substitute runtime values into the config template.
-# The explicit variable list prevents envsubst from touching nginx's own
-# $-variables such as $uri and $host.
-export SNAP SNAP_COMMON UI_HOST UI_PORT SERVER_HOST SERVER_PORT
-envsubst '${SNAP} ${SNAP_COMMON} ${UI_HOST} ${UI_PORT} ${SERVER_HOST} ${SERVER_PORT}' \
-  < "$SNAP/etc/harvest/nginx.conf.template" \
-  > "$SNAP_COMMON/nginx.conf"
+export UI_HOST UI_PORT SERVER_HOST SERVER_PORT SNAP SNAP_COMMON
+# Point Caddy's runtime data paths to the writable snap area.
+export XDG_DATA_HOME="$SNAP_COMMON"
+export XDG_CONFIG_HOME="$SNAP_COMMON"
+export XDG_CACHE_HOME="$SNAP_COMMON"
 
 echo "Harvest UI  →  http://${UI_HOST}:${UI_PORT}"
 echo "API server  →  http://${SERVER_HOST}:${SERVER_PORT}"
-exec "$SNAP/usr/sbin/nginx" -c "$SNAP_COMMON/nginx.conf"
+exec "$SNAP/bin/caddy" run --config "$SNAP/etc/harvest/Caddyfile"
