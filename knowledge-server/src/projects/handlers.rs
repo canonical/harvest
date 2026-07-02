@@ -1,6 +1,6 @@
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderName, HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -305,7 +305,12 @@ pub async fn project_events(
     let stream = tokio_stream::iter(init)
         .chain(GuardedStream { inner: broadcast_stream, _guard: guard });
 
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    response
 }
 
 async fn load_project_history(
@@ -1312,7 +1317,12 @@ pub async fn run_task(
 
     let stream = ReceiverStream::new(sse_rx)
         .map(|data| Ok::<Event, Infallible>(Event::default().data(data)));
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    response
 }
 
 async fn execute_dag(
