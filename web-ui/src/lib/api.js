@@ -34,22 +34,33 @@ async function consumeSseStream(response, onEvent) {
   const decoder = new TextDecoder();
   let buffer = '';
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-
-    const events = buffer.split('\n\n');
-    buffer = events.pop() ?? '';
-
-    for (const block of events) {
-      for (const line of block.split('\n')) {
-        if (!line.startsWith('data: ')) continue;
-        try { onEvent(JSON.parse(line.slice(6).trim())); } catch {}
-      }
-      await Promise.resolve();
+  function processBlock(block) {
+    for (const line of block.split('\n')) {
+      if (!line.startsWith('data: ')) continue;
+      try { onEvent(JSON.parse(line.slice(6).trim())); } catch {}
     }
+  }
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      buffer = buffer.replace(/\r\n/g, '\n');
+
+      const events = buffer.split('\n\n');
+      buffer = events.pop() ?? '';
+
+      for (const block of events) {
+        processBlock(block);
+        await Promise.resolve();
+      }
+    }
+
+    if (buffer.trim()) processBlock(buffer);
+  } finally {
+    reader.releaseLock();
   }
 }
 
