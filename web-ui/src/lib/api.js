@@ -48,8 +48,6 @@ async function consumeSseStream(response, onEvent) {
         if (!line.startsWith('data: ')) continue;
         try { onEvent(JSON.parse(line.slice(6).trim())); } catch {}
       }
-      // Yield to Vue's scheduler so DOM updates are flushed between events,
-      // even when multiple SSE events arrive in a single network chunk.
       await Promise.resolve();
     }
   }
