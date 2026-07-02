@@ -323,13 +323,18 @@ async fn agent_events_handler(
         _guard: guard,
     };
 
-    Sse::new(init_stream.chain(command_stream))
+    let mut response = Sse::new(init_stream.chain(command_stream))
         .keep_alive(
             KeepAlive::new()
                 .interval(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS))
                 .text("keep-alive"),
         )
-        .into_response()
+        .into_response();
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-accel-buffering"),
+        header::HeaderValue::from_static("no"),
+    );
+    response
 }
 
 async fn agent_results_handler(
