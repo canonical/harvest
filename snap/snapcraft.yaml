@@ -1,6 +1,6 @@
 name: harvest
 base: core24
-version: '0.5.0'
+version: '0.6.0'
 summary: AI-powered code knowledge graph server and web interface
 description: |
   Harvest exposes an AI-powered HTTP API and web interface for querying code
