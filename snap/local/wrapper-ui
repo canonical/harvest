@@ -1,8 +1,9 @@
 #!/bin/bash
 # Wrapper for the web UI.
-# Exports snap config values as environment variables and starts Caddy.
-# Caddy serves the static Vite build and reverse-proxies all API paths to
-# knowledge-server using the Caddyfile at $SNAP/etc/harvest/Caddyfile.
+# Generates a Caddyfile from snap config values and starts Caddy in the
+# foreground. Caddy serves the static Vite build and reverse-proxies all
+# API paths to knowledge-server.
+# Caddy's own {placeholders} have no $ prefix so bash leaves them unexpanded.
 set -eu
 
 UI_HOST=$(snapctl get ui.host)
@@ -15,12 +16,41 @@ SERVER_PORT=$(snapctl get server.port)
 : "${SERVER_HOST:=127.0.0.1}"
 : "${SERVER_PORT:=8080}"
 
-export UI_HOST UI_PORT SERVER_HOST SERVER_PORT SNAP SNAP_COMMON
 # Point Caddy's runtime data paths to the writable snap area.
 export XDG_DATA_HOME="$SNAP_COMMON"
 export XDG_CONFIG_HOME="$SNAP_COMMON"
 export XDG_CACHE_HOME="$SNAP_COMMON"
 
+cat > "$SNAP_COMMON/Caddyfile" << EOF
+{
+	auto_https     off
+	admin          off
+	persist_config off
+}
+
+${UI_HOST}:${UI_PORT} {
+	@api path_regexp ^/(auth|admin|conversations|groups|projects|query|repositories|graph|health|tool-description|docs|agents|agent)(/|$)
+
+	handle @api {
+		reverse_proxy ${SERVER_HOST}:${SERVER_PORT} {
+			header_up Host       {host}
+			header_up X-Real-IP  {remote_host}
+			flush_interval -1
+			transport http {
+				read_timeout  3600s
+				write_timeout 3600s
+			}
+		}
+	}
+
+	handle {
+		root * ${SNAP}/share/harvest-ui
+		try_files {path} {path}/ /index.html
+		file_server
+	}
+}
+EOF
+
 echo "Harvest UI  →  http://${UI_HOST}:${UI_PORT}"
 echo "API server  →  http://${SERVER_HOST}:${SERVER_PORT}"
-exec "$SNAP/bin/caddy" run --config "$SNAP/etc/harvest/Caddyfile"
+exec "$SNAP/bin/caddy" run --config "$SNAP_COMMON/Caddyfile"

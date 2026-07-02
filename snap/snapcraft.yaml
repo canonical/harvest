@@ -177,4 +177,3 @@ parts:
       wrapper-server:          bin/wrapper-server
       wrapper-ui:              bin/wrapper-ui
       wrapper-ingest-code:     bin/wrapper-ingest-code
-      Caddyfile:               etc/harvest/Caddyfile
