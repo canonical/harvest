@@ -1,6 +1,6 @@
 name: harvest
 base: core24
-version: '0.9.0'
+version: '0.10.0'
 summary: AI-powered code knowledge graph server and web interface
 description: |
   Harvest exposes an AI-powered HTTP API and web interface for querying code
@@ -90,8 +90,8 @@ apps:
     install-mode: disable
     restart-condition: on-failure
     plugs:
-      - network       # reach Neo4j and the LLM API
-      - network-bind  # bind to server.port
+      - network
+      - network-bind
 
   ui:
     command: bin/wrapper-ui
@@ -99,20 +99,15 @@ apps:
     install-mode: disable
     restart-condition: on-failure
     plugs:
-      - network       # caddy proxy to knowledge-server
-      - network-bind  # bind to ui.port
+      - network
+      - network-bind
 
   ingest-code:
     command: bin/wrapper-ingest-code
     plugs:
-      - network       # reach Neo4j and the LLM API
+      - network
 
 parts:
-  # ── Rust binaries ──────────────────────────────────────────────────────────
-  # Build knowledge-server and harvest-agent from the workspace.
-  # apt Rust (≥1.75 on Ubuntu 24.04) is used instead of the rust plugin
-  # because the plugin invokes rustup which requires static.rust-lang.org.
-  # rust-toolchain.toml is removed before building to avoid rustup complaints.
   rust-binaries:
     plugin: nil
     source: .
@@ -137,8 +132,6 @@ parts:
       install -Dm755 target/release/knowledge-harvester \
         "$SNAPCRAFT_PART_INSTALL/bin/knowledge-harvester"
 
-  # ── Web UI static assets ───────────────────────────────────────────────────
-  # Vite produces a self-contained dist/ bundle served by Caddy at runtime.
   web-ui:
     plugin: nil
     source: web-ui/
@@ -151,9 +144,6 @@ parts:
       mkdir -p "$SNAPCRAFT_PART_INSTALL/share/harvest-ui"
       cp -r dist/. "$SNAPCRAFT_PART_INSTALL/share/harvest-ui/"
 
-  # ── Caddy ──────────────────────────────────────────────────────────────────
-  # Download the official static Caddy binary; verify with the SHA-512 digest
-  # published alongside each release.
   caddy:
     plugin: nil
     build-packages:
@@ -169,7 +159,6 @@ parts:
       tar -xzf caddy.tar.gz caddy
       install -Dm755 caddy "$SNAPCRAFT_PART_INSTALL/bin/caddy"
 
-  # ── Wrapper scripts and static config ─────────────────────────────────────
   wrappers:
     plugin: dump
     source: snap/local/

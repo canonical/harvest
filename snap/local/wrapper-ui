@@ -1,9 +1,4 @@
 #!/bin/bash
-# Wrapper for the web UI.
-# Generates a Caddyfile from snap config values and starts Caddy in the
-# foreground. Caddy serves the static Vite build and reverse-proxies all
-# API paths to knowledge-server.
-# Caddy's own {placeholders} have no $ prefix so bash leaves them unexpanded.
 set -eu
 
 UI_HOST=$(snapctl get ui.host)
@@ -16,7 +11,6 @@ SERVER_PORT=$(snapctl get server.port)
 : "${SERVER_HOST:=127.0.0.1}"
 : "${SERVER_PORT:=8080}"
 
-# Point Caddy's runtime data paths to the writable snap area.
 export XDG_DATA_HOME="$SNAP_COMMON"
 export XDG_CONFIG_HOME="$SNAP_COMMON"
 export XDG_CACHE_HOME="$SNAP_COMMON"
