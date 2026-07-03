@@ -88,7 +88,8 @@ pub async fn list_groups(
 ) -> Result<impl IntoResponse, ApiError> {
     let rows = state.neo4j.query_read(
         "MATCH (g:Group)
-         RETURN g.id AS id, g.name AS name, g.description AS description, g.created_at AS created_at
+         RETURN g.id AS id, g.name AS name, g.description AS description, g.created_at AS created_at,
+                coalesce(g.is_default, false) AS is_default
          ORDER BY g.name",
         json!({}),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
@@ -111,8 +112,8 @@ pub async fn create_group(
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let rows = state.neo4j.query_read(
-        "CREATE (g:Group {id: $id, name: $name, description: $description, created_at: $created_at})
-         RETURN g.id AS id, g.name AS name, g.description AS description",
+        "CREATE (g:Group {id: $id, name: $name, description: $description, created_at: $created_at, is_default: false})
+         RETURN g.id AS id, g.name AS name, g.description AS description, g.is_default AS is_default",
         json!({
             "id": id,
             "name": body.name,
@@ -122,6 +123,23 @@ pub async fn create_group(
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     Ok((StatusCode::CREATED, Json(rows.into_iter().next().unwrap_or(json!({})))))
+}
+
+#[derive(Deserialize)]
+pub struct SetGroupDefaultBody {
+    pub is_default: bool,
+}
+
+pub async fn set_group_default(
+    State(state): State<Arc<AuthState>>,
+    Path(group_id): Path<String>,
+    Json(body): Json<SetGroupDefaultBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    state.neo4j.query_read(
+        "MATCH (g:Group {id: $id}) SET g.is_default = $is_default RETURN g.id AS id",
+        json!({ "id": group_id, "is_default": body.is_default }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn delete_group(

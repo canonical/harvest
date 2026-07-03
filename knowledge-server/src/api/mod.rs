@@ -240,6 +240,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .route("/admin/groups",         get(crate::admin::handlers::list_groups)
                                        .post(crate::admin::handlers::create_group))
         .route("/admin/groups/:id",     delete(crate::admin::handlers::delete_group))
+        .route("/admin/groups/:id/default", put(crate::admin::handlers::set_group_default))
         .with_state(Arc::clone(&auth_state))
         .layer(from_fn_with_state(Arc::clone(&jwt_secret), auth::require_admin));
 
