@@ -98,9 +98,21 @@ pub async fn register(
     })?;
 
     let user = rows.into_iter().next().ok_or_else(|| err(StatusCode::CONFLICT, "email already registered"))?;
+    assign_default_groups(&state, &id).await?;
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
     Ok((jar.add(make_token_cookie(token)), Json(json!({ "ok": true }))))
+}
+
+async fn assign_default_groups(state: &AuthState, user_id: &str) -> Result<(), ApiError> {
+    state.neo4j.query_read(
+        "MATCH (u:User {id: $id})
+         MATCH (g:Group {is_default: true})
+         MERGE (u)-[:MEMBER_OF]->(g)
+         RETURN u.id AS id",
+        json!({ "id": user_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -255,7 +267,7 @@ pub async fn google_callback(
            u.provider = 'google', u.created_at = $created_at,
            u.role = CASE WHEN n = 0 THEN 'admin' ELSE 'regular' END
          ON MATCH SET u.email = $email, u.name = $name
-         RETURN u.id AS id, u.email AS email, u.name AS name, u.role AS role",
+         RETURN u.id AS id, u.email AS email, u.name AS name, u.role AS role, u.id = $id AS is_new",
         json!({
             "google_id": google_user.id,
             "id": id,
@@ -266,6 +278,9 @@ pub async fn google_callback(
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     let user = rows.into_iter().next().ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    if user["is_new"].as_bool().unwrap_or(false) {
+        assign_default_groups(&state, user["id"].as_str().unwrap_or_default()).await?;
+    }
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
     let _ = session; // session consumed above to validate state
@@ -384,7 +399,7 @@ pub async fn oidc_callback(
            u.role = CASE WHEN n = 0 THEN 'admin' ELSE 'regular' END
          ON MATCH SET u.name = $name
          SET u.oidc_sub = $oidc_sub
-         RETURN u.id AS id, u.email AS email, u.name AS name, u.role AS role",
+         RETURN u.id AS id, u.email AS email, u.name AS name, u.role AS role, u.id = $id AS is_new",
         serde_json::json!({
             "oidc_sub": user_info.sub,
             "id": id,
@@ -404,6 +419,9 @@ pub async fn oidc_callback(
             tracing::error!("OIDC user upsert returned no rows");
             err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
         })?;
+    if user["is_new"].as_bool().unwrap_or(false) {
+        assign_default_groups(&state, user["id"].as_str().unwrap_or_default()).await?;
+    }
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
     Ok((jar.add(make_token_cookie(token)), Redirect::to("/")))
