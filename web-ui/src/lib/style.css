@@ -2926,6 +2926,11 @@ a.source-chip:hover .source-chip__name {
   padding: 0.75rem 0;
 }
 
+.admin-panel-hint {
+  font-size: 0.875rem;
+  margin: 0 0 0.75rem;
+}
+
 .admin-checklist {
   display: flex;
   flex-direction: column;

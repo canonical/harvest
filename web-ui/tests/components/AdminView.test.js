@@ -87,4 +87,27 @@ describe('AdminView', () => {
     expect(w.find('.modal, dialog').exists()).toBe(true);
     expect(w.find('input[name="group-name"], #group-name-input').exists() || w.text().match(/group name/i)).toBeTruthy();
   });
+
+  it('toggles a group as default for new users', async () => {
+    mockFetch({ groups: [
+      { id: 'g1', name: 'Engineering', description: 'Dev team', is_default: false },
+      { id: 'g2', name: 'Design',      description: '',         is_default: true },
+    ] });
+    const w = mount(AdminView, { global: { plugins: [createPinia()] } });
+    await flushPromises();
+    const groupsTabBtn = w.findAll('button').find(b => b.text().match(/groups/i));
+    await groupsTabBtn.trigger('click');
+
+    const checkboxes = w.findAll('input[type="checkbox"]');
+    expect(checkboxes[0].element.checked).toBe(false);
+    expect(checkboxes[1].element.checked).toBe(true);
+
+    await checkboxes[0].setValue(true);
+    await flushPromises();
+
+    const call = global.fetch.mock.calls.find(([url]) => url.includes('/admin/groups/g1/default'));
+    expect(call).toBeDefined();
+    expect(call[1].method).toBe('PUT');
+    expect(JSON.parse(call[1].body)).toEqual({ is_default: true });
+  });
 });
