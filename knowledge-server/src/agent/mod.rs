@@ -184,7 +184,8 @@ impl Agent {
             .collect::<Vec<_>>()
             .join("\n");
         let prompt = format!(
-            "In one sentence, describe what these tool calls are trying to find out. \
+            "In one first-person sentence, state the intent behind making these tool calls — \
+             what you're trying to accomplish and why, e.g. \"To find X, I need to get Y from Z\". \
              Be concrete and mention key values. No trailing punctuation.\n{calls_text}"
         );
         match self.llm.chat(&[Message::user(prompt)], &[]).await {
