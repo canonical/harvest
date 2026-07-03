@@ -21,7 +21,7 @@ impl ParserRegistry {
     pub fn with_defaults() -> Self {
         use language::*;
 
-        let entries: Vec<(Arc<dyn LanguageParser>)> = vec![
+        let entries: Vec<Arc<dyn LanguageParser>> = vec![
             Arc::new(RustParser),
             Arc::new(PythonParser),
             Arc::new(TypeScriptParser),
