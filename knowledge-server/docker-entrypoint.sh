@@ -8,7 +8,6 @@ fi
 
 # Validate required variables.
 : "${JWT_SECRET:?JWT_SECRET environment variable is required}"
-: "${LLM_API_KEY:?LLM_API_KEY environment variable is required}"
 
 CONFIG=/tmp/server.toml
 
@@ -32,58 +31,88 @@ password = "${NEO4J_PASSWORD:-devpassword}"
 [auth]
 jwt_secret        = "${JWT_SECRET}"
 allow_local_login = ${ALLOW_LOCAL_LOGIN:-true}
+
+[agent]
+max_iterations = ${LLM_MAX_ITERATIONS:-20}
 EOF
 
-# LLM section — provider-specific fields differ.
-LLM_PROVIDER="${LLM_PROVIDER:-anthropic}"
-LLM_MAX_ITERATIONS="${LLM_MAX_ITERATIONS:-20}"
-LLM_TIMEOUT_SECS="${LLM_TIMEOUT_SECS:-120}"
-LLM_MAX_RETRIES="${LLM_MAX_RETRIES:-3}"
+# Appends one [[llm]] block, reading fields from the env vars named
+# ${1}_PROVIDER, ${1}_MODEL, ${1}_API_KEY, etc. (indirect lookup via eval,
+# since POSIX sh has no arrays/namerefs). $1 is "LLM" for the legacy flat
+# single-provider vars, or "LLM_<NAME>" for a named multi-provider block.
+# Note: max_iterations is NOT a per-provider field — it's set once above,
+# under [agent], since LlmProviderConfig has no such field (config.rs).
+emit_llm_block() {
+  prefix="$1"
+  eval "provider=\"\${${prefix}_PROVIDER:-}\""
+  eval "model=\"\${${prefix}_MODEL:-}\""
+  eval "api_key=\"\${${prefix}_API_KEY:-}\""
+  eval "base_url=\"\${${prefix}_BASE_URL:-}\""
+  eval "priority=\"\${${prefix}_PRIORITY:-0}\""
+  eval "timeout_secs=\"\${${prefix}_TIMEOUT_SECS:-120}\""
+  eval "max_retries=\"\${${prefix}_MAX_RETRIES:-3}\""
 
-case "$LLM_PROVIDER" in
-  anthropic)
-    cat >> "$CONFIG" << EOF
+  : "${provider:?${prefix}_PROVIDER environment variable is required}"
+  : "${api_key:?${prefix}_API_KEY environment variable is required}"
+
+  case "$provider" in
+    anthropic)
+      cat >> "$CONFIG" << EOF
 
 [[llm]]
 provider       = "anthropic"
-model          = "${LLM_MODEL:-claude-sonnet-4-6}"
-api_key        = "${LLM_API_KEY}"
-max_iterations = ${LLM_MAX_ITERATIONS}
-timeout_secs   = ${LLM_TIMEOUT_SECS}
-max_retries    = ${LLM_MAX_RETRIES}
+model          = "${model:-claude-sonnet-4-6}"
+api_key        = "${api_key}"
+timeout_secs   = ${timeout_secs}
+max_retries    = ${max_retries}
+priority       = ${priority}
 EOF
-    ;;
-  gemini)
-    cat >> "$CONFIG" << EOF
+      ;;
+    gemini)
+      cat >> "$CONFIG" << EOF
 
 [[llm]]
 provider       = "gemini"
-model          = "${LLM_MODEL:-gemini-2.5-flash-preview-05-20}"
-api_key        = "${LLM_API_KEY}"
-max_iterations = ${LLM_MAX_ITERATIONS}
-timeout_secs   = ${LLM_TIMEOUT_SECS}
-max_retries    = ${LLM_MAX_RETRIES}
+model          = "${model:-gemini-2.5-flash-preview-05-20}"
+api_key        = "${api_key}"
+timeout_secs   = ${timeout_secs}
+max_retries    = ${max_retries}
+priority       = ${priority}
 EOF
-    ;;
-  openai-compatible)
-    : "${LLM_BASE_URL:?LLM_BASE_URL is required when LLM_PROVIDER=openai-compatible}"
-    cat >> "$CONFIG" << EOF
+      ;;
+    openai-compatible)
+      : "${base_url:?${prefix}_BASE_URL is required when ${prefix}_PROVIDER=openai-compatible}"
+      cat >> "$CONFIG" << EOF
 
 [[llm]]
 provider       = "openai-compatible"
-base_url       = "${LLM_BASE_URL}"
-api_key        = "${LLM_API_KEY}"
-model          = "${LLM_MODEL}"
-max_iterations = ${LLM_MAX_ITERATIONS}
-timeout_secs   = ${LLM_TIMEOUT_SECS}
-max_retries    = ${LLM_MAX_RETRIES}
+base_url       = "${base_url}"
+api_key        = "${api_key}"
+model          = "${model}"
+timeout_secs   = ${timeout_secs}
+max_retries    = ${max_retries}
+priority       = ${priority}
 EOF
-    ;;
-  *)
-    echo "ERROR: unknown LLM_PROVIDER=${LLM_PROVIDER} (expected: anthropic, gemini, openai-compatible)" >&2
-    exit 1
-    ;;
-esac
+      ;;
+    *)
+      echo "ERROR: unknown ${prefix}_PROVIDER=${provider} (expected: anthropic, gemini, openai-compatible)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+# Multi-provider: any LLM_<NAME>_PROVIDER var (e.g. LLM_GEMINI_PROVIDER,
+# LLM_CLAUDE_PROVIDER) defines a named provider block. Falls back to the
+# legacy flat LLM_PROVIDER/LLM_MODEL/LLM_API_KEY vars when none are set.
+llm_names=$(env | sed -n 's/^LLM_\(.*\)_PROVIDER=.*/\1/p' | sort)
+
+if [ -n "$llm_names" ]; then
+  for name in $llm_names; do
+    emit_llm_block "LLM_${name}"
+  done
+else
+  emit_llm_block "LLM"
+fi
 
 # Optional: Google OAuth
 if [ -n "${GOOGLE_CLIENT_ID:-}" ]; then
