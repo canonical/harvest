@@ -323,3 +323,4 @@ export const updateUserRole      = (id, role)     => adminFetch(`/admin/users/${
 export const updateUserGroups    = (id, groupIds) => adminFetch(`/admin/users/${encodeURIComponent(id)}/groups`, { method: 'PUT', body: JSON.stringify({ group_ids: groupIds }) });
 export const createAdminGroup    = (name, desc)   => adminFetch('/admin/groups', { method: 'POST', body: JSON.stringify({ name, description: desc }) });
 export const deleteAdminGroup    = (id)           => adminFetch(`/admin/groups/${encodeURIComponent(id)}`, { method: 'DELETE' });
+export const setGroupDefault     = (id, isDefault) => adminFetch(`/admin/groups/${encodeURIComponent(id)}/default`, { method: 'PUT', body: JSON.stringify({ is_default: isDefault }) });

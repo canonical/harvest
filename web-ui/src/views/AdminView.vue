@@ -84,6 +84,7 @@
       <div class="admin-panel-toolbar">
         <button class="p-button--positive" type="button" @click="openCreateGroup">+ Add group</button>
       </div>
+      <p class="u-text--muted admin-panel-hint">Default groups are automatically assigned to every new user on registration.</p>
       <div v-if="!groups.length" class="admin-empty">
         <p>No groups yet. Create one to get started.</p>
       </div>
@@ -94,6 +95,7 @@
               <th>Name</th>
               <th>Description</th>
               <th>Members</th>
+              <th>Default for new users</th>
               <th aria-label="Actions"></th>
             </tr>
           </thead>
@@ -102,6 +104,11 @@
               <td class="admin-group-name">{{ g.name }}</td>
               <td class="u-text--muted">{{ g.description || '—' }}</td>
               <td class="admin-member-count">{{ memberCount(g.id) }}</td>
+              <td>
+                <label class="admin-checklist-item">
+                  <input type="checkbox" :checked="g.is_default" :aria-label="`Default group ${g.name}`" @change="toggleGroupDefault(g, $event.target.checked)" />
+                </label>
+              </td>
               <td>
                 <button class="p-button--negative p-button--small" type="button" :aria-label="`Delete group ${g.name}`" @click="doDeleteGroup(g)">Delete</button>
               </td>
@@ -188,6 +195,7 @@ import {
   updateUserGroups,
   createAdminGroup,
   deleteAdminGroup,
+  setGroupDefault,
 } from '../lib/api.js';
 
 const users  = ref([]);
@@ -283,6 +291,16 @@ async function submitCreateGroup() {
     createGroupError.value = e.message;
   } finally {
     submitting.value = false;
+  }
+}
+
+async function toggleGroupDefault(group, isDefault) {
+  try {
+    await setGroupDefault(group.id, isDefault);
+    group.is_default = isDefault;
+    showToast(isDefault ? `"${group.name}" is now a default group.` : `"${group.name}" is no longer a default group.`);
+  } catch (e) {
+    showToast(e.message, 'negative');
   }
 }
 
