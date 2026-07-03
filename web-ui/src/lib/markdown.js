@@ -85,6 +85,14 @@ export function formatCitation({ repo, version, file, line }) {
   return `${repo} ${version} · ${filename}:${line}`;
 }
 
+export function buildCitationIndex(sources) {
+  const index = {};
+  (sources ?? []).forEach((src, i) => {
+    index[`${src.repo}:${src.version}:${src.file}:${src.line}`] = i + 1;
+  });
+  return index;
+}
+
 export function parseCitations(text) {
   const seen = new Set();
   const results = [];
