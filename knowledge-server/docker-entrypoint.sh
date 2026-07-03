@@ -44,7 +44,7 @@ case "$LLM_PROVIDER" in
   anthropic)
     cat >> "$CONFIG" << EOF
 
-[llm]
+[[llm]]
 provider       = "anthropic"
 model          = "${LLM_MODEL:-claude-sonnet-4-6}"
 api_key        = "${LLM_API_KEY}"
@@ -56,7 +56,7 @@ EOF
   gemini)
     cat >> "$CONFIG" << EOF
 
-[llm]
+[[llm]]
 provider       = "gemini"
 model          = "${LLM_MODEL:-gemini-2.5-flash-preview-05-20}"
 api_key        = "${LLM_API_KEY}"
@@ -69,7 +69,7 @@ EOF
     : "${LLM_BASE_URL:?LLM_BASE_URL is required when LLM_PROVIDER=openai-compatible}"
     cat >> "$CONFIG" << EOF
 
-[llm]
+[[llm]]
 provider       = "openai-compatible"
 base_url       = "${LLM_BASE_URL}"
 api_key        = "${LLM_API_KEY}"
