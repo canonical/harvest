@@ -120,7 +120,7 @@
 import { computed, ref, watch, nextTick, onMounted } from 'vue';
 import ThinkingBlock from './ThinkingBlock.vue';
 import ToolCallStep  from './ToolCallStep.vue';
-import { renderMarkdown } from '../../lib/markdown.js';
+import { renderMarkdown, buildCitationIndex } from '../../lib/markdown.js';
 import { mountInlineGraphs } from '../../lib/inline-graph.js';
 import { avatarColor, initials } from '../../lib/utils.js';
 
@@ -147,7 +147,9 @@ const senderInitials = computed(() => initials(props.msg.username ?? 'You'));
 const senderColor    = computed(() => avatarColor(props.msg.username ?? 'You'));
 
 const renderedAnswer = computed(() =>
-  props.msg.answer ? renderMarkdown(props.msg.answer) : ''
+  props.msg.answer
+    ? renderMarkdown(props.msg.answer, props.repoUrlMap, buildCitationIndex(props.msg.sources))
+    : ''
 );
 
 onMounted(() => {
