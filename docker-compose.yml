@@ -32,6 +32,12 @@ services:
     depends_on:
       neo4j:
         condition: service_healthy
+    # Loads every var in .env into the container, including arbitrary
+    # LLM_<NAME>_* multi-provider vars (see LLM comment below) that can't be
+    # enumerated here since their names aren't known ahead of time. Entries
+    # under `environment:` still take precedence over same-named vars here.
+    env_file:
+      - .env
     environment:
       # Neo4j — reachable at localhost because port 7687 is published to the host.
       NEO4J_URI:      bolt://localhost:7687
@@ -42,6 +48,11 @@ services:
       JWT_SECRET: "${JWT_SECRET}"
 
       # LLM — set PROVIDER to anthropic, gemini, or openai-compatible.
+      # For multiple providers (with fallback priority), skip these flat vars
+      # and define LLM_<NAME>_PROVIDER / LLM_<NAME>_MODEL / LLM_<NAME>_API_KEY
+      # / LLM_<NAME>_PRIORITY (etc.) in .env instead — e.g. LLM_GEMINI_* and
+      # LLM_CLAUDE_*. Every LLM_<NAME>_PROVIDER found becomes its own [[llm]]
+      # block; these flat vars are only used when no named ones are set.
       LLM_PROVIDER: "${LLM_PROVIDER:-anthropic}"
       LLM_MODEL:    "${LLM_MODEL:-claude-sonnet-4-6}"
       LLM_API_KEY:  "${LLM_API_KEY}"
