@@ -60,6 +60,8 @@ fn memories_app(neo4j: Arc<Neo4jClient>) -> Router {
         neo4j:                      Arc::clone(&neo4j),
         registry:                   Arc::clone(&registry),
         skills:                     Arc::new(knowledge_server::skills::SkillRegistry::new()),
+        lxd:                        None,
+        server_url:                 "http://localhost".into(),
         max_iterations:             2,
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,

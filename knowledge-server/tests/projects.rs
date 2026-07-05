@@ -21,7 +21,7 @@ use knowledge_server::{
     auth::{self, jwt},
     llm::{
         LlmProvider,
-        types::{LlmResponse, Message, ToolDefinition},
+        types::{LlmResponse, Message, ToolCall, ToolDefinition},
     },
     machines::MachineRegistry,
     neo4j::Neo4jClient,
@@ -29,7 +29,8 @@ use knowledge_server::{
         ProjectState,
         create_conversation, create_project, delete_conversation, delete_project,
         get_conversation, get_project, list_conversations, list_projects,
-        project_query, project_query_stream, update_conversation, update_project,
+        project_query, project_query_stream, update_confirm_action,
+        update_conversation, update_project,
     },
 };
 
@@ -44,19 +45,38 @@ impl LlmProvider for FixedTextLlm {
     }
 }
 
+struct ScriptedLlm(std::sync::Mutex<std::collections::VecDeque<LlmResponse>>);
+impl ScriptedLlm {
+    fn new(responses: Vec<LlmResponse>) -> Arc<Self> {
+        Arc::new(Self(std::sync::Mutex::new(responses.into())))
+    }
+}
+#[async_trait]
+impl LlmProvider for ScriptedLlm {
+    async fn chat(&self, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
+        self.0.lock().unwrap().pop_front()
+            .ok_or_else(|| anyhow::anyhow!("ScriptedLlm: no more responses"))
+    }
+}
+
 const JWT_SECRET: &str = "test-projects-secret";
 
 fn projects_app(neo4j: Arc<Neo4jClient>) -> Router {
+    projects_app_with_llm(neo4j, FixedTextLlm::new("stub answer"))
+}
+
+fn projects_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn knowledge_server::llm::LlmProvider>) -> Router {
     let secret   = Arc::new(JWT_SECRET.to_string());
-    let llm: Arc<dyn knowledge_server::llm::LlmProvider> = FixedTextLlm::new("stub answer");
-    let agent    = Arc::new(Agent::new(Arc::clone(&llm), vec![], 2));
+    let agent    = Arc::new(Agent::new(Arc::clone(&llm), vec![], 4));
     let registry = MachineRegistry::new();
     let builder  = Arc::new(ProjectAgentBuilder {
         llm:                        Arc::clone(&llm),
         neo4j:                      Arc::clone(&neo4j),
         registry:                   Arc::clone(&registry),
         skills:                     Arc::new(knowledge_server::skills::SkillRegistry::new()),
-        max_iterations:             2,
+        lxd:                        None,
+        server_url:                 "http://localhost".into(),
+        max_iterations:             4,
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,
     });
@@ -70,6 +90,8 @@ fn projects_app(neo4j: Arc<Neo4jClient>) -> Router {
                route_get(list_conversations).post(create_conversation))
         .route("/projects/:pid/conversations/:cid",
                route_get(get_conversation).put(update_conversation).delete(delete_conversation))
+        .route("/projects/:pid/conversations/:cid/confirm-action",
+               axum::routing::patch(update_confirm_action))
         .route("/projects/:pid/query",        route_post(project_query))
         .route("/projects/:pid/query/stream", route_post(project_query_stream))
         .with_state(state)
@@ -137,6 +159,13 @@ fn req_del(uri: &str, token: &str) -> Request<Body> {
         .header("Cookie", cookie(token)).body(Body::empty()).unwrap()
 }
 
+fn req_patch(uri: &str, token: &str, body: Value) -> Request<Body> {
+    Request::builder().method("PATCH").uri(uri)
+        .header("Cookie", cookie(token))
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap())).unwrap()
+}
+
 fn req_get_anon(uri: &str) -> Request<Body> {
     Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()
 }
@@ -153,6 +182,17 @@ async fn send(app: Router, req: Request<Body>) -> (StatusCode, Value) {
     let bytes  = resp.into_body().collect().await.unwrap().to_bytes();
     let json   = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json)
+}
+
+async fn wait_for_message_count(app: Router, uri: &str, token: &str, expected: usize) -> Value {
+    for _ in 0..40 {
+        let (_, conv) = send(app.clone(), req_get(uri, token)).await;
+        if conv["messages"].as_array().map(|m| m.len()).unwrap_or(0) >= expected {
+            return conv;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("conversation at {uri} never reached {expected} messages");
 }
 
 mod auth_guards {
@@ -581,4 +621,208 @@ async fn project_query_succeeds_for_group_member() {
                  json!({"query":"what is the meaning of life?"}))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["answer"], "stub answer");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn second_turn_preserves_first_turns_sources_and_chain() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+
+    let llm = FixedTextLlm::new("see [myrepo:v1.0:src/lib.rs:42]");
+    let app = projects_app_with_llm(Arc::clone(&neo4j), llm);
+    let (_, project) = send(app.clone(),
+        req_post("/projects", &tok, json!({"name":"P","group_id":gid}))).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    let (_, conv) = send(app.clone(),
+        req_post(&format!("/projects/{pid}/conversations"), &tok, json!({}))).await;
+    let cid = conv["id"].as_str().unwrap().to_string();
+    let conv_uri = format!("/projects/{pid}/conversations/{cid}");
+
+    let (status, _) = send(app.clone(),
+        req_post(&format!("/projects/{pid}/query/stream"), &tok,
+                 json!({"query": "first question", "conversation_id": cid}))).await;
+    assert_eq!(status, StatusCode::OK);
+    wait_for_message_count(app.clone(), &conv_uri, &tok, 2).await;
+
+    let (status, _) = send(app.clone(),
+        req_post(&format!("/projects/{pid}/query/stream"), &tok,
+                 json!({"query": "second question", "conversation_id": cid}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let conv = wait_for_message_count(app, &conv_uri, &tok, 4).await;
+
+    let messages = conv["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 4);
+    let first_assistant = &messages[1];
+    assert_eq!(first_assistant["role"], "assistant");
+    assert!(
+        !first_assistant["sources"].as_array().unwrap().is_empty(),
+        "first turn's sources must survive being an older turn: {first_assistant}"
+    );
+    assert_eq!(first_assistant["sources"][0]["file"], "src/lib.rs");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn tool_call_chain_persists_with_preview() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+
+    let llm = ScriptedLlm::new(vec![
+        LlmResponse::ToolCalls {
+            calls: vec![ToolCall {
+                id: "tc1".into(), name: "list_agents".into(),
+                input: json!({}), thought_signature: None,
+            }],
+            preamble: "Checking connected agents".into(),
+        },
+        LlmResponse::Message { text: "No agents are connected.".into() },
+    ]);
+    let app = projects_app_with_llm(Arc::clone(&neo4j), llm);
+    let (_, project) = send(app.clone(),
+        req_post("/projects", &tok, json!({"name":"P","group_id":gid}))).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    let (_, conv) = send(app.clone(),
+        req_post(&format!("/projects/{pid}/conversations"), &tok, json!({}))).await;
+    let cid = conv["id"].as_str().unwrap().to_string();
+    let conv_uri = format!("/projects/{pid}/conversations/{cid}");
+
+    let (status, _) = send(app.clone(),
+        req_post(&format!("/projects/{pid}/query/stream"), &tok,
+                 json!({"query": "any agents?", "conversation_id": cid}))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let conv = wait_for_message_count(app, &conv_uri, &tok, 2).await;
+    let assistant = &conv["messages"].as_array().unwrap()[1];
+    let chain = assistant["chain"].as_array().unwrap();
+    let tool_call = chain.iter().find(|c| c["type"] == "tool_call")
+        .expect("expected a tool_call chain entry");
+    assert_eq!(tool_call["name"], "list_agents");
+    assert_eq!(tool_call["status"], "done");
+    assert!(!tool_call["preview"].is_null(), "preview must be captured: {tool_call}");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn ask_user_question_persists_across_reload() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+
+    let llm = ScriptedLlm::new(vec![
+        LlmResponse::ToolCalls {
+            calls: vec![ToolCall {
+                id: "tc1".into(), name: "ask_user".into(),
+                input: json!({
+                    "question": "Which environment?",
+                    "choices": ["staging", "production"],
+                }),
+                thought_signature: None,
+            }],
+            preamble: String::new(),
+        },
+    ]);
+    let app = projects_app_with_llm(Arc::clone(&neo4j), llm);
+    let (_, project) = send(app.clone(),
+        req_post("/projects", &tok, json!({"name":"P","group_id":gid}))).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    let (_, conv) = send(app.clone(),
+        req_post(&format!("/projects/{pid}/conversations"), &tok, json!({}))).await;
+    let cid = conv["id"].as_str().unwrap().to_string();
+    let conv_uri = format!("/projects/{pid}/conversations/{cid}");
+
+    let (status, _) = send(app.clone(),
+        req_post(&format!("/projects/{pid}/query/stream"), &tok,
+                 json!({"query": "deploy this", "conversation_id": cid}))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let conv = wait_for_message_count(app, &conv_uri, &tok, 2).await;
+    let assistant = &conv["messages"].as_array().unwrap()[1];
+    assert_eq!(assistant["question"]["question"], "Which environment?");
+    assert_eq!(assistant["question"]["choices"], json!(["staging", "production"]));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn confirm_action_persists_pending_then_patch_resolves_it() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+
+    let llm = ScriptedLlm::new(vec![
+        LlmResponse::ToolCalls {
+            calls: vec![ToolCall {
+                id: "tc1".into(), name: "delete_agent".into(),
+                input: json!({"agent_id": "bogus-agent"}),
+                thought_signature: None,
+            }],
+            preamble: String::new(),
+        },
+        LlmResponse::Message { text: "Deleting agent bogus-agent".into() },
+    ]);
+    let app = projects_app_with_llm(Arc::clone(&neo4j), llm);
+    let (_, project) = send(app.clone(),
+        req_post("/projects", &tok, json!({"name":"P","group_id":gid}))).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    let (_, conv) = send(app.clone(),
+        req_post(&format!("/projects/{pid}/conversations"), &tok, json!({}))).await;
+    let cid = conv["id"].as_str().unwrap().to_string();
+    let conv_uri = format!("/projects/{pid}/conversations/{cid}");
+
+    let (status, _) = send(app.clone(),
+        req_post(&format!("/projects/{pid}/query/stream"), &tok,
+                 json!({"query": "delete it", "conversation_id": cid}))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let conv = wait_for_message_count(app.clone(), &conv_uri, &tok, 2).await;
+    let assistant = &conv["messages"].as_array().unwrap()[1];
+    assert_eq!(assistant["confirm_action"]["name"], "delete_agent");
+    assert_eq!(assistant["confirm_action"]["input"]["agent_id"], "bogus-agent");
+    assert_eq!(assistant["confirm_action"]["status"], "pending");
+
+    let confirm_uri = format!("/projects/{pid}/conversations/{cid}/confirm-action");
+    let (status, _) = send(app.clone(),
+        req_patch(&confirm_uri, &tok,
+                  json!({"status": "done", "steps": [], "result_text": "Agent deleted."}))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, conv) = send(app, req_get(&conv_uri, &tok)).await;
+    let assistant = &conv["messages"].as_array().unwrap()[1];
+    assert_eq!(assistant["confirm_action"]["status"], "done");
+    assert_eq!(assistant["confirm_action"]["result_text"], "Agent deleted.");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn patch_confirm_action_404s_without_pending_action() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+
+    let app = projects_app(Arc::clone(&neo4j));
+    let (_, project) = send(app.clone(),
+        req_post("/projects", &tok, json!({"name":"P","group_id":gid}))).await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    let (_, conv) = send(app.clone(),
+        req_post(&format!("/projects/{pid}/conversations"), &tok, json!({}))).await;
+    let cid = conv["id"].as_str().unwrap().to_string();
+    let conv_uri = format!("/projects/{pid}/conversations/{cid}");
+
+    let (status, _) = send(app.clone(),
+        req_post(&format!("/projects/{pid}/query/stream"), &tok,
+                 json!({"query": "hello", "conversation_id": cid}))).await;
+    assert_eq!(status, StatusCode::OK);
+    wait_for_message_count(app.clone(), &conv_uri, &tok, 2).await;
+
+    let (status, _) = send(app,
+        req_patch(&format!("/projects/{pid}/conversations/{cid}/confirm-action"), &tok,
+                  json!({"status": "done", "steps": [], "result_text": "x"}))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

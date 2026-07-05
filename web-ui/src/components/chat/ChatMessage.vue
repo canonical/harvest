@@ -79,6 +79,20 @@
         </a>
       </div>
 
+      <div v-if="msg.confirmAction" class="message__confirm">
+        <p class="message__confirm-text">{{ msg.confirmAction.description }}</p>
+
+        <ProvisionSteps v-if="msg.confirmAction.steps.length" :steps="msg.confirmAction.steps" />
+
+        <div v-if="isLast && msg.confirmAction.status === 'pending'" class="confirm-actions">
+          <button class="p-button--negative" type="button" @click="$emit('confirm')">Confirm</button>
+          <button class="p-button--base" type="button" @click="$emit('deny')">Cancel</button>
+        </div>
+        <p v-else-if="msg.confirmAction.status === 'denied'" class="confirm-status confirm-status--denied">Cancelled</p>
+        <p v-else-if="msg.confirmAction.status === 'done'" class="confirm-status confirm-status--done">{{ msg.confirmAction.resultText }}</p>
+        <p v-else-if="msg.confirmAction.status === 'error'" class="confirm-status confirm-status--error">{{ msg.confirmAction.resultText }}</p>
+      </div>
+
       <div v-if="msg.question" class="message__question">
         <p class="message__question-text">{{ msg.question.question }}</p>
         <div class="question-choices">
@@ -120,6 +134,7 @@
 import { computed, ref, watch, nextTick, onMounted } from 'vue';
 import ThinkingBlock from './ThinkingBlock.vue';
 import ToolCallStep  from './ToolCallStep.vue';
+import ProvisionSteps from '../agents/ProvisionSteps.vue';
 import { renderMarkdown, buildCitationIndex } from '../../lib/markdown.js';
 import { mountInlineGraphs } from '../../lib/inline-graph.js';
 import { avatarColor, initials } from '../../lib/utils.js';
@@ -137,7 +152,7 @@ const props = defineProps({
   repoUrlMap: { type: Object, default: () => ({}) },
 });
 
-const emit = defineEmits(['choice']);
+const emit = defineEmits(['choice', 'confirm', 'deny']);
 
 const roleClass = computed(() =>
   props.msg.role === 'user' ? 'message--user' : 'message--assistant'
