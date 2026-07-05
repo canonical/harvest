@@ -13,4 +13,7 @@ pub trait Tool: Send + Sync {
     fn preview(&self, result: &str) -> String {
         result.chars().take(DEFAULT_PREVIEW_CHARS).collect()
     }
+    fn requires_confirmation(&self) -> bool {
+        false
+    }
 }

@@ -246,6 +246,48 @@ describe('setQuestion', () => {
   });
 });
 
+describe('setConfirmAction', () => {
+  it('attaches a pending confirmAction to the last assistant message', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.setConfirmAction('create_lxd_agent', { name: 'build-runner', flavor: 'small' }, 'Create a small agent named build-runner');
+    expect(last(s).confirmAction).toEqual({
+      name: 'create_lxd_agent',
+      input: { name: 'build-runner', flavor: 'small' },
+      description: 'Create a small agent named build-runner',
+      status: 'pending',
+      steps: [],
+      resultText: '',
+    });
+  });
+});
+
+describe('updateConfirmAction', () => {
+  it('merges a patch into the confirmAction of the last assistant message', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.setConfirmAction('delete_agent', { agent_id: 'abc' }, 'Delete agent abc');
+    s.updateConfirmAction({ status: 'running' });
+    expect(last(s).confirmAction.status).toBe('running');
+    expect(last(s).confirmAction.input).toEqual({ agent_id: 'abc' });
+  });
+
+  it('does nothing when there is no confirmAction on the last message', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    expect(() => s.updateConfirmAction({ status: 'running' })).not.toThrow();
+    expect(last(s).confirmAction).toBeUndefined();
+  });
+
+  it('replaces steps array rather than merging elements', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.setConfirmAction('create_lxd_agent', {}, 'desc');
+    s.updateConfirmAction({ steps: [{ id: 'ensure_network', status: 'active' }] });
+    expect(last(s).confirmAction.steps).toEqual([{ id: 'ensure_network', status: 'active' }]);
+  });
+});
+
 describe('suggestions', () => {
   it('setSuggestions stores choices', () => {
     const s = useChatStore();
@@ -325,6 +367,70 @@ describe('loadFromHistory', () => {
     const chain = msgs(s)[0].chain;
     expect(chain.some(c => c.type === 'thinking')).toBe(true);
     expect(chain.some(c => c.type === 'tool_call')).toBe(true);
+  });
+
+  it('restores a pending question from history', () => {
+    const s = useChatStore();
+    s.loadFromHistory([{
+      role: 'assistant', text: '', sources: [],
+      question: { question: 'Which repo?', choices: ['a', 'b'] },
+    }]);
+    expect(msgs(s)[0].question).toEqual({ question: 'Which repo?', choices: ['a', 'b'] });
+  });
+
+  it('does not set question when absent from history', () => {
+    const s = useChatStore();
+    s.loadFromHistory([{ role: 'assistant', text: 'done', sources: [] }]);
+    expect(msgs(s)[0].question).toBeUndefined();
+  });
+
+  it('restores a confirm_action from history with defaults for missing fields', () => {
+    const s = useChatStore();
+    s.loadFromHistory([{
+      role: 'assistant', text: '', sources: [],
+      confirm_action: {
+        name: 'create_lxd_agent',
+        input: { name: 'build-runner', flavor: 'small' },
+        description: 'Create a small agent named build-runner',
+      },
+    }]);
+    expect(msgs(s)[0].confirmAction).toEqual({
+      name: 'create_lxd_agent',
+      input: { name: 'build-runner', flavor: 'small' },
+      description: 'Create a small agent named build-runner',
+      status: 'pending',
+      steps: [],
+      resultText: '',
+    });
+  });
+
+  it('restores a resolved confirm_action from history preserving status/steps/result_text', () => {
+    const s = useChatStore();
+    s.loadFromHistory([{
+      role: 'assistant', text: '', sources: [],
+      confirm_action: {
+        name: 'create_lxd_agent',
+        input: { name: 'build-runner', flavor: 'small' },
+        description: 'Create a small agent named build-runner',
+        status: 'done',
+        steps: [{ id: 'ensure_network', label: 'Ensuring network exists', status: 'done', detail: '' }],
+        result_text: "Agent 'build-runner' created.",
+      },
+    }]);
+    expect(msgs(s)[0].confirmAction).toEqual({
+      name: 'create_lxd_agent',
+      input: { name: 'build-runner', flavor: 'small' },
+      description: 'Create a small agent named build-runner',
+      status: 'done',
+      steps: [{ id: 'ensure_network', label: 'Ensuring network exists', status: 'done', detail: '' }],
+      resultText: "Agent 'build-runner' created.",
+    });
+  });
+
+  it('does not set confirmAction when absent from history', () => {
+    const s = useChatStore();
+    s.loadFromHistory([{ role: 'assistant', text: 'done', sources: [] }]);
+    expect(msgs(s)[0].confirmAction).toBeUndefined();
   });
 });
 

@@ -118,6 +118,18 @@ export const useChatStore = defineStore('chat', () => {
     msg.question = { question, choices };
   }
 
+  function setConfirmAction(name, input, description) {
+    const msg = lastAssistant();
+    if (!msg) return;
+    msg.confirmAction = { name, input, description, status: 'pending', steps: [], resultText: '' };
+  }
+
+  function updateConfirmAction(patch) {
+    const msg = lastAssistant();
+    if (!msg?.confirmAction) return;
+    Object.assign(msg.confirmAction, patch);
+  }
+
   function setSuggestions(choices) {
     suggestions.value = choices ?? [];
   }
@@ -180,14 +192,26 @@ export const useChatStore = defineStore('chat', () => {
           const toolCallItems  = (m.tool_calls ?? []).map(tc  => ({ type: 'tool_call', ...tc, status: 'done' }));
           chain = [...thinkingItems, ...toolCallItems];
         }
-        messages.value.push({
+        const msg = {
           role: 'assistant', status: 'done',
           chain,
           tool_calls: chain.filter(c => c.type === 'tool_call'),
           answer: m.text,
           sources: m.sources ?? [],
           tool_calls_made: m.tool_calls_made ?? 0,
-        });
+        };
+        if (m.question) msg.question = m.question;
+        if (m.confirm_action) {
+          msg.confirmAction = {
+            name: m.confirm_action.name,
+            input: m.confirm_action.input,
+            description: m.confirm_action.description,
+            status: m.confirm_action.status ?? 'pending',
+            steps: m.confirm_action.steps ?? [],
+            resultText: m.confirm_action.result_text ?? '',
+          };
+        }
+        messages.value.push(msg);
       }
     }
     loading.value = false;
@@ -205,7 +229,7 @@ export const useChatStore = defineStore('chat', () => {
     addUserMessage, startAssistantMessage, finalizeAssistantMessage,
     setError, addThinking, addThinkingDelta, addTextDelta, addToolCall,
     completeToolCall, updateToolCallDescription,
-    setQuestion, setSuggestions,
+    setQuestion, setConfirmAction, updateConfirmAction, setSuggestions,
     addPendingAttachment, removePendingAttachment, clearPendingAttachments,
     saveableMessages, loadFromHistory, reset,
   };

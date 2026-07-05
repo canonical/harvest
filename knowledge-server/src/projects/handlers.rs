@@ -313,11 +313,11 @@ pub async fn project_events(
     response
 }
 
-async fn load_project_history(
+async fn load_project_messages_raw(
     neo4j: &Neo4jClient,
     project_id: &str,
     conv_id: &str,
-) -> Vec<HistoryMessage> {
+) -> Vec<Value> {
     let rows = neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
          RETURN c.messages AS messages",
@@ -326,10 +326,23 @@ async fn load_project_history(
 
     rows.into_iter().next()
         .and_then(|r| r.get("messages").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .and_then(|s| serde_json::from_str::<Vec<HistoryMessage>>(&s).ok())
+        .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
         .unwrap_or_default()
 }
 
+fn history_messages_from_raw(raw: &[Value]) -> Vec<HistoryMessage> {
+    raw.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect()
+}
+
+async fn load_project_history(
+    neo4j: &Neo4jClient,
+    project_id: &str,
+    conv_id: &str,
+) -> Vec<HistoryMessage> {
+    history_messages_from_raw(&load_project_messages_raw(neo4j, project_id, conv_id).await)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn save_project_turn(
     neo4j: &Neo4jClient,
     project_id: &str,
@@ -338,31 +351,35 @@ async fn save_project_turn(
     user_text: &str,
     username: &str,
     attachments_meta: Vec<Value>,
-    compacted_history: &[HistoryMessage],
+    prior_messages: Vec<Value>,
     assistant_text: &str,
     sources: &[Source],
     tool_calls_made: usize,
-    tool_calls: &[Value],
+    chain: Vec<Value>,
+    question: Option<Value>,
+    confirm_action: Option<Value>,
 ) {
-    let mut messages: Vec<Value> = compacted_history.iter().map(|entry| {
-        let attachments: Vec<Value> = entry.attachments.as_deref().unwrap_or(&[]).iter()
-            .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
-            .collect();
-        json!({ "role": entry.role, "text": entry.text, "attachments": attachments })
-    }).collect();
+    let mut messages = prior_messages;
     messages.push(json!({
         "role": "user",
         "text": user_text,
         "username": username,
         "attachments": attachments_meta,
     }));
-    messages.push(json!({
+    let mut assistant_message = json!({
         "role": "assistant",
         "text": assistant_text,
         "sources": sources,
-        "tool_calls": tool_calls,
+        "chain": chain,
         "tool_calls_made": tool_calls_made,
-    }));
+    });
+    if let Some(question) = question {
+        assistant_message["question"] = question;
+    }
+    if let Some(confirm_action) = confirm_action {
+        assistant_message["confirm_action"] = confirm_action;
+    }
+    messages.push(assistant_message);
 
     let messages_json = match serde_json::to_string(&messages) {
         Ok(s) => s,
@@ -415,7 +432,8 @@ pub async fn project_query_stream(
     }
 
     let agent = state.agent_builder.build(project_id.clone());
-    let raw_history = load_project_history(&state.neo4j, &project_id, &body.conversation_id).await;
+    let raw_messages = load_project_messages_raw(&state.neo4j, &project_id, &body.conversation_id).await;
+    let raw_history = history_messages_from_raw(&raw_messages);
     let history = agent.compact_history(&raw_history).await;
 
     state.broadcast(&project_id, json!({
@@ -457,6 +475,7 @@ pub async fn project_query_stream(
     let attachment_meta: Vec<Value> = attachments.iter()
         .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
         .collect();
+    let prior_messages_for_save = raw_messages;
 
     in_flight.write().await
         .entry(project_id.clone())
@@ -478,6 +497,9 @@ pub async fn project_query_stream(
         });
 
         let mut tool_calls_log: Vec<Value> = Vec::new();
+        let mut chain_builder = crate::agent::chain::ChainBuilder::new();
+        let mut pending_question: Option<Value> = None;
+        let mut pending_confirm_action: Option<Value> = None;
 
         while let Some(event) = agent_rx.recv().await {
             match &event {
@@ -514,6 +536,25 @@ pub async fn project_query_stream(
                 (None, None)
             };
 
+            match &event {
+                AgentEvent::TextDelta { text } => chain_builder.text_delta(text),
+                AgentEvent::Thinking { text } => chain_builder.thinking(text),
+                AgentEvent::ToolCall { name, input } => {
+                    chain_builder.tool_call(name, input, description.as_deref(), hostname.as_deref());
+                }
+                AgentEvent::ToolResult { name, preview } => chain_builder.tool_result(name, preview),
+                AgentEvent::Question { question, choices } => {
+                    pending_question = Some(json!({ "question": question, "choices": choices }));
+                }
+                AgentEvent::ConfirmAction { name, input, description } => {
+                    pending_confirm_action = Some(json!({
+                        "name": name, "input": input, "description": description,
+                        "status": "pending", "steps": [], "result_text": "",
+                    }));
+                }
+                _ => {}
+            }
+
             {
                 let mut map = in_flight.write().await;
                 if let Some(entry) = map.get_mut(&project_id_owned).and_then(|m| m.get_mut(&conv_id)) {
@@ -545,12 +586,13 @@ pub async fn project_query_stream(
 
             if let AgentEvent::Done { answer, sources, tool_calls_made } = &event {
                 let save_now = chrono::Utc::now().to_rfc3339();
+                let chain = std::mem::take(&mut chain_builder).finish();
                 save_project_turn(
                     &neo4j, &project_id_owned, &conv_id, &save_now,
                     &query, &username, attachment_meta.clone(),
-                    &history,
+                    prior_messages_for_save.clone(),
                     answer, sources, *tool_calls_made,
-                    &tool_calls_log,
+                    chain, pending_question.clone(), pending_confirm_action.clone(),
                 ).await;
                 {
                     let ch = channels.lock().await;
@@ -935,6 +977,52 @@ pub async fn update_conversation(
             "count": message_count, "now": now,
         }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateConfirmActionBody {
+    pub status: String,
+    #[serde(default)]
+    pub steps: Vec<Value>,
+    #[serde(default)]
+    pub result_text: String,
+}
+
+pub async fn update_confirm_action(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, conv_id)): Path<(String, String)>,
+    Json(body): Json<UpdateConfirmActionBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+
+    let mut messages = load_project_messages_raw(&state.neo4j, &project_id, &conv_id).await;
+    let Some(last) = messages.last_mut() else {
+        return Err(err(StatusCode::NOT_FOUND, "conversation has no messages"));
+    };
+    if last["confirm_action"].is_null() {
+        return Err(err(StatusCode::NOT_FOUND, "last message has no pending confirm action"));
+    }
+    last["confirm_action"]["status"] = json!(body.status);
+    last["confirm_action"]["steps"] = json!(body.steps);
+    last["confirm_action"]["result_text"] = json!(body.result_text);
+
+    let messages_json = serde_json::to_string(&messages)
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let count = messages.len() as i64;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
+         SET c.messages = $messages, c.message_count = $count, c.updated_at = $now
+         RETURN c.id AS id",
+        json!({
+            "pid": project_id, "cid": conv_id,
+            "messages": messages_json, "count": count, "now": now,
+        }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1472,6 +1560,7 @@ async fn run_single_task(
                 RunEvent::Thinking { task_id: tid.clone(), text }
             }
             AgentEvent::Question { .. }      => continue,
+            AgentEvent::ConfirmAction { .. } => continue,
             AgentEvent::TitleUpdated { .. }  => continue,
         };
         if let Ok(data) = serde_json::to_string(&run_event) {

@@ -135,6 +135,86 @@ const assistantWithGraph = {
   sources: [], tool_calls_made: 0,
 };
 
+const assistantWithConfirmPending = {
+  role: 'assistant', status: 'done',
+  chain: [], tool_calls: [], answer: null, sources: [], tool_calls_made: 1,
+  confirmAction: {
+    name: 'create_lxd_agent',
+    input: { name: 'build-runner', flavor: 'small' },
+    description: 'Create a small agent named build-runner',
+    status: 'pending', steps: [], resultText: '',
+  },
+};
+
+describe('ChatMessage — confirmAction', () => {
+  it('renders the description text', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithConfirmPending, isLast: true } });
+    expect(w.text()).toContain('Create a small agent named build-runner');
+  });
+
+  it('shows Confirm/Cancel buttons when pending and isLast', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithConfirmPending, isLast: true } });
+    expect(w.find('.confirm-actions').exists()).toBe(true);
+    expect(w.text()).toContain('Confirm');
+    expect(w.text()).toContain('Cancel');
+  });
+
+  it('hides Confirm/Cancel buttons when not isLast', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithConfirmPending, isLast: false } });
+    expect(w.find('.confirm-actions').exists()).toBe(false);
+  });
+
+  it('emits confirm when Confirm is clicked', async () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithConfirmPending, isLast: true } });
+    await w.find('.confirm-actions .p-button--negative').trigger('click');
+    expect(w.emitted('confirm')).toBeTruthy();
+  });
+
+  it('emits deny when Cancel is clicked', async () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithConfirmPending, isLast: true } });
+    await w.find('.confirm-actions .p-button--base').trigger('click');
+    expect(w.emitted('deny')).toBeTruthy();
+  });
+
+  it('shows cancelled status text and hides buttons once denied', () => {
+    const msg = { ...assistantWithConfirmPending, confirmAction: { ...assistantWithConfirmPending.confirmAction, status: 'denied' } };
+    const w = mount(ChatMessage, { props: { msg, isLast: true } });
+    expect(w.find('.confirm-actions').exists()).toBe(false);
+    expect(w.text()).toContain('Cancelled');
+  });
+
+  it('shows result text once done', () => {
+    const msg = { ...assistantWithConfirmPending, confirmAction: { ...assistantWithConfirmPending.confirmAction, status: 'done', resultText: "Agent 'build-runner' created." } };
+    const w = mount(ChatMessage, { props: { msg, isLast: true } });
+    expect(w.find('.confirm-actions').exists()).toBe(false);
+    expect(w.text()).toContain("Agent 'build-runner' created.");
+  });
+
+  it('shows result text on error', () => {
+    const msg = { ...assistantWithConfirmPending, confirmAction: { ...assistantWithConfirmPending.confirmAction, status: 'error', resultText: 'LXD is not configured on this server' } };
+    const w = mount(ChatMessage, { props: { msg, isLast: true } });
+    expect(w.text()).toContain('LXD is not configured on this server');
+  });
+
+  it('renders provision steps when present', () => {
+    const msg = {
+      ...assistantWithConfirmPending,
+      confirmAction: {
+        ...assistantWithConfirmPending.confirmAction,
+        status: 'running',
+        steps: [{ id: 'ensure_network', label: 'Ensuring network exists', status: 'active', detail: '' }],
+      },
+    };
+    const w = mount(ChatMessage, { props: { msg, isLast: true } });
+    expect(w.find('.lxd-step').exists()).toBe(true);
+  });
+
+  it('does not render confirm block when confirmAction is absent', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantDone, isLast: true } });
+    expect(w.find('.message__confirm').exists()).toBe(false);
+  });
+});
+
 describe('ChatMessage — inline graph mounting', () => {
   it('calls mountInlineGraphs on mount when answer is already present (historical chat bug)', () => {
     mount(ChatMessage, { props: { msg: assistantWithGraph } });
