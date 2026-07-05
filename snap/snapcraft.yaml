@@ -65,6 +65,23 @@ description: |
   auth.oidc.redirect-uri      OIDC redirect URI            (optional)
   auth.oidc.display-name      OIDC provider display name   (optional)
   agents.public-url           Public URL for agent callbacks  (optional)
+
+  LXD (optional) — set lxd.endpoint to enable "Let Harvest create and
+  manage agent" in the web UI. Harvest generates its own client identity and
+  self-registers it with lxd.trust-token (from `lxc config trust add --name
+  harvest`, run once against the cluster); set lxd.client-cert/client-key
+  instead if you'd rather manage the identity yourself.
+  lxd.endpoint                 LXD REST API URL, e.g. https://lxd:8443
+  lxd.trust-token               One-time token from `lxc config trust add --name harvest`
+  lxd.client-cert              Manual override: client certificate PEM (skips trust-token)
+  lxd.client-key               Manual override: client private key PEM (skips trust-token)
+  lxd.ca-cert                  LXD server CA certificate PEM  (optional)
+  lxd.insecure                 Skip TLS verification        (default: false, dev only)
+  lxd.project                  LXD project for containers   (default: default)
+  lxd.image-alias              Base image alias             (default: 24.04)
+  lxd.image-server             Image simplestreams server    (default: https://cloud-images.ubuntu.com/releases)
+  lxd.profile                  LXD profile applied to containers (default: default)
+
   docs.dir                    Documentation directory      (default: $SNAP_COMMON/docs)
   ui.enable-docs              Show docs page in web UI     (default: false)
   ui.host                     Web UI bind address          (default: 127.0.0.1)

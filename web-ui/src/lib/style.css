@@ -2803,6 +2803,215 @@ a.source-chip:hover .source-chip__name {
   margin-top: 0.5rem;
 }
 
+.agent-choice-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.agent-choice-option {
+  align-items: flex-start;
+  background: var(--bg-surface-hover, rgba(255, 255, 255, 0.05));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.875rem 1rem;
+  text-align: left;
+  width: 100%;
+}
+
+.agent-choice-option:hover,
+.agent-choice-option:focus-visible {
+  background: var(--bg-surface-hover);
+  border-color: rgba(255, 255, 255, 0.25);
+  outline: none;
+}
+
+.agent-choice-option__title {
+  font-weight: 600;
+}
+
+.agent-choice-option__desc {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.form-field label {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+  font-weight: 550;
+}
+
+.form-field input[type="text"],
+.form-field textarea {
+  background: var(--bg-surface);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.9rem;
+  padding: 0.5rem 0.625rem;
+}
+
+.flavor-select {
+  position: relative;
+}
+
+.flavor-select__toggle {
+  align-items: center;
+  background: var(--bg-surface);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  font-family: inherit;
+  font-size: 0.9rem;
+  gap: 0.5rem;
+  justify-content: space-between;
+  padding: 0.5rem 0.625rem;
+  width: 100%;
+}
+
+.flavor-select__toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.flavor-select__dropdown {
+  background: #2b2b2b;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 0.375rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  left: 0;
+  margin-top: 0.25rem;
+  max-height: 240px;
+  overflow-y: auto;
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 20;
+}
+
+.flavor-select__item {
+  align-items: center;
+  background: none;
+  border: 0;
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  display: flex;
+  font-family: inherit;
+  font-size: 0.875rem;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  width: 100%;
+}
+
+.flavor-select__item:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.flavor-select__name {
+  flex: 1;
+  text-align: left;
+}
+
+.flavor-select__badge {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2rem;
+  color: rgba(255, 255, 255, 0.65);
+  flex-shrink: 0;
+  font-size: 0.6875rem;
+  padding: 0.125rem 0.5rem;
+  white-space: nowrap;
+}
+
+.agent-provider-badge {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 2rem;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 0.6875rem;
+  margin-left: 0.5rem;
+  padding: 0.0625rem 0.5rem;
+}
+
+.managed-agent-error {
+  color: #e06c75;
+  font-size: 0.8125rem;
+}
+
+.lxd-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.lxd-step {
+  align-items: center;
+  display: flex;
+  gap: 0.625rem;
+  min-height: 1.875rem;
+  padding: 0.2rem 0;
+}
+
+.lxd-step__icon {
+  flex-shrink: 0;
+  height: 1rem;
+  width: 1rem;
+  color: var(--text-muted);
+}
+
+.lxd-step--active .lxd-step__icon {
+  color: var(--loading-dot-color, #0066cc);
+}
+
+.lxd-step--done .lxd-step__icon {
+  color: #3fb950;
+}
+
+.lxd-step--error .lxd-step__icon {
+  color: #e06c75;
+}
+
+.lxd-step__icon--spinning {
+  animation: spin 0.8s linear infinite;
+}
+
+.lxd-step__label {
+  color: var(--text-muted);
+  flex: 1;
+  line-height: 1.4;
+  transition: color 0.2s;
+}
+
+.lxd-step--active .lxd-step__label {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.lxd-step--done .lxd-step__label {
+  color: var(--text-secondary);
+}
+
+.lxd-step--error .lxd-step__label {
+  color: #e06c75;
+}
+
+.lxd-step__detail {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
 .agents-view,
 .tasks-page,
 .admin-page {

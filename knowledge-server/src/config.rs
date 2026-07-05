@@ -16,6 +16,8 @@ pub struct Config {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub lxd: Option<LxdConfig>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -63,6 +65,40 @@ pub struct AgentsConfig {
     pub binary_path: Option<std::path::PathBuf>,
     pub public_url:  Option<String>,
 }
+
+#[derive(Deserialize, Clone)]
+pub struct LxdConfig {
+    pub endpoint: String,
+    /// Manual override: set both this and `client_key` to manage the client
+    /// identity yourself. Omit both to let Harvest generate and self-register
+    /// its own identity via `trust_token`.
+    #[serde(default)]
+    pub client_cert: Option<String>,
+    #[serde(default)]
+    pub client_key: Option<String>,
+    /// One-time token from `lxc config trust add --name <name>` (no cert
+    /// argument), used to self-register a Harvest-generated identity. Only
+    /// consulted while no trusted identity has been persisted yet.
+    #[serde(default)]
+    pub trust_token: Option<String>,
+    #[serde(default)]
+    pub ca_cert: Option<String>,
+    #[serde(default)]
+    pub insecure: bool,
+    #[serde(default = "default_lxd_project")]
+    pub project: String,
+    #[serde(default = "default_lxd_image_alias")]
+    pub image_alias: String,
+    #[serde(default = "default_lxd_image_server")]
+    pub image_server: String,
+    #[serde(default = "default_lxd_profile")]
+    pub profile: String,
+}
+
+fn default_lxd_project() -> String { "default".into() }
+fn default_lxd_image_alias() -> String { "24.04".into() }
+fn default_lxd_image_server() -> String { "https://cloud-images.ubuntu.com/releases".into() }
+fn default_lxd_profile() -> String { "default".into() }
 
 #[derive(Deserialize)]
 pub struct ServerConfig {
@@ -406,5 +442,124 @@ mod tests {
             }
             _ => panic!("expected Anthropic"),
         }
+    }
+
+    #[test]
+    fn lxd_absent_gives_none() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+        "#);
+        let cfg = parse_config(&toml);
+        assert!(cfg.lxd.is_none());
+    }
+
+    #[test]
+    fn lxd_config_parses_required_fields() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+
+            [lxd]
+            endpoint    = "https://lxd.example.com:8443"
+            client_cert = "cert-pem"
+            client_key  = "key-pem"
+        "#);
+        let cfg = parse_config(&toml);
+        let lxd = cfg.lxd.expect("lxd should be present");
+        assert_eq!(lxd.endpoint, "https://lxd.example.com:8443");
+        assert_eq!(lxd.client_cert.as_deref(), Some("cert-pem"));
+        assert_eq!(lxd.client_key.as_deref(), Some("key-pem"));
+        assert!(lxd.ca_cert.is_none());
+        assert!(!lxd.insecure);
+    }
+
+    #[test]
+    fn lxd_config_client_cert_and_key_are_optional() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+
+            [lxd]
+            endpoint = "https://lxd.example.com:8443"
+        "#);
+        let cfg = parse_config(&toml);
+        let lxd = cfg.lxd.expect("lxd should be present");
+        assert!(lxd.client_cert.is_none());
+        assert!(lxd.client_key.is_none());
+        assert!(lxd.trust_token.is_none());
+    }
+
+    #[test]
+    fn lxd_config_trust_token_parses() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+
+            [lxd]
+            endpoint    = "https://lxd.example.com:8443"
+            trust_token = "eyJjbGllbnRfbmFtZSI6Li4ufQ=="
+        "#);
+        let cfg = parse_config(&toml);
+        let lxd = cfg.lxd.expect("lxd should be present");
+        assert_eq!(lxd.trust_token.as_deref(), Some("eyJjbGllbnRfbmFtZSI6Li4ufQ=="));
+    }
+
+    #[test]
+    fn lxd_config_defaults_apply_when_omitted() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+
+            [lxd]
+            endpoint    = "https://lxd.example.com:8443"
+            client_cert = "cert-pem"
+            client_key  = "key-pem"
+        "#);
+        let cfg = parse_config(&toml);
+        let lxd = cfg.lxd.expect("lxd should be present");
+        assert_eq!(lxd.project, "default");
+        assert_eq!(lxd.image_alias, "24.04");
+        assert_eq!(lxd.image_server, "https://cloud-images.ubuntu.com/releases");
+        assert_eq!(lxd.profile, "default");
+    }
+
+    #[test]
+    fn lxd_config_explicit_values_override_defaults() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+
+            [lxd]
+            endpoint     = "https://lxd.example.com:8443"
+            client_cert  = "cert-pem"
+            client_key   = "key-pem"
+            ca_cert      = "ca-pem"
+            insecure     = true
+            project      = "harvest"
+            image_alias  = "22.04"
+            image_server = "https://images.example.com"
+            profile      = "harvest-profile"
+        "#);
+        let cfg = parse_config(&toml);
+        let lxd = cfg.lxd.expect("lxd should be present");
+        assert_eq!(lxd.ca_cert.as_deref(), Some("ca-pem"));
+        assert!(lxd.insecure);
+        assert_eq!(lxd.project, "harvest");
+        assert_eq!(lxd.image_alias, "22.04");
+        assert_eq!(lxd.image_server, "https://images.example.com");
+        assert_eq!(lxd.profile, "harvest-profile");
     }
 }

@@ -11,6 +11,7 @@ use knowledge_server::skills::SkillRegistry;
 use knowledge_server::auth;
 use knowledge_server::config::Config;
 use knowledge_server::llm;
+use knowledge_server::lxd;
 use knowledge_server::machines::MachineRegistry;
 use knowledge_server::neo4j::Neo4jClient;
 
@@ -39,6 +40,7 @@ async fn main() -> Result<()> {
     neo4j.run("CREATE CONSTRAINT project_id    IF NOT EXISTS FOR (p:Project)      REQUIRE p.id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT machine_id    IF NOT EXISTS FOR (m:Machine)      REQUIRE m.id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT memory_id     IF NOT EXISTS FOR (m:Memory)       REQUIRE m.id IS UNIQUE").await?;
+    neo4j.run("CREATE CONSTRAINT lxd_identity_id IF NOT EXISTS FOR (i:LxdIdentity) REQUIRE i.id IS UNIQUE").await?;
 
     if config.llm.is_empty() {
         anyhow::bail!("at least one [[llm]] provider must be configured in server.toml");
@@ -57,21 +59,27 @@ async fn main() -> Result<()> {
     let machine_registry = MachineRegistry::new();
     let skill_registry   = Arc::new(SkillRegistry::new());
 
-    let agent_builder = Arc::new(ProjectAgentBuilder {
-        llm:            Arc::clone(&llm_provider),
-        neo4j:          Arc::clone(&neo4j),
-        registry:       Arc::clone(&machine_registry),
-        skills:         Arc::clone(&skill_registry),
-        max_iterations,
-        compaction_threshold_chars,
-        compaction_keep_last,
-    });
-
     let docs_dir    = config.documentation.docs_dir.map(Arc::new);
     let server_url  = config.agents.public_url
         .clone()
         .unwrap_or_else(|| format!("http://{}:{}", config.server.host, config.server.port));
     let binary_path = config.agents.binary_path.clone();
+    let lxd = match &config.lxd {
+        Some(cfg) => lxd::resolve_client(cfg, &neo4j).await?.map(Arc::new),
+        None => None,
+    };
+
+    let agent_builder = Arc::new(ProjectAgentBuilder {
+        llm:            Arc::clone(&llm_provider),
+        neo4j:          Arc::clone(&neo4j),
+        registry:       Arc::clone(&machine_registry),
+        skills:         Arc::clone(&skill_registry),
+        lxd:            lxd.clone(),
+        server_url:     server_url.clone(),
+        max_iterations,
+        compaction_threshold_chars,
+        compaction_keep_last,
+    });
 
     let state = AppState {
         agent,
@@ -83,6 +91,7 @@ async fn main() -> Result<()> {
         agent_builder:    Arc::clone(&agent_builder),
         binary_path,
         llm:              Arc::clone(&llm_provider),
+        lxd,
     };
 
     let cache: Arc<GraphCache> = Arc::new(RwLock::new(HashMap::new()));

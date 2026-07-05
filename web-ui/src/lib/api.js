@@ -263,6 +263,38 @@ export async function rotateInstallToken(projectId) {
   return response.json();
 }
 
+export async function getAgentFlavors(projectId) {
+  const response = await fetch(`${projectUrl(projectId)}/agents/flavors`);
+  handleUnauthorized(response.status);
+  if (!response.ok) throw new Error(`Server error: ${response.status}`);
+  return response.json();
+}
+
+export async function provisionLxdAgent(projectId, { name, description, flavor }, onEvent) {
+  const response = await fetch(`${projectUrl(projectId)}/agents/lxd`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ name, description, flavor }),
+  });
+  handleUnauthorized(response.status);
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Server error: ${response.status}`);
+  }
+  await consumeSseStream(response, onEvent);
+}
+
+export async function updateConfirmActionResult(projectId, convId, { status, steps, resultText }) {
+  const response = await fetch(`${projectUrl(projectId)}/conversations/${encodeURIComponent(convId)}/confirm-action`, {
+    method:  'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ status, steps, result_text: resultText }),
+  });
+  handleUnauthorized(response.status);
+  if (!response.ok) throw new Error(`Server error: ${response.status}`);
+  return response.json();
+}
+
 const memoryUrl = (projectId, memoryId) =>
   `${projectUrl(projectId)}/memories/${encodeURIComponent(memoryId)}`;
 

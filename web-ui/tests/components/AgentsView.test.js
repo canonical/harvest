@@ -1,17 +1,58 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
-import { createPinia } from 'pinia';
+import { createPinia, setActivePinia } from 'pinia';
 import AgentsView from '../../src/views/AgentsView.vue';
+import { useAuthStore } from '../../src/stores/auth.js';
 
 const MOCK_AGENTS = [
   { id: 'ag-1', hostname: 'box1', online: true,  last_seen: new Date().toISOString(), version: '1.0' },
   { id: 'ag-2', hostname: 'box2', online: false, last_seen: new Date().toISOString(), version: '1.0' },
 ];
 
+const MOCK_FLAVORS = [
+  { id: 'tiny',        label: 'Tiny',        cpu: 1, memory_mib: 512 },
+  { id: 'small',       label: 'Small',       cpu: 1, memory_mib: 1024 },
+  { id: 'medium',      label: 'Medium',      cpu: 2, memory_mib: 2048 },
+  { id: 'large',       label: 'Large',       cpu: 4, memory_mib: 4096 },
+  { id: 'extra-large', label: 'Extra Large', cpu: 8, memory_mib: 8192 },
+];
+
 function mockApi(agents = MOCK_AGENTS) {
   global.fetch = vi.fn().mockResolvedValue({
     ok: true,
     json: () => Promise.resolve(agents),
+  });
+}
+
+function sseResponse(events) {
+  const bytes = new TextEncoder().encode(events.map(e => `data: ${JSON.stringify(e)}\n\n`).join(''));
+  let sent = false;
+  return {
+    ok: true,
+    status: 200,
+    body: {
+      getReader() {
+        return {
+          read() {
+            if (sent) return Promise.resolve({ done: true, value: undefined });
+            sent = true;
+            return Promise.resolve({ done: false, value: bytes });
+          },
+          releaseLock() {},
+        };
+      },
+    },
+  };
+}
+
+function mountWithLxd(agents = MOCK_AGENTS) {
+  const pinia = createPinia();
+  setActivePinia(pinia);
+  useAuthStore().features.lxd = true;
+  mockApi(agents);
+  return mount(AgentsView, {
+    props: { projectId: 'proj-1' },
+    global: { plugins: [pinia] },
   });
 }
 
@@ -72,5 +113,184 @@ describe('AgentsView', () => {
     await w.find('#install-agent-btn').trigger('click');
     await flushPromises();
     expect(w.find('#install-modal').exists()).toBe(true);
+  });
+
+  it('does not show install modal directly when LXD is configured', async () => {
+    const w = mountWithLxd();
+    await flushPromises();
+    await w.find('#install-agent-btn').trigger('click');
+    await flushPromises();
+    expect(w.find('#install-modal').exists()).toBe(false);
+    expect(w.find('#agent-choice-modal').exists()).toBe(true);
+  });
+
+  it('choice modal offers manual and managed options', async () => {
+    const w = mountWithLxd();
+    await flushPromises();
+    await w.find('#install-agent-btn').trigger('click');
+    await flushPromises();
+    expect(w.find('#choice-manual-btn').exists()).toBe(true);
+    expect(w.find('#choice-lxd-btn').exists()).toBe(true);
+  });
+
+  it('choosing manual install opens the existing install modal', async () => {
+    const w = mountWithLxd();
+    await flushPromises();
+    await w.find('#install-agent-btn').trigger('click');
+    await flushPromises();
+    await w.find('#choice-manual-btn').trigger('click');
+    await flushPromises();
+    expect(w.find('#agent-choice-modal').exists()).toBe(false);
+    expect(w.find('#install-modal').exists()).toBe(true);
+  });
+
+  it('choosing managed agent opens the managed-agent modal and loads flavors', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useAuthStore().features.lxd = true;
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_FLAVORS) });
+
+    const w = mount(AgentsView, {
+      props: { projectId: 'proj-1' },
+      global: { plugins: [pinia] },
+    });
+    await flushPromises();
+    await w.find('#install-agent-btn').trigger('click');
+    await flushPromises();
+    await w.find('#choice-lxd-btn').trigger('click');
+    await flushPromises();
+
+    expect(w.find('#managed-agent-modal').exists()).toBe(true);
+    expect(w.find('#flavor-select-toggle').text()).toContain('Small');
+  });
+
+  it('selecting a flavor updates the toggle button', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useAuthStore().features.lxd = true;
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_FLAVORS) });
+
+    const w = mount(AgentsView, {
+      props: { projectId: 'proj-1' },
+      global: { plugins: [pinia] },
+    });
+    await flushPromises();
+    await w.find('#install-agent-btn').trigger('click');
+    await flushPromises();
+    await w.find('#choice-lxd-btn').trigger('click');
+    await flushPromises();
+
+    await w.find('#flavor-select-toggle').trigger('click');
+    await flushPromises();
+    await w.find('#flavor-option-large').trigger('click');
+    await flushPromises();
+
+    expect(w.find('#flavor-select-toggle').text()).toContain('Large');
+    expect(w.find('#flavor-select-toggle').text()).toContain('4 vCPU');
+  });
+
+  it('submitting the managed-agent form streams live progress and shows Close when done', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useAuthStore().features.lxd = true;
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_FLAVORS) })
+      .mockResolvedValueOnce(sseResponse([
+        { type: 'phase_start', phase: 'ensure_network' },
+        { type: 'phase_start', phase: 'install_token' },
+        { type: 'phase_start', phase: 'create_container' },
+        { type: 'phase_start', phase: 'start_container' },
+        { type: 'phase_start', phase: 'wait_running' },
+        { type: 'phase_start', phase: 'install_agent' },
+        { type: 'done', hostname: 'agent-abcd' },
+      ]))
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) });
+
+    const w = mount(AgentsView, {
+      props: { projectId: 'proj-1' },
+      global: { plugins: [pinia] },
+    });
+    await flushPromises();
+    await w.find('#install-agent-btn').trigger('click');
+    await flushPromises();
+    await w.find('#choice-lxd-btn').trigger('click');
+    await flushPromises();
+
+    await w.find('#managed-agent-name').setValue('build-runner');
+    await w.find('#create-managed-agent-btn').trigger('click');
+    await flushPromises();
+
+    const createCall = global.fetch.mock.calls.find(([url]) => url.includes('/agents/lxd'));
+    expect(createCall).toBeTruthy();
+    const body = JSON.parse(createCall[1].body);
+    expect(body.name).toBe('build-runner');
+    expect(body.flavor).toBe('small');
+
+    expect(w.find('#managed-agent-modal').exists()).toBe(true);
+    expect(w.find('#provision-steps').exists()).toBe(true);
+    expect(w.findAll('.lxd-step--done')).toHaveLength(6);
+    expect(w.text()).toContain('Close');
+  });
+
+  it('shows the failing step and a Try again option when a phase errors', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useAuthStore().features.lxd = true;
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_FLAVORS) })
+      .mockResolvedValueOnce(sseResponse([
+        { type: 'phase_start', phase: 'ensure_network' },
+        { type: 'error', phase: 'ensure_network', message: 'checking LXD network: SSL certificate problem' },
+      ]));
+
+    const w = mount(AgentsView, {
+      props: { projectId: 'proj-1' },
+      global: { plugins: [pinia] },
+    });
+    await flushPromises();
+    await w.find('#install-agent-btn').trigger('click');
+    await flushPromises();
+    await w.find('#choice-lxd-btn').trigger('click');
+    await flushPromises();
+
+    await w.find('#managed-agent-name').setValue('build-runner');
+    await w.find('#create-managed-agent-btn').trigger('click');
+    await flushPromises();
+
+    expect(w.findAll('.lxd-step--error')).toHaveLength(1);
+    expect(w.text()).toContain('checking LXD network: SSL certificate problem');
+    expect(w.text()).toContain('Try again');
+  });
+
+  it('shows an LXD badge for LXD-managed agents', async () => {
+    mockApi([
+      { id: 'ag-1', hostname: 'box1', online: true, last_seen: new Date().toISOString(), provider: 'lxd' },
+    ]);
+    const w = mount(AgentsView, {
+      props: { projectId: 'proj-1' },
+      global: { plugins: [createPinia()] },
+    });
+    await flushPromises();
+    expect(w.find('.agent-provider-badge').exists()).toBe(true);
+  });
+
+  it('delete confirmation mentions the LXD container for LXD-managed agents', async () => {
+    mockApi([
+      { id: 'ag-1', hostname: 'box1', online: true, last_seen: new Date().toISOString(), provider: 'lxd' },
+    ]);
+    const w = mount(AgentsView, {
+      props: { projectId: 'proj-1' },
+      global: { plugins: [createPinia()] },
+    });
+    await flushPromises();
+    await w.findAll('.p-button--negative')[0].trigger('click');
+    await flushPromises();
+    expect(w.text()).toContain('LXD container');
   });
 });

@@ -81,6 +81,7 @@ async fn config_reports_oidc_enabled_with_display_name() {
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
+        lxd_enabled:     false,
     });
     let app  = oidc_router(auth);
 
@@ -104,6 +105,7 @@ async fn config_reports_oidc_disabled_when_not_configured() {
         http:           reqwest::Client::new(),
         oidc_endpoints:  None,
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
+        lxd_enabled:     false,
     });
     let app = oidc_router(auth);
 
@@ -139,6 +141,7 @@ async fn config_oidc_display_name_null_when_not_set() {
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
+        lxd_enabled:     false,
     });
 
     let resp = oidc_router(auth)
@@ -160,6 +163,7 @@ async fn oidc_redirect_returns_501_when_not_configured() {
         http:           reqwest::Client::new(),
         oidc_endpoints:  None,
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
+        lxd_enabled:     false,
     });
     let resp = oidc_router(auth)
         .oneshot(Request::builder().uri("/auth/oidc").body(Body::empty()).unwrap())
@@ -181,6 +185,7 @@ async fn oidc_redirect_returns_302_to_authorization_endpoint() {
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
+        lxd_enabled:     false,
     });
 
     let resp = oidc_router(auth)
@@ -205,6 +210,7 @@ async fn oidc_redirect_url_contains_required_params() {
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
+        lxd_enabled:     false,
     });
 
     let resp = oidc_router(auth)
@@ -237,6 +243,7 @@ async fn oidc_redirect_stores_session_server_side() {
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
+        lxd_enabled:     false,
     });
     let auth_ref = Arc::clone(&auth);
 
@@ -273,6 +280,7 @@ async fn oidc_callback_returns_400_when_no_code() {
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
+        lxd_enabled:     false,
     });
 
     let resp = oidc_router(auth)
@@ -300,6 +308,7 @@ async fn oidc_callback_returns_400_on_idp_error_param() {
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
+        lxd_enabled:     false,
     });
 
     let resp = oidc_router(auth)
@@ -329,6 +338,7 @@ async fn oidc_callback_returns_400_on_state_mismatch() {
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
+        lxd_enabled:     false,
     });
 
     let resp = oidc_router(auth)
@@ -355,6 +365,7 @@ async fn oidc_callback_returns_501_when_not_configured() {
         http:           reqwest::Client::new(),
         oidc_endpoints:  None,
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
+        lxd_enabled:     false,
     });
 
     let resp = oidc_router(auth)
