@@ -31,6 +31,7 @@ fn make_state(registry: Arc<MachineRegistry>) -> Arc<MachineState> {
         neo4j:       None,
         binary_path: None,
         server_url:  "https://harvest.example.com".into(),
+        lxd:         None,
     })
 }
 
@@ -205,6 +206,7 @@ mod docker_tests {
             neo4j:       Some(neo4j),
             binary_path: None,
             server_url:  "http://localhost".into(),
+            lxd:         None,
         });
         let app      = machines_router(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -343,5 +345,102 @@ mod docker_tests {
         ).await.unwrap();
         assert!(!rows.is_empty(), "machine not in DB");
         assert!(rows[0]["last_seen"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn lxd_marker_tags_new_machine_as_lxd_managed() {
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let install_token = "lxd-marker-install-tok";
+        let project_id = seed_project(&neo4j, install_token).await;
+
+        neo4j.query_read(
+            "CREATE (:LxdInstance {
+                 project_id: $pid, hostname: $h, lxd_project: 'harvest',
+                 description: 'test agent', created_at: '2026-01-01'
+             })",
+            json!({ "pid": project_id, "h": "agent-lxd-host" }),
+        ).await.unwrap();
+
+        let addr = spawn_server(Arc::clone(&neo4j)).await;
+        let url  = format!("http://127.0.0.1:{}/agent/events?hostname=agent-lxd-host", addr.port());
+
+        let client = reqwest::Client::new();
+        let resp = client.get(&url)
+            .header("Authorization", format!("Bearer {install_token}"))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        use futures_util::StreamExt as _;
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        loop {
+            let chunk = stream.next().await.unwrap().unwrap();
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            if buf.find("\n\n").is_some() { break; }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let rows = neo4j.query_read(
+            "MATCH (m:Machine {project_id: $pid, hostname: $h})
+             RETURN m.provider AS provider, m.lxd_instance AS lxd_instance, m.description AS description",
+            json!({ "pid": project_id, "h": "agent-lxd-host" }),
+        ).await.unwrap();
+        let m = rows.into_iter().next().expect("machine not created");
+        assert_eq!(m["provider"], "lxd");
+        assert_eq!(m["lxd_instance"], "agent-lxd-host");
+        assert_eq!(m["description"], "test agent");
+
+        let marker_rows = neo4j.query_read(
+            "MATCH (li:LxdInstance {project_id: $pid, hostname: $h}) RETURN li",
+            json!({ "pid": project_id, "h": "agent-lxd-host" }),
+        ).await.unwrap();
+        assert!(marker_rows.is_empty(), "LxdInstance marker should be consumed");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn manually_installed_machine_has_no_lxd_provider() {
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let install_token = "manual-install-tok";
+        let project_id = seed_project(&neo4j, install_token).await;
+
+        let addr = spawn_server(Arc::clone(&neo4j)).await;
+        let url  = format!("http://127.0.0.1:{}/agent/events?hostname=manual-host", addr.port());
+
+        let client = reqwest::Client::new();
+        let resp = client.get(&url)
+            .header("Authorization", format!("Bearer {install_token}"))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        use futures_util::StreamExt as _;
+        let mut stream = resp.bytes_stream();
+        let mut buf = String::new();
+        loop {
+            let chunk = stream.next().await.unwrap().unwrap();
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            if buf.find("\n\n").is_some() { break; }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let rows = neo4j.query_read(
+            "MATCH (m:Machine {project_id: $pid, hostname: $h}) RETURN m.provider AS provider",
+            json!({ "pid": project_id, "h": "manual-host" }),
+        ).await.unwrap();
+        let m = rows.into_iter().next().expect("machine not created");
+        assert!(m["provider"].is_null(), "manually-installed machine should have no provider tag");
     }
 }

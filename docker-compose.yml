@@ -78,6 +78,22 @@ services:
       OIDC_CLIENT_SECRET: "${OIDC_CLIENT_SECRET:-}"
       OIDC_REDIRECT_URI:  "${OIDC_REDIRECT_URI:-}"
       OIDC_DISPLAY_NAME:  "${OIDC_DISPLAY_NAME:-}"
+
+      # Optional: LXD — set LXD_ENDPOINT + LXD_TRUST_TOKEN (from `lxc config
+      # trust add --name harvest`, run once against the cluster) to enable
+      # "Let Harvest create and manage agent" in the web UI; Harvest generates
+      # and self-registers its own client identity. Set LXD_CLIENT_CERT/
+      # LXD_CLIENT_KEY instead to manage the identity yourself.
+      LXD_ENDPOINT:     "${LXD_ENDPOINT:-}"
+      LXD_TRUST_TOKEN:  "${LXD_TRUST_TOKEN:-}"
+      LXD_CLIENT_CERT:  "${LXD_CLIENT_CERT:-}"
+      LXD_CLIENT_KEY:   "${LXD_CLIENT_KEY:-}"
+      LXD_CA_CERT:      "${LXD_CA_CERT:-}"
+      LXD_INSECURE:     "${LXD_INSECURE:-}"
+      LXD_PROJECT:      "${LXD_PROJECT:-}"
+      LXD_IMAGE_ALIAS:  "${LXD_IMAGE_ALIAS:-}"
+      LXD_IMAGE_SERVER: "${LXD_IMAGE_SERVER:-}"
+      LXD_PROFILE:      "${LXD_PROFILE:-}"
     # Mount a hand-crafted config instead of using env vars:
     # volumes:
     #   - ./server.toml:/etc/harvest/server.toml:ro

@@ -1,4 +1,5 @@
 pub mod handlers;
+pub mod lxd_provision;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;

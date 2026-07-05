@@ -50,6 +50,7 @@ pub async fn config(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
         "oidc_display_name": oidc_display_name,
         "features": {
             "docs": state.ui.enable_docs,
+            "lxd":  state.lxd_enabled,
         },
     }))
 }

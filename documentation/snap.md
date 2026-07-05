@@ -156,6 +156,41 @@ sudo snap set harvest \
 | `agent.compaction-keep-last` | `6` | Messages retained after compaction |
 | `agents.public-url` | — | Public URL used for remote agent install scripts |
 
+### LXD-managed agents (optional)
+
+Setting `lxd.endpoint` enables the "Let Harvest create and manage agent" option in the web UI's Agents page, alongside the existing manual install flow. Harvest authenticates to LXD with a TLS client certificate — by default it **generates and self-registers its own** using a one-time trust token, so you never have to run `openssl` or handle key material by hand:
+
+1. Generate a token against the cluster with an already-trusted `lxc`:
+   ```bash
+   lxc config trust add --name harvest
+   ```
+   This prints a short-lived opaque token (no certificate file involved) — the same mechanism `lxc remote add <name> <token>` uses to onboard a new client.
+2. Give that token to Harvest:
+   ```bash
+   sudo snap set harvest \
+     lxd.endpoint=https://lxd-cluster.example.com:8443 \
+     lxd.trust-token=<paste-token-here> \
+     lxd.project=harvest
+   ```
+   On restart, Harvest generates a keypair (persisted in Neo4j), submits it to LXD along with the token, and marks itself trusted once that succeeds — the token is single-use and can be discarded afterward. If the token is missing, expired, or already used, the server logs a warning and starts anyway with LXD features disabled until you supply a working one.
+
+Prefer to manage the certificate yourself instead? Set `lxd.client-cert`/`lxd.client-key` (PEM content) and trust that cert directly with `lxc config trust add <cert-file>` — this skips the trust-token flow entirely.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `lxd.endpoint` | — | LXD REST API URL |
+| `lxd.trust-token` | — | One-time token from `lxc config trust add --name harvest` (self-managed identity path) |
+| `lxd.client-cert` | — | Manual override: client certificate PEM (skips the trust-token flow) |
+| `lxd.client-key` | — | Manual override: client private key PEM (skips the trust-token flow) |
+| `lxd.ca-cert` | — | LXD server CA certificate PEM (only needed for a self-signed LXD server) |
+| `lxd.insecure` | `false` | Skip TLS verification — development only |
+| `lxd.project` | `default` | LXD project holding all Harvest-managed containers |
+| `lxd.image-alias` | `24.04` | Base image alias fetched from `lxd.image-server` |
+| `lxd.image-server` | `https://cloud-images.ubuntu.com/releases` | Simplestreams server images are fetched from |
+| `lxd.profile` | `default` | LXD profile applied to every container (storage pool, resource defaults) |
+
+Harvest creates one bridge network per Harvest project inside `lxd.project`, and sizes containers per-agent from a fixed set of flavors (tiny/small/medium/large/extra-large) chosen in the UI — there's no separate sizing config key.
+
 ### Authentication
 
 ```bash

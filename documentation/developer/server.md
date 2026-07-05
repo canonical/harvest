@@ -186,10 +186,37 @@ docs_dir = "/var/harvest/docs"    # must match harvester.toml [documentation].do
 [agents]
 binary_path = "/usr/local/bin/harvest-agent"    # path to the compiled agent binary
 public_url  = "https://harvest.example.com"     # used in generated install scripts
+
+# Optional: let Harvest provision and manage agents on an LXD cluster
+[lxd]
+endpoint     = "https://lxd-cluster.example.com:8443"
+trust_token  = "eyJjbGllbnRfbmFtZSI6Li4ufQ=="  # one-time; see below
+# client_cert / client_key: omit both (as above) to let Harvest generate and
+# self-register its own identity. Set both instead to manage the cert yourself
+# — see LxdConfig in config.rs for the full field list either way.
+ca_cert      = "..."        # optional; PEM of the LXD server's CA if self-signed
+insecure     = false        # optional; skip TLS verification (dev only)
+project      = "harvest"    # LXD project holding all Harvest-managed containers (default: "default")
+image_alias  = "24.04"      # default
+image_server = "https://cloud-images.ubuntu.com/releases"  # default
+profile      = "default"    # LXD profile applied to every container (storage pool, etc.)
 ```
 
 When `[documentation].docs_dir` is omitted, the `/docs` routes are not registered.
 When `[agents]` is omitted, the `/agents/binary/*` and install-script routes still work but return 404 for the binary.
+When `[lxd]` is omitted, agents can only be added by installing the daemon on an existing machine — the web UI's "Let Harvest create and manage agent" option is hidden (`GET /auth/config` reports `features.lxd: false`).
+
+### Client identity: self-managed vs. manual
+
+By default (`client_cert`/`client_key` both omitted), Harvest manages its own LXD client identity end to end:
+
+1. On startup, if no identity has been persisted yet, `lxd::identity::load_or_generate` generates a self-signed cert/key pair (`rcgen`) and stores it on a singleton `LxdIdentity` Neo4j node — untrusted at this point.
+2. If `trust_token` is set and the identity isn't yet trusted, `lxd::identity::join_with_token` submits the cert to LXD's `POST /1.0/certificates` with that token (an anonymous mTLS request using the untrusted cert itself — this is exactly what LXD's trust-token mechanism is for). On success the identity is marked trusted in Neo4j and the token is never needed again.
+3. If there's no token yet, or the join fails (expired/invalid/already-used token), the server logs a warning and starts anyway with LXD features disabled — this is not a fatal startup error, since the admin may just not have gotten to it yet.
+
+To generate a token, run `lxc config trust add --name harvest` (no certificate argument) against the LXD cluster with an already-trusted `lxc` — it prints a short-lived opaque token (`core.remote_token_expiry`, typically a few hours) to paste into `trust_token` before restarting the server. Each token is single-use; if a join attempt fails, generate a fresh one.
+
+Setting `client_cert`/`client_key` explicitly bypasses all of this — `LxdClient::new` builds directly from the configured PEM pair, and `trust_token`/the persisted identity are ignored.
 
 ---
 
@@ -483,17 +510,37 @@ Generation steps are broadcast over a `broadcast::channel`. Multiple clients can
 GET  /agents/:pid/install.sh                       generate bash install script
 GET  /agents/binary/harvest-agent                  serve the agent binary
 GET  /projects/:pid/agents                         list agents (online status)
+DELETE /projects/:pid/agents/:aid                  remove an agent
 POST /projects/:pid/agents/:aid/execute            run a command on an agent
 POST /projects/:pid/agents/rotate-install-token    rotate the install token
+GET  /projects/:pid/agents/flavors                 list LXD container sizes (requires [lxd])
+POST /projects/:pid/agents/lxd                     provision an LXD-managed agent (requires [lxd])
 ```
 
-**Authentication flow for agents:**
+There are two ways an agent joins a project. The web UI's "Add agent" button offers a choice between them whenever `[lxd]` is configured on the server (see `GET /auth/config` → `features.lxd`); otherwise it goes straight to the manual flow.
+
+**Manual install — authentication flow:**
 
 1. The admin generates an install token for the project (`POST /projects/:pid/agents/rotate-install-token` or the initial auto-generated one).
 2. The install script embeds the token and runs `harvest-agent`.
 3. On first connection to `GET /agent/events`, the server verifies the install token, creates a `Machine` node in Neo4j with a new permanent `agent_token_hash`, and sends a `Registered` event with the permanent token.
 4. The agent saves the permanent token to `/etc/harvest-agent/config.toml`.
 5. On subsequent connections, the server recognises the permanent token hash and sends `HelloAck`.
+
+**LXD-managed agents:**
+
+`POST /projects/:pid/agents/lxd` takes `{name, description, flavor}` (`flavor` is one of `tiny`, `small`, `medium`, `large`, `extra-large` — see `GET /projects/:pid/agents/flavors` for the exact CPU/RAM each maps to) and provisions the agent end to end:
+
+1. Ensures a bridge network exists for the Harvest project (`lxd/mod.rs::ensure_network`) — one LXD network per Harvest project, named deterministically from a hash of the project id (kept ≤ 15 chars for the kernel's `IFNAMSIZ` interface-name limit), all inside the single LXD project configured in `[lxd].project`.
+2. Sanitizes the user-supplied name into a valid LXD instance name and appends a random suffix for uniqueness.
+3. Writes an `LxdInstance` marker node in Neo4j (`project_id`, `hostname`, `description`) — a placeholder consumed once the agent connects.
+4. Creates and starts the container (`[lxd].image_alias` / `image_server` / `profile`, with `limits.cpu` / `limits.memory` set from the chosen flavor) and waits for it to reach the `Running` state.
+5. Runs the *same* install script a manual install would use (`GET /agents/:pid/install.sh`) inside the container via the LXD exec API — no separate provisioning path to keep in sync. A container LXD reports as `Running` hasn't necessarily finished booting (cloud-init, DNS/networking coming up), so this step retries up to `EXEC_INSTALL_ATTEMPTS` (4) times with a 10s delay (`LxdClient::exec_with_retry`) before giving up — safe because the install script is idempotent.
+6. If any step fails, the container and the `LxdInstance` marker are cleaned up and the request returns `502` with the full underlying error chain (both in the response body and server-side logs — see `tracing::error!` calls throughout `lxd_provision.rs` and `lxd/mod.rs`, enabled at `debug` level for request/response detail via `RUST_LOG=knowledge_server::lxd=debug`).
+
+The endpoint returns as soon as the install script exits successfully — it does not wait for the agent to open its SSE connection. When `agent_events_handler` sees a first-time connection whose `(project_id, hostname)` matches a pending `LxdInstance` marker, it tags the new `Machine` node with `provider: "lxd"`, `lxd_instance`, and `description`, then deletes the marker. The web UI's existing 15-second agent-list poll picks up the new agent once this happens — the same UX as a manual install appearing after the admin runs the curl command. Manually-installed agents have no `provider` field (`list_agents` reports `"manual"`).
+
+Deleting an LXD-managed agent (`DELETE /projects/:pid/agents/:aid`) additionally calls the LXD API to destroy the backing container before removing the `Machine` node; if the container deletion fails, the node is left in place and the request returns `502` so the resource isn't silently orphaned.
 
 **Command execution:**
 

@@ -145,4 +145,41 @@ EOF
   fi
 fi
 
+# Optional: LXD (enables "Let Harvest create and manage agent" in the web UI).
+# Set LXD_TRUST_TOKEN (from `lxc config trust add --name harvest`, run once
+# against the cluster) to let Harvest generate and self-register its own
+# client identity — or set LXD_CLIENT_CERT/LXD_CLIENT_KEY instead to manage
+# the identity yourself, which skips the trust-token flow entirely.
+if [ -n "${LXD_ENDPOINT:-}" ]; then
+  cat >> "$CONFIG" << EOF
+
+[lxd]
+endpoint    = "${LXD_ENDPOINT}"
+EOF
+  if [ -n "${LXD_CLIENT_CERT:-}" ] && [ -n "${LXD_CLIENT_KEY:-}" ]; then
+    cat >> "$CONFIG" << EOF
+client_cert = """
+${LXD_CLIENT_CERT}
+"""
+client_key  = """
+${LXD_CLIENT_KEY}
+"""
+EOF
+  elif [ -n "${LXD_TRUST_TOKEN:-}" ]; then
+    printf 'trust_token = "%s"\n' "${LXD_TRUST_TOKEN}" >> "$CONFIG"
+  fi
+  if [ -n "${LXD_CA_CERT:-}" ]; then
+    cat >> "$CONFIG" << EOF
+ca_cert = """
+${LXD_CA_CERT}
+"""
+EOF
+  fi
+  [ -n "${LXD_INSECURE:-}" ]     && printf 'insecure     = %s\n' "${LXD_INSECURE}"     >> "$CONFIG"
+  [ -n "${LXD_PROJECT:-}" ]      && printf 'project      = "%s"\n' "${LXD_PROJECT}"      >> "$CONFIG"
+  [ -n "${LXD_IMAGE_ALIAS:-}" ]  && printf 'image_alias  = "%s"\n' "${LXD_IMAGE_ALIAS}"  >> "$CONFIG"
+  [ -n "${LXD_IMAGE_SERVER:-}" ] && printf 'image_server = "%s"\n' "${LXD_IMAGE_SERVER}" >> "$CONFIG"
+  [ -n "${LXD_PROFILE:-}" ]      && printf 'profile      = "%s"\n' "${LXD_PROFILE}"      >> "$CONFIG"
+fi
+
 exec knowledge-server --config "$CONFIG" "$@"

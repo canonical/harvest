@@ -32,6 +32,7 @@ pub struct AuthState {
     pub http:           reqwest::Client,
     pub oidc_endpoints: Option<Arc<OidcEndpoints>>,
     pub oauth_sessions: OAuthSessions,
+    pub lxd_enabled:    bool,
 }
 
 pub async fn setup_constraints(neo4j: &Neo4jClient) -> Result<()> {
