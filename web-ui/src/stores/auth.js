@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 
 export const useAuthStore = defineStore('auth', () => {
   const user     = ref(null);
-  const features = ref({ docs: false });
+  const features = ref({ docs: false, lxd: false });
 
   const isLoggedIn = computed(() => user.value !== null);
   const isAdmin    = computed(() => user.value?.role === 'admin');

@@ -51,6 +51,18 @@ DOCS_DIR=$(snapctl get docs.dir)
 UI_ENABLE_DOCS=$(snapctl get ui.enable-docs)
 LOG_LEVEL=$(snapctl get log.level)
 
+# LXD (optional — enables "Let Harvest create and manage agent" in the UI)
+LXD_ENDPOINT=$(snapctl get lxd.endpoint)
+LXD_CLIENT_CERT=$(snapctl get lxd.client-cert)
+LXD_CLIENT_KEY=$(snapctl get lxd.client-key)
+LXD_TRUST_TOKEN=$(snapctl get lxd.trust-token)
+LXD_CA_CERT=$(snapctl get lxd.ca-cert)
+LXD_INSECURE=$(snapctl get lxd.insecure)
+LXD_PROJECT=$(snapctl get lxd.project)
+LXD_IMAGE_ALIAS=$(snapctl get lxd.image-alias)
+LXD_IMAGE_SERVER=$(snapctl get lxd.image-server)
+LXD_PROFILE=$(snapctl get lxd.profile)
+
 # ── Apply defaults ─────────────────────────────────────────────────────────
 : "${NEO4J_HOST:=localhost}"
 : "${NEO4J_PORT:=7687}"
@@ -219,6 +231,40 @@ docs_dir = "${DOCS_DIR}"
 [ui]
 enable_docs = ${UI_ENABLE_DOCS}
 TOML
+
+  if [ -n "${LXD_ENDPOINT:-}" ]; then
+    cat << TOML
+
+[lxd]
+endpoint    = "${LXD_ENDPOINT}"
+TOML
+    # Manual override: only emitted when both cert and key are set. Otherwise
+    # Harvest generates and self-registers its own identity via trust_token.
+    if [ -n "${LXD_CLIENT_CERT:-}" ] && [ -n "${LXD_CLIENT_KEY:-}" ]; then
+      cat << TOML
+client_cert = """
+${LXD_CLIENT_CERT}
+"""
+client_key  = """
+${LXD_CLIENT_KEY}
+"""
+TOML
+    elif [ -n "${LXD_TRUST_TOKEN:-}" ]; then
+      echo "trust_token = \"${LXD_TRUST_TOKEN}\""
+    fi
+    if [ -n "${LXD_CA_CERT:-}" ]; then
+      cat << TOML
+ca_cert = """
+${LXD_CA_CERT}
+"""
+TOML
+    fi
+    [ -n "${LXD_INSECURE:-}" ]     && echo "insecure     = ${LXD_INSECURE}"
+    [ -n "${LXD_PROJECT:-}" ]      && echo "project      = \"${LXD_PROJECT}\""
+    [ -n "${LXD_IMAGE_ALIAS:-}" ]  && echo "image_alias  = \"${LXD_IMAGE_ALIAS}\""
+    [ -n "${LXD_IMAGE_SERVER:-}" ] && echo "image_server = \"${LXD_IMAGE_SERVER}\""
+    [ -n "${LXD_PROFILE:-}" ]      && echo "profile      = \"${LXD_PROFILE}\""
+  fi
 
 } > "$SNAP_COMMON/server.toml"
 

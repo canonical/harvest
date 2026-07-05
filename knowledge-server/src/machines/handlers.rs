@@ -23,8 +23,8 @@ use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream};
 use uuid::Uuid;
 
-use crate::{auth::jwt::Claims, neo4j::Neo4jClient};
-use super::{ConnectedAgent, MachineRegistry, ResultBody, ServerToAgent, hash_token};
+use crate::{auth::jwt::Claims, lxd::{Flavor, LxdClient}, neo4j::Neo4jClient};
+use super::{lxd_provision, ConnectedAgent, MachineRegistry, ResultBody, ServerToAgent, hash_token};
 
 const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 25;
 const DEFAULT_EXECUTE_TIMEOUT_SECS: u64 = 30;
@@ -35,6 +35,7 @@ pub struct MachineState {
     pub neo4j:       Option<Arc<Neo4jClient>>,
     pub binary_path: Option<PathBuf>,
     pub server_url:  String,
+    pub lxd:         Option<Arc<LxdClient>>,
 }
 
 type ApiError = (StatusCode, Json<Value>);
@@ -145,7 +146,34 @@ pub fn machines_protected_router(state: Arc<MachineState>) -> Router {
         .route("/projects/:pid/agents/:aid",                 delete(delete_agent))
         .route("/projects/:pid/agents/:aid/execute",         post(execute_command))
         .route("/projects/:pid/agents/rotate-install-token", post(rotate_install_token))
+        .route("/projects/:pid/agents/flavors",              get(list_flavors))
+        .route("/projects/:pid/agents/lxd",                  post(create_lxd_agent_handler))
         .with_state(state)
+}
+
+pub(crate) async fn get_or_create_install_token(
+    neo4j: &Neo4jClient,
+    project_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let rows = neo4j.query_read(
+        "MATCH (p:Project {id: $pid}) RETURN p.install_token AS install_token",
+        json!({ "pid": project_id }),
+    ).await?;
+
+    let Some(first) = rows.into_iter().next() else {
+        return Ok(None);
+    };
+
+    if let Some(tok) = first["install_token"].as_str() {
+        return Ok(Some(tok.to_string()));
+    }
+
+    let tok = Uuid::new_v4().to_string();
+    neo4j.query_read(
+        "MATCH (p:Project {id: $pid}) SET p.install_token = $tok",
+        json!({ "pid": project_id, "tok": tok }),
+    ).await?;
+    Ok(Some(tok))
 }
 
 async fn install_script_handler(
@@ -157,31 +185,10 @@ async fn install_script_handler(
         Err(e) => return e.into_response(),
     };
 
-    let rows = match neo4j.query_read(
-        "MATCH (p:Project {id: $pid}) RETURN p.install_token AS install_token",
-        json!({ "pid": project_id }),
-    ).await {
-        Ok(r) => r,
-        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "server error").into_response(),
-    };
-
-    let first = match rows.into_iter().next() {
-        Some(r) => r,
-        None    => return err(StatusCode::NOT_FOUND, "project not found").into_response(),
-    };
-
-    let install_token = match first["install_token"].as_str().map(|s| s.to_string()) {
-        Some(t) => t,
-        None => {
-            let tok = Uuid::new_v4().to_string();
-            if neo4j.query_read(
-                "MATCH (p:Project {id: $pid}) SET p.install_token = $tok",
-                json!({ "pid": project_id, "tok": tok }),
-            ).await.is_err() {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, "server error").into_response();
-            }
-            tok
-        }
+    let install_token = match get_or_create_install_token(neo4j, &project_id).await {
+        Ok(Some(tok)) => tok,
+        Ok(None)      => return err(StatusCode::NOT_FOUND, "project not found").into_response(),
+        Err(_)        => return err(StatusCode::INTERNAL_SERVER_ERROR, "server error").into_response(),
     };
 
     let script = generate_install_script(&state.server_url, &install_token);
@@ -293,6 +300,15 @@ async fn agent_events_handler(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
 
+        let _ = neo4j.query_read(
+            "MATCH (li:LxdInstance {project_id: $pid, hostname: $h})
+             WITH li LIMIT 1
+             MATCH (m:Machine {id: $mid})
+             SET m.provider = 'lxd', m.lxd_instance = li.hostname, m.description = li.description
+             DELETE li",
+            json!({ "pid": project_id, "h": hostname, "mid": aid }),
+        ).await;
+
         (aid, project_id, perm_hash, ServerToAgent::Registered { agent_token: perm_token })
     };
 
@@ -402,20 +418,24 @@ pub async fn list_agents(
     let db_machines = neo4j.query_read(
         "MATCH (m:Machine {project_id: $pid})
          RETURN m.id AS id, m.hostname AS hostname,
-                m.last_seen AS last_seen, m.created_at AS created_at
+                m.last_seen AS last_seen, m.created_at AS created_at,
+                m.provider AS provider, m.description AS description
          ORDER BY m.created_at ASC",
         json!({ "pid": project_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     let result: Vec<Value> = db_machines.into_iter().map(|m| {
-        let id     = m["id"].as_str().unwrap_or("").to_string();
-        let online = state.registry.agents.contains_key(&id);
+        let id       = m["id"].as_str().unwrap_or("").to_string();
+        let online   = state.registry.agents.contains_key(&id);
+        let provider = m["provider"].as_str().unwrap_or("manual").to_string();
         json!({
-            "id":         id,
-            "hostname":   m["hostname"],
-            "online":     online,
-            "last_seen":  m["last_seen"],
-            "created_at": m["created_at"],
+            "id":          id,
+            "hostname":    m["hostname"],
+            "online":      online,
+            "last_seen":   m["last_seen"],
+            "created_at":  m["created_at"],
+            "provider":    provider,
+            "description": m["description"],
         })
     }).collect();
 
@@ -451,6 +471,65 @@ pub async fn execute_command(
     }
 }
 
+#[derive(Debug)]
+pub enum DeleteAgentError {
+    NotFound,
+    LxdUnavailable,
+    LxdFailed(String),
+    Db,
+}
+
+impl std::fmt::Display for DeleteAgentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeleteAgentError::NotFound       => write!(f, "agent not found"),
+            DeleteAgentError::LxdUnavailable => write!(f, "LXD is not configured on this server"),
+            DeleteAgentError::LxdFailed(e)   => write!(f, "failed to delete LXD container: {e}"),
+            DeleteAgentError::Db             => write!(f, "server error"),
+        }
+    }
+}
+
+impl std::error::Error for DeleteAgentError {}
+
+pub async fn delete_agent_core(
+    neo4j:      &Neo4jClient,
+    lxd:        Option<&Arc<LxdClient>>,
+    registry:   &MachineRegistry,
+    project_id: &str,
+    agent_id:   &str,
+) -> Result<(), DeleteAgentError> {
+    let rows = neo4j.query_read(
+        "MATCH (m:Machine {id: $aid, project_id: $pid})
+         RETURN m.id AS id, m.provider AS provider, m.lxd_instance AS lxd_instance",
+        json!({ "aid": agent_id, "pid": project_id }),
+    ).await.map_err(|_| DeleteAgentError::Db)?;
+
+    let Some(machine) = rows.into_iter().next() else {
+        return Err(DeleteAgentError::NotFound);
+    };
+
+    if machine["provider"].as_str() == Some("lxd") {
+        let lxd_instance = machine["lxd_instance"].as_str().unwrap_or_default();
+        let lxd = lxd.ok_or(DeleteAgentError::LxdUnavailable)?;
+        lxd.delete_instance(lxd_instance).await
+            .map_err(|e| DeleteAgentError::LxdFailed(e.to_string()))?;
+    }
+
+    let sender = registry.agents.get(agent_id).map(|a| a.sender.clone());
+    registry.agents.remove(agent_id);
+    if let Some(sender) = sender {
+        let _ = sender.send(super::ServerToAgent::Uninstall).await;
+    }
+
+    neo4j.query_read(
+        "MATCH (m:Machine {id: $aid, project_id: $pid}) DELETE m",
+        json!({ "aid": agent_id, "pid": project_id }),
+    ).await.map_err(|_| DeleteAgentError::Db)?;
+
+    Ok(())
+}
+
 pub async fn delete_agent(
     Extension(user):  Extension<Claims>,
     State(state):     State<Arc<MachineState>>,
@@ -459,25 +538,14 @@ pub async fn delete_agent(
     let neo4j = neo4j_or_err(&state)?;
     require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
 
-    let rows = neo4j.query_read(
-        "MATCH (m:Machine {id: $aid, project_id: $pid}) RETURN m.id AS id",
-        json!({ "aid": agent_id, "pid": project_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-
-    if rows.is_empty() {
-        return Err(err(StatusCode::NOT_FOUND, "agent not found"));
-    }
-
-    let sender = state.registry.agents.get(&agent_id).map(|a| a.sender.clone());
-    state.registry.agents.remove(&agent_id);
-    if let Some(sender) = sender {
-        let _ = sender.send(super::ServerToAgent::Uninstall).await;
-    }
-
-    neo4j.query_read(
-        "MATCH (m:Machine {id: $aid, project_id: $pid}) DELETE m",
-        json!({ "aid": agent_id, "pid": project_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    delete_agent_core(neo4j, state.lxd.as_ref(), &state.registry, &project_id, &agent_id)
+        .await
+        .map_err(|e| match e {
+            DeleteAgentError::NotFound       => err(StatusCode::NOT_FOUND, &e.to_string()),
+            DeleteAgentError::LxdUnavailable => err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()),
+            DeleteAgentError::LxdFailed(_)   => err(StatusCode::BAD_GATEWAY, &e.to_string()),
+            DeleteAgentError::Db             => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        })?;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -497,6 +565,82 @@ pub async fn rotate_install_token(
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn list_flavors(
+    Extension(user):  Extension<Claims>,
+    State(state):     State<Arc<MachineState>>,
+    Path(project_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let neo4j = neo4j_or_err(&state)?;
+    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+
+    if state.lxd.is_none() {
+        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "LXD is not configured on this server"));
+    }
+
+    let flavors: Vec<Value> = Flavor::all().iter().map(Flavor::to_json).collect();
+    Ok(Json(flavors))
+}
+
+#[derive(serde::Deserialize)]
+pub struct CreateLxdAgentBody {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub flavor: String,
+}
+
+pub async fn create_lxd_agent_handler(
+    Extension(user):  Extension<Claims>,
+    State(state):     State<Arc<MachineState>>,
+    Path(project_id): Path<String>,
+    Json(body):       Json<CreateLxdAgentBody>,
+) -> axum::response::Response {
+    let neo4j = match neo4j_or_err(&state) {
+        Ok(n) => n,
+        Err(e) => return e.into_response(),
+    };
+    if let Err(e) = require_project_access(neo4j, &user.sub, &user.role, &project_id).await {
+        return e.into_response();
+    }
+
+    let lxd = match state.lxd.as_ref() {
+        Some(l) => l,
+        None => return err(StatusCode::SERVICE_UNAVAILABLE, "LXD is not configured on this server").into_response(),
+    };
+
+    if body.name.trim().is_empty() {
+        return err(StatusCode::BAD_REQUEST, "name is required").into_response();
+    }
+    let flavor = match Flavor::from_id(&body.flavor) {
+        Some(f) => f,
+        None => return err(StatusCode::BAD_REQUEST, "unknown flavor").into_response(),
+    };
+
+    let (tx, rx) = mpsc::channel::<String>(64);
+    let neo4j = Arc::clone(neo4j);
+    let lxd = Arc::clone(lxd);
+    let server_url = state.server_url.clone();
+    let project_id_task = project_id.clone();
+    let name = body.name.clone();
+    let description = body.description.clone();
+
+    tokio::spawn(async move {
+        if let Err(e) = lxd_provision::create_lxd_agent(
+            &neo4j, &lxd, &server_url, &project_id_task, &name, &description, flavor, tx,
+        ).await {
+            tracing::error!(project_id = project_id_task, name, error = ?e, "failed to create LXD-managed agent");
+        }
+    });
+
+    let stream = ReceiverStream::new(rx).map(|data| Ok::<Event, Infallible>(Event::default().data(data)));
+    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    response.headers_mut().insert(
+        header::HeaderName::from_static("x-accel-buffering"),
+        header::HeaderValue::from_static("no"),
+    );
+    response
 }
 
 async fn require_project_access(

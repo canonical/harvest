@@ -14,13 +14,14 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::agent::{graph_tools, machine_tools, skill_tools, Agent};
+use crate::agent::{graph_tools, lxd_tools, machine_tools, skill_tools, Agent};
 use crate::skills::SkillRegistry;
 use crate::auth::{self, handlers as auth_handlers, AuthState};
 use crate::config::UiConfig;
 use crate::config::AuthConfig;
 use crate::conversations::handlers::{self as conv_handlers, ConvState};
 use crate::llm::LlmProvider;
+use crate::lxd::LxdClient;
 use crate::machines::{
     handlers::{
         machines_protected_router, machines_router, MachineState,
@@ -55,6 +56,7 @@ pub struct AppState {
     pub agent_builder:    Arc<ProjectAgentBuilder>,
     pub binary_path:      Option<PathBuf>,
     pub llm:              Arc<dyn LlmProvider>,
+    pub lxd:              Option<Arc<LxdClient>>,
 }
 
 #[derive(Clone)]
@@ -63,6 +65,8 @@ pub struct ProjectAgentBuilder {
     pub neo4j:                      Arc<Neo4jClient>,
     pub registry:                   Arc<MachineRegistry>,
     pub skills:                     Arc<SkillRegistry>,
+    pub lxd:                        Option<Arc<LxdClient>>,
+    pub server_url:                 String,
     pub max_iterations:             usize,
     pub compaction_threshold_chars: usize,
     pub compaction_keep_last:       usize,
@@ -84,6 +88,20 @@ impl ProjectAgentBuilder {
         }));
         tools.push(Box::new(skill_tools::LoadSkillTool {
             registry: Arc::clone(&self.skills),
+        }));
+        if let Some(lxd) = &self.lxd {
+            tools.push(Box::new(lxd_tools::CreateLxdAgentTool {
+                neo4j:      Arc::clone(&self.neo4j),
+                lxd:        Arc::clone(lxd),
+                server_url: self.server_url.clone(),
+                project_id: project_id.clone(),
+            }));
+        }
+        tools.push(Box::new(lxd_tools::DeleteAgentTool {
+            neo4j:      Arc::clone(&self.neo4j),
+            lxd:        self.lxd.clone(),
+            registry:   Arc::clone(&self.registry),
+            project_id: project_id.clone(),
         }));
         Arc::new(
             Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
@@ -120,6 +138,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         http,
         oidc_endpoints,
         oauth_sessions: Arc::new(dashmap::DashMap::new()),
+        lxd_enabled:    state.lxd.is_some(),
     });
 
     let jwt_secret = Arc::new(state.auth.jwt_secret.clone());
@@ -185,6 +204,8 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                get(proj_handlers::get_conversation)
                .put(proj_handlers::update_conversation)
                .delete(proj_handlers::delete_conversation))
+        .route("/projects/:pid/conversations/:cid/confirm-action",
+               patch(proj_handlers::update_confirm_action))
         .route("/projects/:pid/events",        get(proj_handlers::project_events))
         .route("/projects/:pid/query",         post(proj_handlers::project_query))
         .route("/projects/:pid/query/stream",  post(proj_handlers::project_query_stream))
@@ -209,6 +230,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         neo4j:       Some(Arc::clone(&state.neo4j)),
         binary_path: state.binary_path.clone(),
         server_url,
+        lxd:         state.lxd.clone(),
     });
 
     let machines_public = machines_router(Arc::clone(&machine_state));

@@ -315,9 +315,14 @@ POST /projects/:pid/overview/regenerate — trigger a new overview generation
 GET  /agents/:pid/install.sh                      — generate install script for a project
 GET  /agents/binary/harvest-agent                 — download the agent binary
 GET  /projects/:pid/agents                        — list connected agents
+DELETE /projects/:pid/agents/:aid                  — remove an agent (deletes the LXD container too, if it has one)
 POST /projects/:pid/agents/:aid/execute            — run a command on an agent
 POST /projects/:pid/agents/rotate-install-token    — rotate the install token
+GET  /projects/:pid/agents/flavors                 — list LXD container sizes (requires [lxd] config)
+POST /projects/:pid/agents/lxd                     — provision a Harvest-managed agent on LXD (requires [lxd] config)
 ```
+
+Agents can be added two ways: install the daemon on a machine you already have, or — if the server has an `[lxd]` section configured — let Harvest provision and manage a container for you on an LXD cluster. The web UI's Agents page offers both options once LXD is configured; see [server.md](documentation/developer/server.md#remote-agents-harvest-agent) for the full provisioning flow.
 
 ### Admin
 
