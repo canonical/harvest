@@ -359,6 +359,31 @@ async fn stream_missing_query_field_returns_422() {
 
 use neo4j_testcontainers::{prelude::*, runners::AsyncRunner as _, Neo4j, Neo4jImageExt as _};
 use neo4rs::{query, Graph};
+use knowledge_server::conversations::handlers as conv_handlers;
+
+fn query_app_with_neo4j(agent: Arc<Agent>, neo4j: Arc<Neo4jClient>) -> Router {
+    let qs = Arc::new(QueryState { agent, neo4j: Some(Arc::clone(&neo4j)) });
+    let query_router = Router::new()
+        .route("/query/stream", post(handle_query_stream))
+        .with_state(qs);
+
+    let conv_state = Arc::new(conv_handlers::ConvState { neo4j });
+    let conv_router = Router::new()
+        .route("/conversations", post(conv_handlers::create))
+        .route("/conversations/:id", get(conv_handlers::get))
+        .with_state(conv_state);
+
+    query_router.merge(conv_router).layer(axum::Extension(test_claims()))
+}
+
+fn post_conv(body: Value) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/conversations")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap()
+}
 
 async fn seed_one_repo(graph: &Graph) {
     let stmts = [
@@ -592,4 +617,48 @@ async fn docs_page_explanations_section_works() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn global_chat_second_turn_preserves_first_turns_chain_and_sources() {
+    let container = Neo4j::default().start().await;
+    let uri  = container.image().bolt_uri_ipv4();
+    let user = container.image().user().unwrap_or("neo4j");
+    let pass = container.image().password().unwrap_or("neo");
+    let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+    neo4j.run("CREATE (:User {id: 'test-user-id'})").await.unwrap();
+
+    let agent = make_agent("see [myrepo:v1.0:src/lib.rs:42]");
+    let app = query_app_with_neo4j(agent, Arc::clone(&neo4j));
+
+    let (status, conv) = body_status_json(app.clone(), post_conv(json!({}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let cid = conv["id"].as_str().unwrap().to_string();
+
+    let resp = app.clone().oneshot(post_query_stream(json!({
+        "query": "first question", "conversation_id": cid,
+    }))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes  = resp.into_body().collect().await.unwrap().to_bytes();
+    let events = parse_sse_events(&String::from_utf8_lossy(&bytes));
+    assert!(events.iter().any(|e| e["type"] == "done"));
+
+    let resp = app.clone().oneshot(post_query_stream(json!({
+        "query": "second question", "conversation_id": cid,
+    }))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes  = resp.into_body().collect().await.unwrap().to_bytes();
+    let events = parse_sse_events(&String::from_utf8_lossy(&bytes));
+    assert!(events.iter().any(|e| e["type"] == "done"));
+
+    let (_, conv) = body_status_json(app, get_req(&format!("/conversations/{cid}"))).await;
+    let messages = conv["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 4);
+    let first_assistant = &messages[1];
+    assert!(
+        !first_assistant["sources"].as_array().unwrap().is_empty(),
+        "first turn's sources must survive being an older turn: {first_assistant}"
+    );
+    assert_eq!(first_assistant["sources"][0]["file"], "src/lib.rs");
 }

@@ -31,6 +31,8 @@
             :is-last="i === chat.messages.length - 1"
             :repo-url-map="repoUrlMap"
             @choice="sendWithChoice"
+            @confirm="handleConfirmAction"
+            @deny="handleDenyAction"
           />
         </div>
 
@@ -174,7 +176,11 @@ import {
   getConversation,
   deleteConversation as apiDeleteConversation,
   fetchRepositories,
+  provisionLxdAgent,
+  deleteAgent,
+  updateConfirmActionResult,
 } from '../lib/api.js';
+import { initialProvisionSteps, applyProvisionEvent, isProvisionDone, isProvisionError } from '../lib/lxd-provision.js';
 
 const props = defineProps({
   projectId: { type: String, default: null },
@@ -310,6 +316,7 @@ function handleProjectEvent(event) {
     case 'tool_call':
     case 'tool_result':
     case 'question':
+    case 'confirm_action':
     case 'done':
     case 'suggestions':
     case 'error':
@@ -447,6 +454,63 @@ function sendWithChoice(text) {
   sendQuery();
 }
 
+async function persistConfirmActionResult() {
+  const current = chat.messages.at(-1)?.confirmAction;
+  if (!current || !activeConvId.value) return;
+  try {
+    await updateConfirmActionResult(props.projectId, activeConvId.value, {
+      status: current.status,
+      steps: current.steps,
+      resultText: current.resultText,
+    });
+  } catch {}
+}
+
+async function handleConfirmAction() {
+  const action = chat.messages.at(-1)?.confirmAction;
+  if (!action || action.status !== 'pending') return;
+
+  if (action.name === 'create_lxd_agent') {
+    chat.updateConfirmAction({ status: 'running', steps: initialProvisionSteps() });
+    try {
+      await provisionLxdAgent(props.projectId, {
+        name: action.input.name,
+        description: action.input.description ?? '',
+        flavor: action.input.flavor,
+      }, (event) => {
+        const current = chat.messages.at(-1)?.confirmAction;
+        if (!current) return;
+        chat.updateConfirmAction({ steps: applyProvisionEvent(current.steps, event) });
+        if (isProvisionDone(event)) {
+          chat.updateConfirmAction({ status: 'done', resultText: `Agent '${action.input.name}' created.` });
+        } else if (isProvisionError(event)) {
+          chat.updateConfirmAction({ status: 'error', resultText: event.message });
+        }
+      });
+    } catch (e) {
+      chat.updateConfirmAction({ status: 'error', resultText: e.message || 'Failed to create agent' });
+    }
+    await persistConfirmActionResult();
+    return;
+  }
+
+  if (action.name === 'delete_agent') {
+    chat.updateConfirmAction({ status: 'running' });
+    try {
+      await deleteAgent(props.projectId, action.input.agent_id);
+      chat.updateConfirmAction({ status: 'done', resultText: 'Agent deleted.' });
+    } catch (e) {
+      chat.updateConfirmAction({ status: 'error', resultText: e.message || 'Failed to delete agent' });
+    }
+    await persistConfirmActionResult();
+  }
+}
+
+async function handleDenyAction() {
+  chat.updateConfirmAction({ status: 'denied' });
+  await persistConfirmActionResult();
+}
+
 function handleChatEvent(event) {
   switch (event.type) {
     case 'user_message':
@@ -460,6 +524,7 @@ function handleChatEvent(event) {
     case 'tool_call':      chat.addToolCall(event.name, event.input, event.description ?? describeToolCall(event.name, event.input ?? {}, { hostname: event.hostname })); break;
     case 'tool_result':    chat.completeToolCall(event.name, event.preview); break;
     case 'question':       chat.setQuestion(event.question, event.choices); break;
+    case 'confirm_action': chat.setConfirmAction(event.name, event.input, event.description); break;
     case 'done':
       chat.finalizeAssistantMessage({ answer: event.answer, sources: event.sources, tool_calls_made: event.tool_calls_made });
       updateConvTitle();

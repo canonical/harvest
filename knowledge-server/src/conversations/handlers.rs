@@ -18,19 +18,42 @@ const CONVERSATION_TITLE_TRUNCATE_CHARS: usize = 57;
 
 type ApiError = (StatusCode, Json<Value>);
 
-pub async fn load_user_history(
+pub async fn load_user_messages_raw(
     neo4j: &Neo4jClient,
     user_id: &str,
     conv_id: &str,
-) -> anyhow::Result<Vec<HistoryMessage>> {
+) -> anyhow::Result<Vec<Value>> {
     let rows = neo4j.query_read(
         "MATCH (:User {id: $uid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
          RETURN c.messages AS messages",
         json!({ "uid": user_id, "cid": conv_id }),
     ).await?;
-    parse_history_from_rows(rows)
+    let row = match rows.into_iter().next() {
+        Some(r) => r,
+        None => return Ok(vec![]),
+    };
+    let messages_str = match row.get("messages").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return Ok(vec![]),
+    };
+    Ok(serde_json::from_str(&messages_str).unwrap_or_default())
 }
 
+pub fn history_messages_from_raw(raw: &[Value]) -> Vec<HistoryMessage> {
+    raw.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect()
+}
+
+pub async fn load_conversation_context(
+    neo4j: &Neo4jClient,
+    user_id: &str,
+    conv_id: &str,
+) -> anyhow::Result<(Vec<Value>, Vec<HistoryMessage>)> {
+    let raw = load_user_messages_raw(neo4j, user_id, conv_id).await?;
+    let history = history_messages_from_raw(&raw);
+    Ok((raw, history))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn append_user_turn(
     neo4j: &Neo4jClient,
     user_id: &str,
@@ -38,10 +61,13 @@ pub async fn append_user_turn(
     user_text: &str,
     username: &str,
     attachments_meta: &[Value],
-    compacted_history: &[HistoryMessage],
+    prior_messages: Vec<Value>,
     assistant_text: &str,
     sources: &[crate::agent::Source],
     tool_calls_made: usize,
+    chain: Vec<Value>,
+    question: Option<Value>,
+    confirm_action: Option<Value>,
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     let title = if user_text.len() > CONVERSATION_TITLE_MAX_CHARS {
@@ -50,22 +76,27 @@ pub async fn append_user_turn(
         user_text.to_string()
     };
 
-    let mut messages: Vec<Value> = compacted_history.iter().map(|entry| {
-        json!({ "role": entry.role, "text": entry.text, "attachments": [] })
-    }).collect();
+    let mut messages = prior_messages;
     messages.push(json!({
         "role": "user",
         "text": user_text,
         "username": username,
         "attachments": attachments_meta,
     }));
-    messages.push(json!({
+    let mut assistant_message = json!({
         "role": "assistant",
         "text": assistant_text,
         "sources": sources,
-        "tool_calls": [],
+        "chain": chain,
         "tool_calls_made": tool_calls_made,
-    }));
+    });
+    if let Some(question) = question {
+        assistant_message["question"] = question;
+    }
+    if let Some(confirm_action) = confirm_action {
+        assistant_message["confirm_action"] = confirm_action;
+    }
+    messages.push(assistant_message);
 
     let messages_json = serde_json::to_string(&messages)?;
     let message_count = messages.len() as i64;
@@ -86,20 +117,6 @@ pub async fn append_user_turn(
         }),
     ).await?;
     Ok(())
-}
-
-fn parse_history_from_rows(rows: Vec<Value>) -> anyhow::Result<Vec<HistoryMessage>> {
-    let row = match rows.into_iter().next() {
-        Some(r) => r,
-        None => return Ok(vec![]),
-    };
-    let messages_str = match row.get("messages").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return Ok(vec![]),
-    };
-    let history: Vec<HistoryMessage> = serde_json::from_str(&messages_str)
-        .unwrap_or_default();
-    Ok(history)
 }
 
 fn err(status: StatusCode, msg: &str) -> ApiError {

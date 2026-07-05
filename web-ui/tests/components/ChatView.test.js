@@ -4,6 +4,7 @@ import { setActivePinia, createPinia } from 'pinia';
 import { createRouter, createWebHashHistory } from 'vue-router';
 import ChatView from '../../src/views/ChatView.vue';
 import { useChatStore } from '../../src/stores/chat.js';
+import { provisionLxdAgent, deleteAgent, listProjectConversations, getProjectConversation, updateConfirmActionResult } from '../../src/lib/api.js';
 
 vi.mock('../../src/lib/api.js', async (importOriginal) => {
   const actual = await importOriginal();
@@ -14,7 +15,11 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
       return { close: vi.fn() };
     }),
     listProjectConversations: vi.fn(() => Promise.resolve([])),
+    getProjectConversation:   vi.fn(() => Promise.resolve({ id: 'conv-1', messages: [] })),
     fetchRepositories:        vi.fn(() => Promise.resolve([])),
+    provisionLxdAgent:        vi.fn(() => Promise.resolve()),
+    deleteAgent:              vi.fn(() => Promise.resolve()),
+    updateConfirmActionResult: vi.fn(() => Promise.resolve({ ok: true })),
   };
 });
 
@@ -201,5 +206,129 @@ describe('ChatView', () => {
 
     const last = chat.messages.at(-1);
     expect(last.pendingAnswer).toBe('The answer is 42.');
+  });
+
+  it('project SSE confirm_action event attaches a pending confirmAction', async () => {
+    const pinia = createPinia();
+    mount(ChatView, {
+      props: { projectId: 'proj-1' },
+      global: { plugins: [pinia, makeRouter()] },
+    });
+    await flushPromises();
+
+    const chat = useChatStore(pinia);
+    chat.startAssistantMessage();
+
+    global.__projectEventCallback({
+      type: 'confirm_action',
+      conv_id: null,
+      name: 'create_lxd_agent',
+      input: { name: 'build-runner', flavor: 'small' },
+      description: 'Create a small agent named build-runner',
+    });
+
+    const last = chat.messages.at(-1);
+    expect(last.confirmAction.name).toBe('create_lxd_agent');
+    expect(last.confirmAction.status).toBe('pending');
+  });
+
+  describe('confirm/deny handling', () => {
+    async function mountWithPendingConfirm(name, input) {
+      listProjectConversations.mockResolvedValue([
+        { id: 'conv-1', title: 'Chat', updated_at: new Date().toISOString() },
+      ]);
+      getProjectConversation.mockResolvedValue({ id: 'conv-1', messages: [] });
+
+      const pinia = createPinia();
+      const w = mount(ChatView, {
+        props: { projectId: 'proj-1' },
+        global: { plugins: [pinia, makeRouter()] },
+      });
+      await flushPromises();
+      await w.find('.conv-item').trigger('click');
+      await flushPromises();
+
+      const chat = useChatStore(pinia);
+      chat.startAssistantMessage();
+      chat.setConfirmAction(name, input, 'description');
+      return { w, chat };
+    }
+
+    beforeEach(() => {
+      provisionLxdAgent.mockReset().mockResolvedValue();
+      deleteAgent.mockReset().mockResolvedValue();
+      updateConfirmActionResult.mockClear().mockResolvedValue({ ok: true });
+    });
+
+    it('confirming create_lxd_agent calls provisionLxdAgent and marks done', async () => {
+      const { w, chat } = await mountWithPendingConfirm('create_lxd_agent', { name: 'build-runner', flavor: 'small' });
+      provisionLxdAgent.mockImplementation((projectId, body, onEvent) => {
+        onEvent({ type: 'done' });
+        return Promise.resolve();
+      });
+
+      await w.find('.confirm-actions .p-button--negative').trigger('click');
+      await flushPromises();
+
+      expect(provisionLxdAgent).toHaveBeenCalledWith('proj-1', { name: 'build-runner', description: '', flavor: 'small' }, expect.any(Function));
+      expect(chat.messages.at(-1).confirmAction.status).toBe('done');
+      expect(updateConfirmActionResult).toHaveBeenCalledWith('proj-1', 'conv-1', {
+        status: 'done', steps: expect.any(Array), resultText: "Agent 'build-runner' created.",
+      });
+    });
+
+    it('failed create_lxd_agent marks confirmAction as error', async () => {
+      const { w, chat } = await mountWithPendingConfirm('create_lxd_agent', { name: 'build-runner', flavor: 'small' });
+      provisionLxdAgent.mockRejectedValue(new Error('boom'));
+
+      await w.find('.confirm-actions .p-button--negative').trigger('click');
+      await flushPromises();
+
+      expect(chat.messages.at(-1).confirmAction.status).toBe('error');
+      expect(chat.messages.at(-1).confirmAction.resultText).toBe('boom');
+      expect(updateConfirmActionResult).toHaveBeenCalledWith('proj-1', 'conv-1', {
+        status: 'error', steps: expect.any(Array), resultText: 'boom',
+      });
+    });
+
+    it('confirming delete_agent calls deleteAgent and marks done', async () => {
+      const { w, chat } = await mountWithPendingConfirm('delete_agent', { agent_id: 'abc' });
+
+      await w.find('.confirm-actions .p-button--negative').trigger('click');
+      await flushPromises();
+
+      expect(deleteAgent).toHaveBeenCalledWith('proj-1', 'abc');
+      expect(chat.messages.at(-1).confirmAction.status).toBe('done');
+      expect(updateConfirmActionResult).toHaveBeenCalledWith('proj-1', 'conv-1', {
+        status: 'done', steps: [], resultText: 'Agent deleted.',
+      });
+    });
+
+    it('failed delete_agent marks confirmAction as error', async () => {
+      const { w, chat } = await mountWithPendingConfirm('delete_agent', { agent_id: 'abc' });
+      deleteAgent.mockRejectedValue(new Error('agent not found'));
+
+      await w.find('.confirm-actions .p-button--negative').trigger('click');
+      await flushPromises();
+
+      expect(chat.messages.at(-1).confirmAction.status).toBe('error');
+      expect(chat.messages.at(-1).confirmAction.resultText).toBe('agent not found');
+      expect(updateConfirmActionResult).toHaveBeenCalledWith('proj-1', 'conv-1', {
+        status: 'error', steps: [], resultText: 'agent not found',
+      });
+    });
+
+    it('denying does not call the agent APIs, marks confirmAction as denied, and persists that', async () => {
+      const { w, chat } = await mountWithPendingConfirm('delete_agent', { agent_id: 'abc' });
+
+      await w.find('.confirm-actions .p-button--base').trigger('click');
+      await flushPromises();
+
+      expect(deleteAgent).not.toHaveBeenCalled();
+      expect(chat.messages.at(-1).confirmAction.status).toBe('denied');
+      expect(updateConfirmActionResult).toHaveBeenCalledWith('proj-1', 'conv-1', {
+        status: 'denied', steps: [], resultText: '',
+      });
+    });
   });
 });

@@ -1,4 +1,6 @@
+pub mod chain;
 pub mod graph_tools;
+pub mod lxd_tools;
 pub mod machine_tools;
 pub mod skill_tools;
 pub mod prompt;
@@ -59,6 +61,7 @@ pub enum AgentEvent {
     Done { answer: String, sources: Vec<Source>, tool_calls_made: usize },
     Error { message: String },
     Question { question: String, choices: Vec<String> },
+    ConfirmAction { name: String, input: serde_json::Value, description: String },
     TitleUpdated { title: String },
 }
 
@@ -310,6 +313,23 @@ impl Agent {
                 return;
             }
 
+            if let Some(confirm_call) = tool_calls.iter().find(|c| {
+                tool_map.get(c.name.as_str()).map(|t| t.requires_confirmation()).unwrap_or(false)
+            }) {
+                let description = self.describe_tool_call(&confirm_call.name, &confirm_call.input).await;
+                let _ = event_sender.send(AgentEvent::ConfirmAction {
+                    name: confirm_call.name.clone(),
+                    input: confirm_call.input.clone(),
+                    description,
+                }).await;
+                let _ = event_sender.send(AgentEvent::Done {
+                    answer: text_buf,
+                    sources: vec![],
+                    tool_calls_made: iterations,
+                }).await;
+                return;
+            }
+
             let call_parts: Vec<ContentPart> = tool_calls
                 .iter()
                 .map(|c| ContentPart::ToolUse {
@@ -487,11 +507,16 @@ mod tests {
     struct MockTool {
         name: String,
         returns: String,
+        confirm: bool,
     }
 
     impl MockTool {
         fn new(name: &str, returns: &str) -> Box<Self> {
-            Box::new(Self { name: name.into(), returns: returns.into() })
+            Box::new(Self { name: name.into(), returns: returns.into(), confirm: false })
+        }
+
+        fn new_confirmable(name: &str, returns: &str) -> Box<Self> {
+            Box::new(Self { name: name.into(), returns: returns.into(), confirm: true })
         }
     }
 
@@ -506,6 +531,9 @@ mod tests {
         }
         async fn execute(&self, _params: serde_json::Value) -> Result<String> {
             Ok(self.returns.clone())
+        }
+        fn requires_confirmation(&self) -> bool {
+            self.confirm
         }
     }
 
@@ -897,6 +925,70 @@ mod tests {
 
         let has_delta_before_tool = events[..tool_pos].iter().any(|e| matches!(e, AgentEvent::TextDelta { .. }));
         assert!(!has_delta_before_tool, "no TextDelta expected before tool call when preamble is empty");
+    }
+
+    #[tokio::test]
+    async fn confirmable_tool_call_emits_confirm_action_and_ends_turn_without_executing() {
+        let llm = MockLlm::new(vec![
+            tool_call("delete_agent"),
+            text("Describing the confirmable action"),
+        ]);
+        let agent = Arc::new(agent_with(
+            llm,
+            vec![MockTool::new_confirmable("delete_agent", "should never run")],
+            5,
+        ));
+        let events = collect_agent_events(agent, "delete the agent").await;
+
+        let confirm = events.iter().find_map(|e| match e {
+            AgentEvent::ConfirmAction { name, .. } => Some(name.clone()),
+            _ => None,
+        });
+        assert_eq!(confirm.as_deref(), Some("delete_agent"));
+
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. })),
+            "confirmable tool must not be executed or announced as a tool call before confirmation"
+        );
+
+        let done = events.iter().any(|e| matches!(e, AgentEvent::Done { .. }));
+        assert!(done, "turn must end after requesting confirmation");
+    }
+
+    #[tokio::test]
+    async fn confirm_action_carries_input_and_description() {
+        let llm = MockLlm::new(vec![
+            tool_call("create_lxd_agent"),
+            text("Provisioning a small container named build-runner"),
+        ]);
+        let agent = Arc::new(agent_with(
+            llm,
+            vec![MockTool::new_confirmable("create_lxd_agent", "unused")],
+            5,
+        ));
+        let events = collect_agent_events(agent, "make me an agent").await;
+
+        let (input, description) = events.iter().find_map(|e| match e {
+            AgentEvent::ConfirmAction { input, description, .. } => Some((input.clone(), description.clone())),
+            _ => None,
+        }).expect("expected a ConfirmAction event");
+
+        assert_eq!(input, serde_json::json!({}));
+        assert_eq!(description, "Provisioning a small container named build-runner");
+    }
+
+    #[tokio::test]
+    async fn non_confirmable_tool_calls_execute_normally_alongside_confirmable_ones_absent() {
+        let llm = MockLlm::new(vec![
+            tool_call("my_tool"),
+            text("Calling my_tool"),
+            text("done"),
+        ]);
+        let agent = Arc::new(agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5));
+        let events = collect_agent_events(agent, "hi").await;
+
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::ConfirmAction { .. })));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolResult { .. })));
     }
 
     #[tokio::test]

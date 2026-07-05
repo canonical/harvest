@@ -9,14 +9,14 @@ use axum::{
 };
 use futures::StreamExt as _;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{convert::Infallible, sync::Arc};
 use tokio::sync::mpsc;
 
-use crate::agent::{AgentEvent, Attachment};
+use crate::agent::{chain::ChainBuilder, AgentEvent, Attachment};
 use crate::api::QueryState;
 use crate::auth::jwt::Claims;
-use crate::conversations::handlers::{append_user_turn, load_user_history};
+use crate::conversations::handlers::{append_user_turn, load_conversation_context};
 use crate::conversations::title_generation::maybe_regenerate_title;
 
 #[derive(Deserialize)]
@@ -34,7 +34,7 @@ pub async fn handle_query(
     Json(req): Json<QueryRequest>,
 ) -> impl IntoResponse {
     let attachments = req.attachments.as_deref().unwrap_or(&[]);
-    let history = load_history_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
+    let (raw_messages, history) = load_context_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
     let compacted = qs.agent.compact_history(&history).await;
     match qs.agent.query(&req.query, &compacted, attachments).await {
         Ok(response) => {
@@ -44,8 +44,9 @@ pub async fn handle_query(
                     .collect();
                 let _ = append_user_turn(
                     neo4j, &user.sub, cid,
-                    &req.query, &user.name, &att_meta, &compacted,
+                    &req.query, &user.name, &att_meta, raw_messages,
                     &response.answer, &response.sources, response.tool_calls_made,
+                    vec![], None, None,
                 ).await;
 
                 let msg_count = compacted.len() + 2;
@@ -76,7 +77,7 @@ pub async fn handle_query_stream(
     Json(req): Json<QueryRequest>,
 ) -> impl IntoResponse {
     let attachments = req.attachments.unwrap_or_default();
-    let history = load_history_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
+    let (raw_messages, history) = load_context_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
     let compacted = qs.agent.compact_history(&history).await;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
@@ -99,16 +100,39 @@ pub async fn handle_query_stream(
             agent.query_streaming(&query_for_agent, &compacted_for_agent, &attachments, agent_tx).await;
         });
 
+        let mut chain_builder = ChainBuilder::new();
+        let mut pending_question: Option<Value> = None;
+        let mut pending_confirm_action: Option<Value> = None;
+
         while let Some(event) = agent_rx.recv().await {
+            match &event {
+                AgentEvent::TextDelta { text } => chain_builder.text_delta(text),
+                AgentEvent::Thinking { text } => chain_builder.thinking(text),
+                AgentEvent::ToolCall { name, input } => chain_builder.tool_call(name, input, None, None),
+                AgentEvent::ToolResult { name, preview } => chain_builder.tool_result(name, preview),
+                AgentEvent::Question { question, choices } => {
+                    pending_question = Some(json!({ "question": question, "choices": choices }));
+                }
+                AgentEvent::ConfirmAction { name, input, description } => {
+                    pending_confirm_action = Some(json!({
+                        "name": name, "input": input, "description": description,
+                        "status": "pending", "steps": [], "result_text": "",
+                    }));
+                }
+                _ => {}
+            }
+
             let new_title = if let (
                 AgentEvent::Done { answer, sources, tool_calls_made },
                 Some(cid),
                 Some(neo4j),
             ) = (&event, &conv_id, &neo4j) {
+                let chain = std::mem::take(&mut chain_builder).finish();
                 let _ = append_user_turn(
                     neo4j, &user_id, cid,
-                    &query, &username, &att_meta, &compacted,
+                    &query, &username, &att_meta, raw_messages.clone(),
                     answer, sources, *tool_calls_made,
+                    chain, pending_question.clone(), pending_confirm_action.clone(),
                 ).await;
                 let msg_count = compacted.len() + 2;
                 maybe_regenerate_title(neo4j, &*llm, cid, &compacted, &query, answer, msg_count).await
@@ -136,15 +160,15 @@ pub async fn handle_query_stream(
     response
 }
 
-async fn load_history_if_needed(
+async fn load_context_if_needed(
     qs: &QueryState,
     user_id: &str,
     conv_id: Option<&str>,
-) -> Vec<crate::agent::HistoryMessage> {
+) -> (Vec<Value>, Vec<crate::agent::HistoryMessage>) {
     match (conv_id, &qs.neo4j) {
         (Some(cid), Some(neo4j)) => {
-            load_user_history(neo4j, user_id, cid).await.unwrap_or_default()
+            load_conversation_context(neo4j, user_id, cid).await.unwrap_or_default()
         }
-        _ => vec![],
+        _ => (vec![], vec![]),
     }
 }
