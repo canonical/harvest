@@ -16,6 +16,7 @@ export default defineConfig({
       '/health':           'http://localhost:8080',
       '/conversations':    'http://localhost:8080',
       '/groups':           'http://localhost:8080',
+      '/skills':           'http://localhost:8080',
       '/agents':           'http://localhost:8080',
       '/agent':            'http://localhost:8080',
       '/tool-description': 'http://localhost:8080',

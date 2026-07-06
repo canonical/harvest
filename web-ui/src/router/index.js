@@ -8,6 +8,7 @@ const routes = [
   { path: '/tasks',          component: () => import('../views/TasksView.vue'),          meta: { requiresProject: true } },
   { path: '/agents',         component: () => import('../views/AgentsView.vue'),         meta: { requiresProject: true } },
   { path: '/memories',       component: () => import('../views/MemoriesView.vue'),       meta: { requiresProject: true } },
+  { path: '/skills',         component: () => import('../views/SkillsView.vue'),         meta: { requiresProject: true } },
   { path: '/docs',           component: () => import('../views/DocumentationView.vue'),  meta: { requiresProject: true, feature: 'docs' } },
   { path: '/repositories',   component: () => import('../views/RepositoriesView.vue'),   meta: { requiresProject: true } },
   { path: '/admin',          component: () => import('../views/AdminView.vue'),          meta: { requiresAuth: true } },
