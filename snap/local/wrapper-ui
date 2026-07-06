@@ -23,7 +23,7 @@ cat > "$SNAP_COMMON/Caddyfile" << EOF
 }
 
 ${UI_HOST}:${UI_PORT} {
-	@api path_regexp ^/(auth|admin|conversations|groups|projects|query|repositories|graph|health|tool-description|docs|agents|agent)(/|$)
+	@api path_regexp ^/(auth|admin|conversations|groups|projects|query|repositories|graph|health|tool-description|docs|skills|agents|agent)(/|$)
 
 	handle @api {
 		reverse_proxy ${SERVER_HOST}:${SERVER_PORT} {
