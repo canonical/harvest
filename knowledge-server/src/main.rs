@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 
 use knowledge_server::agent::{graph_tools, Agent};
 use knowledge_server::api::{AppState, GraphCache, ProjectAgentBuilder};
-use knowledge_server::skills::SkillRegistry;
+use knowledge_server::skills::SkillStore;
 use knowledge_server::auth;
 use knowledge_server::config::Config;
 use knowledge_server::llm;
@@ -41,6 +41,9 @@ async fn main() -> Result<()> {
     neo4j.run("CREATE CONSTRAINT machine_id    IF NOT EXISTS FOR (m:Machine)      REQUIRE m.id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT memory_id     IF NOT EXISTS FOR (m:Memory)       REQUIRE m.id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT lxd_identity_id IF NOT EXISTS FOR (i:LxdIdentity) REQUIRE i.id IS UNIQUE").await?;
+    neo4j.run("CREATE CONSTRAINT skill_id       IF NOT EXISTS FOR (s:Skill)        REQUIRE s.id IS UNIQUE").await?;
+
+    knowledge_server::skills::seed_defaults_if_needed(&neo4j).await?;
 
     if config.llm.is_empty() {
         anyhow::bail!("at least one [[llm]] provider must be configured in server.toml");
@@ -57,7 +60,7 @@ async fn main() -> Result<()> {
     );
 
     let machine_registry = MachineRegistry::new();
-    let skill_registry   = Arc::new(SkillRegistry::new());
+    let skill_registry   = Arc::new(SkillStore::new(Arc::clone(&neo4j)));
 
     let docs_dir    = config.documentation.docs_dir.map(Arc::new);
     let server_url  = config.agents.public_url

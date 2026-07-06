@@ -59,7 +59,7 @@ fn memories_app(neo4j: Arc<Neo4jClient>) -> Router {
         llm:                        Arc::clone(&llm),
         neo4j:                      Arc::clone(&neo4j),
         registry:                   Arc::clone(&registry),
-        skills:                     Arc::new(knowledge_server::skills::SkillRegistry::new()),
+        skills:                     Arc::new(knowledge_server::skills::SkillStore::new(Arc::clone(&neo4j))),
         lxd:                        None,
         server_url:                 "http://localhost".into(),
         max_iterations:             2,

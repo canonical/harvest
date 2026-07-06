@@ -1175,6 +1175,156 @@ pub async fn delete_memory(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn list_project_skills(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path(project_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let rows = state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s:Skill)
+         RETURN s.id AS id, s.name AS name, s.description AS description,
+                s.created_at AS created_at, s.updated_at AS updated_at,
+                s.created_by AS created_by
+         ORDER BY s.created_at DESC",
+        json!({ "pid": project_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(Json(rows))
+}
+
+async fn project_skill_name_taken(
+    neo4j: &Neo4jClient,
+    project_id: &str,
+    name: &str,
+    exclude_id: &str,
+) -> Result<bool, ApiError> {
+    let rows = neo4j.query_read(
+        "MATCH (s:Skill {name: $name})
+         WHERE (s.is_global = true OR EXISTS { MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s) })
+           AND s.id <> $exclude_id
+         RETURN s.id AS id LIMIT 1",
+        json!({ "pid": project_id, "name": name, "exclude_id": exclude_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(!rows.is_empty())
+}
+
+#[derive(serde::Deserialize)]
+pub struct CreateSkillBody {
+    pub name:        String,
+    pub description: String,
+    pub content:     String,
+}
+
+pub async fn create_project_skill(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path(project_id): Path<String>,
+    Json(body): Json<CreateSkillBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "name is required"));
+    }
+    if project_skill_name_taken(&state.neo4j, &project_id, &name, "").await? {
+        return Err(err(StatusCode::CONFLICT, "a skill with this name already exists"));
+    }
+    let id  = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    state.neo4j.query_read(
+        "MATCH (p:Project {id: $pid})
+         CREATE (s:Skill {
+             id: $id, name: $name, description: $description, content: $content,
+             is_global: false, created_by: $uid, created_at: $now, updated_at: $now
+         })
+         CREATE (p)-[:HAS_SKILL]->(s)
+         RETURN s.id AS id",
+        json!({
+            "pid": project_id, "id": id, "name": name, "description": body.description,
+            "content": body.content, "uid": user.sub, "now": now,
+        }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok((StatusCode::CREATED, Json(json!({ "id": id, "name": name, "created_at": now }))))
+}
+
+pub async fn get_project_skill(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, skill_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let rows = state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s:Skill {id: $sid})
+         RETURN s.id AS id, s.name AS name, s.description AS description, s.content AS content,
+                s.created_by AS created_by,
+                s.created_at AS created_at, s.updated_at AS updated_at",
+        json!({ "pid": project_id, "sid": skill_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let row = rows.into_iter().next()
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+    Ok(Json(row))
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateSkillBody {
+    pub name:        Option<String>,
+    pub description: Option<String>,
+    pub content:     Option<String>,
+}
+
+pub async fn update_project_skill(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, skill_id)): Path<(String, String)>,
+    Json(body): Json<UpdateSkillBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    if let Some(ref name) = body.name {
+        if name.trim().is_empty() {
+            return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
+        }
+        if project_skill_name_taken(&state.neo4j, &project_id, name.trim(), &skill_id).await? {
+            return Err(err(StatusCode::CONFLICT, "a skill with this name already exists"));
+        }
+    }
+    let exists = state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s:Skill {id: $sid}) RETURN 1",
+        json!({ "pid": project_id, "sid": skill_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    if exists.is_empty() {
+        return Err(err(StatusCode::NOT_FOUND, "not found"));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut set_clauses = vec!["s.updated_at = $now"];
+    if body.name.is_some()        { set_clauses.push("s.name = $name"); }
+    if body.description.is_some() { set_clauses.push("s.description = $description"); }
+    if body.content.is_some()     { set_clauses.push("s.content = $content"); }
+    let cypher = format!(
+        "MATCH (:Project {{id: $pid}})-[:HAS_SKILL]->(s:Skill {{id: $sid}}) SET {} RETURN s.id",
+        set_clauses.join(", ")
+    );
+    let mut params = json!({ "pid": project_id, "sid": skill_id, "now": now });
+    if let Some(name)        = &body.name        { params["name"]        = json!(name.trim()); }
+    if let Some(description) = &body.description { params["description"] = json!(description); }
+    if let Some(content)     = &body.content     { params["content"]     = json!(content); }
+    state.neo4j.query_read(&cypher, params)
+        .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn delete_project_skill(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, skill_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s:Skill {id: $sid}) DETACH DELETE s",
+        json!({ "pid": project_id, "sid": skill_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn project_query(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
