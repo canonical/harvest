@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::agent::{graph_tools, lxd_tools, machine_tools, skill_tools, Agent};
-use crate::skills::SkillRegistry;
+use crate::skills::{handlers as skill_handlers, SkillStore};
 use crate::auth::{self, handlers as auth_handlers, AuthState};
 use crate::config::UiConfig;
 use crate::config::AuthConfig;
@@ -64,7 +64,7 @@ pub struct ProjectAgentBuilder {
     pub llm:                        Arc<dyn LlmProvider>,
     pub neo4j:                      Arc<Neo4jClient>,
     pub registry:                   Arc<MachineRegistry>,
-    pub skills:                     Arc<SkillRegistry>,
+    pub skills:                     Arc<SkillStore>,
     pub lxd:                        Option<Arc<LxdClient>>,
     pub server_url:                 String,
     pub max_iterations:             usize,
@@ -84,10 +84,12 @@ impl ProjectAgentBuilder {
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(skill_tools::ListSkillsTool {
-            registry: Arc::clone(&self.skills),
+            store:      Arc::clone(&self.skills),
+            project_id: project_id.clone(),
         }));
         tools.push(Box::new(skill_tools::LoadSkillTool {
-            registry: Arc::clone(&self.skills),
+            store:      Arc::clone(&self.skills),
+            project_id: project_id.clone(),
         }));
         if let Some(lxd) = &self.lxd {
             tools.push(Box::new(lxd_tools::CreateLxdAgentTool {
@@ -192,6 +194,8 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         Arc::clone(&state.agent_builder),
     ));
 
+    let skill_store = Arc::new(SkillStore::new(Arc::clone(&state.neo4j)));
+
     let project_router = Router::new()
         .route("/groups",       get(proj_handlers::list_my_groups))
         .route("/projects",     get(proj_handlers::list_projects).post(proj_handlers::create_project))
@@ -215,6 +219,12 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                get(proj_handlers::get_memory)
                .put(proj_handlers::update_memory)
                .delete(proj_handlers::delete_memory))
+        .route("/projects/:pid/skills",
+               get(proj_handlers::list_project_skills).post(proj_handlers::create_project_skill))
+        .route("/projects/:pid/skills/:sid",
+               get(proj_handlers::get_project_skill)
+               .put(proj_handlers::update_project_skill)
+               .delete(proj_handlers::delete_project_skill))
         .route("/projects/:pid/tasks",
                get(proj_handlers::list_tasks).post(proj_handlers::create_task))
         .route("/projects/:pid/tasks/:tid",
@@ -236,13 +246,19 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let machines_public = machines_router(Arc::clone(&machine_state));
     let machines_protected = machines_protected_router(Arc::clone(&machine_state));
 
+    let skills_read_router = Router::new()
+        .route("/skills",     get(skill_handlers::list_global_skills))
+        .route("/skills/:id", get(skill_handlers::get_global_skill))
+        .with_state(Arc::clone(&skill_store));
+
     let mut protected_router = Router::new()
         .merge(me_router)
         .merge(conv_router)
         .merge(agent_router)
         .merge(graph_router)
         .merge(project_router)
-        .merge(machines_protected);
+        .merge(machines_protected)
+        .merge(skills_read_router);
 
     if let Some(docs_dir) = state.docs_dir {
         let docs_router = Router::new()
@@ -255,7 +271,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let protected_router = protected_router
         .layer(from_fn_with_state(Arc::clone(&jwt_secret), auth::require_auth));
 
-    let admin_router = Router::new()
+    let admin_auth_routes = Router::new()
         .route("/admin/users",          get(crate::admin::handlers::list_users))
         .route("/admin/users/:id/role", put(crate::admin::handlers::set_user_role))
         .route("/admin/users/:id/groups", put(crate::admin::handlers::set_user_groups))
@@ -263,7 +279,16 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                                        .post(crate::admin::handlers::create_group))
         .route("/admin/groups/:id",     delete(crate::admin::handlers::delete_group))
         .route("/admin/groups/:id/default", put(crate::admin::handlers::set_group_default))
-        .with_state(Arc::clone(&auth_state))
+        .with_state(Arc::clone(&auth_state));
+
+    let admin_skills_routes = Router::new()
+        .route("/admin/skills",     post(skill_handlers::create_global_skill))
+        .route("/admin/skills/:id", put(skill_handlers::update_global_skill)
+                                   .delete(skill_handlers::delete_global_skill))
+        .with_state(Arc::clone(&skill_store));
+
+    let admin_router = admin_auth_routes
+        .merge(admin_skills_routes)
         .layer(from_fn_with_state(Arc::clone(&jwt_secret), auth::require_admin));
 
     Router::new()

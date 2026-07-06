@@ -1,4 +1,13 @@
+pub mod handlers;
+
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::Result;
+use serde_json::json;
+use uuid::Uuid;
+
+use crate::neo4j::Neo4jClient;
 
 const JUJU_MD:          &str = include_str!("../../skills/juju.md");
 const LXD_MD:           &str = include_str!("../../skills/lxd.md");
@@ -10,17 +19,6 @@ const LANDSCAPE_MD:     &str = include_str!("../../skills/landscape.md");
 pub struct SkillSummary {
     pub name:        String,
     pub description: String,
-}
-
-#[derive(Debug, Clone)]
-struct Skill {
-    pub name:        String,
-    pub description: String,
-    pub body:        String,
-}
-
-pub struct SkillRegistry {
-    skills: Vec<Skill>,
 }
 
 pub fn parse_frontmatter(content: &str) -> HashMap<String, String> {
@@ -51,37 +49,86 @@ pub fn skill_body(content: &str) -> &str {
     after_open[close_pos + 5..].trim_start()
 }
 
-fn load_skill(raw: &str) -> Skill {
-    let fm   = parse_frontmatter(raw);
-    let name = fm.get("name").cloned().unwrap_or_default();
-    let desc = fm.get("description").cloned().unwrap_or_default();
-    let body = skill_body(raw).to_string();
-    Skill { name, description: desc, body }
+pub struct SkillStore {
+    pub neo4j: Arc<Neo4jClient>,
 }
 
-impl SkillRegistry {
-    pub fn new() -> Self {
-        Self {
-            skills: vec![
-                load_skill(JUJU_MD),
-                load_skill(LXD_MD),
-                load_skill(CEPH_MD),
-                load_skill(CANONICAL_K8S_MD),
-                load_skill(LANDSCAPE_MD),
-            ],
-        }
+impl SkillStore {
+    pub fn new(neo4j: Arc<Neo4jClient>) -> Self {
+        Self { neo4j }
     }
 
-    pub fn list(&self) -> Vec<SkillSummary> {
-        self.skills.iter().map(|s| SkillSummary {
-            name:        s.name.clone(),
-            description: s.description.clone(),
+    pub async fn setup_constraints(&self) -> Result<()> {
+        self.neo4j
+            .run("CREATE CONSTRAINT skill_id IF NOT EXISTS FOR (s:Skill) REQUIRE s.id IS UNIQUE")
+            .await
+    }
+
+    pub async fn list_for_project(&self, project_id: &str) -> Vec<SkillSummary> {
+        let rows = self.neo4j.query_read(
+            "MATCH (s:Skill)
+             WHERE s.is_global = true
+                OR EXISTS { MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s) }
+             RETURN s.name AS name, s.description AS description
+             ORDER BY s.is_global DESC, s.name ASC",
+            json!({ "pid": project_id }),
+        ).await.unwrap_or_default();
+
+        rows.into_iter().map(|r| SkillSummary {
+            name:        r["name"].as_str().unwrap_or_default().to_string(),
+            description: r["description"].as_str().unwrap_or_default().to_string(),
         }).collect()
     }
 
-    pub fn load(&self, name: &str) -> Option<&str> {
-        self.skills.iter().find(|s| s.name == name).map(|s| s.body.as_str())
+    pub async fn load_content(&self, name: &str, project_id: &str) -> Option<String> {
+        let rows = self.neo4j.query_read(
+            "MATCH (s:Skill {name: $name})
+             WHERE s.is_global = true
+                OR EXISTS { MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s) }
+             RETURN s.content AS content
+             LIMIT 1",
+            json!({ "name": name, "pid": project_id }),
+        ).await.unwrap_or_default();
+
+        rows.into_iter().next().and_then(|r| r["content"].as_str().map(|s| s.to_string()))
     }
+}
+
+pub async fn seed_defaults_if_needed(neo4j: &Neo4jClient) -> Result<()> {
+    let marker = neo4j.query_read(
+        "MATCH (m:SkillsSeeded) RETURN m.seeded_at AS seeded_at LIMIT 1",
+        json!({}),
+    ).await?;
+    if !marker.is_empty() {
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    for raw in [JUJU_MD, LXD_MD, CEPH_MD, CANONICAL_K8S_MD, LANDSCAPE_MD] {
+        let fm          = parse_frontmatter(raw);
+        let name        = fm.get("name").cloned().unwrap_or_default();
+        let description = fm.get("description").cloned().unwrap_or_default();
+        let content     = skill_body(raw).to_string();
+        let id          = Uuid::new_v4().to_string();
+
+        neo4j.query_read(
+            "MERGE (s:Skill {name: $name})
+             ON CREATE SET s.id = $id, s.description = $description, s.content = $content,
+                           s.is_global = true, s.created_by = 'system',
+                           s.created_at = $now, s.updated_at = $now",
+            json!({
+                "id": id, "name": name, "description": description,
+                "content": content, "now": now,
+            }),
+        ).await?;
+    }
+
+    neo4j.query_read(
+        "CREATE (:SkillsSeeded {seeded_at: $now})",
+        json!({ "now": now }),
+    ).await?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -136,54 +183,5 @@ mod tests {
         let content = "---\nname: x\n---\n\n\nActual body";
         let body = skill_body(content);
         assert!(body.starts_with("Actual body"));
-    }
-
-    #[test]
-    fn registry_list_returns_all_five_skills() {
-        let registry = SkillRegistry::new();
-        assert_eq!(registry.list().len(), 5);
-    }
-
-    #[test]
-    fn registry_list_contains_expected_names() {
-        let registry = SkillRegistry::new();
-        let list = registry.list();
-        let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"juju"),          "missing juju");
-        assert!(names.contains(&"lxd"),           "missing lxd");
-        assert!(names.contains(&"ceph"),          "missing ceph");
-        assert!(names.contains(&"canonical-k8s"), "missing canonical-k8s");
-        assert!(names.contains(&"landscape"),     "missing landscape");
-    }
-
-    #[test]
-    fn registry_list_all_descriptions_non_empty() {
-        let registry = SkillRegistry::new();
-        for s in registry.list() {
-            assert!(!s.description.is_empty(), "{} has empty description", s.name);
-        }
-    }
-
-    #[test]
-    fn registry_load_known_skill_returns_some() {
-        let registry = SkillRegistry::new();
-        assert!(registry.load("juju").is_some());
-        assert!(registry.load("lxd").is_some());
-        assert!(registry.load("ceph").is_some());
-        assert!(registry.load("canonical-k8s").is_some());
-    }
-
-    #[test]
-    fn registry_load_returns_body_without_frontmatter() {
-        let registry = SkillRegistry::new();
-        let body = registry.load("juju").unwrap();
-        assert!(!body.contains("name: juju"),  "frontmatter leaked into body");
-        assert!(!body.starts_with("---"),       "body starts with frontmatter delimiter");
-    }
-
-    #[test]
-    fn registry_load_unknown_skill_returns_none() {
-        let registry = SkillRegistry::new();
-        assert!(registry.load("nonexistent").is_none());
     }
 }
