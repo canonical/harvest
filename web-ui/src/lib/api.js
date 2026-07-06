@@ -310,6 +310,27 @@ export async function deleteProjectMemory(projectId, memoryId) {
   }
 }
 
+export const listGlobalSkills  = ()       => projectFetch('/skills');
+export const getGlobalSkill    = (id)     => projectFetch(`/skills/${encodeURIComponent(id)}`);
+export const createGlobalSkill = (body)   => adminFetch('/admin/skills', { method: 'POST', body: JSON.stringify(body) });
+export const updateGlobalSkill = (id, body) => adminFetch(`/admin/skills/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) });
+export const deleteGlobalSkill = (id)     => adminFetch(`/admin/skills/${encodeURIComponent(id)}`, { method: 'DELETE' });
+
+const projectSkillUrl = (projectId, skillId) =>
+  `${projectUrl(projectId)}/skills/${encodeURIComponent(skillId)}`;
+
+export const listProjectSkills  = (projectId)             => projectFetch(`${projectUrl(projectId)}/skills`);
+export const createProjectSkill = (projectId, body)       => projectFetch(`${projectUrl(projectId)}/skills`, { method: 'POST', body: JSON.stringify(body) });
+export const getProjectSkill    = (projectId, skillId)    => projectFetch(projectSkillUrl(projectId, skillId));
+export const updateProjectSkill = (projectId, skillId, body) => projectFetch(projectSkillUrl(projectId, skillId), { method: 'PUT', body: JSON.stringify(body) });
+export async function deleteProjectSkill(projectId, skillId) {
+  const res = await fetch(projectSkillUrl(projectId, skillId), { method: 'DELETE' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
+}
+
 const taskUrl = (projectId, taskId) =>
   `${projectUrl(projectId)}/tasks/${encodeURIComponent(taskId)}`;
 

@@ -120,6 +120,12 @@
                       <span class="p-side-navigation__label">Memories</span>
                     </router-link>
                   </li>
+                  <li class="p-side-navigation__item">
+                    <router-link to="/skills" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
+                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A6 6 0 1 0 6 9c0 1.5.4 2.6 1.5 3.5A5.4 5.4 0 0 1 9 14"/></svg>
+                      <span class="p-side-navigation__label">Skills</span>
+                    </router-link>
+                  </li>
                   <li class="sidenav-separator" role="separator" aria-hidden="true"></li>
                   <li class="p-side-navigation__item">
                     <router-link to="/repositories" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">

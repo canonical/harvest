@@ -4330,6 +4330,49 @@ a.source-chip:hover .source-chip__name {
   resize: vertical;
 }
 
+.skills-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+  padding: 1.5rem 2rem;
+}
+
+.skills-page .p-tabs {
+  flex-shrink: 0;
+}
+
+.skills-page .p-tabs__item {
+  list-style: none;
+}
+
+.skills-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.skills-section .memories-layout {
+  flex: 1;
+}
+
+.skills-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin-bottom: 1rem;
+  flex-shrink: 0;
+}
+
+.skills-header h2 {
+  white-space: nowrap;
+}
+
 .p-modal__dialog--wide {
   width: min(700px, 95vw);
   max-width: none;
