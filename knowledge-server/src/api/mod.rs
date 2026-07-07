@@ -208,8 +208,8 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                get(proj_handlers::get_conversation)
                .put(proj_handlers::update_conversation)
                .delete(proj_handlers::delete_conversation))
-        .route("/projects/:pid/conversations/:cid/confirm-action",
-               patch(proj_handlers::update_confirm_action))
+        .route("/projects/:pid/conversations/:cid/confirm-action/resume",
+               post(proj_handlers::resume_confirm_action))
         .route("/projects/:pid/events",        get(proj_handlers::project_events))
         .route("/projects/:pid/query",         post(proj_handlers::project_query))
         .route("/projects/:pid/query/stream",  post(proj_handlers::project_query_stream))
