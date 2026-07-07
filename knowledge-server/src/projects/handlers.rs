@@ -20,7 +20,8 @@ use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tokio_stream::{wrappers::{BroadcastStream, ReceiverStream}, Stream};
 use uuid::Uuid;
 
-use crate::agent::{Agent, AgentEvent, Attachment, HistoryMessage, Source};
+use crate::agent::{Agent, AgentEvent, Attachment, HistoryMessage, PausedTurn, PendingConfirmCall, Source, ToolResumeResult};
+use crate::llm::types::Message;
 use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::api::ProjectAgentBuilder;
 use crate::auth::jwt::Claims;
@@ -63,6 +64,19 @@ struct InFlightToolCall {
 }
 
 #[derive(Clone)]
+struct ResolvedConfirmItem {
+    content:  String,
+    is_error: bool,
+}
+
+struct PausedConfirm {
+    messages:   Vec<Message>,
+    iterations: usize,
+    pending:    Vec<PendingConfirmCall>,
+    resolved:   HashMap<String, ResolvedConfirmItem>,
+}
+
+#[derive(Clone)]
 pub struct ProjectState {
     pub neo4j:         Arc<Neo4jClient>,
     pub agent:         Arc<Agent>,
@@ -71,6 +85,7 @@ pub struct ProjectState {
     pub channels:  Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
     pub presence:  Arc<RwLock<HashMap<String, HashMap<String, UserPresence>>>>,
     pub in_flight: Arc<RwLock<HashMap<String, HashMap<String, InFlightState>>>>,
+    paused_confirmations: Arc<RwLock<HashMap<String, PausedConfirm>>>,
 }
 
 #[derive(Clone)]
@@ -89,6 +104,7 @@ impl ProjectState {
             channels:  Arc::new(Mutex::new(HashMap::new())),
             presence:  Arc::new(RwLock::new(HashMap::new())),
             in_flight: Arc::new(RwLock::new(HashMap::new())),
+            paused_confirmations: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -357,7 +373,6 @@ async fn save_project_turn(
     tool_calls_made: usize,
     chain: Vec<Value>,
     question: Option<Value>,
-    confirm_action: Option<Value>,
 ) {
     let mut messages = prior_messages;
     messages.push(json!({
@@ -375,9 +390,6 @@ async fn save_project_turn(
     });
     if let Some(question) = question {
         assistant_message["question"] = question;
-    }
-    if let Some(confirm_action) = confirm_action {
-        assistant_message["confirm_action"] = confirm_action;
     }
     messages.push(assistant_message);
 
@@ -399,6 +411,86 @@ async fn save_project_turn(
     ).await;
 }
 
+async fn update_last_assistant_turn(
+    neo4j: &Neo4jClient,
+    project_id: &str,
+    conv_id: &str,
+    now: &str,
+    assistant_text: &str,
+    sources: &[Source],
+    tool_calls_made: usize,
+    new_chain: Vec<Value>,
+    question: Option<Value>,
+) {
+    let mut messages = load_project_messages_raw(neo4j, project_id, conv_id).await;
+    let Some(last) = messages.last_mut() else { return; };
+
+    let mut chain = last["chain"].as_array().cloned().unwrap_or_default();
+    chain.extend(new_chain);
+
+    last["text"] = json!(assistant_text);
+    last["sources"] = json!(sources);
+    last["chain"] = json!(chain);
+    last["tool_calls_made"] = json!(tool_calls_made);
+    match question {
+        Some(question) => last["question"] = question,
+        None => { if let Some(obj) = last.as_object_mut() { obj.remove("question"); } }
+    }
+
+    let messages_json = match serde_json::to_string(&messages) {
+        Ok(s) => s,
+        Err(e) => { tracing::error!(error=%e, "failed to serialize conversation"); return; }
+    };
+    let count = messages.len() as i64;
+
+    let _ = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
+         SET c.messages = $messages, c.message_count = $count,
+             c.updated_at = $now, c.suggestions = null
+         RETURN c.id AS id",
+        json!({
+            "pid": project_id, "cid": conv_id,
+            "messages": messages_json, "count": count, "now": now,
+        }),
+    ).await;
+}
+
+async fn mark_confirm_action_statuses(
+    neo4j: &Neo4jClient,
+    project_id: &str,
+    conv_id: &str,
+    results: &[ResumeConfirmItem],
+) {
+    let mut messages = load_project_messages_raw(neo4j, project_id, conv_id).await;
+    let Some(last) = messages.last_mut() else { return; };
+    let Some(chain) = last["chain"].as_array_mut() else { return; };
+    for entry in chain.iter_mut() {
+        if entry["type"] != "confirm_action" { continue; }
+        let Some(id) = entry["id"].as_str() else { continue };
+        if let Some(item) = results.iter().find(|r| r.tool_call_id == id) {
+            entry["status"] = json!(item.status);
+            entry["result_text"] = json!(item.result_text);
+        }
+    }
+
+    let messages_json = match serde_json::to_string(&messages) {
+        Ok(s) => s,
+        Err(e) => { tracing::error!(error=%e, "failed to serialize conversation"); return; }
+    };
+    let count = messages.len() as i64;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let _ = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
+         SET c.messages = $messages, c.message_count = $count, c.updated_at = $now
+         RETURN c.id AS id",
+        json!({
+            "pid": project_id, "cid": conv_id,
+            "messages": messages_json, "count": count, "now": now,
+        }),
+    ).await;
+}
+
 #[derive(serde::Deserialize)]
 pub struct ProjectQueryBody {
     pub query: String,
@@ -411,6 +503,238 @@ pub struct ProjectQueryStreamBody {
     pub query: String,
     pub conversation_id: String,
     pub attachments: Option<Vec<Attachment>>,
+}
+
+enum TurnPersist {
+    New { prior_messages: Vec<Value>, attachment_meta: Vec<Value> },
+    Continuation,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_turn(
+    locks:     Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
+    channels:  Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
+    neo4j:     Arc<Neo4jClient>,
+    llm:       Arc<dyn crate::llm::LlmProvider>,
+    registry:  Arc<crate::machines::MachineRegistry>,
+    in_flight: Arc<RwLock<HashMap<String, HashMap<String, InFlightState>>>>,
+    paused_confirmations: Arc<RwLock<HashMap<String, PausedConfirm>>>,
+    agent:      Arc<Agent>,
+    project_id: String,
+    conv_id:    String,
+    query:      String,
+    username:   String,
+    history:    Vec<HistoryMessage>,
+    persist:    TurnPersist,
+    mut agent_rx: mpsc::Receiver<AgentEvent>,
+    paused_rx: tokio::sync::oneshot::Receiver<Option<PausedTurn>>,
+) {
+    let mut chain_builder = crate::agent::chain::ChainBuilder::new();
+    let mut pending_question: Option<Value> = None;
+
+    while let Some(event) = agent_rx.recv().await {
+        let (description, hostname) = if let AgentEvent::ToolCall { name, input } = &event {
+            if name == "run_command" || name == "run_cypher" {
+                let desc = agent.describe_tool_call(name, input).await;
+                let host = if name == "run_command" {
+                    input["agent_id"].as_str()
+                        .and_then(|id| registry.agents.get(id).map(|a| a.hostname.clone()))
+                } else {
+                    None
+                };
+                (Some(desc), host)
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
+        match &event {
+            AgentEvent::TextDelta { text } => chain_builder.text_delta(text),
+            AgentEvent::Thinking { text } => chain_builder.thinking(text),
+            AgentEvent::ToolCall { name, input } => {
+                chain_builder.tool_call(name, input, description.as_deref(), hostname.as_deref());
+            }
+            AgentEvent::ToolResult { name, preview } => chain_builder.tool_result(name, preview),
+            AgentEvent::Question { question, choices } => {
+                pending_question = Some(json!({ "question": question, "choices": choices }));
+            }
+            AgentEvent::ConfirmAction { id, name, input, description } => {
+                chain_builder.confirm_action(id, name, input, description);
+            }
+            _ => {}
+        }
+
+        {
+            let mut map = in_flight.write().await;
+            if let Some(entry) = map.get_mut(&project_id).and_then(|m| m.get_mut(&conv_id)) {
+                match &event {
+                    AgentEvent::ThinkingDelta { text } => entry.current_thinking.push_str(text),
+                    AgentEvent::Thinking { text } => {
+                        entry.thinking_blocks.push(text.clone());
+                        entry.current_thinking.clear();
+                    }
+                    AgentEvent::TextDelta { text } => entry.text.push_str(text),
+                    AgentEvent::ToolCall { name, input } => entry.tool_calls.push(InFlightToolCall {
+                        name: name.clone(),
+                        input: input.clone(),
+                        description: description.clone(),
+                        preview: None,
+                        hostname: hostname.clone(),
+                    }),
+                    AgentEvent::ToolResult { name, preview } => {
+                        if let Some(tc) = entry.tool_calls.iter_mut().rev()
+                            .find(|tc| tc.name == *name && tc.preview.is_none())
+                        {
+                            tc.preview = Some(preview.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if let AgentEvent::Done { answer, sources, tool_calls_made } = &event {
+            let save_now = chrono::Utc::now().to_rfc3339();
+            let chain = std::mem::take(&mut chain_builder).finish();
+            match &persist {
+                TurnPersist::New { prior_messages, attachment_meta } => {
+                    save_project_turn(
+                        &neo4j, &project_id, &conv_id, &save_now,
+                        &query, &username, attachment_meta.clone(),
+                        prior_messages.clone(),
+                        answer, sources, *tool_calls_made,
+                        chain, pending_question.clone(),
+                    ).await;
+                }
+                TurnPersist::Continuation => {
+                    update_last_assistant_turn(
+                        &neo4j, &project_id, &conv_id, &save_now,
+                        answer, sources, *tool_calls_made,
+                        chain, pending_question.clone(),
+                    ).await;
+                }
+            }
+            {
+                let ch = channels.lock().await;
+                if let Some(sender) = ch.get(&project_id) {
+                    let _ = sender.send(json!({
+                        "type": "conversation_updated",
+                        "conv_id": conv_id,
+                        "updated_at": save_now,
+                    }).to_string());
+                }
+            }
+
+            let neo4j_m  = Arc::clone(&neo4j);
+            let llm_m    = Arc::clone(&llm);
+            let pid_m    = project_id.clone();
+            let query_m  = query.clone();
+            let answer_m = answer.clone();
+            tokio::spawn(async move {
+                super::memory_gen::maybe_generate_memory(
+                    &neo4j_m, &*llm_m, &pid_m, &query_m, &answer_m,
+                ).await;
+            });
+
+            let llm_t      = Arc::clone(&llm);
+            let neo4j_t    = Arc::clone(&neo4j);
+            let channels_t = Arc::clone(&channels);
+            let pid_t      = project_id.clone();
+            let cid_t      = conv_id.clone();
+            let query_t    = query.clone();
+            let answer_t   = answer.clone();
+            let prior_t    = history.clone();
+            let count_t    = history.len() + 2;
+            tokio::spawn(async move {
+                if let Some(new_title) = maybe_regenerate_title(
+                    &neo4j_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, count_t,
+                ).await {
+                    let data = json!({
+                        "type": "title_updated",
+                        "conv_id": cid_t,
+                        "title": new_title,
+                    }).to_string();
+                    let ch = channels_t.lock().await;
+                    if let Some(sender) = ch.get(&pid_t) {
+                        let _ = sender.send(data);
+                    }
+                }
+            });
+
+            let llm_s      = Arc::clone(&llm);
+            let neo4j_s    = Arc::clone(&neo4j);
+            let channels_s = Arc::clone(&channels);
+            let pid_s      = project_id.clone();
+            let cid_s      = conv_id.clone();
+            let query_s    = query.clone();
+            let answer_s   = answer.clone();
+            tokio::spawn(async move {
+                if let Some(choices) = super::suggestions::generate_suggestions(
+                    &*llm_s, &query_s, &answer_s,
+                ).await {
+                    let _ = neo4j_s.query_read(
+                        "MATCH (:Project {id:$pid})-[:HAS_CONVERSATION]->(c:Conversation {id:$cid})
+                         SET c.suggestions = $suggestions",
+                        json!({ "pid": pid_s, "cid": cid_s, "suggestions": choices }),
+                    ).await;
+                    let data = json!({
+                        "type": "suggestions",
+                        "conv_id": cid_s,
+                        "choices": choices,
+                    }).to_string();
+                    let ch = channels_s.lock().await;
+                    if let Some(sender) = ch.get(&pid_s) {
+                        let _ = sender.send(data);
+                    }
+                }
+            });
+        }
+
+        let mut v = if let AgentEvent::ToolCall { .. } = &event {
+            let mut v = serde_json::to_value(&event).unwrap_or(Value::Null);
+            if let Some(obj) = v.as_object_mut() {
+                if let Some(d) = &description { obj.insert("description".to_string(), json!(d)); }
+                if let Some(h) = &hostname    { obj.insert("hostname".to_string(),    json!(h)); }
+            }
+            v
+        } else {
+            serde_json::to_value(&event).unwrap_or(Value::Null)
+        };
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("conv_id".to_string(), json!(conv_id));
+        }
+        if let Ok(data) = serde_json::to_string(&v) {
+            let channel_map = channels.lock().await;
+            if let Some(sender) = channel_map.get(&project_id) {
+                let _ = sender.send(data);
+            }
+        }
+    }
+
+    if let Ok(Some(paused_turn)) = paused_rx.await {
+        paused_confirmations.write().await.insert(
+            format!("{project_id}:{conv_id}"),
+            PausedConfirm {
+                messages:   paused_turn.messages,
+                iterations: paused_turn.iterations,
+                pending:    paused_turn.pending,
+                resolved:   HashMap::new(),
+            },
+        );
+    }
+
+    if let Some(m) = in_flight.write().await.get_mut(&project_id) {
+        m.remove(&conv_id);
+    }
+    if let Some(m) = locks.write().await.get_mut(&project_id) {
+        m.remove(&conv_id);
+    }
+    let channel_map = channels.lock().await;
+    if let Some(sender) = channel_map.get(&project_id) {
+        let _ = sender.send(json!({"type": "unlock", "conv_id": conv_id}).to_string());
+    }
 }
 
 pub async fn project_query_stream(
@@ -467,6 +791,7 @@ pub async fn project_query_stream(
     let llm       = Arc::clone(&state.agent_builder.llm);
     let registry  = Arc::clone(&state.agent_builder.registry);
     let in_flight = Arc::clone(&state.in_flight);
+    let paused_confirmations = Arc::clone(&state.paused_confirmations);
     let project_id_owned = project_id.clone();
     let query            = body.query.clone();
     let conv_id          = body.conversation_id.clone();
@@ -488,219 +813,22 @@ pub async fn project_query_stream(
         });
 
     tokio::spawn(async move {
-        let (agent_event_sender, mut agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (agent_event_sender, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
         let agent_clone = Arc::clone(&agent);
         let history_for_agent = history.clone();
         let query_for_agent   = query.clone();
         tokio::spawn(async move {
-            agent_clone.query_streaming(&query_for_agent, &history_for_agent, &attachments, agent_event_sender).await;
+            let paused = agent_clone.query_streaming(&query_for_agent, &history_for_agent, &attachments, agent_event_sender).await;
+            let _ = paused_tx.send(paused);
         });
 
-        let mut tool_calls_log: Vec<Value> = Vec::new();
-        let mut chain_builder = crate::agent::chain::ChainBuilder::new();
-        let mut pending_question: Option<Value> = None;
-        let mut pending_confirm_action: Option<Value> = None;
-
-        while let Some(event) = agent_rx.recv().await {
-            match &event {
-                AgentEvent::ToolCall { name, input } => {
-                    tool_calls_log.push(json!({
-                        "name": name, "input": input,
-                        "status": "done", "preview": null,
-                    }));
-                }
-                AgentEvent::ToolResult { name, preview } => {
-                    if let Some(tc) = tool_calls_log.iter_mut().rev()
-                        .find(|tc| tc["name"] == *name && tc["preview"].is_null())
-                    {
-                        tc["preview"] = json!(preview);
-                    }
-                }
-                _ => {}
-            }
-
-            let (description, hostname) = if let AgentEvent::ToolCall { name, input } = &event {
-                if name == "run_command" || name == "run_cypher" {
-                    let desc = agent.describe_tool_call(name, input).await;
-                    let host = if name == "run_command" {
-                        input["agent_id"].as_str()
-                            .and_then(|id| registry.agents.get(id).map(|a| a.hostname.clone()))
-                    } else {
-                        None
-                    };
-                    (Some(desc), host)
-                } else {
-                    (None, None)
-                }
-            } else {
-                (None, None)
-            };
-
-            match &event {
-                AgentEvent::TextDelta { text } => chain_builder.text_delta(text),
-                AgentEvent::Thinking { text } => chain_builder.thinking(text),
-                AgentEvent::ToolCall { name, input } => {
-                    chain_builder.tool_call(name, input, description.as_deref(), hostname.as_deref());
-                }
-                AgentEvent::ToolResult { name, preview } => chain_builder.tool_result(name, preview),
-                AgentEvent::Question { question, choices } => {
-                    pending_question = Some(json!({ "question": question, "choices": choices }));
-                }
-                AgentEvent::ConfirmAction { name, input, description } => {
-                    pending_confirm_action = Some(json!({
-                        "name": name, "input": input, "description": description,
-                        "status": "pending", "steps": [], "result_text": "",
-                    }));
-                }
-                _ => {}
-            }
-
-            {
-                let mut map = in_flight.write().await;
-                if let Some(entry) = map.get_mut(&project_id_owned).and_then(|m| m.get_mut(&conv_id)) {
-                    match &event {
-                        AgentEvent::ThinkingDelta { text } => entry.current_thinking.push_str(text),
-                        AgentEvent::Thinking { text } => {
-                            entry.thinking_blocks.push(text.clone());
-                            entry.current_thinking.clear();
-                        }
-                        AgentEvent::TextDelta { text } => entry.text.push_str(text),
-                        AgentEvent::ToolCall { name, input } => entry.tool_calls.push(InFlightToolCall {
-                            name: name.clone(),
-                            input: input.clone(),
-                            description: description.clone(),
-                            preview: None,
-                            hostname: hostname.clone(),
-                        }),
-                        AgentEvent::ToolResult { name, preview } => {
-                            if let Some(tc) = entry.tool_calls.iter_mut().rev()
-                                .find(|tc| tc.name == *name && tc.preview.is_none())
-                            {
-                                tc.preview = Some(preview.clone());
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            if let AgentEvent::Done { answer, sources, tool_calls_made } = &event {
-                let save_now = chrono::Utc::now().to_rfc3339();
-                let chain = std::mem::take(&mut chain_builder).finish();
-                save_project_turn(
-                    &neo4j, &project_id_owned, &conv_id, &save_now,
-                    &query, &username, attachment_meta.clone(),
-                    prior_messages_for_save.clone(),
-                    answer, sources, *tool_calls_made,
-                    chain, pending_question.clone(), pending_confirm_action.clone(),
-                ).await;
-                {
-                    let ch = channels.lock().await;
-                    if let Some(sender) = ch.get(&project_id_owned) {
-                        let _ = sender.send(json!({
-                            "type": "conversation_updated",
-                            "conv_id": conv_id,
-                            "updated_at": save_now,
-                        }).to_string());
-                    }
-                }
-
-                let neo4j_m  = Arc::clone(&neo4j);
-                let llm_m    = Arc::clone(&llm);
-                let pid_m    = project_id_owned.clone();
-                let query_m  = query.clone();
-                let answer_m = answer.clone();
-                tokio::spawn(async move {
-                    super::memory_gen::maybe_generate_memory(
-                        &neo4j_m, &*llm_m, &pid_m, &query_m, &answer_m,
-                    ).await;
-                });
-
-                let llm_t      = Arc::clone(&llm);
-                let neo4j_t    = Arc::clone(&neo4j);
-                let channels_t = Arc::clone(&channels);
-                let pid_t      = project_id_owned.clone();
-                let cid_t      = conv_id.clone();
-                let query_t    = query.clone();
-                let answer_t   = answer.clone();
-                let prior_t    = history.clone();
-                let count_t    = history.len() + 2;
-                tokio::spawn(async move {
-                    if let Some(new_title) = maybe_regenerate_title(
-                        &neo4j_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, count_t,
-                    ).await {
-                        let data = json!({
-                            "type": "title_updated",
-                            "conv_id": cid_t,
-                            "title": new_title,
-                        }).to_string();
-                        let ch = channels_t.lock().await;
-                        if let Some(sender) = ch.get(&pid_t) {
-                            let _ = sender.send(data);
-                        }
-                    }
-                });
-
-                let llm_s      = Arc::clone(&llm);
-                let neo4j_s    = Arc::clone(&neo4j);
-                let channels_s = Arc::clone(&channels);
-                let pid_s      = project_id_owned.clone();
-                let cid_s      = conv_id.clone();
-                let query_s    = query.clone();
-                let answer_s   = answer.clone();
-                tokio::spawn(async move {
-                    if let Some(choices) = super::suggestions::generate_suggestions(
-                        &*llm_s, &query_s, &answer_s,
-                    ).await {
-                        let _ = neo4j_s.query_read(
-                            "MATCH (:Project {id:$pid})-[:HAS_CONVERSATION]->(c:Conversation {id:$cid})
-                             SET c.suggestions = $suggestions",
-                            json!({ "pid": pid_s, "cid": cid_s, "suggestions": choices }),
-                        ).await;
-                        let data = json!({
-                            "type": "suggestions",
-                            "conv_id": cid_s,
-                            "choices": choices,
-                        }).to_string();
-                        let ch = channels_s.lock().await;
-                        if let Some(sender) = ch.get(&pid_s) {
-                            let _ = sender.send(data);
-                        }
-                    }
-                });
-            }
-
-            let mut v = if let AgentEvent::ToolCall { .. } = &event {
-                let mut v = serde_json::to_value(&event).unwrap_or(Value::Null);
-                if let Some(obj) = v.as_object_mut() {
-                    if let Some(d) = &description { obj.insert("description".to_string(), json!(d)); }
-                    if let Some(h) = &hostname    { obj.insert("hostname".to_string(),    json!(h)); }
-                }
-                v
-            } else {
-                serde_json::to_value(&event).unwrap_or(Value::Null)
-            };
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("conv_id".to_string(), json!(conv_id));
-            }
-            if let Ok(data) = serde_json::to_string(&v) {
-                let channel_map = channels.lock().await;
-                if let Some(sender) = channel_map.get(&project_id_owned) {
-                    let _ = sender.send(data);
-                }
-            }
-        }
-
-        if let Some(m) = in_flight.write().await.get_mut(&project_id_owned) {
-            m.remove(&conv_id);
-        }
-        if let Some(m) = locks.write().await.get_mut(&project_id_owned) {
-            m.remove(&conv_id);
-        }
-        let channel_map = channels.lock().await;
-        if let Some(sender) = channel_map.get(&project_id_owned) {
-            let _ = sender.send(json!({"type": "unlock", "conv_id": conv_id}).to_string());
-        }
+        drive_turn(
+            locks, channels, neo4j, llm, registry, in_flight, paused_confirmations,
+            agent, project_id_owned, conv_id, query, username, history,
+            TurnPersist::New { prior_messages: prior_messages_for_save, attachment_meta },
+            agent_rx, paused_rx,
+        ).await;
     });
 
     Json(json!({"ok": true})).into_response()
@@ -981,49 +1109,135 @@ pub async fn update_conversation(
 }
 
 #[derive(serde::Deserialize)]
-pub struct UpdateConfirmActionBody {
+pub struct ResumeConfirmItem {
+    pub tool_call_id: String,
     pub status: String,
-    #[serde(default)]
-    pub steps: Vec<Value>,
     #[serde(default)]
     pub result_text: String,
 }
 
-pub async fn update_confirm_action(
+#[derive(serde::Deserialize)]
+pub struct ResumeConfirmBody {
+    pub results: Vec<ResumeConfirmItem>,
+}
+
+pub async fn resume_confirm_action(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
     Path((project_id, conv_id)): Path<(String, String)>,
-    Json(body): Json<UpdateConfirmActionBody>,
+    Json(body): Json<ResumeConfirmBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
 
-    let mut messages = load_project_messages_raw(&state.neo4j, &project_id, &conv_id).await;
-    let Some(last) = messages.last_mut() else {
-        return Err(err(StatusCode::NOT_FOUND, "conversation has no messages"));
-    };
-    if last["confirm_action"].is_null() {
-        return Err(err(StatusCode::NOT_FOUND, "last message has no pending confirm action"));
+    if body.results.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "results must not be empty"));
     }
-    last["confirm_action"]["status"] = json!(body.status);
-    last["confirm_action"]["steps"] = json!(body.steps);
-    last["confirm_action"]["result_text"] = json!(body.result_text);
 
-    let messages_json = serde_json::to_string(&messages)
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let count = messages.len() as i64;
-    let now = chrono::Utc::now().to_rfc3339();
+    let key = format!("{project_id}:{conv_id}");
+    let ready = {
+        let mut map = state.paused_confirmations.write().await;
+        let Some(paused) = map.get_mut(&key) else {
+            return Err(err(StatusCode::NOT_FOUND, "no pending confirmation for this conversation"));
+        };
+        for item in &body.results {
+            if !paused.pending.iter().any(|p| p.id == item.tool_call_id) { continue; }
+            paused.resolved.entry(item.tool_call_id.clone()).or_insert_with(|| ResolvedConfirmItem {
+                content: if !item.result_text.is_empty() {
+                    item.result_text.clone()
+                } else if item.status == "denied" {
+                    "The user declined to run this action.".to_string()
+                } else if item.status == "error" {
+                    "The action failed.".to_string()
+                } else {
+                    "Done.".to_string()
+                },
+                is_error: item.status != "done",
+            });
+        }
+        paused.resolved.len() >= paused.pending.len()
+    };
 
-    state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         SET c.messages = $messages, c.message_count = $count, c.updated_at = $now
-         RETURN c.id AS id",
-        json!({
-            "pid": project_id, "cid": conv_id,
-            "messages": messages_json, "count": count, "now": now,
-        }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    mark_confirm_action_statuses(&state.neo4j, &project_id, &conv_id, &body.results).await;
 
-    Ok(Json(json!({ "ok": true })))
+    if !ready {
+        return Ok(Json(json!({ "ok": true, "resumed": false })));
+    }
+
+    let Some(paused) = state.paused_confirmations.write().await.remove(&key) else {
+        return Ok(Json(json!({ "ok": true, "resumed": false })));
+    };
+
+    {
+        let mut locks = state.locks.write().await;
+        if locks.get(&project_id).map_or(false, |m| m.contains_key(&conv_id)) {
+            return Err(err(StatusCode::CONFLICT, "chat is locked"));
+        }
+        locks.entry(project_id.clone()).or_default().insert(conv_id.clone(), user.name.clone());
+    }
+    state.broadcast(&project_id, json!({
+        "type": "lock", "by": user.name, "conv_id": conv_id,
+    }).to_string()).await;
+
+    let results: Vec<ToolResumeResult> = paused.pending.iter().filter_map(|p| {
+        paused.resolved.get(&p.id).map(|r| ToolResumeResult {
+            tool_call_id: p.tool_use_id.clone(),
+            content:      r.content.clone(),
+            is_error:     r.is_error,
+        })
+    }).collect();
+
+    let agent = state.agent_builder.build(project_id.clone());
+    let raw_messages = load_project_messages_raw(&state.neo4j, &project_id, &conv_id).await;
+    let split = raw_messages.len().saturating_sub(2);
+    let (prior_raw, tail_raw) = raw_messages.split_at(split);
+    let prior_history = agent.compact_history(&history_messages_from_raw(prior_raw)).await;
+    let (query, username) = tail_raw.iter()
+        .find(|m| m["role"] == "user")
+        .map(|m| (
+            m["text"].as_str().unwrap_or("").to_string(),
+            m["username"].as_str().unwrap_or("").to_string(),
+        ))
+        .unwrap_or_default();
+
+    state.in_flight.write().await
+        .entry(project_id.clone())
+        .or_default()
+        .insert(conv_id.clone(), InFlightState {
+            query:    query.clone(),
+            username: username.clone(),
+            ..Default::default()
+        });
+
+    let locks     = Arc::clone(&state.locks);
+    let channels  = Arc::clone(&state.channels);
+    let neo4j     = Arc::clone(&state.neo4j);
+    let llm       = Arc::clone(&state.agent_builder.llm);
+    let registry  = Arc::clone(&state.agent_builder.registry);
+    let in_flight = Arc::clone(&state.in_flight);
+    let paused_confirmations = Arc::clone(&state.paused_confirmations);
+    let project_id_owned = project_id.clone();
+    let conv_id_owned    = conv_id.clone();
+
+    tokio::spawn(async move {
+        let (agent_event_sender, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+        let agent_clone = Arc::clone(&agent);
+        tokio::spawn(async move {
+            let out = agent_clone.resume_after_confirm(
+                paused.messages, paused.iterations, results, agent_event_sender,
+            ).await;
+            let _ = paused_tx.send(out);
+        });
+
+        drive_turn(
+            locks, channels, neo4j, llm, registry, in_flight, paused_confirmations,
+            agent, project_id_owned, conv_id_owned, query, username, prior_history,
+            TurnPersist::Continuation,
+            agent_rx, paused_rx,
+        ).await;
+    });
+
+    Ok(Json(json!({ "ok": true, "resumed": true })))
 }
 
 pub async fn delete_conversation(

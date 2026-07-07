@@ -61,8 +61,32 @@ pub enum AgentEvent {
     Done { answer: String, sources: Vec<Source>, tool_calls_made: usize },
     Error { message: String },
     Question { question: String, choices: Vec<String> },
-    ConfirmAction { name: String, input: serde_json::Value, description: String },
+    ConfirmAction { id: String, name: String, input: serde_json::Value, description: String },
     TitleUpdated { title: String },
+}
+
+enum LoopOutcome {
+    Finished { text: String, iterations: usize },
+    EndedWithoutCitations { text: String, iterations: usize },
+    Paused { messages: Vec<Message>, iterations: usize, text_buf: String, pending: Vec<PendingConfirmCall> },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingConfirmCall {
+    pub id:          String,
+    pub tool_use_id: String,
+}
+
+pub struct PausedTurn {
+    pub messages:   Vec<Message>,
+    pub iterations: usize,
+    pub pending:    Vec<PendingConfirmCall>,
+}
+
+pub struct ToolResumeResult {
+    pub tool_call_id: String,
+    pub content:       String,
+    pub is_error:      bool,
 }
 
 pub struct Agent {
@@ -197,13 +221,7 @@ impl Agent {
         }
     }
 
-    pub async fn query_streaming(
-        &self,
-        user_query: &str,
-        history: &[HistoryMessage],
-        attachments: &[Attachment],
-        event_sender: mpsc::Sender<AgentEvent>,
-    ) {
+    fn build_tool_defs(&self) -> Vec<ToolDefinition> {
         let mut tool_defs: Vec<ToolDefinition> =
             self.tools.iter().map(|t| t.definition()).collect();
         tool_defs.push(ToolDefinition {
@@ -233,34 +251,117 @@ impl Agent {
                 "required": ["question", "choices"]
             }),
         });
+        tool_defs
+    }
 
-        let tool_map: HashMap<String, &dyn Tool> =
-            self.tools.iter().map(|t| (t.definition().name, t.as_ref())).collect();
+    fn build_tool_map(&self) -> HashMap<String, &dyn Tool> {
+        self.tools.iter().map(|t| (t.definition().name, t.as_ref())).collect()
+    }
+
+    pub async fn query_streaming(
+        &self,
+        user_query: &str,
+        history: &[HistoryMessage],
+        attachments: &[Attachment],
+        event_sender: mpsc::Sender<AgentEvent>,
+    ) -> Option<PausedTurn> {
+        let tool_defs = self.build_tool_defs();
+        let tool_map  = self.build_tool_map();
 
         let compacted = self.compact_history(history).await;
         let mut messages = vec![Message::system(prompt::system_prompt())];
         messages.extend(history_to_messages(&compacted));
         messages.push(build_user_message(user_query, attachments));
 
-        let mut iterations = 0;
+        let outcome = self.run_loop(messages, 0, &tool_defs, &tool_map, &event_sender).await;
+        self.finish_outcome(outcome, &event_sender).await
+    }
 
-        let final_text = loop {
+    pub async fn resume_after_confirm(
+        &self,
+        mut messages: Vec<Message>,
+        iterations: usize,
+        results: Vec<ToolResumeResult>,
+        event_sender: mpsc::Sender<AgentEvent>,
+    ) -> Option<PausedTurn> {
+        for r in results {
+            messages.push(Message {
+                role: crate::llm::types::Role::User,
+                content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                    tool_use_id: r.tool_call_id,
+                    content:     r.content,
+                    is_error:    r.is_error,
+                }]),
+            });
+        }
+
+        let tool_defs = self.build_tool_defs();
+        let tool_map  = self.build_tool_map();
+
+        let outcome = self.run_loop(messages, iterations, &tool_defs, &tool_map, &event_sender).await;
+        self.finish_outcome(outcome, &event_sender).await
+    }
+
+    async fn finish_outcome(
+        &self,
+        outcome: LoopOutcome,
+        event_sender: &mpsc::Sender<AgentEvent>,
+    ) -> Option<PausedTurn> {
+        match outcome {
+            LoopOutcome::Finished { text, iterations } => {
+                let sources = parse_citations(&text);
+                let _ = event_sender.send(AgentEvent::Done {
+                    answer: text,
+                    sources,
+                    tool_calls_made: iterations,
+                }).await;
+                None
+            }
+            LoopOutcome::EndedWithoutCitations { text, iterations } => {
+                let _ = event_sender.send(AgentEvent::Done {
+                    answer: text,
+                    sources: vec![],
+                    tool_calls_made: iterations,
+                }).await;
+                None
+            }
+            LoopOutcome::Paused { messages, iterations, text_buf, pending } => {
+                let _ = event_sender.send(AgentEvent::Done {
+                    answer: text_buf,
+                    sources: vec![],
+                    tool_calls_made: iterations,
+                }).await;
+                Some(PausedTurn { messages, iterations, pending })
+            }
+        }
+    }
+
+    async fn run_loop(
+        &self,
+        mut messages: Vec<Message>,
+        mut iterations: usize,
+        tool_defs: &[ToolDefinition],
+        tool_map: &HashMap<String, &dyn Tool>,
+        event_sender: &mpsc::Sender<AgentEvent>,
+    ) -> LoopOutcome {
+        loop {
             if iterations >= self.max_iterations {
                 tracing::warn!("agent hit max_iterations={} — requesting synthesis", self.max_iterations);
                 messages.push(Message::user(
                     "You have used the maximum number of tool calls. \
                      Synthesize what you have gathered so far into a final answer.",
                 ));
-                match self.llm.chat(&messages, &[]).await {
-                    Ok(LlmResponse::Message { text }) => break text,
-                    Ok(LlmResponse::ToolCalls { .. }) | Err(_) => break self.last_assistant_text(&messages),
-                }
+                let text = match self.llm.chat(&messages, &[]).await {
+                    Ok(LlmResponse::Message { text }) => text,
+                    Ok(LlmResponse::ToolCalls { .. }) | Err(_) => self.last_assistant_text(&messages),
+                };
+                return LoopOutcome::Finished { text, iterations };
             }
 
             let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(64);
             let llm            = Arc::clone(&self.llm);
             let msgs_snapshot  = messages.clone();
-            let tools_snapshot = tool_defs.clone();
+            let tools_snapshot = tool_defs.to_vec();
             tokio::spawn(async move {
                 if let Err(e) = llm.chat_stream(&msgs_snapshot, &tools_snapshot, stream_tx).await {
                     tracing::warn!(error = %e, "chat_stream failed");
@@ -290,7 +391,7 @@ impl Agent {
             }
 
             if stop_reason == "end_turn" || tool_calls.is_empty() {
-                break text_buf;
+                return LoopOutcome::Finished { text: text_buf, iterations };
             }
 
             iterations += 1;
@@ -305,29 +406,7 @@ impl Agent {
                         .collect())
                     .unwrap_or_default();
                 let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
-                let _ = event_sender.send(AgentEvent::Done {
-                    answer: text_buf,
-                    sources: vec![],
-                    tool_calls_made: iterations,
-                }).await;
-                return;
-            }
-
-            if let Some(confirm_call) = tool_calls.iter().find(|c| {
-                tool_map.get(c.name.as_str()).map(|t| t.requires_confirmation()).unwrap_or(false)
-            }) {
-                let description = self.describe_tool_call(&confirm_call.name, &confirm_call.input).await;
-                let _ = event_sender.send(AgentEvent::ConfirmAction {
-                    name: confirm_call.name.clone(),
-                    input: confirm_call.input.clone(),
-                    description,
-                }).await;
-                let _ = event_sender.send(AgentEvent::Done {
-                    answer: text_buf,
-                    sources: vec![],
-                    tool_calls_made: iterations,
-                }).await;
-                return;
+                return LoopOutcome::EndedWithoutCitations { text: text_buf, iterations };
             }
 
             let call_parts: Vec<ContentPart> = tool_calls
@@ -344,6 +423,56 @@ impl Agent {
                 content: MessageContent::Parts(call_parts),
             });
 
+            let (confirmable, automatic): (Vec<&ToolCall>, Vec<&ToolCall>) = tool_calls.iter().partition(|c| {
+                tool_map.get(c.name.as_str()).map(|t| t.requires_confirmation()).unwrap_or(false)
+            });
+
+            if !confirmable.is_empty() {
+                let mut pending = Vec::with_capacity(confirmable.len());
+                for (idx, call) in confirmable.iter().enumerate() {
+                    let description = self.describe_tool_call(&call.name, &call.input).await;
+                    let ui_id = format!("{}:{idx}", call.id);
+                    let _ = event_sender.send(AgentEvent::ConfirmAction {
+                        id:          ui_id.clone(),
+                        name:        call.name.clone(),
+                        input:       call.input.clone(),
+                        description,
+                    }).await;
+                    pending.push(PendingConfirmCall { id: ui_id, tool_use_id: call.id.clone() });
+                }
+
+                if !automatic.is_empty() {
+                    for call in &automatic {
+                        let _ = event_sender.send(AgentEvent::ToolCall {
+                            name:  call.name.clone(),
+                            input: call.input.clone(),
+                        }).await;
+                    }
+                    let results = join_all(
+                        automatic.iter().map(|c| self.execute_tool_call(c, tool_map))
+                    ).await;
+                    for (call, result) in automatic.iter().zip(results) {
+                        let preview = tool_map.get(call.name.as_str())
+                            .map(|t| t.preview(&result))
+                            .unwrap_or_else(|| result.chars().take(tool::DEFAULT_PREVIEW_CHARS).collect());
+                        let _ = event_sender.send(AgentEvent::ToolResult {
+                            name:    call.name.clone(),
+                            preview,
+                        }).await;
+                        messages.push(Message {
+                            role: crate::llm::types::Role::User,
+                            content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                                tool_use_id: call.id.clone(),
+                                content:     result,
+                                is_error:    false,
+                            }]),
+                        });
+                    }
+                }
+
+                return LoopOutcome::Paused { messages, iterations, text_buf, pending };
+            }
+
             if text_buf.is_empty() {
                 let thinking = self.describe_tool_calls_batch(&tool_calls).await;
                 if !thinking.is_empty() {
@@ -359,7 +488,7 @@ impl Agent {
             }
 
             let results = join_all(
-                tool_calls.iter().map(|c| self.execute_tool_call(c, &tool_map))
+                tool_calls.iter().map(|c| self.execute_tool_call(c, tool_map))
             ).await;
 
             for (call, result) in tool_calls.iter().zip(results) {
@@ -379,14 +508,7 @@ impl Agent {
                     }]),
                 });
             }
-        };
-
-        let sources = parse_citations(&final_text);
-        let _ = event_sender.send(AgentEvent::Done {
-            answer: final_text,
-            sources,
-            tool_calls_made: iterations,
-        }).await;
+        }
     }
 
     async fn execute_tool_call(
@@ -975,6 +1097,134 @@ mod tests {
 
         assert_eq!(input, serde_json::json!({}));
         assert_eq!(description, "Provisioning a small container named build-runner");
+    }
+
+    #[tokio::test]
+    async fn multiple_confirmable_calls_in_one_round_all_pause_and_none_execute() {
+        let llm = MockLlm::new(vec![
+            two_tool_calls("create_lxd_agent", "delete_agent"),
+            text("unused"),
+            text("unused"),
+        ]);
+        let agent = Arc::new(agent_with(
+            llm,
+            vec![
+                MockTool::new_confirmable("create_lxd_agent", "unused"),
+                MockTool::new_confirmable("delete_agent", "unused"),
+            ],
+            5,
+        ));
+        let events = collect_agent_events(agent, "do both").await;
+
+        let confirm_names: Vec<String> = events.iter().filter_map(|e| match e {
+            AgentEvent::ConfirmAction { name, .. } => Some(name.clone()),
+            _ => None,
+        }).collect();
+        assert_eq!(confirm_names, vec!["create_lxd_agent".to_string(), "delete_agent".to_string()]);
+
+        assert!(
+            !events.iter().any(|e| matches!(e, AgentEvent::ToolCall { .. } | AgentEvent::ToolResult { .. })),
+            "no confirmable call should execute before confirmation"
+        );
+    }
+
+    #[tokio::test]
+    async fn mixed_confirmable_and_automatic_calls_executes_automatic_and_pauses_confirmable() {
+        let llm = MockLlm::new(vec![
+            two_tool_calls("my_tool", "delete_agent"),
+            text("unused"),
+        ]);
+        let agent = Arc::new(agent_with(
+            llm,
+            vec![
+                MockTool::new("my_tool", "ok"),
+                MockTool::new_confirmable("delete_agent", "unused"),
+            ],
+            5,
+        ));
+        let events = collect_agent_events(agent, "do stuff").await;
+
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "my_tool")));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolResult { name, .. } if name == "my_tool")));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ConfirmAction { name, .. } if name == "delete_agent")));
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "delete_agent")));
+    }
+
+    #[tokio::test]
+    async fn resume_after_confirm_continues_the_loop_to_completion() {
+        let llm = MockLlm::new(vec![
+            tool_call("delete_agent"),
+            text("Deleting the requested agent"),
+            text("Done, agent deleted."),
+        ]);
+        let agent = Arc::new(agent_with(
+            llm,
+            vec![MockTool::new_confirmable("delete_agent", "unused")],
+            5,
+        ));
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let paused = agent.query_streaming("delete it", &[], &[], tx).await
+            .expect("expected the turn to pause");
+        assert_eq!(paused.pending, vec![PendingConfirmCall { id: "tc_1:0".into(), tool_use_id: "tc_1".into() }]);
+        while rx.try_recv().is_ok() {}
+
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let outcome = agent.resume_after_confirm(
+            paused.messages,
+            paused.iterations,
+            vec![ToolResumeResult {
+                tool_call_id: "tc_1".into(),
+                content:      "Agent deleted.".into(),
+                is_error:     false,
+            }],
+            tx2,
+        ).await;
+        assert!(outcome.is_none(), "expected the turn to finish, not pause again");
+
+        let mut events = Vec::new();
+        while let Ok(e) = rx2.try_recv() { events.push(e); }
+        let answer = events.iter().find_map(|e| match e {
+            AgentEvent::Done { answer, .. } => Some(answer.clone()),
+            _ => None,
+        });
+        assert_eq!(answer.as_deref(), Some("Done, agent deleted."));
+    }
+
+    #[tokio::test]
+    async fn resume_after_confirm_can_pause_again_on_a_second_confirmable_call() {
+        let llm = MockLlm::new(vec![
+            tool_call("create_lxd_agent"),
+            text("Creating the requested agent"),
+            tool_call("delete_agent"),
+            text("Deleting a stale agent"),
+        ]);
+        let agent = Arc::new(agent_with(
+            llm,
+            vec![
+                MockTool::new_confirmable("create_lxd_agent", "unused"),
+                MockTool::new_confirmable("delete_agent", "unused"),
+            ],
+            5,
+        ));
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let first = agent.query_streaming("do stuff", &[], &[], tx).await
+            .expect("expected the first turn to pause");
+
+        let (tx2, _rx2) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        let second = agent.resume_after_confirm(
+            first.messages,
+            first.iterations,
+            vec![ToolResumeResult {
+                tool_call_id: first.pending[0].tool_use_id.clone(),
+                content:      "Agent created.".into(),
+                is_error:     false,
+            }],
+            tx2,
+        ).await.expect("expected the resumed turn to pause again");
+
+        assert_eq!(second.pending, vec![PendingConfirmCall { id: "tc_1:0".into(), tool_use_id: "tc_1".into() }]);
     }
 
     #[tokio::test]

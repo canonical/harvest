@@ -29,7 +29,7 @@ use knowledge_server::{
         ProjectState,
         create_conversation, create_project, delete_conversation, delete_project,
         get_conversation, get_project, list_conversations, list_projects,
-        project_query, project_query_stream, update_confirm_action,
+        project_query, project_query_stream, resume_confirm_action,
         update_conversation, update_project,
     },
 };
@@ -90,8 +90,8 @@ fn projects_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn knowledge_server:
                route_get(list_conversations).post(create_conversation))
         .route("/projects/:pid/conversations/:cid",
                route_get(get_conversation).put(update_conversation).delete(delete_conversation))
-        .route("/projects/:pid/conversations/:cid/confirm-action",
-               axum::routing::patch(update_confirm_action))
+        .route("/projects/:pid/conversations/:cid/confirm-action/resume",
+               route_post(resume_confirm_action))
         .route("/projects/:pid/query",        route_post(project_query))
         .route("/projects/:pid/query/stream", route_post(project_query_stream))
         .with_state(state)
@@ -159,13 +159,6 @@ fn req_del(uri: &str, token: &str) -> Request<Body> {
         .header("Cookie", cookie(token)).body(Body::empty()).unwrap()
 }
 
-fn req_patch(uri: &str, token: &str, body: Value) -> Request<Body> {
-    Request::builder().method("PATCH").uri(uri)
-        .header("Cookie", cookie(token))
-        .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_string(&body).unwrap())).unwrap()
-}
-
 fn req_get_anon(uri: &str) -> Request<Body> {
     Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()
 }
@@ -193,6 +186,22 @@ async fn wait_for_message_count(app: Router, uri: &str, token: &str, expected: u
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     panic!("conversation at {uri} never reached {expected} messages");
+}
+
+async fn wait_for_message_text(app: Router, uri: &str, token: &str, expected_text: &str) -> Value {
+    for _ in 0..40 {
+        let (_, conv) = send(app.clone(), req_get(uri, token)).await;
+        if conv["messages"].as_array()
+            .and_then(|m| m.last())
+            .and_then(|m| m["text"].as_str())
+            .map(|t| t == expected_text)
+            .unwrap_or(false)
+        {
+            return conv;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("conversation at {uri} never reached text {expected_text:?}");
 }
 
 mod auth_guards {
@@ -749,7 +758,7 @@ async fn ask_user_question_persists_across_reload() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn confirm_action_persists_pending_then_patch_resolves_it() {
+async fn confirm_action_persists_pending_then_resume_continues_the_turn() {
     neo4j!(c, neo4j);
     let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
     let gid = make_group(&neo4j, "eng").await;
@@ -764,7 +773,7 @@ async fn confirm_action_persists_pending_then_patch_resolves_it() {
             }],
             preamble: String::new(),
         },
-        LlmResponse::Message { text: "Deleting agent bogus-agent".into() },
+        LlmResponse::Message { text: "Deleted bogus-agent as requested".into() },
     ]);
     let app = projects_app_with_llm(Arc::clone(&neo4j), llm);
     let (_, project) = send(app.clone(),
@@ -782,25 +791,34 @@ async fn confirm_action_persists_pending_then_patch_resolves_it() {
 
     let conv = wait_for_message_count(app.clone(), &conv_uri, &tok, 2).await;
     let assistant = &conv["messages"].as_array().unwrap()[1];
-    assert_eq!(assistant["confirm_action"]["name"], "delete_agent");
-    assert_eq!(assistant["confirm_action"]["input"]["agent_id"], "bogus-agent");
-    assert_eq!(assistant["confirm_action"]["status"], "pending");
+    let chain = assistant["chain"].as_array().unwrap();
+    let actions: Vec<&Value> = chain.iter().filter(|c| c["type"] == "confirm_action").collect();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["name"], "delete_agent");
+    assert_eq!(actions[0]["input"]["agent_id"], "bogus-agent");
+    assert_eq!(actions[0]["status"], "pending");
+    let tool_call_id = actions[0]["id"].as_str().unwrap().to_string();
 
-    let confirm_uri = format!("/projects/{pid}/conversations/{cid}/confirm-action");
-    let (status, _) = send(app.clone(),
-        req_patch(&confirm_uri, &tok,
-                  json!({"status": "done", "steps": [], "result_text": "Agent deleted."}))).await;
+    let resume_uri = format!("/projects/{pid}/conversations/{cid}/confirm-action/resume");
+    let (status, body) = send(app.clone(),
+        req_post(&resume_uri, &tok, json!({"results": [
+            {"tool_call_id": tool_call_id, "status": "done", "result_text": "Agent deleted."},
+        ]}))).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["resumed"], true);
 
-    let (_, conv) = send(app, req_get(&conv_uri, &tok)).await;
+    let conv = wait_for_message_text(app, &conv_uri, &tok, "Deleted bogus-agent as requested").await;
     let assistant = &conv["messages"].as_array().unwrap()[1];
-    assert_eq!(assistant["confirm_action"]["status"], "done");
-    assert_eq!(assistant["confirm_action"]["result_text"], "Agent deleted.");
+    let chain = assistant["chain"].as_array().unwrap();
+    let confirm_entry = chain.iter().find(|c| c["type"] == "confirm_action").unwrap();
+    assert_eq!(confirm_entry["status"], "done");
+    assert_eq!(confirm_entry["result_text"], "Agent deleted.");
+    assert_eq!(assistant["text"], "Deleted bogus-agent as requested");
 }
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn patch_confirm_action_404s_without_pending_action() {
+async fn resume_confirm_action_404s_without_pending_action() {
     neo4j!(c, neo4j);
     let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
     let gid = make_group(&neo4j, "eng").await;
@@ -822,7 +840,7 @@ async fn patch_confirm_action_404s_without_pending_action() {
     wait_for_message_count(app.clone(), &conv_uri, &tok, 2).await;
 
     let (status, _) = send(app,
-        req_patch(&format!("/projects/{pid}/conversations/{cid}/confirm-action"), &tok,
-                  json!({"status": "done", "steps": [], "result_text": "x"}))).await;
+        req_post(&format!("/projects/{pid}/conversations/{cid}/confirm-action/resume"), &tok,
+                  json!({"results": [{"tool_call_id": "nope", "status": "done", "result_text": "x"}]}))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }

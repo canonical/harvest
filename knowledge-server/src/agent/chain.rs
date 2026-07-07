@@ -39,6 +39,20 @@ impl ChainBuilder {
         self.chain.push(entry);
     }
 
+    pub fn confirm_action(&mut self, id: &str, name: &str, input: &Value, description: &str) {
+        self.flush_pending();
+        self.chain.push(json!({
+            "type": "confirm_action",
+            "id": id,
+            "name": name,
+            "input": input,
+            "description": description,
+            "status": "pending",
+            "steps": [],
+            "result_text": "",
+        }));
+    }
+
     pub fn tool_result(&mut self, name: &str, preview: &str) {
         if let Some(entry) = self.chain.iter_mut()
             .find(|e| e["type"] == "tool_call" && e["name"] == name && e["preview"].is_null())
@@ -188,6 +202,31 @@ mod tests {
         let chain = b.finish();
         assert!(chain[0].get("description").is_none());
         assert!(chain[0].get("hostname").is_none());
+    }
+
+    #[test]
+    fn confirm_action_pushes_pending_entry_in_place() {
+        let mut b = ChainBuilder::new();
+        b.tool_call("list_agents", &json!({}), None, None);
+        b.tool_result("list_agents", "[]");
+        b.confirm_action("tc1", "create_lxd_agent", &json!({"name": "x"}), "Create agent x");
+        let chain = b.finish();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[1], json!({
+            "type": "confirm_action", "id": "tc1", "name": "create_lxd_agent",
+            "input": {"name": "x"}, "description": "Create agent x",
+            "status": "pending", "steps": [], "result_text": "",
+        }));
+    }
+
+    #[test]
+    fn confirm_action_promotes_pending_text_to_thinking_before_it() {
+        let mut b = ChainBuilder::new();
+        b.text_delta("Let me create that agent");
+        b.confirm_action("tc1", "create_lxd_agent", &json!({}), "desc");
+        let chain = b.finish();
+        assert_eq!(chain[0], json!({"type": "thinking", "text": "Let me create that agent"}));
+        assert_eq!(chain[1]["type"], json!("confirm_action"));
     }
 
     #[test]

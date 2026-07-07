@@ -113,7 +113,7 @@ pub async fn handle_query_stream(
                 AgentEvent::Question { question, choices } => {
                     pending_question = Some(json!({ "question": question, "choices": choices }));
                 }
-                AgentEvent::ConfirmAction { name, input, description } => {
+                AgentEvent::ConfirmAction { name, input, description, .. } => {
                     pending_confirm_action = Some(json!({
                         "name": name, "input": input, "description": description,
                         "status": "pending", "steps": [], "result_text": "",
