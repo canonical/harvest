@@ -36,7 +36,7 @@
         <span class="loading-orbit__label">Thinking…</span>
       </span>
 
-      <!-- Activity log: preambles + tool calls, unified left-border track -->
+      <!-- Activity log: preambles + tool calls + confirmable actions, unified left-border track -->
       <div
         v-if="msg.chain?.length"
         class="tc-chain"
@@ -49,7 +49,28 @@
             :streaming="item.streaming ?? false"
           />
           <ToolCallStep v-else-if="item.type === 'tool_call'" :step="item" />
+
+          <div v-else-if="item.type === 'confirm_action'" class="message__confirm">
+            <p class="message__confirm-text">{{ item.description }}</p>
+
+            <ProvisionSteps v-if="item.steps.length" :steps="item.steps" />
+
+            <div v-if="isLast && item.status === 'pending'" class="confirm-actions">
+              <button class="p-button--negative" type="button" @click="$emit('confirm', item.id)">Confirm</button>
+              <button class="p-button--base" type="button" @click="$emit('deny', item.id)">Cancel</button>
+            </div>
+            <p v-else-if="item.status === 'running'" class="confirm-status confirm-status--running">
+              {{ item.name === 'delete_agent' ? 'Deleting…' : 'Creating…' }}
+            </p>
+            <p v-else-if="item.status === 'denied'" class="confirm-status confirm-status--denied">Cancelled</p>
+            <p v-else-if="item.status === 'done'" class="confirm-status confirm-status--done">{{ item.resultText }}</p>
+            <p v-else-if="item.status === 'error'" class="confirm-status confirm-status--error">{{ item.resultText }}</p>
+          </div>
         </template>
+
+        <div v-if="isLast && pendingConfirmCount > 1" class="confirm-actions confirm-actions--all">
+          <button class="p-button--negative" type="button" @click="$emit('confirmAll')">Approve all</button>
+        </div>
       </div>
 
       <!-- Final answer: streaming phase (TextDelta before Done fires) -->
@@ -77,20 +98,6 @@
           <span class="source-chip__num">{{ i + 1 }}</span>
           <span class="source-chip__name">{{ src.file }}</span>
         </a>
-      </div>
-
-      <div v-if="msg.confirmAction" class="message__confirm">
-        <p class="message__confirm-text">{{ msg.confirmAction.description }}</p>
-
-        <ProvisionSteps v-if="msg.confirmAction.steps.length" :steps="msg.confirmAction.steps" />
-
-        <div v-if="isLast && msg.confirmAction.status === 'pending'" class="confirm-actions">
-          <button class="p-button--negative" type="button" @click="$emit('confirm')">Confirm</button>
-          <button class="p-button--base" type="button" @click="$emit('deny')">Cancel</button>
-        </div>
-        <p v-else-if="msg.confirmAction.status === 'denied'" class="confirm-status confirm-status--denied">Cancelled</p>
-        <p v-else-if="msg.confirmAction.status === 'done'" class="confirm-status confirm-status--done">{{ msg.confirmAction.resultText }}</p>
-        <p v-else-if="msg.confirmAction.status === 'error'" class="confirm-status confirm-status--error">{{ msg.confirmAction.resultText }}</p>
       </div>
 
       <div v-if="msg.question" class="message__question">
@@ -152,7 +159,7 @@ const props = defineProps({
   repoUrlMap: { type: Object, default: () => ({}) },
 });
 
-const emit = defineEmits(['choice', 'confirm', 'deny']);
+const emit = defineEmits(['choice', 'confirm', 'deny', 'confirmAll']);
 
 const roleClass = computed(() =>
   props.msg.role === 'user' ? 'message--user' : 'message--assistant'
@@ -160,6 +167,10 @@ const roleClass = computed(() =>
 
 const senderInitials = computed(() => initials(props.msg.username ?? 'You'));
 const senderColor    = computed(() => avatarColor(props.msg.username ?? 'You'));
+
+const pendingConfirmCount = computed(() =>
+  (props.msg.chain ?? []).filter(i => i.type === 'confirm_action' && i.status === 'pending').length
+);
 
 const renderedAnswer = computed(() =>
   props.msg.answer

@@ -284,11 +284,17 @@ export async function provisionLxdAgent(projectId, { name, description, flavor }
   await consumeSseStream(response, onEvent);
 }
 
-export async function updateConfirmActionResult(projectId, convId, { status, steps, resultText }) {
-  const response = await fetch(`${projectUrl(projectId)}/conversations/${encodeURIComponent(convId)}/confirm-action`, {
-    method:  'PATCH',
+export async function resumeConfirmAction(projectId, convId, results) {
+  const response = await fetch(`${projectUrl(projectId)}/conversations/${encodeURIComponent(convId)}/confirm-action/resume`, {
+    method:  'POST',
     headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ status, steps, result_text: resultText }),
+    body:    JSON.stringify({
+      results: results.map(r => ({
+        tool_call_id: r.toolCallId,
+        status:       r.status,
+        result_text:  r.resultText,
+      })),
+    }),
   });
   handleUnauthorized(response.status);
   if (!response.ok) throw new Error(`Server error: ${response.status}`);
