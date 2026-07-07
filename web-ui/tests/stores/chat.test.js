@@ -246,45 +246,77 @@ describe('setQuestion', () => {
   });
 });
 
-describe('setConfirmAction', () => {
-  it('attaches a pending confirmAction to the last assistant message', () => {
+function confirmItems(s) {
+  return last(s).chain.filter(c => c.type === 'confirm_action');
+}
+
+describe('addConfirmAction', () => {
+  it('appends a pending confirm action to the chain of the last assistant message', () => {
     const s = useChatStore();
     s.startAssistantMessage();
-    s.setConfirmAction('create_lxd_agent', { name: 'build-runner', flavor: 'small' }, 'Create a small agent named build-runner');
-    expect(last(s).confirmAction).toEqual({
+    s.addConfirmAction('tc1', 'create_lxd_agent', { name: 'build-runner', flavor: 'small' }, 'Create a small agent named build-runner');
+    expect(confirmItems(s)).toEqual([{
+      type: 'confirm_action',
+      id: 'tc1',
       name: 'create_lxd_agent',
       input: { name: 'build-runner', flavor: 'small' },
       description: 'Create a small agent named build-runner',
       status: 'pending',
       steps: [],
       resultText: '',
-    });
+    }]);
+  });
+
+  it('appends a second pending action to the chain rather than replacing the first', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addConfirmAction('tc1', 'create_lxd_agent', {}, 'first');
+    s.addConfirmAction('tc2', 'delete_agent', {}, 'second');
+    expect(confirmItems(s).map(a => a.id)).toEqual(['tc1', 'tc2']);
+  });
+
+  it('keeps a tool call before it and a confirm action after in chain order', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addToolCall('list_agents', {});
+    s.addConfirmAction('tc1', 'delete_agent', {}, 'desc');
+    expect(last(s).chain.map(c => c.type)).toEqual(['tool_call', 'confirm_action']);
   });
 });
 
-describe('updateConfirmAction', () => {
-  it('merges a patch into the confirmAction of the last assistant message', () => {
+describe('updateConfirmActionItem', () => {
+  it('merges a patch into the matching confirm action in the chain', () => {
     const s = useChatStore();
     s.startAssistantMessage();
-    s.setConfirmAction('delete_agent', { agent_id: 'abc' }, 'Delete agent abc');
-    s.updateConfirmAction({ status: 'running' });
-    expect(last(s).confirmAction.status).toBe('running');
-    expect(last(s).confirmAction.input).toEqual({ agent_id: 'abc' });
+    s.addConfirmAction('tc1', 'delete_agent', { agent_id: 'abc' }, 'Delete agent abc');
+    s.updateConfirmActionItem('tc1', { status: 'running' });
+    expect(confirmItems(s)[0].status).toBe('running');
+    expect(confirmItems(s)[0].input).toEqual({ agent_id: 'abc' });
   });
 
-  it('does nothing when there is no confirmAction on the last message', () => {
+  it('does nothing when there is no matching confirm action on the last message', () => {
     const s = useChatStore();
     s.startAssistantMessage();
-    expect(() => s.updateConfirmAction({ status: 'running' })).not.toThrow();
-    expect(last(s).confirmAction).toBeUndefined();
+    expect(() => s.updateConfirmActionItem('tc1', { status: 'running' })).not.toThrow();
+    expect(confirmItems(s)).toEqual([]);
+  });
+
+  it('only patches the action with the matching id', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addConfirmAction('tc1', 'create_lxd_agent', {}, 'first');
+    s.addConfirmAction('tc2', 'delete_agent', {}, 'second');
+    s.updateConfirmActionItem('tc2', { status: 'done' });
+    expect(confirmItems(s)[0].status).toBe('pending');
+    expect(confirmItems(s)[1].status).toBe('done');
   });
 
   it('replaces steps array rather than merging elements', () => {
     const s = useChatStore();
     s.startAssistantMessage();
-    s.setConfirmAction('create_lxd_agent', {}, 'desc');
-    s.updateConfirmAction({ steps: [{ id: 'ensure_network', status: 'active' }] });
-    expect(last(s).confirmAction.steps).toEqual([{ id: 'ensure_network', status: 'active' }]);
+    s.addConfirmAction('tc1', 'create_lxd_agent', {}, 'desc');
+    s.updateConfirmActionItem('tc1', { steps: [{ id: 'ensure_network', status: 'active' }] });
+    expect(confirmItems(s)[0].steps).toEqual([{ id: 'ensure_network', status: 'active' }]);
   });
 });
 
@@ -384,53 +416,68 @@ describe('loadFromHistory', () => {
     expect(msgs(s)[0].question).toBeUndefined();
   });
 
-  it('restores a confirm_action from history with defaults for missing fields', () => {
+  it('restores a confirm_action chain entry from history with defaults for missing fields', () => {
     const s = useChatStore();
     s.loadFromHistory([{
       role: 'assistant', text: '', sources: [],
-      confirm_action: {
+      chain: [{
+        type: 'confirm_action',
+        id: 'tc1',
         name: 'create_lxd_agent',
         input: { name: 'build-runner', flavor: 'small' },
         description: 'Create a small agent named build-runner',
-      },
+      }],
     }]);
-    expect(msgs(s)[0].confirmAction).toEqual({
+    expect(msgs(s)[0].chain).toEqual([{
+      type: 'confirm_action',
+      id: 'tc1',
       name: 'create_lxd_agent',
       input: { name: 'build-runner', flavor: 'small' },
       description: 'Create a small agent named build-runner',
       status: 'pending',
       steps: [],
       resultText: '',
-    });
+    }]);
   });
 
-  it('restores a resolved confirm_action from history preserving status/steps/result_text', () => {
+  it('restores a resolved confirm_action chain entry preserving status/steps/result_text', () => {
     const s = useChatStore();
     s.loadFromHistory([{
       role: 'assistant', text: '', sources: [],
-      confirm_action: {
+      chain: [{
+        type: 'confirm_action',
+        id: 'tc1',
         name: 'create_lxd_agent',
         input: { name: 'build-runner', flavor: 'small' },
         description: 'Create a small agent named build-runner',
         status: 'done',
         steps: [{ id: 'ensure_network', label: 'Ensuring network exists', status: 'done', detail: '' }],
         result_text: "Agent 'build-runner' created.",
-      },
+      }],
     }]);
-    expect(msgs(s)[0].confirmAction).toEqual({
+    expect(msgs(s)[0].chain).toEqual([{
+      type: 'confirm_action',
+      id: 'tc1',
       name: 'create_lxd_agent',
       input: { name: 'build-runner', flavor: 'small' },
       description: 'Create a small agent named build-runner',
       status: 'done',
       steps: [{ id: 'ensure_network', label: 'Ensuring network exists', status: 'done', detail: '' }],
       resultText: "Agent 'build-runner' created.",
-    });
+    }]);
   });
 
-  it('does not set confirmAction when absent from history', () => {
+  it('preserves the position of a confirm_action entry relative to surrounding tool calls', () => {
     const s = useChatStore();
-    s.loadFromHistory([{ role: 'assistant', text: 'done', sources: [] }]);
-    expect(msgs(s)[0].confirmAction).toBeUndefined();
+    s.loadFromHistory([{
+      role: 'assistant', text: '', sources: [],
+      chain: [
+        { type: 'tool_call', name: 'list_agents', input: {}, status: 'done', preview: '[]' },
+        { type: 'confirm_action', id: 'tc1', name: 'delete_agent', input: {}, description: 'desc', status: 'done', steps: [], result_text: 'Agent deleted.' },
+        { type: 'tool_call', name: 'run_command', input: {}, status: 'done', preview: 'ok' },
+      ],
+    }]);
+    expect(msgs(s)[0].chain.map(c => c.type)).toEqual(['tool_call', 'confirm_action', 'tool_call']);
   });
 });
 

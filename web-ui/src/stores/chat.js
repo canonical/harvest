@@ -118,16 +118,29 @@ export const useChatStore = defineStore('chat', () => {
     msg.question = { question, choices };
   }
 
-  function setConfirmAction(name, input, description) {
+  function addConfirmAction(id, name, input, description) {
     const msg = lastAssistant();
     if (!msg) return;
-    msg.confirmAction = { name, input, description, status: 'pending', steps: [], resultText: '' };
+    if (msg.pendingAnswer) {
+      msg.chain.push({ type: 'thinking', text: msg.pendingAnswer, streaming: false });
+      msg.pendingAnswer = '';
+    }
+    const last = msg.chain.at(-1);
+    if (last?.type === 'thinking' && last.streaming) last.streaming = false;
+    msg.chain.push({ type: 'confirm_action', id, name, input, description, status: 'pending', steps: [], resultText: '' });
   }
 
-  function updateConfirmAction(patch) {
+  function updateConfirmActionItem(id, patch) {
+    const item = lastAssistant()?.chain?.find(c => c.type === 'confirm_action' && c.id === id);
+    if (!item) return;
+    Object.assign(item, patch);
+  }
+
+  function resumeAssistantMessage() {
     const msg = lastAssistant();
-    if (!msg?.confirmAction) return;
-    Object.assign(msg.confirmAction, patch);
+    if (!msg) return;
+    msg.status = 'loading';
+    loading.value = true;
   }
 
   function setSuggestions(choices) {
@@ -184,9 +197,19 @@ export const useChatStore = defineStore('chat', () => {
       } else {
         let chain;
         if (m.chain) {
-          chain = m.chain.map(item =>
-            item.type === 'tool_call' ? { ...item, status: 'done' } : item,
-          );
+          chain = m.chain.map(item => {
+            if (item.type === 'tool_call') return { ...item, status: 'done' };
+            if (item.type === 'confirm_action') {
+              const { result_text, ...rest } = item;
+              return {
+                ...rest,
+                status: item.status ?? 'pending',
+                steps: item.steps ?? [],
+                resultText: result_text ?? '',
+              };
+            }
+            return item;
+          });
         } else {
           const thinkingItems  = (m.thinking  ?? []).map(text => ({ type: 'thinking', text }));
           const toolCallItems  = (m.tool_calls ?? []).map(tc  => ({ type: 'tool_call', ...tc, status: 'done' }));
@@ -201,16 +224,6 @@ export const useChatStore = defineStore('chat', () => {
           tool_calls_made: m.tool_calls_made ?? 0,
         };
         if (m.question) msg.question = m.question;
-        if (m.confirm_action) {
-          msg.confirmAction = {
-            name: m.confirm_action.name,
-            input: m.confirm_action.input,
-            description: m.confirm_action.description,
-            status: m.confirm_action.status ?? 'pending',
-            steps: m.confirm_action.steps ?? [],
-            resultText: m.confirm_action.result_text ?? '',
-          };
-        }
         messages.value.push(msg);
       }
     }
@@ -229,7 +242,7 @@ export const useChatStore = defineStore('chat', () => {
     addUserMessage, startAssistantMessage, finalizeAssistantMessage,
     setError, addThinking, addThinkingDelta, addTextDelta, addToolCall,
     completeToolCall, updateToolCallDescription,
-    setQuestion, setConfirmAction, updateConfirmAction, setSuggestions,
+    setQuestion, addConfirmAction, updateConfirmActionItem, resumeAssistantMessage, setSuggestions,
     addPendingAttachment, removePendingAttachment, clearPendingAttachments,
     saveableMessages, loadFromHistory, reset,
   };

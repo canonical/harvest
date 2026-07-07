@@ -33,6 +33,7 @@
             @choice="sendWithChoice"
             @confirm="handleConfirmAction"
             @deny="handleDenyAction"
+            @confirm-all="handleConfirmAllActions"
           />
         </div>
 
@@ -178,7 +179,7 @@ import {
   fetchRepositories,
   provisionLxdAgent,
   deleteAgent,
-  updateConfirmActionResult,
+  resumeConfirmAction,
 } from '../lib/api.js';
 import { initialProvisionSteps, applyProvisionEvent, isProvisionDone, isProvisionError } from '../lib/lxd-provision.js';
 
@@ -454,61 +455,77 @@ function sendWithChoice(text) {
   sendQuery();
 }
 
-async function persistConfirmActionResult() {
-  const current = chat.messages.at(-1)?.confirmAction;
-  if (!current || !activeConvId.value) return;
+function findConfirmAction(id) {
+  return chat.messages.at(-1)?.chain?.find(c => c.type === 'confirm_action' && c.id === id);
+}
+
+async function submitResolvedResults(items) {
+  if (!items.length || !activeConvId.value) return;
   try {
-    await updateConfirmActionResult(props.projectId, activeConvId.value, {
-      status: current.status,
-      steps: current.steps,
-      resultText: current.resultText,
-    });
+    const res = await resumeConfirmAction(props.projectId, activeConvId.value, items.map(item => ({
+      toolCallId: item.id,
+      status:     item.status,
+      resultText: item.resultText,
+    })));
+    if (res.resumed) chat.resumeAssistantMessage();
   } catch {}
 }
 
-async function handleConfirmAction() {
-  const action = chat.messages.at(-1)?.confirmAction;
-  if (!action || action.status !== 'pending') return;
-
+async function runConfirmableAction(action) {
   if (action.name === 'create_lxd_agent') {
-    chat.updateConfirmAction({ status: 'running', steps: initialProvisionSteps() });
+    chat.updateConfirmActionItem(action.id, { status: 'running', steps: initialProvisionSteps() });
     try {
       await provisionLxdAgent(props.projectId, {
         name: action.input.name,
         description: action.input.description ?? '',
         flavor: action.input.flavor,
       }, (event) => {
-        const current = chat.messages.at(-1)?.confirmAction;
+        const current = findConfirmAction(action.id);
         if (!current) return;
-        chat.updateConfirmAction({ steps: applyProvisionEvent(current.steps, event) });
+        chat.updateConfirmActionItem(action.id, { steps: applyProvisionEvent(current.steps, event) });
         if (isProvisionDone(event)) {
-          chat.updateConfirmAction({ status: 'done', resultText: `Agent '${action.input.name}' created.` });
+          chat.updateConfirmActionItem(action.id, { status: 'done', resultText: `Agent '${action.input.name}' created.` });
         } else if (isProvisionError(event)) {
-          chat.updateConfirmAction({ status: 'error', resultText: event.message });
+          chat.updateConfirmActionItem(action.id, { status: 'error', resultText: event.message });
         }
       });
     } catch (e) {
-      chat.updateConfirmAction({ status: 'error', resultText: e.message || 'Failed to create agent' });
+      chat.updateConfirmActionItem(action.id, { status: 'error', resultText: e.message || 'Failed to create agent' });
     }
-    await persistConfirmActionResult();
-    return;
-  }
-
-  if (action.name === 'delete_agent') {
-    chat.updateConfirmAction({ status: 'running' });
+  } else if (action.name === 'delete_agent') {
+    chat.updateConfirmActionItem(action.id, { status: 'running' });
     try {
       await deleteAgent(props.projectId, action.input.agent_id);
-      chat.updateConfirmAction({ status: 'done', resultText: 'Agent deleted.' });
+      chat.updateConfirmActionItem(action.id, { status: 'done', resultText: 'Agent deleted.' });
     } catch (e) {
-      chat.updateConfirmAction({ status: 'error', resultText: e.message || 'Failed to delete agent' });
+      chat.updateConfirmActionItem(action.id, { status: 'error', resultText: e.message || 'Failed to delete agent' });
     }
-    await persistConfirmActionResult();
   }
 }
 
-async function handleDenyAction() {
-  chat.updateConfirmAction({ status: 'denied' });
-  await persistConfirmActionResult();
+async function handleConfirmAction(id) {
+  const action = findConfirmAction(id);
+  if (!action || action.status !== 'pending') return;
+
+  await runConfirmableAction(action);
+  await submitResolvedResults([findConfirmAction(id)]);
+}
+
+async function handleDenyAction(id) {
+  const action = findConfirmAction(id);
+  if (!action || action.status !== 'pending') return;
+
+  chat.updateConfirmActionItem(id, { status: 'denied', resultText: 'Cancelled by user.' });
+  await submitResolvedResults([findConfirmAction(id)]);
+}
+
+async function handleConfirmAllActions() {
+  const pending = (chat.messages.at(-1)?.chain ?? []).filter(c => c.type === 'confirm_action' && c.status === 'pending');
+  if (!pending.length) return;
+
+  await Promise.all(pending.map(action => runConfirmableAction(action)));
+  const resolved = pending.map(action => findConfirmAction(action.id)).filter(Boolean);
+  await submitResolvedResults(resolved);
 }
 
 function handleChatEvent(event) {
@@ -524,7 +541,7 @@ function handleChatEvent(event) {
     case 'tool_call':      chat.addToolCall(event.name, event.input, event.description ?? describeToolCall(event.name, event.input ?? {}, { hostname: event.hostname })); break;
     case 'tool_result':    chat.completeToolCall(event.name, event.preview); break;
     case 'question':       chat.setQuestion(event.question, event.choices); break;
-    case 'confirm_action': chat.setConfirmAction(event.name, event.input, event.description); break;
+    case 'confirm_action': chat.addConfirmAction(event.id, event.name, event.input, event.description); break;
     case 'done':
       chat.finalizeAssistantMessage({ answer: event.answer, sources: event.sources, tool_calls_made: event.tool_calls_made });
       updateConvTitle();
