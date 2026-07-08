@@ -1,4 +1,5 @@
 mod config;
+mod console;
 mod executor;
 mod sse_client;
 
