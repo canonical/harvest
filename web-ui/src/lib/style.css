@@ -2987,13 +2987,13 @@ a.source-chip:hover .source-chip__name {
 .agent-type-icon {
   color: var(--text-secondary);
   display: inline-flex;
-  margin-right: 0.4rem;
+  margin-right: 0.6rem;
   vertical-align: middle;
 }
 
 .agent-type-icon svg {
-  height: 13px;
-  width: 13px;
+  height: 16px;
+  width: 16px;
 }
 
 .agent-row-actions {
