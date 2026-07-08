@@ -59,12 +59,20 @@ export function addCopyButtons(containerEl, selector = 'pre') {
     btn.textContent = 'Copy';
     btn.addEventListener('click', () => {
       const text = (pre.querySelector('code') ?? pre).innerText;
+      btn.classList.remove('copy-btn--pulse');
+      void btn.offsetWidth; // restart the animation on repeated clicks
+      btn.classList.add('copy-btn--pulse');
       copyText(text).then(() => {
         btn.textContent = 'Copied!';
+        btn.classList.add('copy-btn--copied');
       }).catch(() => {
         btn.textContent = 'Failed';
+        btn.classList.add('copy-btn--error');
       }).finally(() => {
-        setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+        setTimeout(() => {
+          btn.textContent = 'Copy';
+          btn.classList.remove('copy-btn--copied', 'copy-btn--error');
+        }, 2000);
       });
     });
     wrapper.appendChild(btn);
