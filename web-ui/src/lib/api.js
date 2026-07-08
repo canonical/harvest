@@ -254,6 +254,24 @@ export async function deleteAgent(projectId, agentId) {
   return projectFetch(`${projectUrl(projectId)}/agents/${encodeURIComponent(agentId)}`, { method: 'DELETE' });
 }
 
+export async function startAgent(projectId, agentId) {
+  return projectFetch(`${projectUrl(projectId)}/agents/${encodeURIComponent(agentId)}/start`, { method: 'POST' });
+}
+
+export async function stopAgent(projectId, agentId) {
+  return projectFetch(`${projectUrl(projectId)}/agents/${encodeURIComponent(agentId)}/stop`, { method: 'POST' });
+}
+
+export async function restartAgent(projectId, agentId) {
+  return projectFetch(`${projectUrl(projectId)}/agents/${encodeURIComponent(agentId)}/restart`, { method: 'POST' });
+}
+
+export function consoleSocketUrl(projectId, agentId, cols, rows) {
+  const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const path = `${projectUrl(projectId)}/agents/${encodeURIComponent(agentId)}/console`;
+  return `${wsProtocol}//${window.location.host}${path}?cols=${cols}&rows=${rows}`;
+}
+
 export async function rotateInstallToken(projectId) {
   const response = await fetch(`${projectUrl(projectId)}/agents/rotate-install-token`, {
     method: 'POST',

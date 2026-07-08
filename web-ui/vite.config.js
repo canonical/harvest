@@ -7,7 +7,7 @@ export default defineConfig({
     proxy: {
       '/auth':             'http://localhost:8080',
       '/query':            'http://localhost:8080',
-      '/projects':         'http://localhost:8080',
+      '/projects':         { target: 'http://localhost:8080', ws: true },
       '/admin':            'http://localhost:8080',
       '/graph':            'http://localhost:8080',
       '/docs':             'http://localhost:8080',
@@ -18,7 +18,7 @@ export default defineConfig({
       '/groups':           'http://localhost:8080',
       '/skills':           'http://localhost:8080',
       '/agents':           'http://localhost:8080',
-      '/agent':            'http://localhost:8080',
+      '/agent':            { target: 'http://localhost:8080', ws: true },
       '/tool-description': 'http://localhost:8080',
     },
     allowedHosts: [

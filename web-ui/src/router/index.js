@@ -7,6 +7,7 @@ const routes = [
   { path: '/',               component: () => import('../views/ChatView.vue'),           meta: { requiresProject: true } },
   { path: '/tasks',          component: () => import('../views/TasksView.vue'),          meta: { requiresProject: true } },
   { path: '/agents',         component: () => import('../views/AgentsView.vue'),         meta: { requiresProject: true } },
+  { path: '/agents/:agentId/console', component: () => import('../views/AgentConsoleView.vue'), meta: { requiresProject: true } },
   { path: '/memories',       component: () => import('../views/MemoriesView.vue'),       meta: { requiresProject: true } },
   { path: '/skills',         component: () => import('../views/SkillsView.vue'),         meta: { requiresProject: true } },
   { path: '/docs',           component: () => import('../views/DocumentationView.vue'),  meta: { requiresProject: true, feature: 'docs' } },
