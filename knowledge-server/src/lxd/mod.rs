@@ -323,6 +323,10 @@ impl LxdClient {
         self.set_instance_state(name, "stop", 30).await
     }
 
+    pub async fn restart_instance(&self, name: &str) -> Result<()> {
+        self.set_instance_state(name, "restart", 30).await
+    }
+
     pub async fn wait_running(&self, name: &str, timeout_secs: u64) -> Result<()> {
         tracing::debug!(name, timeout_secs, "LXD wait_running: polling instance state");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
@@ -719,6 +723,25 @@ mod tests {
             .await.unwrap();
 
         assert_eq!(*seen.lock().unwrap(), vec![(1, 3), (2, 3)]);
+    }
+
+    #[tokio::test]
+    async fn restart_instance_sends_restart_action() {
+        let server = MockServer::start();
+        let restart_mock = server.mock(|when, then| {
+            when.method("PUT")
+                .path("/1.0/instances/agent-1/state")
+                .json_body_includes(r#"{"action":"restart"}"#);
+            then.status(202).json_body(async_op("op-restart"));
+        });
+        server.mock(|when, then| {
+            when.method("GET").path("/1.0/operations/op-restart/wait");
+            then.status(200).json_body(op_wait_success(json!({})));
+        });
+
+        let client = LxdClient::test_client(&server.base_url());
+        client.restart_instance("agent-1").await.unwrap();
+        restart_mock.assert();
     }
 
     #[tokio::test]
