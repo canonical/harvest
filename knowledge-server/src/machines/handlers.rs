@@ -1,5 +1,8 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, Query, State,
+    },
     http::{header, HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -8,7 +11,7 @@ use axum::{
     routing::{delete, get, post},
     Extension, Json, Router,
 };
-use futures::StreamExt as _;
+use futures::{SinkExt as _, StreamExt as _};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -29,6 +32,10 @@ use super::{lxd_provision, ConnectedAgent, MachineRegistry, ResultBody, ServerTo
 const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 25;
 const DEFAULT_EXECUTE_TIMEOUT_SECS: u64 = 30;
 const MAX_EXECUTE_TIMEOUT_SECS: u64 = 300;
+const CONSOLE_CLAIM_TIMEOUT_SECS: u64 = 15;
+const CONSOLE_MAX_MESSAGE_SIZE: usize = 64 * 1024;
+const DEFAULT_CONSOLE_COLS: u16 = 80;
+const DEFAULT_CONSOLE_ROWS: u16 = 24;
 
 pub struct MachineState {
     pub registry:    Arc<MachineRegistry>,
@@ -137,6 +144,7 @@ pub fn machines_router(state: Arc<MachineState>) -> Router {
         .route("/agent/events",                  get(agent_events_handler))
         .route("/agent/results",                 post(agent_results_handler))
         .route("/agent/ping",                    post(agent_ping_handler))
+        .route("/agent/console/:session_id",     get(agent_console_claim_handler))
         .with_state(state)
 }
 
@@ -145,6 +153,10 @@ pub fn machines_protected_router(state: Arc<MachineState>) -> Router {
         .route("/projects/:pid/agents",                      get(list_agents))
         .route("/projects/:pid/agents/:aid",                 delete(delete_agent))
         .route("/projects/:pid/agents/:aid/execute",         post(execute_command))
+        .route("/projects/:pid/agents/:aid/console",         get(agent_console_open_handler))
+        .route("/projects/:pid/agents/:aid/start",           post(start_agent))
+        .route("/projects/:pid/agents/:aid/stop",            post(stop_agent))
+        .route("/projects/:pid/agents/:aid/restart",         post(restart_agent))
         .route("/projects/:pid/agents/rotate-install-token", post(rotate_install_token))
         .route("/projects/:pid/agents/flavors",              get(list_flavors))
         .route("/projects/:pid/agents/lxd",                  post(create_lxd_agent_handler))
@@ -213,12 +225,17 @@ async fn binary_handler(State(state): State<Arc<MachineState>>) -> impl IntoResp
 struct AgentGuard {
     agent_id:   String,
     index_hash: String,
+    sender:     mpsc::Sender<ServerToAgent>,
     registry:   Arc<MachineRegistry>,
 }
 
 impl Drop for AgentGuard {
     fn drop(&mut self) {
-        self.registry.agents.remove(&self.agent_id);
+        if !self.registry.disconnect_if_current(&self.agent_id, &self.sender) {
+            tracing::info!(agent_id = %self.agent_id, "stale connection dropped, agent already reconnected");
+            return;
+        }
+
         self.registry.token_index.remove(&self.index_hash);
         tracing::info!(agent_id = %self.agent_id, "agent disconnected");
     }
@@ -319,7 +336,7 @@ async fn agent_events_handler(
         project_id,
         hostname:     hostname.clone(),
         connected_at: chrono::Utc::now(),
-        sender:       command_sender,
+        sender:       command_sender.clone(),
     });
     state.registry.token_index.insert(index_hash.clone(), agent_id.clone());
 
@@ -330,7 +347,7 @@ async fn agent_events_handler(
         Ok::<Event, Infallible>(Event::default().data(first_data)),
     ]);
 
-    let guard = AgentGuard { agent_id, index_hash, registry: Arc::clone(&state.registry) };
+    let guard = AgentGuard { agent_id, index_hash, sender: command_sender, registry: Arc::clone(&state.registry) };
     let command_stream = GuardedStream {
         inner: ReceiverStream::new(command_receiver).map(|msg| {
             let data = serde_json::to_string(&msg).unwrap_or_default();
@@ -471,6 +488,143 @@ pub async fn execute_command(
     }
 }
 
+#[derive(serde::Deserialize)]
+pub struct ConsoleQuery {
+    #[serde(default = "default_console_cols")]
+    pub cols: u16,
+    #[serde(default = "default_console_rows")]
+    pub rows: u16,
+}
+
+fn default_console_cols() -> u16 { DEFAULT_CONSOLE_COLS }
+fn default_console_rows() -> u16 { DEFAULT_CONSOLE_ROWS }
+
+async fn bridge_console_socket(
+    socket: WebSocket,
+    mut in_rx: mpsc::Receiver<Message>,
+    out_tx: mpsc::Sender<Message>,
+) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    let reader = tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            if out_tx.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    while let Some(msg) = in_rx.recv().await {
+        if ws_tx.send(msg).await.is_err() {
+            break;
+        }
+    }
+
+    reader.abort();
+}
+
+async fn pump_browser_console_socket(
+    socket:         WebSocket,
+    session_id:     String,
+    registry:       Arc<MachineRegistry>,
+    mut to_browser_rx: mpsc::Receiver<Message>,
+    to_agent_tx:    mpsc::Sender<Message>,
+) {
+    let first = tokio::select! {
+        msg = to_browser_rx.recv() => msg,
+        _ = tokio::time::sleep(Duration::from_secs(CONSOLE_CLAIM_TIMEOUT_SECS)) => None,
+    };
+
+    let Some(first) = first else {
+        registry.expire_console_session(&session_id);
+        let (mut ws_tx, _) = socket.split();
+        let _ = ws_tx.send(Message::Text(
+            r#"{"type":"error","message":"agent did not respond"}"#.to_string(),
+        )).await;
+        return;
+    };
+
+    let (mut ws_tx, ws_rx) = socket.split();
+    if ws_tx.send(first).await.is_err() {
+        return;
+    }
+
+    let reader = tokio::spawn(async move {
+        let mut ws_rx = ws_rx;
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            if to_agent_tx.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    while let Some(msg) = to_browser_rx.recv().await {
+        if ws_tx.send(msg).await.is_err() {
+            break;
+        }
+    }
+
+    reader.abort();
+}
+
+pub async fn agent_console_open_handler(
+    Extension(user):  Extension<Claims>,
+    State(state):     State<Arc<MachineState>>,
+    Path((project_id, agent_id)): Path<(String, String)>,
+    Query(q):         Query<ConsoleQuery>,
+    ws:               WebSocketUpgrade,
+) -> Result<impl IntoResponse, ApiError> {
+    let neo4j = neo4j_or_err(&state)?;
+    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+
+    if !state.registry.agents.contains_key(&agent_id) {
+        return Err(err(StatusCode::BAD_GATEWAY, "agent not connected"));
+    }
+
+    let (session_id, to_browser_rx, to_agent_tx) = state.registry
+        .open_console_session(&agent_id, q.cols, q.rows)
+        .await
+        .map_err(|e| err(StatusCode::BAD_GATEWAY, &e))?;
+
+    tracing::info!(user = %user.email, project_id, agent_id, session_id, "console session opened");
+
+    let registry = Arc::clone(&state.registry);
+    Ok(ws
+        .max_message_size(CONSOLE_MAX_MESSAGE_SIZE)
+        .on_upgrade(move |socket| async move {
+            pump_browser_console_socket(socket, session_id, registry, to_browser_rx, to_agent_tx).await;
+        }))
+}
+
+pub async fn agent_console_claim_handler(
+    State(state):  State<Arc<MachineState>>,
+    headers:       HeaderMap,
+    Path(session_id): Path<String>,
+    ws:            WebSocketUpgrade,
+) -> impl IntoResponse {
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t,
+        None    => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    let agent_id = match state.registry.token_index.get(&hash_token(&token)) {
+        Some(r) => r.value().clone(),
+        None    => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    let Some((to_browser_tx, to_agent_rx)) = state.registry.claim_console_session(&session_id, &agent_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    tracing::info!(agent_id, session_id, "console session claimed by agent");
+
+    ws.max_message_size(CONSOLE_MAX_MESSAGE_SIZE)
+        .on_upgrade(move |socket| async move {
+            bridge_console_socket(socket, to_agent_rx, to_browser_tx).await;
+        })
+        .into_response()
+}
+
 #[derive(Debug)]
 pub enum DeleteAgentError {
     NotFound,
@@ -492,6 +646,45 @@ impl std::fmt::Display for DeleteAgentError {
 
 impl std::error::Error for DeleteAgentError {}
 
+struct MachineLxdInfo {
+    provider:     String,
+    lxd_instance: String,
+}
+
+async fn lookup_machine_lxd_info(
+    neo4j:      &Neo4jClient,
+    project_id: &str,
+    agent_id:   &str,
+) -> Result<Option<MachineLxdInfo>, ()> {
+    let rows = neo4j.query_read(
+        "MATCH (m:Machine {id: $aid, project_id: $pid})
+         RETURN m.id AS id, m.provider AS provider, m.lxd_instance AS lxd_instance",
+        json!({ "aid": agent_id, "pid": project_id }),
+    ).await.map_err(|_| ())?;
+
+    Ok(rows.into_iter().next().map(|m| MachineLxdInfo {
+        provider:     m["provider"].as_str().unwrap_or("manual").to_string(),
+        lxd_instance: m["lxd_instance"].as_str().unwrap_or_default().to_string(),
+    }))
+}
+
+async fn lxd_instance_for_agent(
+    neo4j:      &Neo4jClient,
+    lxd:        Option<&Arc<LxdClient>>,
+    project_id: &str,
+    agent_id:   &str,
+) -> Result<(Arc<LxdClient>, String), ApiError> {
+    let info = lookup_machine_lxd_info(neo4j, project_id, agent_id).await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "agent not found"))?;
+
+    if info.provider != "lxd" {
+        return Err(err(StatusCode::BAD_REQUEST, "agent is not LXD-managed"));
+    }
+    let lxd = lxd.ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "LXD is not configured on this server"))?;
+    Ok((Arc::clone(lxd), info.lxd_instance))
+}
+
 pub async fn delete_agent_core(
     neo4j:      &Neo4jClient,
     lxd:        Option<&Arc<LxdClient>>,
@@ -499,20 +692,13 @@ pub async fn delete_agent_core(
     project_id: &str,
     agent_id:   &str,
 ) -> Result<(), DeleteAgentError> {
-    let rows = neo4j.query_read(
-        "MATCH (m:Machine {id: $aid, project_id: $pid})
-         RETURN m.id AS id, m.provider AS provider, m.lxd_instance AS lxd_instance",
-        json!({ "aid": agent_id, "pid": project_id }),
-    ).await.map_err(|_| DeleteAgentError::Db)?;
+    let machine = lookup_machine_lxd_info(neo4j, project_id, agent_id).await
+        .map_err(|_| DeleteAgentError::Db)?
+        .ok_or(DeleteAgentError::NotFound)?;
 
-    let Some(machine) = rows.into_iter().next() else {
-        return Err(DeleteAgentError::NotFound);
-    };
-
-    if machine["provider"].as_str() == Some("lxd") {
-        let lxd_instance = machine["lxd_instance"].as_str().unwrap_or_default();
+    if machine.provider == "lxd" {
         let lxd = lxd.ok_or(DeleteAgentError::LxdUnavailable)?;
-        lxd.delete_instance(lxd_instance).await
+        lxd.delete_instance(&machine.lxd_instance).await
             .map_err(|e| DeleteAgentError::LxdFailed(e.to_string()))?;
     }
 
@@ -547,6 +733,62 @@ pub async fn delete_agent(
             DeleteAgentError::Db             => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
         })?;
 
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn set_lxd_agent_state(
+    user:       &Claims,
+    state:      &MachineState,
+    project_id: &str,
+    agent_id:   &str,
+    action:     &str,
+) -> Result<(), ApiError> {
+    let neo4j = neo4j_or_err(state)?;
+    require_project_access(neo4j, &user.sub, &user.role, project_id).await?;
+
+    let (lxd, lxd_instance) = lxd_instance_for_agent(neo4j, state.lxd.as_ref(), project_id, agent_id).await?;
+
+    let result = match action {
+        "start"   => lxd.start_instance(&lxd_instance).await,
+        "stop"    => lxd.stop_instance(&lxd_instance).await,
+        "restart" => lxd.restart_instance(&lxd_instance).await,
+        _         => unreachable!("unknown lxd agent action: {action}"),
+    };
+
+    result.map_err(|e| err(StatusCode::BAD_GATEWAY, &e.to_string()))?;
+
+    if action == "stop" || action == "restart" {
+        state.registry.agents.remove(agent_id);
+    }
+
+    tracing::info!(user = %user.email, project_id, agent_id, action, "agent lxd state change");
+    Ok(())
+}
+
+pub async fn start_agent(
+    Extension(user):  Extension<Claims>,
+    State(state):     State<Arc<MachineState>>,
+    Path((project_id, agent_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    set_lxd_agent_state(&user, &state, &project_id, &agent_id, "start").await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn stop_agent(
+    Extension(user):  Extension<Claims>,
+    State(state):     State<Arc<MachineState>>,
+    Path((project_id, agent_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    set_lxd_agent_state(&user, &state, &project_id, &agent_id, "stop").await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub async fn restart_agent(
+    Extension(user):  Extension<Claims>,
+    State(state):     State<Arc<MachineState>>,
+    Path((project_id, agent_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    set_lxd_agent_state(&user, &state, &project_id, &agent_id, "restart").await?;
     Ok(Json(json!({ "ok": true })))
 }
 
