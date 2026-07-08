@@ -760,6 +760,28 @@ html, body {
   color: #eee;
 }
 
+.copy-btn--pulse {
+  animation: copy-btn-pulse 0.3s ease;
+}
+
+@keyframes copy-btn-pulse {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.2); }
+  100% { transform: scale(1); }
+}
+
+.copy-btn--copied {
+  background: rgba(56, 193, 114, 0.25);
+  color: #4ede8b;
+  border-color: rgba(56, 193, 114, 0.4);
+}
+
+.copy-btn--error {
+  background: rgba(224, 82, 82, 0.25);
+  color: #ff8a8a;
+  border-color: rgba(224, 82, 82, 0.4);
+}
+
 .message__body code:not(pre code) {
   background: var(--bg-code-inline);
   color: var(--text-code-inline);
