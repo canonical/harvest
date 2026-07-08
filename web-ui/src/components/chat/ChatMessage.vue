@@ -144,7 +144,7 @@ import ToolCallStep  from './ToolCallStep.vue';
 import ProvisionSteps from '../agents/ProvisionSteps.vue';
 import { renderMarkdown, buildCitationIndex } from '../../lib/markdown.js';
 import { mountInlineGraphs } from '../../lib/inline-graph.js';
-import { avatarColor, initials } from '../../lib/utils.js';
+import { avatarColor, initials, addCopyButtons } from '../../lib/utils.js';
 
 const answerBodyRef = ref(null);
 const otherText     = ref('');
@@ -179,11 +179,17 @@ const renderedAnswer = computed(() =>
 );
 
 onMounted(() => {
-  if (answerBodyRef.value) mountInlineGraphs(answerBodyRef.value);
+  if (answerBodyRef.value) {
+    mountInlineGraphs(answerBodyRef.value);
+    addCopyButtons(answerBodyRef.value);
+  }
 });
 
 watch(renderedAnswer, () => nextTick(() => {
-  if (answerBodyRef.value) mountInlineGraphs(answerBodyRef.value);
+  if (answerBodyRef.value) {
+    mountInlineGraphs(answerBodyRef.value);
+    addCopyButtons(answerBodyRef.value);
+  }
 }));
 
 function submitOther() {
