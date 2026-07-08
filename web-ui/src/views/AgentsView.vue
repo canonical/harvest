@@ -31,7 +31,25 @@
             </td>
             <td>{{ relativeTime(agent.last_seen) }}</td>
             <td>
-              <button class="p-button--negative p-button--small" type="button" @click="handleDelete(agent)">Delete</button>
+              <div class="agent-row-actions">
+                <router-link
+                  :to="`/agents/${agent.id}/console`"
+                  class="console-icon-btn"
+                  title="Open console"
+                  aria-label="Open console"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                </router-link>
+                <button
+                  class="console-icon-btn console-icon-btn--danger"
+                  type="button"
+                  title="Delete agent"
+                  aria-label="Delete agent"
+                  @click="handleDelete(agent)"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+                </button>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -63,12 +81,18 @@
         <h3>Add agent</h3>
         <div class="agent-choice-options">
           <button id="choice-manual-btn" type="button" class="agent-choice-option" @click="chooseManualInstall">
-            <span class="agent-choice-option__title">Install agent on existing machine</span>
-            <span class="agent-choice-option__desc">Run an install command on a machine you already manage.</span>
+            <svg class="agent-choice-option__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+            <span class="agent-choice-option__text">
+              <span class="agent-choice-option__title">Install agent on existing machine</span>
+              <span class="agent-choice-option__desc">Run an install command on a machine you already manage.</span>
+            </span>
           </button>
           <button id="choice-lxd-btn" type="button" class="agent-choice-option" @click="chooseManagedAgent">
-            <span class="agent-choice-option__title">Let Harvest create and manage agent</span>
-            <span class="agent-choice-option__desc">Harvest provisions and manages an LXD container for you.</span>
+            <svg class="agent-choice-option__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+            <span class="agent-choice-option__text">
+              <span class="agent-choice-option__title">Let Harvest create and manage agent</span>
+              <span class="agent-choice-option__desc">Harvest provisions and manages an LXD container for you.</span>
+            </span>
           </button>
         </div>
       </div>
@@ -108,28 +132,35 @@
             <div class="flavor-select">
               <button
                 id="flavor-select-toggle"
+                ref="flavorToggleRef"
                 type="button"
                 class="flavor-select__toggle"
                 :aria-expanded="flavorDropdownOpen"
                 :disabled="flavorsLoading || !flavors.length"
-                @click="flavorDropdownOpen = !flavorDropdownOpen"
+                @click="toggleFlavorDropdown"
               >
                 <span>{{ selectedFlavor ? selectedFlavor.label : (flavorsLoading ? 'Loading…' : 'No sizes available') }}</span>
                 <span v-if="selectedFlavor" class="flavor-select__badge">{{ selectedFlavor.cpu }} vCPU · {{ formatMemory(selectedFlavor.memory_mib) }}</span>
               </button>
-              <div v-if="flavorDropdownOpen" class="flavor-select__dropdown">
-                <button
-                  v-for="f in flavors"
-                  :key="f.id"
-                  :id="`flavor-option-${f.id}`"
-                  type="button"
-                  class="flavor-select__item"
-                  @click="selectFlavor(f)"
+              <Teleport to="body">
+                <div
+                  v-if="flavorDropdownOpen"
+                  class="flavor-select__dropdown flavor-select__dropdown--teleported"
+                  :style="flavorDropdownStyle"
                 >
-                  <span class="flavor-select__name">{{ f.label }}</span>
-                  <span class="flavor-select__badge">{{ f.cpu }} vCPU · {{ formatMemory(f.memory_mib) }}</span>
-                </button>
-              </div>
+                  <button
+                    v-for="f in flavors"
+                    :key="f.id"
+                    :id="`flavor-option-${f.id}`"
+                    type="button"
+                    class="flavor-select__item"
+                    @click="selectFlavor(f)"
+                  >
+                    <span class="flavor-select__name">{{ f.label }}</span>
+                    <span class="flavor-select__badge">{{ f.cpu }} vCPU · {{ formatMemory(f.memory_mib) }}</span>
+                  </button>
+                </div>
+              </Teleport>
             </div>
           </div>
 
@@ -165,7 +196,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted, nextTick } from 'vue';
 import {
   listProjectAgents, rotateInstallToken, deleteAgent,
   getAgentFlavors, provisionLxdAgent,
@@ -175,6 +206,9 @@ import {
 } from '../lib/lxd-provision.js';
 import { useAuthStore } from '../stores/auth.js';
 import ProvisionSteps from '../components/agents/ProvisionSteps.vue';
+
+const PROVISION_WAIT_ATTEMPTS     = 15;
+const PROVISION_WAIT_INTERVAL_MS  = 1000;
 
 const props = defineProps({ projectId: { type: String, required: true } });
 
@@ -194,12 +228,17 @@ const showManagedModal = ref(false);
 const flavors          = ref([]);
 const flavorsLoading   = ref(false);
 const flavorDropdownOpen = ref(false);
+const flavorToggleRef    = ref(null);
+const flavorDropdownStyle = ref({});
 const selectedFlavor   = ref(null);
 const managedName        = ref('');
 const managedDescription = ref('');
 const managedError        = ref('');
 const provisionSteps      = ref([]);
 const provisionDone       = ref(false);
+let provisionWaitToken    = 0;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function load() {
   try {
@@ -221,6 +260,7 @@ async function chooseManualInstall() {
 }
 
 async function chooseManagedAgent() {
+  provisionWaitToken += 1;
   showChoiceModal.value = false;
   managedName.value = '';
   managedDescription.value = '';
@@ -241,6 +281,7 @@ async function chooseManagedAgent() {
 }
 
 function closeManagedModal() {
+  provisionWaitToken += 1;
   showManagedModal.value = false;
   flavorDropdownOpen.value = false;
 }
@@ -249,6 +290,37 @@ function resetManagedForm() {
   provisionSteps.value = [];
   provisionDone.value = false;
   managedError.value = '';
+}
+
+function updateFlavorDropdownPosition() {
+  const el = flavorToggleRef.value;
+  if (!el) return;
+  const rect = el.getBoundingClientRect();
+  flavorDropdownStyle.value = {
+    position: 'fixed',
+    top:  `${rect.bottom + 4}px`,
+    left: `${rect.left}px`,
+    width: `${rect.width}px`,
+  };
+}
+
+function closeFlavorDropdown() {
+  flavorDropdownOpen.value = false;
+}
+
+function handleOutsideScroll(event) {
+  if (event.target?.closest?.('.flavor-select__dropdown')) return;
+  closeFlavorDropdown();
+}
+
+async function toggleFlavorDropdown() {
+  if (flavorDropdownOpen.value) {
+    flavorDropdownOpen.value = false;
+    return;
+  }
+  flavorDropdownOpen.value = true;
+  await nextTick();
+  updateFlavorDropdownPosition();
 }
 
 function selectFlavor(f) {
@@ -275,7 +347,7 @@ async function submitManagedAgent() {
       provisionSteps.value = applyProvisionEvent(provisionSteps.value, event);
       if (isProvisionDone(event)) {
         provisionDone.value = true;
-        load();
+        waitForAgentThenClose(event.hostname);
       } else if (isProvisionError(event)) {
         managedError.value = event.message;
       }
@@ -283,6 +355,18 @@ async function submitManagedAgent() {
   } catch (e) {
     managedError.value = e.message || 'Failed to create agent';
   }
+}
+
+async function waitForAgentThenClose(hostname) {
+  const token = ++provisionWaitToken;
+  for (let attempt = 0; attempt < PROVISION_WAIT_ATTEMPTS; attempt += 1) {
+    await load();
+    if (token !== provisionWaitToken) return;
+    if (agents.value.some(a => a.hostname === hostname)) break;
+    await sleep(PROVISION_WAIT_INTERVAL_MS);
+    if (token !== provisionWaitToken) return;
+  }
+  if (token === provisionWaitToken) closeManagedModal();
 }
 
 async function openInstallModal() {
@@ -334,9 +418,14 @@ function relativeTime(iso) {
 onMounted(() => {
   load();
   refreshTimer = setInterval(load, 15_000);
+  window.addEventListener('resize', closeFlavorDropdown);
+  window.addEventListener('scroll', handleOutsideScroll, true);
 });
 
 onUnmounted(() => {
+  provisionWaitToken += 1;
   clearInterval(refreshTimer);
+  window.removeEventListener('resize', closeFlavorDropdown);
+  window.removeEventListener('scroll', handleOutsideScroll, true);
 });
 </script>

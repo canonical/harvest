@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mount, flushPromises } from '@vue/test-utils';
+import { mount, flushPromises, DOMWrapper } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import AgentsView from '../../src/views/AgentsView.vue';
 import { useAuthStore } from '../../src/stores/auth.js';
@@ -68,6 +68,19 @@ describe('AgentsView', () => {
     await flushPromises();
     const rows = w.findAll('tbody tr');
     expect(rows).toHaveLength(2);
+  });
+
+  it('shows a console link per agent pointing at its console route', async () => {
+    mockApi();
+    const w = mount(AgentsView, {
+      props: { projectId: 'proj-1' },
+      global: { plugins: [createPinia()] },
+    });
+    await flushPromises();
+    const links = w.findAll('a.console-icon-btn');
+    expect(links).toHaveLength(2);
+    expect(links[0].attributes('href')).toBe('/agents/ag-1/console');
+    expect(links[1].attributes('href')).toBe('/agents/ag-2/console');
   });
 
   it('shows online status dot', async () => {
@@ -186,14 +199,61 @@ describe('AgentsView', () => {
 
     await w.find('#flavor-select-toggle').trigger('click');
     await flushPromises();
-    await w.find('#flavor-option-large').trigger('click');
+    await new DOMWrapper(document.body).find('#flavor-option-large').trigger('click');
     await flushPromises();
 
     expect(w.find('#flavor-select-toggle').text()).toContain('Large');
     expect(w.find('#flavor-select-toggle').text()).toContain('4 vCPU');
   });
 
-  it('submitting the managed-agent form streams live progress and shows Close when done', async () => {
+  it('submitting the managed-agent form streams live progress through all steps', async () => {
+    vi.useFakeTimers();
+    try {
+      const pinia = createPinia();
+      setActivePinia(pinia);
+      useAuthStore().features.lxd = true;
+      global.fetch = vi.fn()
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_FLAVORS) })
+        .mockResolvedValueOnce(sseResponse([
+          { type: 'phase_start', phase: 'ensure_network' },
+          { type: 'phase_start', phase: 'install_token' },
+          { type: 'phase_start', phase: 'create_container' },
+          { type: 'phase_start', phase: 'start_container' },
+          { type: 'phase_start', phase: 'wait_running' },
+          { type: 'phase_start', phase: 'install_agent' },
+          { type: 'done', hostname: 'agent-abcd' },
+        ]))
+        .mockResolvedValue({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) });
+
+      const w = mount(AgentsView, {
+        props: { projectId: 'proj-1' },
+        global: { plugins: [pinia] },
+      });
+      await flushPromises();
+      await w.find('#install-agent-btn').trigger('click');
+      await flushPromises();
+      await w.find('#choice-lxd-btn').trigger('click');
+      await flushPromises();
+
+      await w.find('#managed-agent-name').setValue('build-runner');
+      await w.find('#create-managed-agent-btn').trigger('click');
+      await flushPromises();
+
+      const createCall = global.fetch.mock.calls.find(([url]) => url.includes('/agents/lxd'));
+      expect(createCall).toBeTruthy();
+      const body = JSON.parse(createCall[1].body);
+      expect(body.name).toBe('build-runner');
+      expect(body.flavor).toBe('small');
+
+      expect(w.find('#provision-steps').exists()).toBe(true);
+      expect(w.findAll('.lxd-step--done')).toHaveLength(6);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('closes the managed-agent modal and shows the new agent once it appears after provisioning', async () => {
     const pinia = createPinia();
     setActivePinia(pinia);
     useAuthStore().features.lxd = true;
@@ -201,15 +261,15 @@ describe('AgentsView', () => {
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
       .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_FLAVORS) })
       .mockResolvedValueOnce(sseResponse([
-        { type: 'phase_start', phase: 'ensure_network' },
-        { type: 'phase_start', phase: 'install_token' },
-        { type: 'phase_start', phase: 'create_container' },
-        { type: 'phase_start', phase: 'start_container' },
-        { type: 'phase_start', phase: 'wait_running' },
-        { type: 'phase_start', phase: 'install_agent' },
         { type: 'done', hostname: 'agent-abcd' },
       ]))
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) });
+      .mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve([
+          ...MOCK_AGENTS,
+          { id: 'ag-abcd', hostname: 'agent-abcd', online: true, last_seen: new Date().toISOString(), provider: 'lxd' },
+        ]),
+      });
 
     const w = mount(AgentsView, {
       props: { projectId: 'proj-1' },
@@ -224,17 +284,50 @@ describe('AgentsView', () => {
     await w.find('#managed-agent-name').setValue('build-runner');
     await w.find('#create-managed-agent-btn').trigger('click');
     await flushPromises();
+    await flushPromises();
 
-    const createCall = global.fetch.mock.calls.find(([url]) => url.includes('/agents/lxd'));
-    expect(createCall).toBeTruthy();
-    const body = JSON.parse(createCall[1].body);
-    expect(body.name).toBe('build-runner');
-    expect(body.flavor).toBe('small');
+    expect(w.find('#managed-agent-modal').exists()).toBe(false);
+    expect(w.text()).toContain('agent-abcd');
+  });
 
-    expect(w.find('#managed-agent-modal').exists()).toBe(true);
-    expect(w.find('#provision-steps').exists()).toBe(true);
-    expect(w.findAll('.lxd-step--done')).toHaveLength(6);
-    expect(w.text()).toContain('Close');
+  it('gives up waiting and closes the modal anyway if the agent never appears', async () => {
+    vi.useFakeTimers();
+    try {
+      const pinia = createPinia();
+      setActivePinia(pinia);
+      useAuthStore().features.lxd = true;
+      global.fetch = vi.fn()
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) })
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(MOCK_FLAVORS) })
+        .mockResolvedValueOnce(sseResponse([
+          { type: 'done', hostname: 'agent-abcd' },
+        ]))
+        .mockResolvedValue({ ok: true, json: () => Promise.resolve(MOCK_AGENTS) });
+
+      const w = mount(AgentsView, {
+        props: { projectId: 'proj-1' },
+        global: { plugins: [pinia] },
+      });
+      await flushPromises();
+      await w.find('#install-agent-btn').trigger('click');
+      await flushPromises();
+      await w.find('#choice-lxd-btn').trigger('click');
+      await flushPromises();
+
+      await w.find('#managed-agent-name').setValue('build-runner');
+      await w.find('#create-managed-agent-btn').trigger('click');
+      await flushPromises();
+
+      expect(w.find('#managed-agent-modal').exists()).toBe(true);
+
+      for (let i = 0; i < 15; i += 1) {
+        await vi.advanceTimersByTimeAsync(1000);
+      }
+
+      expect(w.find('#managed-agent-modal').exists()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shows the failing step and a Try again option when a phase errors', async () => {
@@ -289,7 +382,7 @@ describe('AgentsView', () => {
       global: { plugins: [createPinia()] },
     });
     await flushPromises();
-    await w.findAll('.p-button--negative')[0].trigger('click');
+    await w.findAll('.console-icon-btn--danger')[0].trigger('click');
     await flushPromises();
     expect(w.text()).toContain('LXD container');
   });
