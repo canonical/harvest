@@ -2954,12 +2954,24 @@ a.source-chip:hover .source-chip__name {
 }
 
 .agent-provider-badge {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--bg-surface-alt);
   border-radius: 2rem;
-  color: rgba(255, 255, 255, 0.65);
+  color: var(--text-secondary);
   font-size: 0.6875rem;
   margin-left: 0.5rem;
   padding: 0.0625rem 0.5rem;
+}
+
+.agent-type-icon {
+  color: var(--text-secondary);
+  display: inline-flex;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+
+.agent-type-icon svg {
+  height: 16px;
+  width: 16px;
 }
 
 .agent-row-actions {
