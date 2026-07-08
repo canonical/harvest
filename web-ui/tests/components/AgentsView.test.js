@@ -373,6 +373,22 @@ describe('AgentsView', () => {
     expect(w.find('.agent-provider-badge').exists()).toBe(true);
   });
 
+  it('shows a type icon reflecting each agent\'s provider', async () => {
+    mockApi([
+      { id: 'ag-1', hostname: 'box1', online: true,  last_seen: new Date().toISOString(), provider: 'lxd' },
+      { id: 'ag-2', hostname: 'box2', online: false, last_seen: new Date().toISOString(), provider: 'manual' },
+    ]);
+    const w = mount(AgentsView, {
+      props: { projectId: 'proj-1' },
+      global: { plugins: [createPinia()] },
+    });
+    await flushPromises();
+    const icons = w.findAll('.agent-type-icon');
+    expect(icons).toHaveLength(2);
+    expect(icons[0].attributes('title')).toBe('Harvest-managed (LXD)');
+    expect(icons[1].attributes('title')).toBe('Manually installed');
+  });
+
   it('delete confirmation mentions the LXD container for LXD-managed agents', async () => {
     mockApi([
       { id: 'ag-1', hostname: 'box1', online: true, last_seen: new Date().toISOString(), provider: 'lxd' },
