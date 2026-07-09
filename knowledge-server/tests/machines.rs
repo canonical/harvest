@@ -181,6 +181,47 @@ async fn agent_results_no_token_returns_401() {
 }
 
 #[tokio::test]
+async fn agents_install_script_route_not_shadowed_by_proxy_route() {
+    use knowledge_server::machines::handlers::machines_protected_router;
+
+    let state = make_state(MachineRegistry::new());
+    let app = machines_router(Arc::clone(&state)).merge(machines_protected_router(Arc::clone(&state)));
+
+    let install_req = Request::builder()
+        .uri("/agents/some-project/install.sh")
+        .body(Body::empty()).unwrap();
+    let install_resp = app.clone().oneshot(install_req).await.unwrap();
+    assert_eq!(
+        install_resp.status(), StatusCode::SERVICE_UNAVAILABLE,
+        "install.sh must still resolve to the installer, not the proxy"
+    );
+
+    let proxy_req = Request::builder()
+        .uri("/agents/some-agent/some-route")
+        .body(Body::empty()).unwrap();
+    let proxy_resp = app.oneshot(proxy_req).await.unwrap();
+    assert_eq!(
+        proxy_resp.status(), StatusCode::INTERNAL_SERVER_ERROR,
+        "an arbitrary route name must fall through to the proxy handler (500 here because \
+         Extension<Claims> isn't populated without the auth middleware layer in this test)"
+    );
+}
+
+#[tokio::test]
+async fn agents_binary_route_not_shadowed_by_proxy_route() {
+    use knowledge_server::machines::handlers::machines_protected_router;
+
+    let state = make_state(MachineRegistry::new());
+    let app = machines_router(Arc::clone(&state)).merge(machines_protected_router(Arc::clone(&state)));
+
+    let req = Request::builder()
+        .uri("/agents/binary/harvest-agent")
+        .body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "binary route must still resolve to the binary handler");
+}
+
+#[tokio::test]
 async fn agent_ping_invalid_token_returns_401() {
     let app = machines_router(make_state(MachineRegistry::new()));
     let req = Request::builder()
@@ -541,6 +582,197 @@ mod docker_tests {
         assert_eq!(resp.status(), 503);
     }
 
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn create_port_forward_returns_created_forward_with_url() {
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let project_id = seed_project(&neo4j, "pf-create-tok").await;
+        seed_machine(&neo4j, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+
+        let client = reqwest::Client::new();
+        let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
+            .json(&json!({ "port": 8080, "route_name": "app" }))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["port"], 8080);
+        assert_eq!(body["route_name"], "app");
+        assert!(body["url"].as_str().unwrap().ends_with("/agents/agent-1/app"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn create_port_forward_rejects_invalid_port() {
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let project_id = seed_project(&neo4j, "pf-invalid-port-tok").await;
+        seed_machine(&neo4j, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+
+        let client = reqwest::Client::new();
+        let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
+            .json(&json!({ "port": 99999, "route_name": "app" }))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 400);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn create_port_forward_rejects_duplicate_route_name() {
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let project_id = seed_project(&neo4j, "pf-dup-tok").await;
+        seed_machine(&neo4j, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port());
+        client.post(&url).json(&json!({ "port": 8080, "route_name": "app" })).send().await.unwrap();
+        let resp = client.post(&url).json(&json!({ "port": 9090, "route_name": "app" })).send().await.unwrap();
+        assert_eq!(resp.status(), 409);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn list_port_forwards_returns_only_this_agents_forwards() {
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let project_id = seed_project(&neo4j, "pf-list-tok").await;
+        seed_machine(&neo4j, &project_id, "agent-1", None).await;
+        seed_machine(&neo4j, &project_id, "agent-2", None).await;
+        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+
+        let client = reqwest::Client::new();
+        client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
+            .json(&json!({ "port": 8080, "route_name": "app" })).send().await.unwrap();
+        client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-2/port-forwards", addr.port()))
+            .json(&json!({ "port": 9090, "route_name": "other" })).send().await.unwrap();
+
+        let resp = client.get(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body: Value = resp.json().await.unwrap();
+        let arr = body.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["route_name"], "app");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn update_port_forward_changes_fields() {
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let project_id = seed_project(&neo4j, "pf-update-tok").await;
+        seed_machine(&neo4j, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+
+        let client = reqwest::Client::new();
+        let create_resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
+            .json(&json!({ "port": 8080, "route_name": "app" })).send().await.unwrap();
+        let created: Value = create_resp.json().await.unwrap();
+        let forward_id = created["id"].as_str().unwrap();
+
+        let resp = client.put(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards/{forward_id}", addr.port()))
+            .json(&json!({ "port": 9090 }))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let updated: Value = resp.json().await.unwrap();
+        assert_eq!(updated["port"], 9090);
+        assert_eq!(updated["route_name"], "app");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn update_port_forward_returns_404_for_unknown_id() {
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let project_id = seed_project(&neo4j, "pf-update-404-tok").await;
+        seed_machine(&neo4j, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+
+        let client = reqwest::Client::new();
+        let resp = client.put(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards/nonexistent", addr.port()))
+            .json(&json!({ "port": 9090 }))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn delete_port_forward_removes_it() {
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let project_id = seed_project(&neo4j, "pf-delete-tok").await;
+        seed_machine(&neo4j, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+
+        let client = reqwest::Client::new();
+        let create_resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
+            .json(&json!({ "port": 8080, "route_name": "app" })).send().await.unwrap();
+        let created: Value = create_resp.json().await.unwrap();
+        let forward_id = created["id"].as_str().unwrap();
+
+        let del_resp = client.delete(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards/{forward_id}", addr.port()))
+            .send().await.unwrap();
+        assert_eq!(del_resp.status(), 200);
+
+        let list_resp = client.get(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
+            .send().await.unwrap();
+        let body: Value = list_resp.json().await.unwrap();
+        assert!(body.as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn port_forwards_rejects_reserved_route_name() {
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let project_id = seed_project(&neo4j, "pf-reserved-tok").await;
+        seed_machine(&neo4j, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+
+        let client = reqwest::Client::new();
+        let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
+            .json(&json!({ "port": 8080, "route_name": "install.sh" }))
+            .send().await.unwrap();
+        assert_eq!(resp.status(), 400);
+    }
+
     async fn spawn_console_server(neo4j: Arc<Neo4jClient>) -> std::net::SocketAddr {
         let state = Arc::new(MachineState {
             registry:    MachineRegistry::new(),
@@ -753,5 +985,371 @@ mod docker_tests {
             .header("Authorization", "Bearer completely-different-token")
             .send().await.unwrap();
         assert_eq!(resp.status(), 401);
+    }
+
+    async fn spawn_stand_in_http_server() -> std::net::SocketAddr {
+        async fn echo_path(req: axum::extract::Request) -> String {
+            req.uri().path().to_string()
+        }
+        let app = axum::Router::new().fallback(echo_path);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(axum::serve(listener, app).into_future());
+        addr
+    }
+
+    async fn simulate_agent_tunnel(ws_base: &str, session_id: &str, agent_token: &str, target_port: u16) {
+        use futures_util::{SinkExt as _, StreamExt as _};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+        let mut agent_ws = connect_ws(&format!("{ws_base}/agent/tunnel/{session_id}"), Some(agent_token)).await;
+
+        let tcp = match tokio::net::TcpStream::connect(("127.0.0.1", target_port)).await {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = agent_ws.send(WsMessage::text(format!(r#"{{"type":"error","message":"{e}"}}"#))).await;
+                return;
+            }
+        };
+
+        if agent_ws.send(WsMessage::text(r#"{"type":"connected"}"#)).await.is_err() {
+            return;
+        }
+
+        let (mut ws_tx, mut ws_rx) = agent_ws.split();
+        let (mut tcp_read, mut tcp_write) = tcp.into_split();
+
+        let writer = tokio::spawn(async move {
+            let mut buf = [0u8; 8192];
+            loop {
+                match tcp_read.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if ws_tx.send(WsMessage::binary(buf[..n].to_vec())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            match msg {
+                WsMessage::Binary(data) => {
+                    if tcp_write.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                WsMessage::Close(_) => break,
+                _ => {}
+            }
+        }
+
+        writer.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn port_forward_proxy_forwards_request_to_agent_port() {
+
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let install_token = "pf-proxy-install-tok";
+        let project_id = seed_project(&neo4j, install_token).await;
+
+        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let base = format!("http://127.0.0.1:{}", addr.port());
+        let ws_base = format!("ws://127.0.0.1:{}", addr.port());
+
+        let http = reqwest::Client::new();
+        let sse_resp = http.get(format!("{base}/agent/events?hostname=pf-proxy-host"))
+            .header("Authorization", format!("Bearer {install_token}"))
+            .send().await.unwrap();
+
+        let mut stream = sse_resp.bytes_stream();
+        let mut buf = String::new();
+        let registered_event = next_sse_event(&mut buf, &mut stream).await;
+        let registered_data = registered_event.lines()
+            .find(|l| l.starts_with("data: "))
+            .and_then(|l| l.strip_prefix("data: ")).unwrap();
+        let registered: Value = serde_json::from_str(registered_data).unwrap();
+        let perm_token = registered["agent_token"].as_str().unwrap().to_string();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let rows = neo4j.query_read(
+            "MATCH (m:Machine {hostname: 'pf-proxy-host'}) RETURN m.id AS id",
+            json!({}),
+        ).await.unwrap();
+        let agent_id = rows[0]["id"].as_str().unwrap().to_string();
+
+        let stand_in_addr = spawn_stand_in_http_server().await;
+        http.post(format!("{base}/projects/{project_id}/agents/{agent_id}/port-forwards"))
+            .json(&json!({ "port": stand_in_addr.port(), "route_name": "app" }))
+            .send().await.unwrap();
+
+        let agent_task = tokio::spawn({
+            let ws_base = ws_base.clone();
+            let perm_token = perm_token.clone();
+            async move {
+                let open_tunnel_event = next_sse_event(&mut buf, &mut stream).await;
+                let data = open_tunnel_event.lines()
+                    .find(|l| l.starts_with("data: "))
+                    .and_then(|l| l.strip_prefix("data: ")).unwrap();
+                let val: Value = serde_json::from_str(data).unwrap();
+                assert_eq!(val["type"], "open_tunnel");
+                let session_id = val["session_id"].as_str().unwrap().to_string();
+                simulate_agent_tunnel(&ws_base, &session_id, &perm_token, stand_in_addr.port()).await;
+            }
+        });
+
+        let resp = http.get(format!("{base}/agents/{agent_id}/app")).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap(), "/");
+
+        agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn port_forward_proxy_forwards_subpath() {
+
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let install_token = "pf-subpath-install-tok";
+        let project_id = seed_project(&neo4j, install_token).await;
+
+        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let base = format!("http://127.0.0.1:{}", addr.port());
+        let ws_base = format!("ws://127.0.0.1:{}", addr.port());
+
+        let http = reqwest::Client::new();
+        let sse_resp = http.get(format!("{base}/agent/events?hostname=pf-subpath-host"))
+            .header("Authorization", format!("Bearer {install_token}"))
+            .send().await.unwrap();
+
+        let mut stream = sse_resp.bytes_stream();
+        let mut buf = String::new();
+        let registered_event = next_sse_event(&mut buf, &mut stream).await;
+        let registered_data = registered_event.lines()
+            .find(|l| l.starts_with("data: "))
+            .and_then(|l| l.strip_prefix("data: ")).unwrap();
+        let registered: Value = serde_json::from_str(registered_data).unwrap();
+        let perm_token = registered["agent_token"].as_str().unwrap().to_string();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let rows = neo4j.query_read(
+            "MATCH (m:Machine {hostname: 'pf-subpath-host'}) RETURN m.id AS id",
+            json!({}),
+        ).await.unwrap();
+        let agent_id = rows[0]["id"].as_str().unwrap().to_string();
+
+        let stand_in_addr = spawn_stand_in_http_server().await;
+        http.post(format!("{base}/projects/{project_id}/agents/{agent_id}/port-forwards"))
+            .json(&json!({ "port": stand_in_addr.port(), "route_name": "app" }))
+            .send().await.unwrap();
+
+        let agent_task = tokio::spawn({
+            let ws_base = ws_base.clone();
+            let perm_token = perm_token.clone();
+            async move {
+                let open_tunnel_event = next_sse_event(&mut buf, &mut stream).await;
+                let data = open_tunnel_event.lines()
+                    .find(|l| l.starts_with("data: "))
+                    .and_then(|l| l.strip_prefix("data: ")).unwrap();
+                let val: Value = serde_json::from_str(data).unwrap();
+                let session_id = val["session_id"].as_str().unwrap().to_string();
+                simulate_agent_tunnel(&ws_base, &session_id, &perm_token, stand_in_addr.port()).await;
+            }
+        });
+
+        let resp = http.get(format!("{base}/agents/{agent_id}/app/foo/bar")).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap(), "/foo/bar");
+
+        agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn port_forward_proxy_returns_502_when_agent_not_connected() {
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let project_id = seed_project(&neo4j, "pf-offline-tok").await;
+        seed_machine(&neo4j, &project_id, "offline-agent", None).await;
+
+        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let base = format!("http://127.0.0.1:{}", addr.port());
+
+        let http = reqwest::Client::new();
+        http.post(format!("{base}/projects/{project_id}/agents/offline-agent/port-forwards"))
+            .json(&json!({ "port": 8080, "route_name": "app" }))
+            .send().await.unwrap();
+
+        let resp = http.get(format!("{base}/agents/offline-agent/app")).send().await.unwrap();
+        assert_eq!(resp.status(), 502);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn port_forward_proxy_forwards_request_with_trailing_slash() {
+        use futures_util::{SinkExt as _, StreamExt as _};
+
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let install_token = "pf-trailing-slash-install-tok";
+        let project_id = seed_project(&neo4j, install_token).await;
+
+        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let base = format!("http://127.0.0.1:{}", addr.port());
+        let ws_base = format!("ws://127.0.0.1:{}", addr.port());
+
+        let http = reqwest::Client::new();
+        let sse_resp = http.get(format!("{base}/agent/events?hostname=pf-trailing-slash-host"))
+            .header("Authorization", format!("Bearer {install_token}"))
+            .send().await.unwrap();
+
+        let mut stream = sse_resp.bytes_stream();
+        let mut buf = String::new();
+        let registered_event = next_sse_event(&mut buf, &mut stream).await;
+        let registered_data = registered_event.lines()
+            .find(|l| l.starts_with("data: "))
+            .and_then(|l| l.strip_prefix("data: ")).unwrap();
+        let registered: Value = serde_json::from_str(registered_data).unwrap();
+        let perm_token = registered["agent_token"].as_str().unwrap().to_string();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let rows = neo4j.query_read(
+            "MATCH (m:Machine {hostname: 'pf-trailing-slash-host'}) RETURN m.id AS id",
+            json!({}),
+        ).await.unwrap();
+        let agent_id = rows[0]["id"].as_str().unwrap().to_string();
+
+        let stand_in_addr = spawn_stand_in_http_server().await;
+        http.post(format!("{base}/projects/{project_id}/agents/{agent_id}/port-forwards"))
+            .json(&json!({ "port": stand_in_addr.port(), "route_name": "app" }))
+            .send().await.unwrap();
+
+        let agent_task = tokio::spawn({
+            let ws_base = ws_base.clone();
+            let perm_token = perm_token.clone();
+            async move {
+                let open_tunnel_event = next_sse_event(&mut buf, &mut stream).await;
+                let data = open_tunnel_event.lines()
+                    .find(|l| l.starts_with("data: "))
+                    .and_then(|l| l.strip_prefix("data: ")).unwrap();
+                let val: Value = serde_json::from_str(data).unwrap();
+                let session_id = val["session_id"].as_str().unwrap().to_string();
+                simulate_agent_tunnel(&ws_base, &session_id, &perm_token, stand_in_addr.port()).await;
+            }
+        });
+
+        let resp = http.get(format!("{base}/agents/{agent_id}/app/")).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap(), "/");
+
+        agent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn port_forward_proxy_returns_404_for_unknown_route() {
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let project_id = seed_project(&neo4j, "pf-404-tok").await;
+        seed_machine(&neo4j, &project_id, "some-agent", None).await;
+
+        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let base = format!("http://127.0.0.1:{}", addr.port());
+
+        let http = reqwest::Client::new();
+        let resp = http.get(format!("{base}/agents/some-agent/nope")).send().await.unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker"]
+    async fn port_forward_proxy_returns_502_when_agent_side_connection_refused() {
+
+        let container = Neo4j::default().start().await;
+        let uri  = container.image().bolt_uri_ipv4();
+        let user = container.image().user().unwrap_or("neo4j");
+        let pass = container.image().password().unwrap_or("neo");
+        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+
+        let install_token = "pf-refused-install-tok";
+        let project_id = seed_project(&neo4j, install_token).await;
+
+        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let base = format!("http://127.0.0.1:{}", addr.port());
+        let ws_base = format!("ws://127.0.0.1:{}", addr.port());
+
+        let http = reqwest::Client::new();
+        let sse_resp = http.get(format!("{base}/agent/events?hostname=pf-refused-host"))
+            .header("Authorization", format!("Bearer {install_token}"))
+            .send().await.unwrap();
+
+        let mut stream = sse_resp.bytes_stream();
+        let mut buf = String::new();
+        let registered_event = next_sse_event(&mut buf, &mut stream).await;
+        let registered_data = registered_event.lines()
+            .find(|l| l.starts_with("data: "))
+            .and_then(|l| l.strip_prefix("data: ")).unwrap();
+        let registered: Value = serde_json::from_str(registered_data).unwrap();
+        let perm_token = registered["agent_token"].as_str().unwrap().to_string();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let rows = neo4j.query_read(
+            "MATCH (m:Machine {hostname: 'pf-refused-host'}) RETURN m.id AS id",
+            json!({}),
+        ).await.unwrap();
+        let agent_id = rows[0]["id"].as_str().unwrap().to_string();
+
+        let closed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_port = closed_listener.local_addr().unwrap().port();
+        drop(closed_listener);
+
+        http.post(format!("{base}/projects/{project_id}/agents/{agent_id}/port-forwards"))
+            .json(&json!({ "port": closed_port, "route_name": "app" }))
+            .send().await.unwrap();
+
+        let agent_task = tokio::spawn({
+            let ws_base = ws_base.clone();
+            let perm_token = perm_token.clone();
+            async move {
+                let open_tunnel_event = next_sse_event(&mut buf, &mut stream).await;
+                let data = open_tunnel_event.lines()
+                    .find(|l| l.starts_with("data: "))
+                    .and_then(|l| l.strip_prefix("data: ")).unwrap();
+                let val: Value = serde_json::from_str(data).unwrap();
+                let session_id = val["session_id"].as_str().unwrap().to_string();
+                simulate_agent_tunnel(&ws_base, &session_id, &perm_token, closed_port).await;
+            }
+        });
+
+        let resp = http.get(format!("{base}/agents/{agent_id}/app")).send().await.unwrap();
+        assert_eq!(resp.status(), 502);
+
+        agent_task.await.unwrap();
     }
 }

@@ -17,14 +17,7 @@ struct ControlMsg {
 }
 
 fn console_ws_url(server_url: &str, session_id: &str) -> String {
-    let ws_base = if let Some(rest) = server_url.strip_prefix("https://") {
-        format!("wss://{rest}")
-    } else if let Some(rest) = server_url.strip_prefix("http://") {
-        format!("ws://{rest}")
-    } else {
-        server_url.to_string()
-    };
-    format!("{}/agent/console/{session_id}", ws_base.trim_end_matches('/'))
+    crate::ws_url::dial_back_ws_url(server_url, &format!("/agent/console/{session_id}"))
 }
 
 pub async fn run_console_session(

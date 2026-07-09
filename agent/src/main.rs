@@ -2,6 +2,8 @@ mod config;
 mod console;
 mod executor;
 mod sse_client;
+mod tunnel;
+mod ws_url;
 
 use anyhow::Result;
 use clap::Parser;

@@ -8,7 +8,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
     },
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Extension, Json, Router,
 };
 use futures::{SinkExt as _, StreamExt as _};
@@ -27,7 +27,7 @@ use tokio_stream::{wrappers::ReceiverStream, Stream};
 use uuid::Uuid;
 
 use crate::{auth::jwt::Claims, lxd::{Flavor, LxdClient}, neo4j::Neo4jClient};
-use super::{lxd_provision, ConnectedAgent, MachineRegistry, ResultBody, ServerToAgent, hash_token};
+use super::{lxd_provision, port_forwards, ConnectedAgent, MachineRegistry, ResultBody, ServerToAgent, hash_token};
 
 const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 25;
 const DEFAULT_EXECUTE_TIMEOUT_SECS: u64 = 30;
@@ -45,13 +45,13 @@ pub struct MachineState {
     pub lxd:         Option<Arc<LxdClient>>,
 }
 
-type ApiError = (StatusCode, Json<Value>);
+pub(super) type ApiError = (StatusCode, Json<Value>);
 
-fn err(status: StatusCode, msg: &str) -> ApiError {
+pub(super) fn err(status: StatusCode, msg: &str) -> ApiError {
     (status, Json(json!({ "error": msg })))
 }
 
-fn neo4j_or_err(state: &MachineState) -> Result<&Arc<Neo4jClient>, ApiError> {
+pub(super) fn neo4j_or_err(state: &MachineState) -> Result<&Arc<Neo4jClient>, ApiError> {
     state.neo4j.as_ref().ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "database unavailable"))
 }
 
@@ -145,6 +145,7 @@ pub fn machines_router(state: Arc<MachineState>) -> Router {
         .route("/agent/results",                 post(agent_results_handler))
         .route("/agent/ping",                    post(agent_ping_handler))
         .route("/agent/console/:session_id",     get(agent_console_claim_handler))
+        .route("/agent/tunnel/:session_id",      get(agent_tunnel_claim_handler))
         .with_state(state)
 }
 
@@ -160,6 +161,16 @@ pub fn machines_protected_router(state: Arc<MachineState>) -> Router {
         .route("/projects/:pid/agents/rotate-install-token", post(rotate_install_token))
         .route("/projects/:pid/agents/flavors",              get(list_flavors))
         .route("/projects/:pid/agents/lxd",                  post(create_lxd_agent_handler))
+        .route("/projects/:pid/agents/:aid/port-forwards",
+               get(list_port_forwards).post(create_port_forward))
+        .route("/projects/:pid/agents/:aid/port-forwards/:fid",
+               put(update_port_forward).delete(delete_port_forward))
+        .route("/agents/:agent_id/:route_name",
+               axum::routing::any(super::proxy::port_forward_proxy_handler))
+        .route("/agents/:agent_id/:route_name/",
+               axum::routing::any(super::proxy::port_forward_proxy_handler))
+        .route("/agents/:agent_id/:route_name/*subpath",
+               axum::routing::any(super::proxy::port_forward_proxy_handler_subpath))
         .with_state(state)
 }
 
@@ -499,7 +510,7 @@ pub struct ConsoleQuery {
 fn default_console_cols() -> u16 { DEFAULT_CONSOLE_COLS }
 fn default_console_rows() -> u16 { DEFAULT_CONSOLE_ROWS }
 
-async fn bridge_console_socket(
+async fn bridge_socket(
     socket: WebSocket,
     mut in_rx: mpsc::Receiver<Message>,
     out_tx: mpsc::Sender<Message>,
@@ -620,7 +631,36 @@ pub async fn agent_console_claim_handler(
 
     ws.max_message_size(CONSOLE_MAX_MESSAGE_SIZE)
         .on_upgrade(move |socket| async move {
-            bridge_console_socket(socket, to_agent_rx, to_browser_tx).await;
+            bridge_socket(socket, to_agent_rx, to_browser_tx).await;
+        })
+        .into_response()
+}
+
+pub async fn agent_tunnel_claim_handler(
+    State(state):  State<Arc<MachineState>>,
+    headers:       HeaderMap,
+    Path(session_id): Path<String>,
+    ws:            WebSocketUpgrade,
+) -> impl IntoResponse {
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t,
+        None    => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    let agent_id = match state.registry.token_index.get(&hash_token(&token)) {
+        Some(r) => r.value().clone(),
+        None    => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    let Some((to_caller_tx, to_agent_rx)) = state.registry.claim_tunnel_session(&session_id, &agent_id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    tracing::info!(agent_id, session_id, "tunnel session claimed by agent");
+
+    ws.max_message_size(CONSOLE_MAX_MESSAGE_SIZE)
+        .on_upgrade(move |socket| async move {
+            bridge_socket(socket, to_agent_rx, to_caller_tx).await;
         })
         .into_response()
 }
@@ -885,7 +925,112 @@ pub async fn create_lxd_agent_handler(
     response
 }
 
-async fn require_project_access(
+fn port_forward_error_to_api(e: port_forwards::PortForwardError) -> ApiError {
+    use port_forwards::PortForwardError::*;
+    match e {
+        Validation(msg)    => err(StatusCode::BAD_REQUEST, &msg),
+        DuplicateRouteName => err(StatusCode::CONFLICT, &e.to_string()),
+        NotFound           => err(StatusCode::NOT_FOUND, &e.to_string()),
+        Db                 => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    }
+}
+
+fn port_forward_json(state: &MachineState, f: &port_forwards::PortForward) -> Value {
+    json!({
+        "id":         f.id,
+        "agent_id":   f.agent_id,
+        "port":       f.port,
+        "route_name": f.route_name,
+        "created_at": f.created_at,
+        "updated_at": f.updated_at,
+        "url":        format!("{}/agents/{}/{}", state.server_url, f.agent_id, f.route_name),
+    })
+}
+
+pub async fn list_port_forwards(
+    Extension(user):  Extension<Claims>,
+    State(state):     State<Arc<MachineState>>,
+    Path((project_id, agent_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let neo4j = neo4j_or_err(&state)?;
+    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+
+    let forwards = port_forwards::list_for_agent(neo4j, &project_id, &agent_id)
+        .await
+        .map_err(port_forward_error_to_api)?;
+
+    let result: Vec<Value> = forwards.iter().map(|f| port_forward_json(&state, f)).collect();
+    Ok(Json(result))
+}
+
+#[derive(serde::Deserialize)]
+pub struct CreatePortForwardBody {
+    pub port:       u64,
+    pub route_name: String,
+}
+
+pub async fn create_port_forward(
+    Extension(user):  Extension<Claims>,
+    State(state):     State<Arc<MachineState>>,
+    Path((project_id, agent_id)): Path<(String, String)>,
+    Json(body):       Json<CreatePortForwardBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let neo4j = neo4j_or_err(&state)?;
+    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+
+    let port = port_forwards::validate_port(body.port)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
+
+    let forward = port_forwards::create(neo4j, &project_id, &agent_id, port, &body.route_name)
+        .await
+        .map_err(port_forward_error_to_api)?;
+
+    Ok(Json(port_forward_json(&state, &forward)))
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdatePortForwardBody {
+    pub port:       Option<u64>,
+    pub route_name: Option<String>,
+}
+
+pub async fn update_port_forward(
+    Extension(user):  Extension<Claims>,
+    State(state):     State<Arc<MachineState>>,
+    Path((project_id, agent_id, forward_id)): Path<(String, String, String)>,
+    Json(body):       Json<UpdatePortForwardBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let neo4j = neo4j_or_err(&state)?;
+    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+
+    let port = match body.port {
+        Some(p) => Some(port_forwards::validate_port(p).map_err(|e| err(StatusCode::BAD_REQUEST, &e))?),
+        None    => None,
+    };
+
+    let forward = port_forwards::update(neo4j, &project_id, &agent_id, &forward_id, port, body.route_name)
+        .await
+        .map_err(port_forward_error_to_api)?;
+
+    Ok(Json(port_forward_json(&state, &forward)))
+}
+
+pub async fn delete_port_forward(
+    Extension(user):  Extension<Claims>,
+    State(state):     State<Arc<MachineState>>,
+    Path((project_id, agent_id, forward_id)): Path<(String, String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let neo4j = neo4j_or_err(&state)?;
+    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+
+    port_forwards::delete(neo4j, &project_id, &agent_id, &forward_id)
+        .await
+        .map_err(port_forward_error_to_api)?;
+
+    Ok(Json(json!({ "ok": true })))
+}
+
+pub(super) async fn require_project_access(
     neo4j:      &Neo4jClient,
     user_id:    &str,
     user_role:  &str,
