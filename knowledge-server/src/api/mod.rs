@@ -14,7 +14,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::agent::{graph_tools, lxd_tools, machine_tools, skill_tools, Agent};
+use crate::agent::{graph_tools, lxd_tools, machine_tools, port_forward_tools, skill_tools, Agent};
 use crate::skills::{handlers as skill_handlers, SkillStore};
 use crate::auth::{self, handlers as auth_handlers, AuthState};
 use crate::config::UiConfig;
@@ -103,6 +103,22 @@ impl ProjectAgentBuilder {
             neo4j:      Arc::clone(&self.neo4j),
             lxd:        self.lxd.clone(),
             registry:   Arc::clone(&self.registry),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(port_forward_tools::ListPortForwardsTool {
+            neo4j:      Arc::clone(&self.neo4j),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(port_forward_tools::CreatePortForwardTool {
+            neo4j:      Arc::clone(&self.neo4j),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(port_forward_tools::UpdatePortForwardTool {
+            neo4j:      Arc::clone(&self.neo4j),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(port_forward_tools::DeletePortForwardTool {
+            neo4j:      Arc::clone(&self.neo4j),
             project_id: project_id.clone(),
         }));
         Arc::new(

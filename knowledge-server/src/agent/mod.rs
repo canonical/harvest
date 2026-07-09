@@ -2,6 +2,7 @@ pub mod chain;
 pub mod graph_tools;
 pub mod lxd_tools;
 pub mod machine_tools;
+pub mod port_forward_tools;
 pub mod skill_tools;
 pub mod prompt;
 pub mod tool;
