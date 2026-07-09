@@ -158,7 +158,7 @@ fn build_outbound_request(req: Request, outbound_path: &str, port: u16) -> Resul
 
     let mut builder = Request::builder().method(parts.method).uri(uri);
     for (name, value) in parts.headers.iter() {
-        if is_hop_by_hop(name) {
+        if is_hop_by_hop(name) || name == HOST {
             continue;
         }
         builder = builder.header(name, value);
@@ -293,4 +293,67 @@ pub async fn port_forward_proxy_handler_subpath(
     req: Request,
 ) -> Response {
     proxy_request(user, state, agent_id, route_name, format!("/{subpath}"), req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_outbound_request_sends_exactly_one_host_header() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/hello")
+            .header(HOST, "harvest-development.thinking-dragon.net")
+            .body(Body::empty())
+            .unwrap();
+
+        let outbound = build_outbound_request(req, "/", 80).unwrap();
+        let hosts: Vec<_> = outbound.headers().get_all(HOST).iter().collect();
+        assert_eq!(hosts.len(), 1, "expected exactly one Host header, got {hosts:?}");
+        assert_eq!(hosts[0], "127.0.0.1:80");
+    }
+
+    #[test]
+    fn build_outbound_request_sets_host_even_without_an_inbound_host_header() {
+        let req = Request::builder().method("GET").uri("/").body(Body::empty()).unwrap();
+        let outbound = build_outbound_request(req, "/", 8080).unwrap();
+        assert_eq!(outbound.headers().get(HOST).unwrap(), "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn build_outbound_request_strips_hop_by_hop_headers() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header(axum::http::header::CONNECTION, "keep-alive")
+            .header(axum::http::header::UPGRADE, "websocket")
+            .body(Body::empty())
+            .unwrap();
+
+        let outbound = build_outbound_request(req, "/", 8080).unwrap();
+        assert!(outbound.headers().get(axum::http::header::CONNECTION).is_none());
+        assert!(outbound.headers().get(axum::http::header::UPGRADE).is_none());
+    }
+
+    #[test]
+    fn build_outbound_request_preserves_other_headers() {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("x-custom", "value")
+            .body(Body::empty())
+            .unwrap();
+
+        let outbound = build_outbound_request(req, "/", 8080).unwrap();
+        assert_eq!(outbound.headers().get("x-custom").unwrap(), "value");
+    }
+
+    #[test]
+    fn build_outbound_request_rewrites_path_and_preserves_query() {
+        let req = Request::builder().method("GET").uri("/ignored?a=1").body(Body::empty()).unwrap();
+        let outbound = build_outbound_request(req, "/foo/bar", 8080).unwrap();
+        assert_eq!(outbound.uri().path(), "/foo/bar");
+        assert_eq!(outbound.uri().query(), Some("a=1"));
+    }
 }
