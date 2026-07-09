@@ -302,6 +302,26 @@ export async function provisionLxdAgent(projectId, { name, description, flavor }
   await consumeSseStream(response, onEvent);
 }
 
+const portForwardsUrl = (projectId, agentId) =>
+  `${projectUrl(projectId)}/agents/${encodeURIComponent(agentId)}/port-forwards`;
+
+export const listPortForwards = (projectId, agentId) => projectFetch(portForwardsUrl(projectId, agentId));
+
+export const createPortForward = (projectId, agentId, { port, routeName }) =>
+  projectFetch(portForwardsUrl(projectId, agentId), {
+    method: 'POST',
+    body:   JSON.stringify({ port, route_name: routeName }),
+  });
+
+export const updatePortForward = (projectId, agentId, forwardId, { port, routeName }) =>
+  projectFetch(`${portForwardsUrl(projectId, agentId)}/${encodeURIComponent(forwardId)}`, {
+    method: 'PUT',
+    body:   JSON.stringify({ port, route_name: routeName }),
+  });
+
+export const deletePortForward = (projectId, agentId, forwardId) =>
+  projectFetch(`${portForwardsUrl(projectId, agentId)}/${encodeURIComponent(forwardId)}`, { method: 'DELETE' });
+
 export async function resumeConfirmAction(projectId, convId, results) {
   const response = await fetch(`${projectUrl(projectId)}/conversations/${encodeURIComponent(convId)}/confirm-action/resume`, {
     method:  'POST',

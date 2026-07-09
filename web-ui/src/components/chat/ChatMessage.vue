@@ -60,7 +60,7 @@
               <button class="p-button--base" type="button" @click="$emit('deny', item.id)">Cancel</button>
             </div>
             <p v-else-if="item.status === 'running'" class="confirm-status confirm-status--running">
-              {{ item.name === 'delete_agent' ? 'Deleting…' : 'Creating…' }}
+              {{ runningVerb(item.name) }}
             </p>
             <p v-else-if="item.status === 'denied'" class="confirm-status confirm-status--denied">Cancelled</p>
             <p v-else-if="item.status === 'done'" class="confirm-status confirm-status--done">{{ item.resultText }}</p>
@@ -145,6 +145,7 @@ import ProvisionSteps from '../agents/ProvisionSteps.vue';
 import { renderMarkdown, buildCitationIndex } from '../../lib/markdown.js';
 import { mountInlineGraphs } from '../../lib/inline-graph.js';
 import { avatarColor, initials, addCopyButtons } from '../../lib/utils.js';
+import { runningVerb } from '../../lib/tool-verbs.js';
 
 const answerBodyRef = ref(null);
 const otherText     = ref('');
