@@ -42,12 +42,16 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
-    listProjectAgents: vi.fn(),
-    deleteAgent:       vi.fn(() => Promise.resolve({ ok: true })),
-    startAgent:        vi.fn(() => Promise.resolve({ ok: true })),
-    stopAgent:         vi.fn(() => Promise.resolve({ ok: true })),
-    restartAgent:      vi.fn(() => Promise.resolve({ ok: true })),
-    consoleSocketUrl:  vi.fn(() => 'ws://test/console'),
+    listProjectAgents:  vi.fn(),
+    deleteAgent:        vi.fn(() => Promise.resolve({ ok: true })),
+    startAgent:         vi.fn(() => Promise.resolve({ ok: true })),
+    stopAgent:          vi.fn(() => Promise.resolve({ ok: true })),
+    restartAgent:       vi.fn(() => Promise.resolve({ ok: true })),
+    consoleSocketUrl:   vi.fn(() => 'ws://test/console'),
+    listPortForwards:   vi.fn(() => Promise.resolve([])),
+    createPortForward:  vi.fn(() => Promise.resolve({ id: 'f-new', route_name: 'app', port: 8080, url: 'http://test/agents/ag-1/app' })),
+    updatePortForward:  vi.fn(() => Promise.resolve({ id: 'f-1', route_name: 'app', port: 9090, url: 'http://test/agents/ag-1/app' })),
+    deletePortForward:  vi.fn(() => Promise.resolve({ ok: true })),
   };
 });
 
@@ -300,5 +304,173 @@ describe('AgentConsoleView', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe('port forwards', () => {
+    it('loads port forwards on mount without showing the manager', async () => {
+      api.listPortForwards.mockResolvedValue([
+        { id: 'f-1', route_name: 'app', port: 8080, url: 'http://test/agents/ag-1/app' },
+      ]);
+      const { w } = await mountView();
+      expect(api.listPortForwards).toHaveBeenCalledWith('proj-1', 'ag-1');
+      expect(w.find('#portforward-manager-modal').exists()).toBe(false);
+    });
+
+    it('shows a badge on the header button with the port forward count', async () => {
+      api.listPortForwards.mockResolvedValue([
+        { id: 'f-1', route_name: 'app', port: 8080, url: 'http://test/agents/ag-1/app' },
+        { id: 'f-2', route_name: 'other', port: 9090, url: 'http://test/agents/ag-1/other' },
+      ]);
+      const { w } = await mountView();
+      expect(w.find('#console-portforwards-btn .console-icon-btn__badge').text()).toBe('2');
+    });
+
+    it('hides the badge when there are no port forwards', async () => {
+      api.listPortForwards.mockResolvedValue([]);
+      const { w } = await mountView();
+      expect(w.find('#console-portforwards-btn .console-icon-btn__badge').exists()).toBe(false);
+    });
+
+    it('opens the manager modal listing existing forwards when the header button is clicked', async () => {
+      api.listPortForwards.mockResolvedValue([
+        { id: 'f-1', route_name: 'app', port: 8080, url: 'http://test/agents/ag-1/app' },
+      ]);
+      const { w } = await mountView();
+      await w.find('#console-portforwards-btn').trigger('click');
+      expect(w.find('#portforward-manager-modal').exists()).toBe(true);
+      expect(w.find('.p-table').exists()).toBe(true);
+      expect(w.text()).toContain('8080');
+    });
+
+    it('shows the route as a short /{route} link pointing at the full forward URL', async () => {
+      api.listPortForwards.mockResolvedValue([
+        { id: 'f-1', route_name: 'app', port: 8080, url: 'http://test/agents/ag-1/app' },
+      ]);
+      const { w } = await mountView();
+      await w.find('#console-portforwards-btn').trigger('click');
+      const link = w.find('.p-table a');
+      expect(link.text()).toBe('/app');
+      expect(link.attributes('href')).toBe('http://test/agents/ag-1/app');
+      expect(w.text()).not.toContain('http://test/agents/ag-1/app');
+    });
+
+    it('shows an empty state inside the manager when there are no port forwards', async () => {
+      api.listPortForwards.mockResolvedValue([]);
+      const { w } = await mountView();
+      await w.find('#console-portforwards-btn').trigger('click');
+      expect(w.find('.portforward-empty').exists()).toBe(true);
+    });
+
+    it('closes the manager modal via the close button', async () => {
+      const { w } = await mountView();
+      await w.find('#console-portforwards-btn').trigger('click');
+      await w.find('#portforward-manager-modal .modal-close').trigger('click');
+      expect(w.find('#portforward-manager-modal').exists()).toBe(false);
+    });
+
+    it('opens the add form with empty fields', async () => {
+      const { w } = await mountView();
+      await w.find('#console-portforwards-btn').trigger('click');
+      await w.find('#portforward-add-btn').trigger('click');
+      expect(w.find('#portforward-route-name-input').element.value).toBe('');
+    });
+
+    it('creates a port forward and returns to the list, reloaded', async () => {
+      const { w } = await mountView();
+      await w.find('#console-portforwards-btn').trigger('click');
+      await w.find('#portforward-add-btn').trigger('click');
+      await w.find('#portforward-route-name-input').setValue('app');
+      await w.find('#portforward-port-input').setValue('8080');
+
+      api.listPortForwards.mockResolvedValue([
+        { id: 'f-new', route_name: 'app', port: 8080, url: 'http://test/agents/ag-1/app' },
+      ]);
+      await w.find('#portforward-save-btn').trigger('click');
+      await flushPromises();
+
+      expect(api.createPortForward).toHaveBeenCalledWith('proj-1', 'ag-1', { port: 8080, routeName: 'app' });
+      expect(w.find('#portforward-route-name-input').exists()).toBe(false);
+      expect(w.find('.p-table').exists()).toBe(true);
+      expect(api.listPortForwards).toHaveBeenCalledTimes(2);
+    });
+
+    it('shows an error and stays on the form when create fails', async () => {
+      api.createPortForward.mockRejectedValueOnce(new Error('route_name already exists'));
+      const { w } = await mountView();
+      await w.find('#console-portforwards-btn').trigger('click');
+      await w.find('#portforward-add-btn').trigger('click');
+      await w.find('#portforward-route-name-input').setValue('app');
+      await w.find('#portforward-port-input').setValue('8080');
+      await w.find('#portforward-save-btn').trigger('click');
+      await flushPromises();
+
+      expect(w.find('#portforward-route-name-input').exists()).toBe(true);
+      expect(w.text()).toContain('route_name already exists');
+    });
+
+    it('cancelling the add form returns to the list', async () => {
+      const { w } = await mountView();
+      await w.find('#console-portforwards-btn').trigger('click');
+      await w.find('#portforward-add-btn').trigger('click');
+      await w.find('.modal-actions .p-button--base').trigger('click');
+      expect(w.find('#portforward-route-name-input').exists()).toBe(false);
+      expect(w.find('#portforward-manager-modal').exists()).toBe(true);
+    });
+
+    it('opens the edit form pre-filled with the forward being edited', async () => {
+      api.listPortForwards.mockResolvedValue([
+        { id: 'f-1', route_name: 'app', port: 8080, url: 'http://test/agents/ag-1/app' },
+      ]);
+      const { w } = await mountView();
+      await w.find('#console-portforwards-btn').trigger('click');
+      await w.find('.portforward-edit-btn').trigger('click');
+      expect(w.find('#portforward-route-name-input').element.value).toBe('app');
+      expect(w.find('#portforward-port-input').element.value).toBe('8080');
+    });
+
+    it('updates a port forward and returns to the reloaded list', async () => {
+      api.listPortForwards.mockResolvedValue([
+        { id: 'f-1', route_name: 'app', port: 8080, url: 'http://test/agents/ag-1/app' },
+      ]);
+      const { w } = await mountView();
+      await w.find('#console-portforwards-btn').trigger('click');
+      await w.find('.portforward-edit-btn').trigger('click');
+      await w.find('#portforward-port-input').setValue('9090');
+      await w.find('#portforward-save-btn').trigger('click');
+      await flushPromises();
+
+      expect(api.updatePortForward).toHaveBeenCalledWith('proj-1', 'ag-1', 'f-1', { port: 9090, routeName: 'app' });
+      expect(w.find('#portforward-route-name-input').exists()).toBe(false);
+    });
+
+    it('asks for inline confirmation before deleting, and cancelling keeps the row', async () => {
+      api.listPortForwards.mockResolvedValue([
+        { id: 'f-1', route_name: 'app', port: 8080, url: 'http://test/agents/ag-1/app' },
+      ]);
+      const { w } = await mountView();
+      await w.find('#console-portforwards-btn').trigger('click');
+      await w.find('.portforward-delete-btn').trigger('click');
+      expect(w.text()).toContain('Delete?');
+
+      await w.find('.portforward-delete-cancel-btn').trigger('click');
+      expect(api.deletePortForward).not.toHaveBeenCalled();
+      expect(w.find('.portforward-edit-btn').exists()).toBe(true);
+    });
+
+    it('deletes a port forward after inline confirmation and reloads the list', async () => {
+      api.listPortForwards.mockResolvedValue([
+        { id: 'f-1', route_name: 'app', port: 8080, url: 'http://test/agents/ag-1/app' },
+      ]);
+      const { w } = await mountView();
+      await w.find('#console-portforwards-btn').trigger('click');
+      await w.find('.portforward-delete-btn').trigger('click');
+
+      api.listPortForwards.mockResolvedValue([]);
+      await w.find('.portforward-delete-confirm-btn').trigger('click');
+      await flushPromises();
+
+      expect(api.deletePortForward).toHaveBeenCalledWith('proj-1', 'ag-1', 'f-1');
+      expect(w.find('.portforward-empty').exists()).toBe(true);
+    });
   });
 });
