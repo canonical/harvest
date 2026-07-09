@@ -39,6 +39,17 @@
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
         </button>
         <button
+          id="console-portforwards-btn"
+          class="console-icon-btn"
+          type="button"
+          title="Port forwards"
+          aria-label="Port forwards"
+          @click="openForwardsManager"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/></svg>
+          <span v-if="portForwards.length" class="console-icon-btn__badge">{{ portForwards.length }}</span>
+        </button>
+        <button
           id="console-delete-btn"
           class="console-icon-btn console-icon-btn--danger"
           type="button"
@@ -72,6 +83,60 @@
         </div>
       </div>
     </div>
+
+    <div v-if="showForwardsManager" id="portforward-manager-modal" class="modal" @click.self="closeForwardsManager">
+      <div class="modal-content modal-content--wide">
+        <button class="modal-close" type="button" @click="closeForwardsManager">✕</button>
+
+        <template v-if="!forwardFormOpen">
+          <div class="page-header portforward-manager-header">
+            <h3>Port Forwards</h3>
+            <button id="portforward-add-btn" class="p-button--positive" type="button" @click="openAddForwardModal">Add</button>
+          </div>
+          <p v-if="portForwardsError" class="console-action-error">{{ portForwardsError }}</p>
+          <table v-if="portForwards.length" class="p-table">
+            <thead>
+              <tr><th>Port</th><th>Route</th><th></th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="f in portForwards" :key="f.id">
+                <td>{{ f.port }}</td>
+                <td><a :href="f.url" :title="f.url" target="_blank" rel="noopener">/{{ f.route_name }}</a></td>
+                <td class="portforward-row-actions">
+                  <template v-if="confirmingDeleteId === f.id">
+                    <span class="portforward-confirm-text">Delete?</span>
+                    <button class="portforward-delete-confirm-btn" type="button" :disabled="deletingForward" @click="performDeleteForward(f)">Yes</button>
+                    <button class="portforward-delete-cancel-btn" type="button" @click="confirmingDeleteId = null">No</button>
+                  </template>
+                  <template v-else>
+                    <button class="portforward-edit-btn" type="button" @click="openEditForwardModal(f)">Edit</button>
+                    <button class="portforward-delete-btn" type="button" @click="confirmingDeleteId = f.id">Delete</button>
+                  </template>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-else class="portforward-empty">No port forwards yet.</p>
+        </template>
+
+        <template v-else>
+          <h3>{{ editingForward ? 'Edit port forward' : 'Add port forward' }}</h3>
+          <label>
+            Route name
+            <input id="portforward-route-name-input" v-model="forwardForm.routeName" type="text" />
+          </label>
+          <label>
+            Port
+            <input id="portforward-port-input" v-model.number="forwardForm.port" type="number" min="1" max="65535" />
+          </label>
+          <p v-if="forwardFormError" class="console-action-error">{{ forwardFormError }}</p>
+          <div class="modal-actions">
+            <button class="p-button--base" type="button" @click="forwardFormOpen = false">Cancel</button>
+            <button id="portforward-save-btn" class="p-button--positive" type="button" :disabled="savingForward" @click="saveForward">Save</button>
+          </div>
+        </template>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -83,6 +148,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import {
   listProjectAgents, deleteAgent, startAgent, stopAgent, restartAgent, consoleSocketUrl,
+  listPortForwards, createPortForward, updatePortForward, deletePortForward,
 } from '../lib/api.js';
 import { useConsoleSocket } from '../composables/useConsoleSocket.js';
 
@@ -103,6 +169,17 @@ const showDeleteConfirm  = ref(false);
 const deleting           = ref(false);
 const terminalContainer  = ref(null);
 const consoleStatus      = ref('connecting');
+
+const portForwards        = ref([]);
+const portForwardsError   = ref('');
+const showForwardsManager = ref(false);
+const forwardFormOpen     = ref(false);
+const editingForward      = ref(null);
+const forwardForm         = ref({ routeName: '', port: null });
+const forwardFormError    = ref('');
+const savingForward       = ref(false);
+const confirmingDeleteId  = ref(null);
+const deletingForward     = ref(false);
 
 let terminal          = null;
 let fitAddon           = null;
@@ -275,8 +352,74 @@ async function confirmDelete() {
   }
 }
 
+async function refreshPortForwards() {
+  try {
+    portForwards.value = await listPortForwards(props.projectId, agentId);
+  } catch (e) {
+    portForwardsError.value = e.message || 'Failed to load port forwards';
+  }
+}
+
+function openForwardsManager() {
+  forwardFormOpen.value = false;
+  confirmingDeleteId.value = null;
+  portForwardsError.value = '';
+  showForwardsManager.value = true;
+}
+
+function closeForwardsManager() {
+  showForwardsManager.value = false;
+}
+
+function openAddForwardModal() {
+  editingForward.value = null;
+  forwardForm.value = { routeName: '', port: null };
+  forwardFormError.value = '';
+  forwardFormOpen.value = true;
+}
+
+function openEditForwardModal(forward) {
+  editingForward.value = forward;
+  forwardForm.value = { routeName: forward.route_name, port: forward.port };
+  forwardFormError.value = '';
+  forwardFormOpen.value = true;
+}
+
+async function saveForward() {
+  forwardFormError.value = '';
+  savingForward.value = true;
+  try {
+    const body = { port: forwardForm.value.port, routeName: forwardForm.value.routeName };
+    if (editingForward.value) {
+      await updatePortForward(props.projectId, agentId, editingForward.value.id, body);
+    } else {
+      await createPortForward(props.projectId, agentId, body);
+    }
+    forwardFormOpen.value = false;
+    await refreshPortForwards();
+  } catch (e) {
+    forwardFormError.value = e.message || 'Failed to save port forward';
+  } finally {
+    savingForward.value = false;
+  }
+}
+
+async function performDeleteForward(forward) {
+  deletingForward.value = true;
+  try {
+    await deletePortForward(props.projectId, agentId, forward.id);
+    confirmingDeleteId.value = null;
+    await refreshPortForwards();
+  } catch (e) {
+    portForwardsError.value = e.message || 'Failed to delete port forward';
+  } finally {
+    deletingForward.value = false;
+  }
+}
+
 onMounted(async () => {
   await refreshAgent();
+  await refreshPortForwards();
   await nextTick();
   await initTerminal();
   scheduleStatusPoll();
