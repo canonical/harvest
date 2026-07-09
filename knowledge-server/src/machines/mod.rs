@@ -1,5 +1,7 @@
 pub mod handlers;
 pub mod lxd_provision;
+pub mod port_forwards;
+pub mod proxy;
 
 use axum::extract::ws::Message;
 use chrono::{DateTime, Utc};
@@ -24,6 +26,7 @@ pub enum ServerToAgent {
     HelloAck,
     Execute    { request_id: String, command: String, timeout_secs: u64 },
     OpenShell  { session_id: String, cols: u16, rows: u16 },
+    OpenTunnel { session_id: String, port: u16 },
     Uninstall,
     Error      { message: String },
 }
@@ -54,12 +57,19 @@ pub struct PendingConsoleSession {
     pub to_agent_rx:   mpsc::Receiver<Message>,
 }
 
+pub struct PendingTunnelSession {
+    pub agent_id:      String,
+    pub to_caller_tx:  mpsc::Sender<Message>,
+    pub to_agent_rx:   mpsc::Receiver<Message>,
+}
+
 #[derive(Default)]
 pub struct MachineRegistry {
     pub agents:          DashMap<String, ConnectedAgent>,
     pub pending:         DashMap<String, PendingResult>,
     pub token_index:     DashMap<String, String>,
     pub console_pending: DashMap<String, PendingConsoleSession>,
+    pub tunnel_pending:  DashMap<String, PendingTunnelSession>,
 }
 
 impl MachineRegistry {
@@ -183,6 +193,56 @@ impl MachineRegistry {
     pub fn expire_console_session(&self, session_id: &str) -> bool {
         self.console_pending.remove(session_id).is_some()
     }
+
+    pub async fn open_tunnel_session(
+        &self,
+        agent_id: &str,
+        port: u16,
+    ) -> Result<(String, mpsc::Receiver<Message>, mpsc::Sender<Message>), String> {
+        let sender = self
+            .agents
+            .get(agent_id)
+            .ok_or_else(|| format!("agent {agent_id} not connected"))?
+            .sender
+            .clone();
+
+        let session_id = Uuid::new_v4().to_string();
+        let (to_agent_tx, to_agent_rx) = mpsc::channel::<Message>(64);
+        let (to_caller_tx, to_caller_rx) = mpsc::channel::<Message>(64);
+
+        self.tunnel_pending.insert(session_id.clone(), PendingTunnelSession {
+            agent_id: agent_id.to_string(),
+            to_caller_tx,
+            to_agent_rx,
+        });
+
+        if sender
+            .send(ServerToAgent::OpenTunnel { session_id: session_id.clone(), port })
+            .await
+            .is_err()
+        {
+            self.tunnel_pending.remove(&session_id);
+            return Err("agent disconnected before send".to_string());
+        }
+
+        Ok((session_id, to_caller_rx, to_agent_tx))
+    }
+
+    pub fn claim_tunnel_session(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+    ) -> Option<(mpsc::Sender<Message>, mpsc::Receiver<Message>)> {
+        let (_, pending) = self.tunnel_pending.remove(session_id)?;
+        if pending.agent_id != agent_id {
+            return None;
+        }
+        Some((pending.to_caller_tx, pending.to_agent_rx))
+    }
+
+    pub fn expire_tunnel_session(&self, session_id: &str) -> bool {
+        self.tunnel_pending.remove(session_id).is_some()
+    }
 }
 
 pub fn hash_token(token: &str) -> String {
@@ -285,6 +345,64 @@ mod tests {
         assert!(registry.expire_console_session(&session_id));
         assert!(!registry.expire_console_session(&session_id));
         assert!(registry.claim_console_session(&session_id, "a1").is_none());
+    }
+
+    #[tokio::test]
+    async fn open_tunnel_session_unknown_agent_returns_error() {
+        let registry = MachineRegistry::new();
+        let e = registry.open_tunnel_session("nonexistent", 8080).await.unwrap_err();
+        assert!(e.contains("not connected"), "got: {e}");
+    }
+
+    #[tokio::test]
+    async fn open_tunnel_session_sends_open_tunnel_message() {
+        let registry = MachineRegistry::new();
+        let mut rx = register_agent(&registry, "a1");
+
+        let (session_id, _to_caller_rx, _to_agent_tx) =
+            registry.open_tunnel_session("a1", 8080).await.unwrap();
+
+        match rx.recv().await.unwrap() {
+            ServerToAgent::OpenTunnel { session_id: sid, port } => {
+                assert_eq!(sid, session_id);
+                assert_eq!(port, 8080);
+            }
+            other => panic!("expected OpenTunnel, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_tunnel_session_succeeds_once_for_matching_agent() {
+        let registry = MachineRegistry::new();
+        let mut rx = register_agent(&registry, "a1");
+        let (session_id, ..) = registry.open_tunnel_session("a1", 8080).await.unwrap();
+        rx.recv().await.unwrap();
+
+        assert!(registry.claim_tunnel_session(&session_id, "a1").is_some());
+        assert!(registry.claim_tunnel_session(&session_id, "a1").is_none());
+    }
+
+    #[tokio::test]
+    async fn claim_tunnel_session_rejects_mismatched_agent() {
+        let registry = MachineRegistry::new();
+        let mut rx = register_agent(&registry, "a1");
+        let (session_id, ..) = registry.open_tunnel_session("a1", 8080).await.unwrap();
+        rx.recv().await.unwrap();
+
+        assert!(registry.claim_tunnel_session(&session_id, "a2").is_none());
+        assert!(registry.claim_tunnel_session(&session_id, "a1").is_none());
+    }
+
+    #[tokio::test]
+    async fn expire_tunnel_session_removes_unclaimed_entry() {
+        let registry = MachineRegistry::new();
+        let mut rx = register_agent(&registry, "a1");
+        let (session_id, ..) = registry.open_tunnel_session("a1", 8080).await.unwrap();
+        rx.recv().await.unwrap();
+
+        assert!(registry.expire_tunnel_session(&session_id));
+        assert!(!registry.expire_tunnel_session(&session_id));
+        assert!(registry.claim_tunnel_session(&session_id, "a1").is_none());
     }
 
     #[test]
