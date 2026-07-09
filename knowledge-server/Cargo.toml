@@ -24,6 +24,8 @@ axum         = { version = "0.7", features = ["json", "macros", "ws"] }
 futures      = { version = "0.3", default-features = false, features = ["std"] }
 tower        = { version = "0.4", features = ["util"] }
 tower-http   = { version = "0.5", features = ["cors", "trace"] }
+hyper        = { version = "1", features = ["client", "http1"] }
+hyper-util   = { version = "0.1", features = ["tokio"] }
 
 # Machines / agent registry
 dashmap      = "5"

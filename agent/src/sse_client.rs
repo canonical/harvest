@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
-use crate::{config::Config, console, executor};
+use crate::{config::Config, console, executor, tunnel};
 
 const PING_INTERVAL_SECS: u64 = 30;
 const PING_TIMEOUT_SECS: u64 = 10;
@@ -28,6 +28,10 @@ enum ServerMsg {
         session_id: String,
         cols:       u16,
         rows:       u16,
+    },
+    OpenTunnel {
+        session_id: String,
+        port:       u16,
     },
     Uninstall,
     Error { message: String },
@@ -186,6 +190,17 @@ async fn connect_and_run(
                             let token = token_ref.lock().await.clone();
                             if let Err(e) = console::run_console_session(&server_url, &token, &session_id, cols, rows).await {
                                 tracing::warn!(session_id, error = %e, "console session ended with error");
+                            }
+                        });
+                    }
+
+                    Ok(ServerMsg::OpenTunnel { session_id, port }) => {
+                        let server_url = config.server_url.clone();
+                        let token_ref   = Arc::clone(&shared_token);
+                        tokio::spawn(async move {
+                            let token = token_ref.lock().await.clone();
+                            if let Err(e) = tunnel::run_tunnel_session(&server_url, &token, &session_id, port).await {
+                                tracing::warn!(session_id, error = %e, "tunnel session ended with error");
                             }
                         });
                     }

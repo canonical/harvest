@@ -42,6 +42,7 @@ async fn main() -> Result<()> {
     neo4j.run("CREATE CONSTRAINT memory_id     IF NOT EXISTS FOR (m:Memory)       REQUIRE m.id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT lxd_identity_id IF NOT EXISTS FOR (i:LxdIdentity) REQUIRE i.id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT skill_id       IF NOT EXISTS FOR (s:Skill)        REQUIRE s.id IS UNIQUE").await?;
+    neo4j.run("CREATE CONSTRAINT port_forward_id IF NOT EXISTS FOR (f:PortForward) REQUIRE f.id IS UNIQUE").await?;
 
     knowledge_server::skills::seed_defaults_if_needed(&neo4j).await?;
 

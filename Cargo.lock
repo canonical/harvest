@@ -1557,6 +1557,8 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "httpmock",
+ "hyper",
+ "hyper-util",
  "jsonwebtoken",
  "neo4j_testcontainers",
  "neo4rs",
