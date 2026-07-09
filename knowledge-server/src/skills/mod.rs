@@ -14,6 +14,7 @@ const LXD_MD:           &str = include_str!("../../skills/lxd.md");
 const CEPH_MD:          &str = include_str!("../../skills/ceph.md");
 const CANONICAL_K8S_MD: &str = include_str!("../../skills/canonical-k8s.md");
 const LANDSCAPE_MD:     &str = include_str!("../../skills/landscape.md");
+const OPENSTACK_MD:     &str = include_str!("../../skills/openstack.md");
 
 #[derive(Debug, Clone)]
 pub struct SkillSummary {
@@ -104,7 +105,7 @@ pub async fn seed_defaults_if_needed(neo4j: &Neo4jClient) -> Result<()> {
     }
 
     let now = chrono::Utc::now().to_rfc3339();
-    for raw in [JUJU_MD, LXD_MD, CEPH_MD, CANONICAL_K8S_MD, LANDSCAPE_MD] {
+    for raw in [JUJU_MD, LXD_MD, CEPH_MD, CANONICAL_K8S_MD, LANDSCAPE_MD, OPENSTACK_MD] {
         let fm          = parse_frontmatter(raw);
         let name        = fm.get("name").cloned().unwrap_or_default();
         let description = fm.get("description").cloned().unwrap_or_default();
