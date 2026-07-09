@@ -179,6 +179,9 @@ import {
   fetchRepositories,
   provisionLxdAgent,
   deleteAgent,
+  createPortForward,
+  updatePortForward,
+  deletePortForward,
   resumeConfirmAction,
 } from '../lib/api.js';
 import { initialProvisionSteps, applyProvisionEvent, isProvisionDone, isProvisionError } from '../lib/lxd-provision.js';
@@ -499,6 +502,36 @@ async function runConfirmableAction(action) {
       chat.updateConfirmActionItem(action.id, { status: 'done', resultText: 'Agent deleted.' });
     } catch (e) {
       chat.updateConfirmActionItem(action.id, { status: 'error', resultText: e.message || 'Failed to delete agent' });
+    }
+  } else if (action.name === 'create_port_forward') {
+    chat.updateConfirmActionItem(action.id, { status: 'running' });
+    try {
+      await createPortForward(props.projectId, action.input.agent_id, {
+        port: action.input.port,
+        routeName: action.input.route_name,
+      });
+      chat.updateConfirmActionItem(action.id, { status: 'done', resultText: `Port forward '${action.input.route_name}' created.` });
+    } catch (e) {
+      chat.updateConfirmActionItem(action.id, { status: 'error', resultText: e.message || 'Failed to create port forward' });
+    }
+  } else if (action.name === 'update_port_forward') {
+    chat.updateConfirmActionItem(action.id, { status: 'running' });
+    try {
+      await updatePortForward(props.projectId, action.input.agent_id, action.input.forward_id, {
+        port: action.input.port,
+        routeName: action.input.route_name,
+      });
+      chat.updateConfirmActionItem(action.id, { status: 'done', resultText: 'Port forward updated.' });
+    } catch (e) {
+      chat.updateConfirmActionItem(action.id, { status: 'error', resultText: e.message || 'Failed to update port forward' });
+    }
+  } else if (action.name === 'delete_port_forward') {
+    chat.updateConfirmActionItem(action.id, { status: 'running' });
+    try {
+      await deletePortForward(props.projectId, action.input.agent_id, action.input.forward_id);
+      chat.updateConfirmActionItem(action.id, { status: 'done', resultText: 'Port forward deleted.' });
+    } catch (e) {
+      chat.updateConfirmActionItem(action.id, { status: 'error', resultText: e.message || 'Failed to delete port forward' });
     }
   }
 }
