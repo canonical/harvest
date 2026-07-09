@@ -4,7 +4,10 @@ import { setActivePinia, createPinia } from 'pinia';
 import { createRouter, createWebHashHistory } from 'vue-router';
 import ChatView from '../../src/views/ChatView.vue';
 import { useChatStore } from '../../src/stores/chat.js';
-import { provisionLxdAgent, deleteAgent, listProjectConversations, getProjectConversation, resumeConfirmAction } from '../../src/lib/api.js';
+import {
+  provisionLxdAgent, deleteAgent, listProjectConversations, getProjectConversation, resumeConfirmAction,
+  createPortForward, updatePortForward, deletePortForward,
+} from '../../src/lib/api.js';
 
 vi.mock('../../src/lib/api.js', async (importOriginal) => {
   const actual = await importOriginal();
@@ -19,6 +22,9 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
     fetchRepositories:        vi.fn(() => Promise.resolve([])),
     provisionLxdAgent:        vi.fn(() => Promise.resolve()),
     deleteAgent:              vi.fn(() => Promise.resolve()),
+    createPortForward:        vi.fn(() => Promise.resolve()),
+    updatePortForward:        vi.fn(() => Promise.resolve()),
+    deletePortForward:        vi.fn(() => Promise.resolve()),
     resumeConfirmAction:      vi.fn(() => Promise.resolve({ ok: true, resumed: true })),
   };
 });
@@ -262,6 +268,9 @@ describe('ChatView', () => {
     beforeEach(() => {
       provisionLxdAgent.mockReset().mockResolvedValue();
       deleteAgent.mockReset().mockResolvedValue();
+      createPortForward.mockReset().mockResolvedValue();
+      updatePortForward.mockReset().mockResolvedValue();
+      deletePortForward.mockReset().mockResolvedValue();
       resumeConfirmAction.mockClear().mockResolvedValue({ ok: true, resumed: true });
     });
 
@@ -334,6 +343,78 @@ describe('ChatView', () => {
       expect(resumeConfirmAction).toHaveBeenCalledWith('proj-1', 'conv-1', [
         { toolCallId: 'tc1', status: 'denied', resultText: 'Cancelled by user.' },
       ]);
+    });
+
+    it('confirming create_port_forward calls createPortForward and marks done', async () => {
+      const { w, chat } = await mountWithPendingConfirm('create_port_forward', { agent_id: 'abc', port: 8080, route_name: 'app' });
+
+      await w.find('.confirm-actions .p-button--negative').trigger('click');
+      await flushPromises();
+
+      expect(createPortForward).toHaveBeenCalledWith('proj-1', 'abc', { port: 8080, routeName: 'app' });
+      expect(confirmItems(chat.messages.at(-1))[0].status).toBe('done');
+      expect(resumeConfirmAction).toHaveBeenCalledWith('proj-1', 'conv-1', [
+        { toolCallId: 'tc1', status: 'done', resultText: "Port forward 'app' created." },
+      ]);
+    });
+
+    it('failed create_port_forward marks the action as error', async () => {
+      const { w, chat } = await mountWithPendingConfirm('create_port_forward', { agent_id: 'abc', port: 8080, route_name: 'app' });
+      createPortForward.mockRejectedValue(new Error('route_name already exists'));
+
+      await w.find('.confirm-actions .p-button--negative').trigger('click');
+      await flushPromises();
+
+      expect(confirmItems(chat.messages.at(-1))[0].status).toBe('error');
+      expect(confirmItems(chat.messages.at(-1))[0].resultText).toBe('route_name already exists');
+    });
+
+    it('confirming update_port_forward calls updatePortForward and marks done', async () => {
+      const { w, chat } = await mountWithPendingConfirm('update_port_forward', { agent_id: 'abc', forward_id: 'f1', port: 9090 });
+
+      await w.find('.confirm-actions .p-button--negative').trigger('click');
+      await flushPromises();
+
+      expect(updatePortForward).toHaveBeenCalledWith('proj-1', 'abc', 'f1', { port: 9090, routeName: undefined });
+      expect(confirmItems(chat.messages.at(-1))[0].status).toBe('done');
+      expect(resumeConfirmAction).toHaveBeenCalledWith('proj-1', 'conv-1', [
+        { toolCallId: 'tc1', status: 'done', resultText: 'Port forward updated.' },
+      ]);
+    });
+
+    it('failed update_port_forward marks the action as error', async () => {
+      const { w, chat } = await mountWithPendingConfirm('update_port_forward', { agent_id: 'abc', forward_id: 'f1', port: 9090 });
+      updatePortForward.mockRejectedValue(new Error('port forward not found'));
+
+      await w.find('.confirm-actions .p-button--negative').trigger('click');
+      await flushPromises();
+
+      expect(confirmItems(chat.messages.at(-1))[0].status).toBe('error');
+      expect(confirmItems(chat.messages.at(-1))[0].resultText).toBe('port forward not found');
+    });
+
+    it('confirming delete_port_forward calls deletePortForward and marks done', async () => {
+      const { w, chat } = await mountWithPendingConfirm('delete_port_forward', { agent_id: 'abc', forward_id: 'f1' });
+
+      await w.find('.confirm-actions .p-button--negative').trigger('click');
+      await flushPromises();
+
+      expect(deletePortForward).toHaveBeenCalledWith('proj-1', 'abc', 'f1');
+      expect(confirmItems(chat.messages.at(-1))[0].status).toBe('done');
+      expect(resumeConfirmAction).toHaveBeenCalledWith('proj-1', 'conv-1', [
+        { toolCallId: 'tc1', status: 'done', resultText: 'Port forward deleted.' },
+      ]);
+    });
+
+    it('failed delete_port_forward marks the action as error', async () => {
+      const { w, chat } = await mountWithPendingConfirm('delete_port_forward', { agent_id: 'abc', forward_id: 'f1' });
+      deletePortForward.mockRejectedValue(new Error('port forward not found'));
+
+      await w.find('.confirm-actions .p-button--negative').trigger('click');
+      await flushPromises();
+
+      expect(confirmItems(chat.messages.at(-1))[0].status).toBe('error');
+      expect(confirmItems(chat.messages.at(-1))[0].resultText).toBe('port forward not found');
     });
 
     it('approve all runs every pending action in parallel and resumes once with all results', async () => {

@@ -230,6 +230,24 @@ describe('ChatMessage — confirm_action chain entries', () => {
     expect(w.text()).toContain('Deleting…');
   });
 
+  it('shows an Updating… status while a port forward update is running', () => {
+    const msg = {
+      ...assistantWithConfirmPending,
+      chain: [confirmChainItem({ name: 'update_port_forward', status: 'running', steps: [] })],
+    };
+    const w = mount(ChatMessage, { props: { msg, isLast: true } });
+    expect(w.text()).toContain('Updating…');
+  });
+
+  it('shows a generic Working… status for an unrecognised confirmable tool name', () => {
+    const msg = {
+      ...assistantWithConfirmPending,
+      chain: [confirmChainItem({ name: 'some_future_tool', status: 'running', steps: [] })],
+    };
+    const w = mount(ChatMessage, { props: { msg, isLast: true } });
+    expect(w.text()).toContain('Working…');
+  });
+
   it('does not render confirm block when chain has no confirm_action entries', () => {
     const w = mount(ChatMessage, { props: { msg: assistantDone, isLast: true } });
     expect(w.find('.message__confirm').exists()).toBe(false);
