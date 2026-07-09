@@ -3103,6 +3103,62 @@ a.source-chip:hover .source-chip__name {
   border-color: #e06c75;
 }
 
+.console-icon-btn {
+  position: relative;
+}
+
+.console-icon-btn__badge {
+  align-items: center;
+  background: #2563eb;
+  border-radius: 999px;
+  bottom: -6px;
+  color: #fff;
+  display: flex;
+  font-size: 0.65rem;
+  font-weight: 600;
+  height: 16px;
+  justify-content: center;
+  line-height: 1;
+  min-width: 16px;
+  padding: 0 0.25rem;
+  position: absolute;
+  right: -6px;
+}
+
+[data-theme="dark"] .console-icon-btn__badge {
+  background: #60a5fa;
+  color: #0d1117;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .console-icon-btn__badge {
+    background: #60a5fa;
+    color: #0d1117;
+  }
+}
+
+.portforward-manager-header {
+  margin-top: -0.75rem;
+  padding-right: 3rem;
+}
+
+.portforward-row-actions {
+  align-items: center;
+  display: flex;
+  gap: 0.4rem;
+  white-space: nowrap;
+}
+
+.portforward-confirm-text {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
+.portforward-empty {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
 .console-action-error {
   color: #e06c75;
   font-size: 0.8125rem;
