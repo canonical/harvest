@@ -36,7 +36,9 @@ description: |
   server.host                 API bind address             (default: 127.0.0.1)
   server.port                 API port                     (default: 8080)
 
-  LLM providers — define any number with user-chosen names:
+  LLM providers — define any number with user-chosen names. <name> itself
+  becomes the provider's stable id, which the chat page's model picker uses
+  to target a specific provider:
   llm.<name>.provider         anthropic | gemini | openai-compatible
   llm.<name>.api-key          API key (setting this enables the provider)
   llm.<name>.model            Model name
@@ -44,12 +46,27 @@ description: |
   llm.<name>.timeout-secs     Per-request timeout          (default: 120)
   llm.<name>.max-retries      Retry limit per request      (default: 3)
   llm.<name>.priority         Lower = tried first on rate limits  (default: 0)
+  llm.<name>.expose-to-ui     Show in the chat page's model picker;
+                               set to false to keep a provider failover-only
+                               (default: true)
+  llm.<name>.display-name     Name shown in the model picker
+                               (default: the provider kind)
+  llm.<name>.models           Comma-separated allowlist of model names to
+                               offer in the picker (default: all discovered
+                               models)
 
   Example — Anthropic primary, Gemini fallback:
     snap set harvest \
       llm.primary.provider=anthropic llm.primary.api-key=sk-ant-... \
       llm.fallback.provider=gemini   llm.fallback.api-key=AIza... \
       llm.fallback.priority=1
+
+  Example — hide a failover-only provider from the picker, restrict another
+  to a curated model list:
+    snap set harvest \
+      llm.backup.expose-to-ui=false \
+      llm.primary.display-name="Claude (production)" \
+      llm.primary.models="claude-sonnet-5,claude-opus-5"
 
   agent.max-iterations        Agent iteration limit        (default: 20)
   agent.compaction-threshold-chars  Context compaction trigger  (default: 40000)
