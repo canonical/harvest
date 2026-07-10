@@ -97,6 +97,45 @@ describe('ChatMessage — sources', () => {
   });
 });
 
+const assistantWithProvider = {
+  role: 'assistant', status: 'done',
+  chain: [], tool_calls: [],
+  answer: 'Done',
+  sources: [], tool_calls_made: 0,
+  provider_used: { provider_id: 'anthropic-main', kind: 'anthropic', model: 'claude-sonnet-5' },
+};
+
+describe('ChatMessage — provider badge', () => {
+  it('renders a badge with the model and kind when provider_used is set', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithProvider } });
+    const badge = w.find('.provider-badge');
+    expect(badge.exists()).toBe(true);
+    expect(badge.text()).toContain('claude-sonnet-5');
+    expect(badge.text()).toContain('anthropic');
+  });
+
+  it('does not render a badge when provider_used is absent', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantDone } });
+    expect(w.find('.provider-badge').exists()).toBe(false);
+  });
+
+  it('renders the Ubuntu logo icon inside the badge', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithProvider } });
+    expect(w.find('.provider-badge .provider-badge__icon').exists()).toBe(true);
+  });
+
+  it('renders before the tool-use chain, not after it', () => {
+    const msg = { ...assistantWithThinking, provider_used: { provider_id: 'a', kind: 'anthropic', model: 'claude-sonnet-5' } };
+    const w = mount(ChatMessage, { props: { msg } });
+    const html = w.html();
+    const badgeIndex = html.indexOf('provider-badge');
+    const chainIndex = html.indexOf('tc-chain');
+    expect(badgeIndex).toBeGreaterThan(-1);
+    expect(chainIndex).toBeGreaterThan(-1);
+    expect(badgeIndex).toBeLessThan(chainIndex);
+  });
+});
+
 describe('ChatMessage — error', () => {
   it('renders error message', () => {
     const w = mount(ChatMessage, { props: { msg: assistantError } });
