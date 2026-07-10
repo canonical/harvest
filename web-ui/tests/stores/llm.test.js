@@ -8,7 +8,7 @@ describe('useLlmStore', () => {
     vi.restoreAllMocks();
   });
 
-  it('defaults to no selection (auto)', () => {
+  it('starts with no selection before providers load', () => {
     const store = useLlmStore();
     expect(store.selection).toBeNull();
     expect(store.providers).toEqual([]);
@@ -22,6 +22,36 @@ describe('useLlmStore', () => {
     await store.load();
 
     expect(store.providers).toEqual(payload.providers);
+  });
+
+  it('load() defaults the selection to the highest-precedence provider when none is set', async () => {
+    const payload = { providers: [
+      { id: 'anthropic-main', kind: 'anthropic', default_model: 'claude-sonnet-5', models: [{ id: 'claude-sonnet-5' }] },
+      { id: 'gemini-1', kind: 'gemini', default_model: 'gemini-2.5-flash', models: [{ id: 'gemini-2.5-flash' }] },
+    ] };
+    vi.spyOn(api, 'fetchLlmProviders').mockResolvedValue(payload);
+
+    const store = useLlmStore();
+    await store.load();
+
+    expect(store.selection).toEqual({ providerId: 'anthropic-main', model: 'claude-sonnet-5' });
+  });
+
+  it('load() does not override a selection already restored from the profile', async () => {
+    const payload = { providers: [
+      { id: 'anthropic-main', kind: 'anthropic', default_model: 'claude-sonnet-5', models: [{ id: 'claude-sonnet-5' }] },
+      { id: 'gemini-1', kind: 'gemini', default_model: 'gemini-2.5-flash', models: [{ id: 'gemini-2.5-flash' }] },
+    ] };
+    vi.spyOn(api, 'fetchLlmProviders').mockResolvedValue(payload);
+
+    const auth = useAuthStore();
+    auth.user = { id: 'u1', last_llm_provider_id: 'gemini-1', last_llm_model: 'gemini-2.5-flash' };
+
+    const store = useLlmStore();
+    store.loadFromProfile();
+    await store.load();
+
+    expect(store.selection).toEqual({ providerId: 'gemini-1', model: 'gemini-2.5-flash' });
   });
 
   it('setSelection updates the selection and persists it to the user profile', () => {
@@ -40,16 +70,6 @@ describe('useLlmStore', () => {
     const store = useLlmStore();
     expect(() => store.setSelection('anthropic-main', 'claude-sonnet-5')).not.toThrow();
     await Promise.resolve();
-  });
-
-  it('setSelection(null) clears the selection without calling updateMe', () => {
-    const updateMeSpy = vi.spyOn(api, 'updateMe').mockResolvedValue({ ok: true });
-    const store = useLlmStore();
-    store.setSelection('anthropic-main', 'claude-sonnet-5');
-    store.setSelection(null);
-
-    expect(store.selection).toBeNull();
-    expect(updateMeSpy).toHaveBeenCalledTimes(1);
   });
 
   it('loadFromProfile() restores the selection from the logged-in user', () => {

@@ -72,11 +72,12 @@ const filteredEntries = computed(() => {
 });
 
 const triggerLabel = computed(() => {
-  if (!llm.selection?.providerId) return 'Auto';
   const match = entries.value.find(e =>
-    e.providerId === llm.selection.providerId && e.modelId === llm.selection.model
+    e.providerId === llm.selection?.providerId && e.modelId === llm.selection?.model
   );
-  return match ? match.label : (llm.selection.model || llm.selection.providerId);
+  if (match) return match.label;
+  if (llm.selection) return llm.selection.model || llm.selection.providerId;
+  return entries.value[0]?.label ?? '';
 });
 
 function toggle() {
