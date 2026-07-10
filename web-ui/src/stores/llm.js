@@ -13,13 +13,13 @@ export const useLlmStore = defineStore('llm', () => {
     const data = await fetchLlmProviders();
     providers.value = data.providers ?? [];
     loading.value = false;
+    if (!selection.value && providers.value.length) {
+      const top = providers.value[0];
+      selection.value = { providerId: top.id, model: top.default_model };
+    }
   }
 
   function setSelection(providerId, model = null) {
-    if (!providerId) {
-      selection.value = null;
-      return;
-    }
     selection.value = { providerId, model };
     updateMe({ last_llm_provider_id: providerId, last_llm_model: model }).catch(() => {});
   }

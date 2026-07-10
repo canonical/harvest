@@ -31,10 +31,10 @@ describe('LlmModelPicker', () => {
     localStorage.clear();
   });
 
-  it('shows Auto as the trigger label with no selection', () => {
+  it('shows the highest-precedence provider model as the trigger label with no selection', () => {
     setProviders(providers);
     const w = mount(LlmModelPicker);
-    expect(w.find('.llm-picker__trigger').text()).toContain('Auto');
+    expect(w.find('.llm-picker__trigger').text()).toContain('Claude Sonnet 5');
   });
 
   it('prefixes the trigger label with a + to signal it is clickable', () => {
