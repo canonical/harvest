@@ -42,6 +42,12 @@ EOF
 # single-provider vars, or "LLM_<NAME>" for a named multi-provider block.
 # Note: max_iterations is NOT a per-provider field — it's set once above,
 # under [agent], since LlmProviderConfig has no such field (config.rs).
+#
+# ${1}_ID/_EXPOSE_TO_UI/_NAME/_MODELS map to the id/expose_to_ui/name/models
+# fields the chat page's provider/model picker relies on (config.rs). For a
+# named multi-provider block, id defaults to <NAME> lowercased so it doesn't
+# need to be set explicitly; the legacy flat LLM_* block leaves id blank so
+# config.rs auto-derives it from provider+priority.
 emit_llm_block() {
   prefix="$1"
   eval "provider=\"\${${prefix}_PROVIDER:-}\""
@@ -51,54 +57,50 @@ emit_llm_block() {
   eval "priority=\"\${${prefix}_PRIORITY:-0}\""
   eval "timeout_secs=\"\${${prefix}_TIMEOUT_SECS:-120}\""
   eval "max_retries=\"\${${prefix}_MAX_RETRIES:-3}\""
+  eval "id=\"\${${prefix}_ID:-}\""
+  eval "expose_to_ui=\"\${${prefix}_EXPOSE_TO_UI:-}\""
+  eval "display_name=\"\${${prefix}_NAME:-}\""
+  eval "models=\"\${${prefix}_MODELS:-}\""
 
   : "${provider:?${prefix}_PROVIDER environment variable is required}"
   : "${api_key:?${prefix}_API_KEY environment variable is required}"
 
+  if [ -z "$id" ] && [ "$prefix" != "LLM" ]; then
+    id=$(printf '%s' "${prefix#LLM_}" | tr '[:upper:]' '[:lower:]')
+  fi
+
   case "$provider" in
-    anthropic)
-      cat >> "$CONFIG" << EOF
-
-[[llm]]
-provider       = "anthropic"
-model          = "${model:-claude-sonnet-4-6}"
-api_key        = "${api_key}"
-timeout_secs   = ${timeout_secs}
-max_retries    = ${max_retries}
-priority       = ${priority}
-EOF
-      ;;
-    gemini)
-      cat >> "$CONFIG" << EOF
-
-[[llm]]
-provider       = "gemini"
-model          = "${model:-gemini-2.5-flash-preview-05-20}"
-api_key        = "${api_key}"
-timeout_secs   = ${timeout_secs}
-max_retries    = ${max_retries}
-priority       = ${priority}
-EOF
-      ;;
+    anthropic)         default_model="claude-sonnet-4-6" ;;
+    gemini)             default_model="gemini-2.5-flash-preview-05-20" ;;
     openai-compatible)
       : "${base_url:?${prefix}_BASE_URL is required when ${prefix}_PROVIDER=openai-compatible}"
-      cat >> "$CONFIG" << EOF
-
-[[llm]]
-provider       = "openai-compatible"
-base_url       = "${base_url}"
-api_key        = "${api_key}"
-model          = "${model}"
-timeout_secs   = ${timeout_secs}
-max_retries    = ${max_retries}
-priority       = ${priority}
-EOF
+      default_model=""
       ;;
     *)
       echo "ERROR: unknown ${prefix}_PROVIDER=${provider} (expected: anthropic, gemini, openai-compatible)" >&2
       exit 1
       ;;
   esac
+
+  cat >> "$CONFIG" << EOF
+
+[[llm]]
+provider       = "${provider}"
+model          = "${model:-$default_model}"
+api_key        = "${api_key}"
+timeout_secs   = ${timeout_secs}
+max_retries    = ${max_retries}
+priority       = ${priority}
+EOF
+
+  [ "$provider" = "openai-compatible" ] && printf 'base_url       = "%s"\n' "${base_url}" >> "$CONFIG"
+  [ -n "$id" ]           && printf 'id             = "%s"\n' "${id}" >> "$CONFIG"
+  [ -n "$expose_to_ui" ] && printf 'expose_to_ui   = %s\n' "${expose_to_ui}" >> "$CONFIG"
+  [ -n "$display_name" ] && printf 'name           = "%s"\n' "${display_name}" >> "$CONFIG"
+  if [ -n "$models" ]; then
+    models_toml=$(printf '%s' "$models" | awk -F',' '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i); printf "\"%s\"%s", $i, (i<NF?", ":"")}}')
+    printf 'models         = [%s]\n' "${models_toml}" >> "$CONFIG"
+  fi
 }
 
 # Multi-provider: any LLM_<NAME>_PROVIDER var (e.g. LLM_GEMINI_PROVIDER,

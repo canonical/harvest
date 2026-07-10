@@ -127,12 +127,15 @@ for name, cfg in sorted(providers.items(), key=sort_key):
     api_key = cfg.get("api-key", "")
     if not api_key:
         continue
-    provider = cfg.get("provider", "anthropic")
-    model    = cfg.get("model", "") or DEFAULTS.get(provider, "")
-    timeout  = cfg.get("timeout-secs", 120)
-    retries  = cfg.get("max-retries", 3)
-    priority = cfg.get("priority", 0)
-    base_url = cfg.get("base-url", "")
+    provider     = cfg.get("provider", "anthropic")
+    model        = cfg.get("model", "") or DEFAULTS.get(provider, "")
+    timeout      = cfg.get("timeout-secs", 120)
+    retries      = cfg.get("max-retries", 3)
+    priority     = cfg.get("priority", 0)
+    base_url     = cfg.get("base-url", "")
+    expose_to_ui = str(cfg.get("expose-to-ui", "true")).strip().lower() not in ("false", "0", "no", "")
+    display_name = cfg.get("display-name", "")
+    models       = [m.strip() for m in str(cfg.get("models", "")).split(",") if m.strip()]
 
     print("")
     print("[[llm]]")
@@ -145,6 +148,14 @@ for name, cfg in sorted(providers.items(), key=sort_key):
     print("priority     = %s" % priority)
     if provider == "openai-compatible" and base_url:
         print("base_url     = \"%s\"" % base_url)
+    # <name> is the key the provider was declared under (e.g. llm.primary.*),
+    # so it doubles as the stable id the chat page picker targets.
+    print("id           = \"%s\"" % name)
+    print("expose_to_ui = %s" % ("true" if expose_to_ui else "false"))
+    if display_name:
+        print("name         = \"%s\"" % display_name)
+    if models:
+        print("models       = [%s]" % ", ".join("\"%s\"" % m for m in models))
     found += 1
 '
 }

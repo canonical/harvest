@@ -53,6 +53,17 @@ services:
       # / LLM_<NAME>_PRIORITY (etc.) in .env instead — e.g. LLM_GEMINI_* and
       # LLM_CLAUDE_*. Every LLM_<NAME>_PROVIDER found becomes its own [[llm]]
       # block; these flat vars are only used when no named ones are set.
+      #
+      # Optional per-provider chat-page selector settings (named blocks only):
+      # LLM_<NAME>_ID            stable id used by the chat page's model picker
+      #                           (default: <NAME> lowercased)
+      # LLM_<NAME>_EXPOSE_TO_UI  set to false to keep a provider failover-only,
+      #                           hidden from the picker (default: true)
+      # LLM_<NAME>_NAME          display name shown in the picker
+      #                           (default: the provider kind)
+      # LLM_<NAME>_MODELS        comma-separated allowlist of model names to
+      #                           offer in the picker (default: all discovered
+      #                           models)
       LLM_PROVIDER: "${LLM_PROVIDER:-anthropic}"
       LLM_MODEL:    "${LLM_MODEL:-claude-sonnet-4-6}"
       LLM_API_KEY:  "${LLM_API_KEY}"
