@@ -54,6 +54,29 @@ describe('assistant message lifecycle', () => {
     expect(s.loading).toBe(false);
   });
 
+  it('startAssistantMessage initializes provider_used to null', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    expect(last(s).provider_used).toBeNull();
+  });
+
+  it('finalizeAssistantMessage stores provider_used when present', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.finalizeAssistantMessage({
+      answer: 'done', sources: [], tool_calls_made: 0,
+      provider_used: { provider_id: 'anthropic-main', kind: 'anthropic', model: 'claude-sonnet-5' },
+    });
+    expect(last(s).provider_used).toEqual({ provider_id: 'anthropic-main', kind: 'anthropic', model: 'claude-sonnet-5' });
+  });
+
+  it('finalizeAssistantMessage leaves provider_used null when absent', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.finalizeAssistantMessage({ answer: 'done', sources: [], tool_calls_made: 0 });
+    expect(last(s).provider_used).toBeNull();
+  });
+
   it('setError marks error state', () => {
     const s = useChatStore();
     s.startAssistantMessage();
@@ -373,6 +396,27 @@ describe('saveableMessages', () => {
     const assistant = saved.find(m => m.role === 'assistant');
     expect(assistant.chain).toHaveLength(2);
   });
+
+  it('includes provider on the assistant message when provider_used is set', () => {
+    const s = useChatStore();
+    s.addUserMessage('q', null, []);
+    s.startAssistantMessage();
+    s.finalizeAssistantMessage({
+      answer: 'done', sources: [], tool_calls_made: 0,
+      provider_used: { provider_id: 'gemini-1', kind: 'gemini', model: 'gemini-flash' },
+    });
+    const assistant = s.saveableMessages.find(m => m.role === 'assistant');
+    expect(assistant.provider).toEqual({ provider_id: 'gemini-1', kind: 'gemini', model: 'gemini-flash' });
+  });
+
+  it('omits provider on the assistant message when provider_used is absent', () => {
+    const s = useChatStore();
+    s.addUserMessage('q', null, []);
+    s.startAssistantMessage();
+    s.finalizeAssistantMessage({ answer: 'done', sources: [], tool_calls_made: 0 });
+    const assistant = s.saveableMessages.find(m => m.role === 'assistant');
+    expect(assistant).not.toHaveProperty('provider');
+  });
 });
 
 describe('loadFromHistory', () => {
@@ -478,6 +522,21 @@ describe('loadFromHistory', () => {
       ],
     }]);
     expect(msgs(s)[0].chain.map(c => c.type)).toEqual(['tool_call', 'confirm_action', 'tool_call']);
+  });
+
+  it('restores provider_used from a stored provider field', () => {
+    const s = useChatStore();
+    s.loadFromHistory([{
+      role: 'assistant', text: 'done', sources: [],
+      provider: { provider_id: 'anthropic-main', kind: 'anthropic', model: 'claude-sonnet-5' },
+    }]);
+    expect(msgs(s)[0].provider_used).toEqual({ provider_id: 'anthropic-main', kind: 'anthropic', model: 'claude-sonnet-5' });
+  });
+
+  it('provider_used is null when no provider field is stored', () => {
+    const s = useChatStore();
+    s.loadFromHistory([{ role: 'assistant', text: 'done', sources: [] }]);
+    expect(msgs(s)[0].provider_used).toBeNull();
   });
 });
 
