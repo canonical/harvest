@@ -108,13 +108,17 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use async_trait::async_trait;
-    use crate::llm::types::{LlmResponse, ToolDefinition};
+    use crate::llm::types::{LlmResponse, ModelInfo, ToolDefinition};
 
     struct MockLlm(String);
 
     #[async_trait]
     impl LlmProvider for MockLlm {
-        async fn chat(&self, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
+        fn id(&self) -> &str { "mock" }
+        fn kind(&self) -> &str { "mock" }
+        fn default_model(&self) -> &str { "mock-model" }
+        async fn list_models(&self) -> Result<Vec<ModelInfo>> { Ok(vec![]) }
+        async fn chat_with(&self, _: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
             Ok(LlmResponse::Message { text: self.0.clone() })
         }
     }
@@ -123,7 +127,11 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for FailLlm {
-        async fn chat(&self, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
+        fn id(&self) -> &str { "fail" }
+        fn kind(&self) -> &str { "mock" }
+        fn default_model(&self) -> &str { "mock-model" }
+        async fn list_models(&self) -> Result<Vec<ModelInfo>> { Ok(vec![]) }
+        async fn chat_with(&self, _: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
             Err(anyhow::anyhow!("LLM failure"))
         }
     }

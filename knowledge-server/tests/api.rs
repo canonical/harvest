@@ -27,7 +27,7 @@ use knowledge_server::{
     auth::jwt::Claims,
     llm::{
         LlmProvider,
-        types::{LlmResponse, Message, ToolDefinition},
+        types::{LlmResponse, Message, ModelInfo, ToolDefinition},
     },
     neo4j::Neo4jClient,
 };
@@ -43,7 +43,11 @@ impl FixedTextLlm {
 
 #[async_trait]
 impl LlmProvider for FixedTextLlm {
-    async fn chat(&self, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
+    fn id(&self) -> &str { "fixed-text" }
+    fn kind(&self) -> &str { "mock" }
+    fn default_model(&self) -> &str { "mock-model" }
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> { Ok(vec![]) }
+    async fn chat_with(&self, _model: Option<&str>, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
         Ok(LlmResponse::Message { text: self.0.clone() })
     }
 }
@@ -52,7 +56,11 @@ struct ErrorLlm;
 
 #[async_trait]
 impl LlmProvider for ErrorLlm {
-    async fn chat(&self, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
+    fn id(&self) -> &str { "error" }
+    fn kind(&self) -> &str { "mock" }
+    fn default_model(&self) -> &str { "mock-model" }
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> { Ok(vec![]) }
+    async fn chat_with(&self, _model: Option<&str>, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
         Err(anyhow::anyhow!("simulated LLM failure"))
     }
 }
