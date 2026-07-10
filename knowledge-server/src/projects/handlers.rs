@@ -21,7 +21,7 @@ use tokio_stream::{wrappers::{BroadcastStream, ReceiverStream}, Stream};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentEvent, Attachment, HistoryMessage, PausedTurn, PendingConfirmCall, Source, ToolResumeResult};
-use crate::llm::types::Message;
+use crate::llm::types::{Message, ProviderSelection, UsedProvider};
 use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::api::ProjectAgentBuilder;
 use crate::auth::jwt::Claims;
@@ -74,6 +74,11 @@ struct PausedConfirm {
     iterations: usize,
     pending:    Vec<PendingConfirmCall>,
     resolved:   HashMap<String, ResolvedConfirmItem>,
+    selection:  Option<ProviderSelection>,
+}
+
+fn selection_from_parts(provider_id: &Option<String>, model: &Option<String>) -> Option<ProviderSelection> {
+    provider_id.clone().map(|provider_id| ProviderSelection { provider_id, model: model.clone() })
 }
 
 #[derive(Clone)]
@@ -373,6 +378,7 @@ async fn save_project_turn(
     tool_calls_made: usize,
     chain: Vec<Value>,
     question: Option<Value>,
+    provider_used: Option<&UsedProvider>,
 ) {
     let mut messages = prior_messages;
     messages.push(json!({
@@ -390,6 +396,13 @@ async fn save_project_turn(
     });
     if let Some(question) = question {
         assistant_message["question"] = question;
+    }
+    if let Some(provider_used) = provider_used {
+        assistant_message["provider"] = json!({
+            "provider_id": provider_used.provider_id,
+            "kind": provider_used.kind,
+            "model": provider_used.model,
+        });
     }
     messages.push(assistant_message);
 
@@ -411,6 +424,7 @@ async fn save_project_turn(
     ).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn update_last_assistant_turn(
     neo4j: &Neo4jClient,
     project_id: &str,
@@ -421,6 +435,7 @@ async fn update_last_assistant_turn(
     tool_calls_made: usize,
     new_chain: Vec<Value>,
     question: Option<Value>,
+    provider_used: Option<&UsedProvider>,
 ) {
     let mut messages = load_project_messages_raw(neo4j, project_id, conv_id).await;
     let Some(last) = messages.last_mut() else { return; };
@@ -435,6 +450,13 @@ async fn update_last_assistant_turn(
     match question {
         Some(question) => last["question"] = question,
         None => { if let Some(obj) = last.as_object_mut() { obj.remove("question"); } }
+    }
+    if let Some(provider_used) = provider_used {
+        last["provider"] = json!({
+            "provider_id": provider_used.provider_id,
+            "kind": provider_used.kind,
+            "model": provider_used.model,
+        });
     }
 
     let messages_json = match serde_json::to_string(&messages) {
@@ -496,6 +518,8 @@ pub struct ProjectQueryBody {
     pub query: String,
     pub conversation_id: Option<String>,
     pub attachments: Option<Vec<Attachment>>,
+    pub provider_id: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -503,6 +527,8 @@ pub struct ProjectQueryStreamBody {
     pub query: String,
     pub conversation_id: String,
     pub attachments: Option<Vec<Attachment>>,
+    pub provider_id: Option<String>,
+    pub model: Option<String>,
 }
 
 enum TurnPersist {
@@ -526,6 +552,7 @@ async fn drive_turn(
     username:   String,
     history:    Vec<HistoryMessage>,
     persist:    TurnPersist,
+    selection:  Option<ProviderSelection>,
     mut agent_rx: mpsc::Receiver<AgentEvent>,
     paused_rx: tokio::sync::oneshot::Receiver<Option<PausedTurn>>,
 ) {
@@ -595,7 +622,7 @@ async fn drive_turn(
             }
         }
 
-        if let AgentEvent::Done { answer, sources, tool_calls_made } = &event {
+        if let AgentEvent::Done { answer, sources, tool_calls_made, provider_used } = &event {
             let save_now = chrono::Utc::now().to_rfc3339();
             let chain = std::mem::take(&mut chain_builder).finish();
             match &persist {
@@ -605,14 +632,14 @@ async fn drive_turn(
                         &query, &username, attachment_meta.clone(),
                         prior_messages.clone(),
                         answer, sources, *tool_calls_made,
-                        chain, pending_question.clone(),
+                        chain, pending_question.clone(), provider_used.as_ref(),
                     ).await;
                 }
                 TurnPersist::Continuation => {
                     update_last_assistant_turn(
                         &neo4j, &project_id, &conv_id, &save_now,
                         answer, sources, *tool_calls_made,
-                        chain, pending_question.clone(),
+                        chain, pending_question.clone(), provider_used.as_ref(),
                     ).await;
                 }
             }
@@ -721,6 +748,7 @@ async fn drive_turn(
                 iterations: paused_turn.iterations,
                 pending:    paused_turn.pending,
                 resolved:   HashMap::new(),
+                selection,
             },
         );
     }
@@ -796,6 +824,7 @@ pub async fn project_query_stream(
     let query            = body.query.clone();
     let conv_id          = body.conversation_id.clone();
     let username         = user.name.clone();
+    let selection        = selection_from_parts(&body.provider_id, &body.model);
     let attachments      = body.attachments.unwrap_or_default();
     let attachment_meta: Vec<Value> = attachments.iter()
         .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
@@ -818,8 +847,9 @@ pub async fn project_query_stream(
         let agent_clone = Arc::clone(&agent);
         let history_for_agent = history.clone();
         let query_for_agent   = query.clone();
+        let selection_for_agent = selection.clone();
         tokio::spawn(async move {
-            let paused = agent_clone.query_streaming(&query_for_agent, &history_for_agent, &attachments, agent_event_sender).await;
+            let paused = agent_clone.query_streaming(&query_for_agent, &history_for_agent, &attachments, selection_for_agent.as_ref(), agent_event_sender).await;
             let _ = paused_tx.send(paused);
         });
 
@@ -827,6 +857,7 @@ pub async fn project_query_stream(
             locks, channels, neo4j, llm, registry, in_flight, paused_confirmations,
             agent, project_id_owned, conv_id, query, username, history,
             TurnPersist::New { prior_messages: prior_messages_for_save, attachment_meta },
+            selection,
             agent_rx, paused_rx,
         ).await;
     });
@@ -1218,13 +1249,16 @@ pub async fn resume_confirm_action(
     let project_id_owned = project_id.clone();
     let conv_id_owned    = conv_id.clone();
 
+    let selection = paused.selection.clone();
+
     tokio::spawn(async move {
         let (agent_event_sender, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
         let agent_clone = Arc::clone(&agent);
+        let selection_for_agent = selection.clone();
         tokio::spawn(async move {
             let out = agent_clone.resume_after_confirm(
-                paused.messages, paused.iterations, results, agent_event_sender,
+                paused.messages, paused.iterations, results, selection_for_agent.as_ref(), agent_event_sender,
             ).await;
             let _ = paused_tx.send(out);
         });
@@ -1233,11 +1267,38 @@ pub async fn resume_confirm_action(
             locks, channels, neo4j, llm, registry, in_flight, paused_confirmations,
             agent, project_id_owned, conv_id_owned, query, username, prior_history,
             TurnPersist::Continuation,
+            selection,
             agent_rx, paused_rx,
         ).await;
     });
 
     Ok(Json(json!({ "ok": true, "resumed": true })))
+}
+
+#[cfg(test)]
+mod provider_selection_tests {
+    use super::*;
+
+    #[test]
+    fn selection_from_parts_builds_selection_when_provider_id_present() {
+        let selection = selection_from_parts(&Some("anthropic-main".into()), &Some("claude-sonnet-5".into()));
+        let selection = selection.expect("expected Some");
+        assert_eq!(selection.provider_id, "anthropic-main");
+        assert_eq!(selection.model.as_deref(), Some("claude-sonnet-5"));
+    }
+
+    #[test]
+    fn selection_from_parts_allows_model_to_be_absent() {
+        let selection = selection_from_parts(&Some("anthropic-main".into()), &None).expect("expected Some");
+        assert_eq!(selection.provider_id, "anthropic-main");
+        assert_eq!(selection.model, None);
+    }
+
+    #[test]
+    fn selection_from_parts_is_none_without_provider_id() {
+        assert!(selection_from_parts(&None, &Some("claude-sonnet-5".into())).is_none());
+        assert!(selection_from_parts(&None, &None).is_none());
+    }
 }
 
 pub async fn delete_conversation(
@@ -1555,7 +1616,8 @@ pub async fn project_query(
     };
     let history = agent.compact_history(&raw_history).await;
     let attachments = body.attachments.as_deref().unwrap_or(&[]);
-    match agent.query(&body.query, &history, attachments).await {
+    let selection = selection_from_parts(&body.provider_id, &body.model);
+    match agent.query(&body.query, &history, attachments, selection.as_ref()).await {
         Ok(response) => Json(response).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "project query failed");
@@ -1873,7 +1935,7 @@ async fn run_single_task(
     let agent_ref    = Arc::clone(&agent);
     let prompt_clone = task.prompt.clone();
     tokio::spawn(async move {
-        agent_ref.query_streaming(&prompt_clone, &[], &[], event_tx).await;
+        agent_ref.query_streaming(&prompt_clone, &[], &[], None, event_tx).await;
     });
 
     let mut output     = String::new();

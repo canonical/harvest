@@ -16,7 +16,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::llm::{
-    types::{ContentPart, LlmResponse, Message, MessageContent, StreamEvent, ToolCall, ToolDefinition},
+    types::{
+        ContentPart, LlmResponse, Message, MessageContent, ProviderSelection, StreamEvent,
+        ToolCall, ToolDefinition, UsedProvider,
+    },
     LlmProvider,
 };
 use tool::Tool;
@@ -49,6 +52,7 @@ pub struct QueryResponse {
     pub answer: String,
     pub sources: Vec<Source>,
     pub tool_calls_made: usize,
+    pub provider_used: Option<UsedProvider>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,7 +63,12 @@ pub enum AgentEvent {
     TextDelta { text: String },
     ToolCall { name: String, input: serde_json::Value },
     ToolResult { name: String, preview: String },
-    Done { answer: String, sources: Vec<Source>, tool_calls_made: usize },
+    Done {
+        answer: String,
+        sources: Vec<Source>,
+        tool_calls_made: usize,
+        provider_used: Option<UsedProvider>,
+    },
     Error { message: String },
     Question { question: String, choices: Vec<String> },
     ConfirmAction { id: String, name: String, input: serde_json::Value, description: String },
@@ -67,9 +76,15 @@ pub enum AgentEvent {
 }
 
 enum LoopOutcome {
-    Finished { text: String, iterations: usize },
-    EndedWithoutCitations { text: String, iterations: usize },
-    Paused { messages: Vec<Message>, iterations: usize, text_buf: String, pending: Vec<PendingConfirmCall> },
+    Finished { text: String, iterations: usize, provider_used: Option<UsedProvider> },
+    EndedWithoutCitations { text: String, iterations: usize, provider_used: Option<UsedProvider> },
+    Paused {
+        messages: Vec<Message>,
+        iterations: usize,
+        text_buf: String,
+        pending: Vec<PendingConfirmCall>,
+        provider_used: Option<UsedProvider>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -168,16 +183,17 @@ impl Agent {
         user_query: &str,
         history: &[HistoryMessage],
         attachments: &[Attachment],
+        selection: Option<&ProviderSelection>,
     ) -> Result<QueryResponse> {
         let (event_sender, mut receiver) = mpsc::channel::<AgentEvent>(64);
-        self.query_streaming(user_query, history, attachments, event_sender).await;
+        self.query_streaming(user_query, history, attachments, selection, event_sender).await;
 
         let mut response = None;
         let mut error = None;
         while let Some(event) = receiver.recv().await {
             match event {
-                AgentEvent::Done { answer, sources, tool_calls_made } => {
-                    response = Some(QueryResponse { answer, sources, tool_calls_made });
+                AgentEvent::Done { answer, sources, tool_calls_made, provider_used } => {
+                    response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used });
                 }
                 AgentEvent::Error { message } => {
                     error = Some(anyhow::anyhow!(message));
@@ -264,6 +280,7 @@ impl Agent {
         user_query: &str,
         history: &[HistoryMessage],
         attachments: &[Attachment],
+        selection: Option<&ProviderSelection>,
         event_sender: mpsc::Sender<AgentEvent>,
     ) -> Option<PausedTurn> {
         let tool_defs = self.build_tool_defs();
@@ -274,7 +291,7 @@ impl Agent {
         messages.extend(history_to_messages(&compacted));
         messages.push(build_user_message(user_query, attachments));
 
-        let outcome = self.run_loop(messages, 0, &tool_defs, &tool_map, &event_sender).await;
+        let outcome = self.run_loop(messages, 0, &tool_defs, &tool_map, selection, &event_sender).await;
         self.finish_outcome(outcome, &event_sender).await
     }
 
@@ -283,6 +300,7 @@ impl Agent {
         mut messages: Vec<Message>,
         iterations: usize,
         results: Vec<ToolResumeResult>,
+        selection: Option<&ProviderSelection>,
         event_sender: mpsc::Sender<AgentEvent>,
     ) -> Option<PausedTurn> {
         for r in results {
@@ -299,7 +317,7 @@ impl Agent {
         let tool_defs = self.build_tool_defs();
         let tool_map  = self.build_tool_map();
 
-        let outcome = self.run_loop(messages, iterations, &tool_defs, &tool_map, &event_sender).await;
+        let outcome = self.run_loop(messages, iterations, &tool_defs, &tool_map, selection, &event_sender).await;
         self.finish_outcome(outcome, &event_sender).await
     }
 
@@ -309,28 +327,31 @@ impl Agent {
         event_sender: &mpsc::Sender<AgentEvent>,
     ) -> Option<PausedTurn> {
         match outcome {
-            LoopOutcome::Finished { text, iterations } => {
+            LoopOutcome::Finished { text, iterations, provider_used } => {
                 let sources = parse_citations(&text);
                 let _ = event_sender.send(AgentEvent::Done {
                     answer: text,
                     sources,
                     tool_calls_made: iterations,
+                    provider_used,
                 }).await;
                 None
             }
-            LoopOutcome::EndedWithoutCitations { text, iterations } => {
+            LoopOutcome::EndedWithoutCitations { text, iterations, provider_used } => {
                 let _ = event_sender.send(AgentEvent::Done {
                     answer: text,
                     sources: vec![],
                     tool_calls_made: iterations,
+                    provider_used,
                 }).await;
                 None
             }
-            LoopOutcome::Paused { messages, iterations, text_buf, pending } => {
+            LoopOutcome::Paused { messages, iterations, text_buf, pending, provider_used } => {
                 let _ = event_sender.send(AgentEvent::Done {
                     answer: text_buf,
                     sources: vec![],
                     tool_calls_made: iterations,
+                    provider_used,
                 }).await;
                 Some(PausedTurn { messages, iterations, pending })
             }
@@ -343,8 +364,10 @@ impl Agent {
         mut iterations: usize,
         tool_defs: &[ToolDefinition],
         tool_map: &HashMap<String, &dyn Tool>,
+        selection: Option<&ProviderSelection>,
         event_sender: &mpsc::Sender<AgentEvent>,
     ) -> LoopOutcome {
+        let mut last_provider_used: Option<UsedProvider> = None;
         loop {
             if iterations >= self.max_iterations {
                 tracing::warn!("agent hit max_iterations={} — requesting synthesis", self.max_iterations);
@@ -352,21 +375,27 @@ impl Agent {
                     "You have used the maximum number of tool calls. \
                      Synthesize what you have gathered so far into a final answer.",
                 ));
-                let text = match self.llm.chat(&messages, &[]).await {
-                    Ok(LlmResponse::Message { text }) => text,
-                    Ok(LlmResponse::ToolCalls { .. }) | Err(_) => self.last_assistant_text(&messages),
+                let text = match self.llm.chat_routed(selection, &messages, &[]).await {
+                    Ok((LlmResponse::Message { text }, used)) => {
+                        last_provider_used = Some(used);
+                        text
+                    }
+                    Ok((LlmResponse::ToolCalls { .. }, used)) => {
+                        last_provider_used = Some(used);
+                        self.last_assistant_text(&messages)
+                    }
+                    Err(_) => self.last_assistant_text(&messages),
                 };
-                return LoopOutcome::Finished { text, iterations };
+                return LoopOutcome::Finished { text, iterations, provider_used: last_provider_used };
             }
 
             let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(64);
             let llm            = Arc::clone(&self.llm);
             let msgs_snapshot  = messages.clone();
             let tools_snapshot = tool_defs.to_vec();
-            tokio::spawn(async move {
-                if let Err(e) = llm.chat_stream(&msgs_snapshot, &tools_snapshot, stream_tx).await {
-                    tracing::warn!(error = %e, "chat_stream failed");
-                }
+            let selection_owned = selection.cloned();
+            let stream_handle = tokio::spawn(async move {
+                llm.chat_stream_routed(selection_owned.as_ref(), &msgs_snapshot, &tools_snapshot, stream_tx).await
             });
 
             let mut text_buf     = String::new();
@@ -391,8 +420,14 @@ impl Agent {
                 }
             }
 
+            match stream_handle.await {
+                Ok(Ok(used)) => last_provider_used = Some(used),
+                Ok(Err(e)) => tracing::warn!(error = %e, "chat_stream failed"),
+                Err(e) => tracing::warn!(error = %e, "chat_stream task panicked"),
+            }
+
             if stop_reason == "end_turn" || tool_calls.is_empty() {
-                return LoopOutcome::Finished { text: text_buf, iterations };
+                return LoopOutcome::Finished { text: text_buf, iterations, provider_used: last_provider_used };
             }
 
             iterations += 1;
@@ -407,7 +442,7 @@ impl Agent {
                         .collect())
                     .unwrap_or_default();
                 let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
-                return LoopOutcome::EndedWithoutCitations { text: text_buf, iterations };
+                return LoopOutcome::EndedWithoutCitations { text: text_buf, iterations, provider_used: last_provider_used };
             }
 
             let call_parts: Vec<ContentPart> = tool_calls
@@ -471,7 +506,7 @@ impl Agent {
                     }
                 }
 
-                return LoopOutcome::Paused { messages, iterations, text_buf, pending };
+                return LoopOutcome::Paused { messages, iterations, text_buf, pending, provider_used: last_provider_used };
             }
 
             if text_buf.is_empty() {
@@ -610,18 +645,29 @@ mod tests {
     use std::sync::Mutex;
 
     struct MockLlm {
+        id: String,
         responses: Mutex<VecDeque<LlmResponse>>,
     }
 
     impl MockLlm {
         fn new(responses: Vec<LlmResponse>) -> Arc<Self> {
-            Arc::new(Self { responses: Mutex::new(responses.into()) })
+            Self::with_id("mock-llm", responses)
+        }
+
+        fn with_id(id: &str, responses: Vec<LlmResponse>) -> Arc<Self> {
+            Arc::new(Self { id: id.into(), responses: Mutex::new(responses.into()) })
         }
     }
 
     #[async_trait]
     impl LlmProvider for MockLlm {
-        async fn chat(&self, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
+        fn id(&self) -> &str { &self.id }
+        fn kind(&self) -> &str { "mock" }
+        fn default_model(&self) -> &str { "mock-model" }
+
+        async fn list_models(&self) -> Result<Vec<crate::llm::types::ModelInfo>> { Ok(vec![]) }
+
+        async fn chat_with(&self, _model: Option<&str>, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
             self.responses.lock().unwrap().pop_front()
                 .ok_or_else(|| anyhow::anyhow!("MockLlm: no more responses"))
         }
@@ -741,9 +787,44 @@ mod tests {
     async fn text_on_first_turn_returns_immediately() {
         let llm = MockLlm::new(vec![text("all done")]);
         let agent = agent_with(llm, vec![], 5);
-        let resp = agent.query("hi", &[], &[]).await.unwrap();
+        let resp = agent.query("hi", &[], &[], None).await.unwrap();
         assert_eq!(resp.answer, "all done");
         assert_eq!(resp.tool_calls_made, 0);
+    }
+
+    #[tokio::test]
+    async fn no_selection_reports_default_provider_used() {
+        let llm = MockLlm::with_id("mock-llm", vec![text("all done")]);
+        let agent = agent_with(llm, vec![], 5);
+        let resp = agent.query("hi", &[], &[], None).await.unwrap();
+        let used = resp.provider_used.expect("expected provider_used to be set");
+        assert_eq!(used.provider_id, "mock-llm");
+        assert_eq!(used.model, "mock-model");
+    }
+
+    #[tokio::test]
+    async fn matching_selection_reports_overridden_model() {
+        let llm = MockLlm::with_id("mock-llm", vec![text("all done")]);
+        let agent = agent_with(llm, vec![], 5);
+        let selection = ProviderSelection { provider_id: "mock-llm".into(), model: Some("custom-model".into()) };
+        let resp = agent.query("hi", &[], &[], Some(&selection)).await.unwrap();
+        let used = resp.provider_used.expect("expected provider_used to be set");
+        assert_eq!(used.provider_id, "mock-llm");
+        assert_eq!(used.model, "custom-model");
+    }
+
+    #[tokio::test]
+    async fn multi_turn_query_reports_provider_used_from_final_call() {
+        let llm = MockLlm::with_id("mock-llm", vec![
+            tool_call("my_tool"),
+            text("Calling my_tool"),
+            text("final answer"),
+        ]);
+        let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
+        let resp = agent.query("hi", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "final answer");
+        let used = resp.provider_used.expect("expected provider_used to be set");
+        assert_eq!(used.provider_id, "mock-llm");
     }
 
     #[tokio::test]
@@ -754,7 +835,7 @@ mod tests {
             text("result arrived"),
         ]);
         let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
-        let resp = agent.query("hi", &[], &[]).await.unwrap();
+        let resp = agent.query("hi", &[], &[], None).await.unwrap();
         assert_eq!(resp.answer, "result arrived");
         assert_eq!(resp.tool_calls_made, 1);
     }
@@ -769,7 +850,7 @@ mod tests {
             text("done after two rounds"),
         ]);
         let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
-        let resp = agent.query("hi", &[], &[]).await.unwrap();
+        let resp = agent.query("hi", &[], &[], None).await.unwrap();
         assert_eq!(resp.tool_calls_made, 2);
     }
 
@@ -780,7 +861,7 @@ mod tests {
             vec![],
             0,
         );
-        let resp = agent.query("hi", &[], &[]).await.unwrap();
+        let resp = agent.query("hi", &[], &[], None).await.unwrap();
         assert_eq!(resp.tool_calls_made, 0);
     }
 
@@ -796,7 +877,7 @@ mod tests {
             vec![MockTool::new("tool_a", "result_a"), MockTool::new("tool_b", "result_b")],
             5,
         );
-        let resp = agent.query("hi", &[], &[]).await.unwrap();
+        let resp = agent.query("hi", &[], &[], None).await.unwrap();
         assert_eq!(resp.answer, "got both results");
         assert_eq!(resp.tool_calls_made, 1);
     }
@@ -809,7 +890,7 @@ mod tests {
             text("handled gracefully"),
         ]);
         let agent = agent_with(llm, vec![], 5);
-        let resp = agent.query("hi", &[], &[]).await.unwrap();
+        let resp = agent.query("hi", &[], &[], None).await.unwrap();
         assert_eq!(resp.answer, "handled gracefully");
     }
 
@@ -957,7 +1038,7 @@ mod tests {
             HistoryMessage { role: "user".into(), text: "message one".into(), attachments: None },
             HistoryMessage { role: "assistant".into(), text: "response one".into(), attachments: None },
         ];
-        let resp = agent.query("new question", &history, &[]).await.unwrap();
+        let resp = agent.query("new question", &history, &[], None).await.unwrap();
         assert_eq!(resp.answer, "final answer");
     }
 
@@ -975,7 +1056,7 @@ mod tests {
             HistoryMessage { role: "assistant".into(), text: "response one".into(), attachments: None },
         ];
         let (event_sender, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
-        agent.query_streaming("new question", &history, &[], event_sender).await;
+        agent.query_streaming("new question", &history, &[], None, event_sender).await;
         let mut answer = None;
         while let Ok(event) = rx.try_recv() {
             if let AgentEvent::Done { answer: a, .. } = event {
@@ -987,7 +1068,7 @@ mod tests {
 
     async fn collect_agent_events(agent: Arc<Agent>, query: &str) -> Vec<AgentEvent> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(128);
-        agent.query_streaming(query, &[], &[], tx).await;
+        agent.query_streaming(query, &[], &[], None, tx).await;
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() { events.push(e); }
         events
@@ -1165,7 +1246,7 @@ mod tests {
         ));
 
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
-        let paused = agent.query_streaming("delete it", &[], &[], tx).await
+        let paused = agent.query_streaming("delete it", &[], &[], None, tx).await
             .expect("expected the turn to pause");
         assert_eq!(paused.pending, vec![PendingConfirmCall { id: "tc_1:0".into(), tool_use_id: "tc_1".into() }]);
         while rx.try_recv().is_ok() {}
@@ -1179,6 +1260,7 @@ mod tests {
                 content:      "Agent deleted.".into(),
                 is_error:     false,
             }],
+            None,
             tx2,
         ).await;
         assert!(outcome.is_none(), "expected the turn to finish, not pause again");
@@ -1210,7 +1292,7 @@ mod tests {
         ));
 
         let (tx, _rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
-        let first = agent.query_streaming("do stuff", &[], &[], tx).await
+        let first = agent.query_streaming("do stuff", &[], &[], None, tx).await
             .expect("expected the first turn to pause");
 
         let (tx2, _rx2) = tokio::sync::mpsc::channel::<AgentEvent>(64);
@@ -1222,6 +1304,7 @@ mod tests {
                 content:      "Agent created.".into(),
                 is_error:     false,
             }],
+            None,
             tx2,
         ).await.expect("expected the resumed turn to pause again");
 

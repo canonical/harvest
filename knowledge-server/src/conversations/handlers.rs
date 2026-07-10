@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::agent::HistoryMessage;
 use crate::auth::jwt::Claims;
+use crate::llm::types::UsedProvider;
 use crate::neo4j::Neo4jClient;
 
 const CONVERSATION_TITLE_MAX_CHARS: usize = 60;
@@ -54,6 +55,39 @@ pub async fn load_conversation_context(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn build_assistant_message(
+    assistant_text: &str,
+    sources: &[crate::agent::Source],
+    tool_calls_made: usize,
+    chain: Vec<Value>,
+    question: Option<Value>,
+    confirm_action: Option<Value>,
+    provider_used: Option<&UsedProvider>,
+) -> Value {
+    let mut assistant_message = json!({
+        "role": "assistant",
+        "text": assistant_text,
+        "sources": sources,
+        "chain": chain,
+        "tool_calls_made": tool_calls_made,
+    });
+    if let Some(question) = question {
+        assistant_message["question"] = question;
+    }
+    if let Some(confirm_action) = confirm_action {
+        assistant_message["confirm_action"] = confirm_action;
+    }
+    if let Some(provider_used) = provider_used {
+        assistant_message["provider"] = json!({
+            "provider_id": provider_used.provider_id,
+            "kind": provider_used.kind,
+            "model": provider_used.model,
+        });
+    }
+    assistant_message
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn append_user_turn(
     neo4j: &Neo4jClient,
     user_id: &str,
@@ -68,6 +102,7 @@ pub async fn append_user_turn(
     chain: Vec<Value>,
     question: Option<Value>,
     confirm_action: Option<Value>,
+    provider_used: Option<&UsedProvider>,
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     let title = if user_text.len() > CONVERSATION_TITLE_MAX_CHARS {
@@ -83,20 +118,9 @@ pub async fn append_user_turn(
         "username": username,
         "attachments": attachments_meta,
     }));
-    let mut assistant_message = json!({
-        "role": "assistant",
-        "text": assistant_text,
-        "sources": sources,
-        "chain": chain,
-        "tool_calls_made": tool_calls_made,
-    });
-    if let Some(question) = question {
-        assistant_message["question"] = question;
-    }
-    if let Some(confirm_action) = confirm_action {
-        assistant_message["confirm_action"] = confirm_action;
-    }
-    messages.push(assistant_message);
+    messages.push(build_assistant_message(
+        assistant_text, sources, tool_calls_made, chain, question, confirm_action, provider_used,
+    ));
 
     let messages_json = serde_json::to_string(&messages)?;
     let message_count = messages.len() as i64;
@@ -239,4 +263,41 @@ pub async fn delete(
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     Ok(Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn used_provider() -> UsedProvider {
+        UsedProvider {
+            provider_id: "anthropic-main".into(),
+            kind: "anthropic".into(),
+            model: "claude-sonnet-5".into(),
+        }
+    }
+
+    #[test]
+    fn build_assistant_message_includes_provider_when_present() {
+        let used = used_provider();
+        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, Some(&used));
+        assert_eq!(msg["provider"]["provider_id"], "anthropic-main");
+        assert_eq!(msg["provider"]["kind"], "anthropic");
+        assert_eq!(msg["provider"]["model"], "claude-sonnet-5");
+    }
+
+    #[test]
+    fn build_assistant_message_omits_provider_key_when_none() {
+        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, None);
+        assert!(msg.as_object().unwrap().get("provider").is_none());
+    }
+
+    #[test]
+    fn build_assistant_message_provider_round_trips_through_json_string() {
+        let used = used_provider();
+        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, Some(&used));
+        let serialized = serde_json::to_string(&vec![msg]).unwrap();
+        let parsed: Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(parsed[0]["provider"]["model"], "claude-sonnet-5");
+    }
 }
