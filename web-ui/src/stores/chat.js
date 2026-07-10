@@ -23,12 +23,12 @@ export const useChatStore = defineStore('chat', () => {
     messages.value.push({
       role: 'assistant', status: 'loading',
       chain: [], tool_calls: [], answer: null, pendingAnswer: '',
-      sources: [], tool_calls_made: 0,
+      sources: [], tool_calls_made: 0, provider_used: null,
     });
     loading.value = true;
   }
 
-  function finalizeAssistantMessage({ answer, sources, tool_calls_made }) {
+  function finalizeAssistantMessage({ answer, sources, tool_calls_made, provider_used }) {
     const msg = lastAssistant();
     if (!msg) return;
     msg.status = 'done';
@@ -39,6 +39,7 @@ export const useChatStore = defineStore('chat', () => {
     }
     msg.sources = sources ?? [];
     msg.tool_calls_made = tool_calls_made ?? 0;
+    msg.provider_used = provider_used ?? null;
     loading.value = false;
   }
 
@@ -170,13 +171,15 @@ export const useChatStore = defineStore('chat', () => {
           return saved;
         }
         const chain = m.chain ?? [];
-        return {
+        const saved = {
           role: 'assistant', text: m.answer,
           sources: m.sources ?? [],
           chain,
           tool_calls: chain.filter(c => c.type === 'tool_call'),
           tool_calls_made: m.tool_calls_made ?? 0,
         };
+        if (m.provider_used) saved.provider = m.provider_used;
+        return saved;
       });
   });
 
@@ -222,6 +225,7 @@ export const useChatStore = defineStore('chat', () => {
           answer: m.text,
           sources: m.sources ?? [],
           tool_calls_made: m.tool_calls_made ?? 0,
+          provider_used: m.provider ?? null,
         };
         if (m.question) msg.question = m.question;
         messages.value.push(msg);

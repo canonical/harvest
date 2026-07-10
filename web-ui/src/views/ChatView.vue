@@ -95,6 +95,7 @@
               </button>
             </div>
           </div>
+          <LlmModelPicker />
           <button
             v-if="projectId"
             class="chat-history-toggle-btn"
@@ -161,7 +162,9 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useAuthStore }    from '../stores/auth.js';
 import { useChatStore }    from '../stores/chat.js';
+import { useLlmStore }     from '../stores/llm.js';
 import ChatMessage         from '../components/chat/ChatMessage.vue';
+import LlmModelPicker      from '../components/chat/LlmModelPicker.vue';
 import SourcePanel         from '../components/SourcePanel.vue';
 import { describeToolCall } from '../lib/tool-render.js';
 import {
@@ -192,6 +195,7 @@ const props = defineProps({
 
 const auth  = useAuthStore();
 const chat  = useChatStore();
+const llm   = useLlmStore();
 
 const query          = ref('');
 const historyOpen    = ref(false);
@@ -419,7 +423,7 @@ async function sendQuery() {
         }
         openEventStream();
       }
-      await projectQueryStart(props.projectId, text, activeConvId.value, attachments);
+      await projectQueryStart(props.projectId, text, activeConvId.value, attachments, llm.selection);
     } catch (err) {
       if (err.status !== 409) {
         chat.addUserMessage(text, auth.user?.name ?? null, attachments);
@@ -447,7 +451,7 @@ async function sendQuery() {
       handleStreamEvent(event);
       if (event.type === 'done') scrollToLastMessage();
       else scrollToBottom();
-    });
+    }, llm.selection);
   } catch (err) {
     chat.setError(err.message);
   }
@@ -576,7 +580,10 @@ function handleChatEvent(event) {
     case 'question':       chat.setQuestion(event.question, event.choices); break;
     case 'confirm_action': chat.addConfirmAction(event.id, event.name, event.input, event.description); break;
     case 'done':
-      chat.finalizeAssistantMessage({ answer: event.answer, sources: event.sources, tool_calls_made: event.tool_calls_made });
+      chat.finalizeAssistantMessage({
+        answer: event.answer, sources: event.sources, tool_calls_made: event.tool_calls_made,
+        provider_used: event.provider_used,
+      });
       updateConvTitle();
       break;
     case 'suggestions':    chat.setSuggestions(event.choices ?? []); break;
@@ -649,6 +656,8 @@ onMounted(async () => {
   } else {
     await loadConversationList();
   }
+  llm.loadFromProfile();
+  llm.load();
   try {
     const repos = await fetchRepositories();
     repoUrlMap.value = Object.fromEntries(
