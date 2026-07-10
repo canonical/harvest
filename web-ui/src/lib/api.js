@@ -6,6 +6,7 @@ const GRAPH_URL = '/graph';
 const DOCS_URL = '/docs';
 const PROJECTS_URL = '/projects';
 const CONVERSATIONS_URL = '/conversations';
+const LLM_PROVIDERS_URL = '/llm/providers';
 
 async function convFetch(url, options = {}) {
   const res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...options });
@@ -64,11 +65,21 @@ async function consumeSseStream(response, onEvent) {
   }
 }
 
-export async function queryStream(query, conversationId, attachments, onEvent) {
+function withProviderSelection(body, providerSelection) {
+  if (providerSelection?.providerId) {
+    body.provider_id = providerSelection.providerId;
+    if (providerSelection.model) body.model = providerSelection.model;
+  }
+  return body;
+}
+
+export async function queryStream(query, conversationId, attachments, onEvent, providerSelection) {
+  const body = withProviderSelection({ query, conversation_id: conversationId, attachments }, providerSelection);
+
   const response = await fetch(QUERY_STREAM_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, conversation_id: conversationId, attachments }),
+    body: JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -77,6 +88,16 @@ export async function queryStream(query, conversationId, attachments, onEvent) {
   }
 
   await consumeSseStream(response, onEvent);
+}
+
+export async function fetchLlmProviders() {
+  try {
+    const response = await fetch(LLM_PROVIDERS_URL);
+    if (!response.ok) return { providers: [] };
+    return response.json();
+  } catch {
+    return { providers: [] };
+  }
 }
 
 export async function queryOnce(query) {
@@ -192,12 +213,13 @@ export const getProjectConversation     = (projectId, convId)   => projectFetch(
 export const updateProjectConversation  = (projectId, convId, body) => projectFetch(conversationUrl(projectId, convId), { method: 'PUT',  body: JSON.stringify(body) });
 export const deleteProjectConversation  = (projectId, convId)   => projectFetch(conversationUrl(projectId, convId), { method: 'DELETE' });
 
-export async function projectQueryStart(projectId, query, conversationId, attachments) {
+export async function projectQueryStart(projectId, query, conversationId, attachments, providerSelection) {
   const url = `${projectUrl(projectId)}/query/stream`;
+  const body = withProviderSelection({ query, conversation_id: conversationId, attachments }, providerSelection);
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, conversation_id: conversationId, attachments }),
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     handleUnauthorized(response.status);
