@@ -21,7 +21,7 @@ use knowledge_server::{
     auth::{self, jwt},
     llm::{
         LlmProvider,
-        types::{LlmResponse, Message, ToolCall, ToolDefinition},
+        types::{LlmResponse, Message, ModelInfo, ToolCall, ToolDefinition},
     },
     machines::MachineRegistry,
     neo4j::Neo4jClient,
@@ -40,7 +40,11 @@ impl FixedTextLlm {
 }
 #[async_trait]
 impl LlmProvider for FixedTextLlm {
-    async fn chat(&self, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
+    fn id(&self) -> &str { "fixed-text" }
+    fn kind(&self) -> &str { "mock" }
+    fn default_model(&self) -> &str { "mock-model" }
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> { Ok(vec![]) }
+    async fn chat_with(&self, _model: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
         Ok(LlmResponse::Message { text: self.0.clone() })
     }
 }
@@ -53,7 +57,11 @@ impl ScriptedLlm {
 }
 #[async_trait]
 impl LlmProvider for ScriptedLlm {
-    async fn chat(&self, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
+    fn id(&self) -> &str { "scripted" }
+    fn kind(&self) -> &str { "mock" }
+    fn default_model(&self) -> &str { "mock-model" }
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> { Ok(vec![]) }
+    async fn chat_with(&self, _model: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
         self.0.lock().unwrap().pop_front()
             .ok_or_else(|| anyhow::anyhow!("ScriptedLlm: no more responses"))
     }

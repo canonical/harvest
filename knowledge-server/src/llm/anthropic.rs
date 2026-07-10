@@ -8,11 +8,12 @@ use tokio::sync::mpsc;
 
 use super::{
     retry,
-    types::{ContentPart, LlmResponse, Message, MessageContent, Role, StreamEvent, ToolCall, ToolDefinition},
+    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, StreamEvent, ToolCall, ToolDefinition},
     LlmProvider,
 };
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
+const MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const MAX_TOKENS: u32 = 8192;
 const OVERLOAD_STATUS_CODES: &[u16] = &[529, 503];
@@ -22,16 +23,24 @@ pub struct AnthropicProvider {
     api_key: String,
     client: Client,
     base_url: String,
+    models_url: String,
     max_retries: u32,
+    meta: ProviderMeta,
 }
 
 impl AnthropicProvider {
-    pub fn new(model: String, api_key: String, timeout_secs: u64, max_retries: u32) -> Self {
+    pub fn new(model: String, api_key: String, timeout_secs: u64, max_retries: u32, meta: ProviderMeta) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .expect("failed to build HTTP client");
-        Self { model, api_key, client, base_url: API_URL.to_string(), max_retries }
+        Self {
+            model, api_key, client,
+            base_url: API_URL.to_string(),
+            models_url: MODELS_URL.to_string(),
+            max_retries,
+            meta,
+        }
     }
 
     #[cfg(test)]
@@ -39,11 +48,44 @@ impl AnthropicProvider {
         self.base_url = url.into();
         self
     }
+
+    #[cfg(test)]
+    fn with_models_url(mut self, url: impl Into<String>) -> Self {
+        self.models_url = url.into();
+        self
+    }
 }
 
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
-    async fn chat(&self, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
+    fn id(&self) -> &str { &self.meta.id }
+    fn kind(&self) -> &str { "anthropic" }
+    fn default_model(&self) -> &str { &self.model }
+    fn expose_to_ui(&self) -> bool { self.meta.expose_to_ui }
+    fn name(&self) -> Option<&str> { self.meta.name.as_deref() }
+    fn configured_models(&self) -> Option<&[String]> { self.meta.models.as_deref() }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let fallback = vec![ModelInfo { id: self.model.clone(), display_name: None }];
+        let req = self.client.get(&self.models_url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION);
+        let Ok(response) = req.send().await else { return Ok(fallback) };
+        if !response.status().is_success() {
+            return Ok(fallback);
+        }
+        let Ok(json) = response.json::<Value>().await else { return Ok(fallback) };
+        let Some(data) = json["data"].as_array() else { return Ok(fallback) };
+        let models: Vec<ModelInfo> = data.iter()
+            .filter_map(|m| m["id"].as_str().map(|id| ModelInfo {
+                id: id.to_string(),
+                display_name: m["display_name"].as_str().map(str::to_string),
+            }))
+            .collect();
+        if models.is_empty() { Ok(fallback) } else { Ok(models) }
+    }
+
+    async fn chat_with(&self, model: Option<&str>, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
         let system_text = messages
             .iter()
             .find(|m| matches!(m.role, Role::System))
@@ -62,7 +104,7 @@ impl LlmProvider for AnthropicProvider {
         let api_tools: Vec<Value> = tools.iter().map(to_anthropic_tool).collect();
 
         let body = json!({
-            "model":      self.model,
+            "model":      model.unwrap_or(&self.model),
             "system":     system_text,
             "messages":   api_messages,
             "tools":      api_tools,
@@ -94,13 +136,14 @@ impl LlmProvider for AnthropicProvider {
         parse_anthropic_response(json)
     }
 
-    async fn chat_stream(
+    async fn chat_stream_with(
         &self,
+        model: Option<&str>,
         messages: &[Message],
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
-        self.stream(messages, tools, tx).await
+        self.stream(model, messages, tools, tx).await
     }
 }
 
@@ -262,6 +305,7 @@ async fn process_stream_event(
 impl AnthropicProvider {
     pub async fn stream(
         &self,
+        model: Option<&str>,
         messages: &[Message],
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
@@ -284,7 +328,7 @@ impl AnthropicProvider {
         let api_tools: Vec<Value> = tools.iter().map(to_anthropic_tool).collect();
 
         let body = json!({
-            "model":      self.model,
+            "model":      model.unwrap_or(&self.model),
             "system":     system_text,
             "messages":   api_messages,
             "tools":      api_tools,
@@ -531,12 +575,95 @@ mod tests {
             then.status(200).json_body(text_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0)
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
             .with_base_url(server.url("/v1/messages"));
         match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
             LlmResponse::Message { text } => assert_eq!(text, "all good"),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn chat_with_model_override_sends_that_model() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .body_includes(r#""model":"override-model""#);
+            then.status(200).json_body(text_response_body());
+        });
+
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        provider.chat_with(Some("override-model"), &[Message::user("hi")], &[]).await.unwrap();
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn chat_with_none_uses_configured_default_model() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .body_includes(r#""model":"claude-test""#);
+            then.status(200).json_body(text_response_body());
+        });
+
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        provider.chat_with(None, &[Message::user("hi")], &[]).await.unwrap();
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn list_models_parses_anthropic_shape() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("GET").path("/v1/models");
+            then.status(200).json_body(json!({
+                "data": [
+                    { "id": "claude-opus-4-8", "display_name": "Claude Opus 4.8" },
+                    { "id": "claude-sonnet-5", "display_name": "Claude Sonnet 5" },
+                ]
+            }));
+        });
+
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_models_url(server.url("/v1/models"));
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "claude-opus-4-8");
+        assert_eq!(models[0].display_name.as_deref(), Some("Claude Opus 4.8"));
+    }
+
+    #[tokio::test]
+    async fn list_models_falls_back_to_default_on_error_status() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("GET").path("/v1/models");
+            then.status(500);
+        });
+
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_models_url(server.url("/v1/models"));
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models, vec![ModelInfo { id: "claude-test".into(), display_name: None }]);
+    }
+
+    #[test]
+    fn expose_to_ui_reflects_constructor_value() {
+        let visible = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("a"));
+        let hidden  = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "b".into(), expose_to_ui: false, name: None, models: None });
+        assert!(visible.expose_to_ui());
+        assert!(!hidden.expose_to_ui());
+    }
+
+    #[test]
+    fn name_reflects_constructor_value() {
+        let named   = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "a".into(), expose_to_ui: true, name: Some("Claude Direct".into()), models: None });
+        let unnamed = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("b"));
+        assert_eq!(named.name(), Some("Claude Direct"));
+        assert_eq!(unnamed.name(), None);
     }
 
     #[tokio::test]
@@ -547,7 +674,7 @@ mod tests {
             then.status(200).json_body(tool_use_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0)
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
             .with_base_url(server.url("/v1/messages"));
         match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
             LlmResponse::ToolCalls { calls, .. } => {
@@ -566,7 +693,7 @@ mod tests {
             then.status(401).json_body(json!({ "error": "unauthorized" }));
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "bad-key".into(), 30, 0)
+        let provider = AnthropicProvider::new("claude-test".into(), "bad-key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
             .with_base_url(server.url("/v1/messages"));
         assert!(provider.chat(&[Message::user("hi")], &[]).await.is_err());
     }
@@ -582,7 +709,7 @@ mod tests {
             then.status(200).json_body(text_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "test-key".into(), 30, 0)
+        let provider = AnthropicProvider::new("claude-test".into(), "test-key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
             .with_base_url(server.url("/v1/messages"));
         provider.chat(&[Message::user("hi")], &[]).await.unwrap();
         mock.assert();
@@ -598,7 +725,7 @@ mod tests {
             then.status(200).json_body(text_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "k".into(), 30, 0)
+        let provider = AnthropicProvider::new("claude-test".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
             .with_base_url(server.url("/v1/messages"));
         let result = provider
             .chat(&[Message::system("be helpful"), Message::user("hi")], &[])
@@ -620,7 +747,7 @@ mod tests {
 
     async fn collect_stream_events(provider: &AnthropicProvider) -> Vec<StreamEvent> {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        provider.stream(&[Message::user("hi")], &[], tx).await.unwrap();
+        provider.stream(None, &[Message::user("hi")], &[], tx).await.unwrap();
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() {
             events.push(e);
@@ -645,7 +772,7 @@ mod tests {
                 ]));
         });
 
-        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0)
+        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
             .with_base_url(server.url("/v1/messages"));
         let events = collect_stream_events(&provider).await;
 
@@ -677,7 +804,7 @@ mod tests {
                 ]));
         });
 
-        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0)
+        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
             .with_base_url(server.url("/v1/messages"));
         let events = collect_stream_events(&provider).await;
 
@@ -704,7 +831,7 @@ mod tests {
                 ]));
         });
 
-        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0)
+        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
             .with_base_url(server.url("/v1/messages"));
         let events = collect_stream_events(&provider).await;
 
@@ -736,7 +863,7 @@ mod tests {
                 ]));
         });
 
-        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0)
+        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
             .with_base_url(server.url("/v1/messages"));
         let events = collect_stream_events(&provider).await;
 
@@ -755,10 +882,10 @@ mod tests {
             then.status(401).body("unauthorized");
         });
 
-        let provider = AnthropicProvider::new("m".into(), "bad-key".into(), 30, 0)
+        let provider = AnthropicProvider::new("m".into(), "bad-key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
             .with_base_url(server.url("/v1/messages"));
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
-        let result = provider.stream(&[Message::user("hi")], &[], tx).await;
+        let result = provider.stream(None, &[Message::user("hi")], &[], tx).await;
         assert!(result.is_err(), "expected error on 4xx");
     }
 
@@ -778,7 +905,7 @@ mod tests {
                 ]));
         });
 
-        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0)
+        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
             .with_base_url(server.url("/v1/messages"));
         let events = collect_stream_events(&provider).await;
 

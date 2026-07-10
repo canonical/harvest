@@ -145,21 +145,37 @@ pub enum LlmProviderConfig {
         model: String,
         api_key: String,
         #[serde(default)]
-        priority: u32,
-        #[serde(default = "default_timeout_secs")]
-        timeout_secs: u64,
-        #[serde(default = "default_max_retries")]
-        max_retries: u32,
-    },
-    Gemini {
-        model: String,
-        api_key: String,
+        id: String,
         #[serde(default)]
         priority: u32,
         #[serde(default = "default_timeout_secs")]
         timeout_secs: u64,
         #[serde(default = "default_max_retries")]
         max_retries: u32,
+        #[serde(default = "default_true")]
+        expose_to_ui: bool,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        models: Option<Vec<String>>,
+    },
+    Gemini {
+        model: String,
+        api_key: String,
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        priority: u32,
+        #[serde(default = "default_timeout_secs")]
+        timeout_secs: u64,
+        #[serde(default = "default_max_retries")]
+        max_retries: u32,
+        #[serde(default = "default_true")]
+        expose_to_ui: bool,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        models: Option<Vec<String>>,
     },
     #[serde(rename = "openai-compatible")]
     OpenAiCompat {
@@ -167,11 +183,19 @@ pub enum LlmProviderConfig {
         api_key: String,
         model: String,
         #[serde(default)]
+        id: String,
+        #[serde(default)]
         priority: u32,
         #[serde(default = "default_timeout_secs")]
         timeout_secs: u64,
         #[serde(default = "default_max_retries")]
         max_retries: u32,
+        #[serde(default = "default_true")]
+        expose_to_ui: bool,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        models: Option<Vec<String>>,
     },
 }
 
@@ -181,6 +205,54 @@ impl LlmProviderConfig {
             Self::Anthropic    { priority, .. } => *priority,
             Self::Gemini       { priority, .. } => *priority,
             Self::OpenAiCompat { priority, .. } => *priority,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Anthropic    { id, .. } => id,
+            Self::Gemini       { id, .. } => id,
+            Self::OpenAiCompat { id, .. } => id,
+        }
+    }
+
+    fn id_mut(&mut self) -> &mut String {
+        match self {
+            Self::Anthropic    { id, .. } => id,
+            Self::Gemini       { id, .. } => id,
+            Self::OpenAiCompat { id, .. } => id,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Anthropic    { .. } => "anthropic",
+            Self::Gemini       { .. } => "gemini",
+            Self::OpenAiCompat { .. } => "openai-compatible",
+        }
+    }
+
+    pub fn expose_to_ui(&self) -> bool {
+        match self {
+            Self::Anthropic    { expose_to_ui, .. } => *expose_to_ui,
+            Self::Gemini       { expose_to_ui, .. } => *expose_to_ui,
+            Self::OpenAiCompat { expose_to_ui, .. } => *expose_to_ui,
+        }
+    }
+
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Anthropic    { name, .. } => name.as_deref(),
+            Self::Gemini       { name, .. } => name.as_deref(),
+            Self::OpenAiCompat { name, .. } => name.as_deref(),
+        }
+    }
+
+    pub fn models(&self) -> Option<&[String]> {
+        match self {
+            Self::Anthropic    { models, .. } => models.as_deref(),
+            Self::Gemini       { models, .. } => models.as_deref(),
+            Self::OpenAiCompat { models, .. } => models.as_deref(),
         }
     }
 }
@@ -195,7 +267,25 @@ impl Config {
     pub fn from_file(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading config file: {}", path.display()))?;
-        toml::from_str(&text).context("parsing config TOML")
+        let mut config: Config = toml::from_str(&text).context("parsing config TOML")?;
+        config.normalize_llm_ids()?;
+        Ok(config)
+    }
+
+    fn normalize_llm_ids(&mut self) -> Result<()> {
+        for provider in &mut self.llm {
+            if provider.id_mut().is_empty() {
+                let derived = format!("{}-{}", provider.kind(), provider.priority());
+                *provider.id_mut() = derived;
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        for provider in &self.llm {
+            if !seen.insert(provider.id()) {
+                anyhow::bail!("duplicate LLM provider id: {}", provider.id());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -211,6 +301,12 @@ mod tests {
 
     fn parse_config(toml: &str) -> Config {
         toml::from_str::<Config>(toml).expect("parse failed")
+    }
+
+    fn parse_and_normalize(toml: &str) -> Result<Config> {
+        let mut cfg = toml::from_str::<Config>(toml).expect("parse failed");
+        cfg.normalize_llm_ids()?;
+        Ok(cfg)
     }
 
     #[test]
@@ -442,6 +538,147 @@ mod tests {
             }
             _ => panic!("expected Anthropic"),
         }
+    }
+
+    #[test]
+    fn expose_to_ui_defaults_to_true() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+        "#);
+        let cfg = parse_config(&toml);
+        assert!(cfg.llm[0].expose_to_ui());
+    }
+
+    #[test]
+    fn expose_to_ui_can_be_set_false() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider     = "openai-compatible"
+            base_url     = "https://openai.example.com"
+            model        = "gpt-4o"
+            api_key      = "k"
+            expose_to_ui = false
+        "#);
+        let cfg = parse_config(&toml);
+        assert!(!cfg.llm[0].expose_to_ui());
+    }
+
+    #[test]
+    fn name_defaults_to_none() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+        "#);
+        let cfg = parse_config(&toml);
+        assert_eq!(cfg.llm[0].name(), None);
+    }
+
+    #[test]
+    fn name_is_preserved_when_set() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "openai-compatible"
+            base_url = "https://lemonade.example.com/api/v1"
+            model    = "Mistral-3-3B"
+            api_key  = ""
+            name     = "Lemonade (local)"
+        "#);
+        let cfg = parse_config(&toml);
+        assert_eq!(cfg.llm[0].name(), Some("Lemonade (local)"));
+    }
+
+    #[test]
+    fn models_defaults_to_none() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+        "#);
+        let cfg = parse_config(&toml);
+        assert_eq!(cfg.llm[0].models(), None);
+    }
+
+    #[test]
+    fn models_allowlist_is_preserved_when_set() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "gemini-3.1-pro-preview"
+            api_key  = "k"
+            models   = ["gemini-2.5-flash", "gemini-2.5-pro"]
+        "#);
+        let cfg = parse_config(&toml);
+        assert_eq!(cfg.llm[0].models(), Some(&["gemini-2.5-flash".to_string(), "gemini-2.5-pro".to_string()][..]));
+    }
+
+    #[test]
+    fn blank_id_normalizes_to_kind_and_priority() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "gemini-flash"
+            api_key  = "k"
+            priority = 2
+        "#);
+        let cfg = parse_and_normalize(&toml).expect("normalize failed");
+        assert_eq!(cfg.llm[0].id(), "gemini-2");
+        assert_eq!(cfg.llm[0].kind(), "gemini");
+    }
+
+    #[test]
+    fn explicit_id_is_preserved() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "anthropic"
+            model    = "claude-sonnet-4-6"
+            api_key  = "k"
+            id       = "main-anthropic"
+        "#);
+        let cfg = parse_and_normalize(&toml).expect("normalize failed");
+        assert_eq!(cfg.llm[0].id(), "main-anthropic");
+    }
+
+    #[test]
+    fn duplicate_explicit_ids_are_rejected() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "gemini-flash"
+            api_key  = "k1"
+            id       = "dup"
+
+            [[llm]]
+            provider = "anthropic"
+            model    = "claude-sonnet-4-6"
+            api_key  = "k2"
+            id       = "dup"
+        "#);
+        let result = parse_and_normalize(&toml);
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err.to_string().contains("dup"), "expected error to mention id, got: {err}");
+    }
+
+    #[test]
+    fn two_blank_ids_with_same_kind_and_priority_still_collide() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "gemini-flash"
+            api_key  = "k1"
+
+            [[llm]]
+            provider = "gemini"
+            model    = "gemini-pro"
+            api_key  = "k2"
+        "#);
+        assert!(parse_and_normalize(&toml).is_err());
     }
 
     #[test]

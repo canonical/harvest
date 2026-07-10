@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::{
     retry,
-    types::{ContentPart, LlmResponse, Message, MessageContent, Role, ToolCall, ToolDefinition},
+    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, ToolCall, ToolDefinition},
     LlmProvider,
 };
 
@@ -17,26 +17,54 @@ pub struct OpenAiCompatProvider {
     model: String,
     client: Client,
     max_retries: u32,
+    meta: ProviderMeta,
 }
 
 impl OpenAiCompatProvider {
-    pub fn new(base_url: String, api_key: String, model: String, timeout_secs: u64, max_retries: u32) -> Self {
+    pub fn new(base_url: String, api_key: String, model: String, timeout_secs: u64, max_retries: u32, meta: ProviderMeta) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .expect("failed to build HTTP client");
-        Self { base_url, api_key, model, client, max_retries }
+        Self { base_url, api_key, model, client, max_retries, meta }
     }
 }
 
 #[async_trait]
 impl LlmProvider for OpenAiCompatProvider {
-    async fn chat(&self, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
+    fn id(&self) -> &str { &self.meta.id }
+    fn kind(&self) -> &str { "openai-compatible" }
+    fn default_model(&self) -> &str { &self.model }
+    fn name(&self) -> Option<&str> { self.meta.name.as_deref() }
+    fn expose_to_ui(&self) -> bool { self.meta.expose_to_ui }
+    fn configured_models(&self) -> Option<&[String]> { self.meta.models.as_deref() }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let fallback = vec![ModelInfo { id: self.model.clone(), display_name: None }];
+        let url = format!("{}/models", self.base_url.trim_end_matches('/'));
+        let mut req = self.client.get(&url);
+        if !self.api_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+        }
+        let Ok(response) = req.send().await else { return Ok(fallback) };
+        if !response.status().is_success() {
+            return Ok(fallback);
+        }
+        let Ok(json) = response.json::<Value>().await else { return Ok(fallback) };
+        let Some(data) = json["data"].as_array() else { return Ok(fallback) };
+        let models: Vec<ModelInfo> = data.iter()
+            .filter_map(|m| m["id"].as_str())
+            .map(|id| ModelInfo { id: id.to_string(), display_name: None })
+            .collect();
+        if models.is_empty() { Ok(fallback) } else { Ok(models) }
+    }
+
+    async fn chat_with(&self, model: Option<&str>, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
         let api_messages: Vec<Value> = messages.iter().map(to_openai_message).collect();
         let api_tools: Vec<Value> = tools.iter().map(to_openai_function).collect();
 
         let mut body = json!({
-            "model":    self.model,
+            "model":    model.unwrap_or(&self.model),
             "messages": api_messages,
         });
         if !api_tools.is_empty() {
@@ -187,7 +215,7 @@ mod tests {
     use serde_json::json;
 
     fn make_provider(base_url: &str) -> OpenAiCompatProvider {
-        OpenAiCompatProvider::new(base_url.into(), "test-key".into(), "test-model".into(), 30, 0)
+        OpenAiCompatProvider::new(base_url.into(), "test-key".into(), "test-model".into(), 30, 0, ProviderMeta::new("oai-1"))
     }
 
     #[test]
@@ -446,6 +474,99 @@ mod tests {
         let provider = make_provider(&server.base_url());
         provider.chat(&[Message::user("hi")], &[]).await.unwrap();
         mock.assert();
+    }
+
+    #[tokio::test]
+    async fn chat_with_model_override_sends_that_model() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/chat/completions")
+                .body_includes(r#""model":"override-model""#);
+            then.status(200).json_body(text_response());
+        });
+
+        let provider = make_provider(&server.base_url());
+        provider.chat_with(Some("override-model"), &[Message::user("hi")], &[]).await.unwrap();
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn chat_with_none_uses_configured_default_model() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/chat/completions")
+                .body_includes(r#""model":"test-model""#);
+            then.status(200).json_body(text_response());
+        });
+
+        let provider = make_provider(&server.base_url());
+        provider.chat_with(None, &[Message::user("hi")], &[]).await.unwrap();
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn list_models_parses_openai_shape() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("GET").path("/models");
+            then.status(200).json_body(json!({
+                "object": "list",
+                "data": [
+                    { "id": "gpt-4o", "object": "model" },
+                    { "id": "gpt-4o-mini", "object": "model" },
+                ]
+            }));
+        });
+
+        let provider = make_provider(&server.base_url());
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "gpt-4o");
+        assert_eq!(models[1].id, "gpt-4o-mini");
+    }
+
+    #[tokio::test]
+    async fn list_models_falls_back_to_default_on_error_status() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("GET").path("/models");
+            then.status(404);
+        });
+
+        let provider = make_provider(&server.base_url());
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models, vec![ModelInfo { id: "test-model".into(), display_name: None }]);
+    }
+
+    #[test]
+    fn expose_to_ui_reflects_constructor_value() {
+        let visible = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta::new("a"));
+        let hidden  = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta { id: "b".into(), expose_to_ui: false, name: None, models: None });
+        assert!(visible.expose_to_ui());
+        assert!(!hidden.expose_to_ui());
+    }
+
+    #[test]
+    fn name_reflects_constructor_value() {
+        let named   = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta { id: "a".into(), expose_to_ui: true, name: Some("Lemonade (local)".into()), models: None });
+        let unnamed = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta::new("b"));
+        assert_eq!(named.name(), Some("Lemonade (local)"));
+        assert_eq!(unnamed.name(), None);
+    }
+
+    #[tokio::test]
+    async fn list_models_falls_back_to_default_on_malformed_body() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("GET").path("/models");
+            then.status(200).body("not json");
+        });
+
+        let provider = make_provider(&server.base_url());
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models, vec![ModelInfo { id: "test-model".into(), display_name: None }]);
     }
 
     #[tokio::test]

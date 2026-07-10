@@ -94,3 +94,38 @@ pub enum StreamEvent {
     ToolCallReady(ToolCall),
     Done { stop_reason: String },
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ModelInfo {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderSelection {
+    pub provider_id: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UsedProvider {
+    pub provider_id: String,
+    pub kind: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderMeta {
+    pub id: String,
+    pub expose_to_ui: bool,
+    pub name: Option<String>,
+    pub models: Option<Vec<String>>,
+}
+
+impl ProviderMeta {
+    pub fn new(id: impl Into<String>) -> Self {
+        Self { id: id.into(), expose_to_ui: true, name: None, models: None }
+    }
+}
