@@ -18,6 +18,7 @@ use crate::api::QueryState;
 use crate::auth::jwt::Claims;
 use crate::conversations::handlers::{append_user_turn, load_conversation_context};
 use crate::conversations::title_generation::maybe_regenerate_title;
+use crate::llm::types::ProviderSelection;
 
 #[derive(Deserialize)]
 pub struct QueryRequest {
@@ -26,6 +27,12 @@ pub struct QueryRequest {
     pub attachments: Option<Vec<Attachment>>,
     pub repositories: Option<Vec<String>>,
     pub versions: Option<Vec<String>>,
+    pub provider_id: Option<String>,
+    pub model: Option<String>,
+}
+
+fn selection_from(req: &QueryRequest) -> Option<ProviderSelection> {
+    req.provider_id.clone().map(|provider_id| ProviderSelection { provider_id, model: req.model.clone() })
 }
 
 pub async fn handle_query(
@@ -36,7 +43,8 @@ pub async fn handle_query(
     let attachments = req.attachments.as_deref().unwrap_or(&[]);
     let (raw_messages, history) = load_context_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
     let compacted = qs.agent.compact_history(&history).await;
-    match qs.agent.query(&req.query, &compacted, attachments).await {
+    let selection = selection_from(&req);
+    match qs.agent.query(&req.query, &compacted, attachments, selection.as_ref()).await {
         Ok(response) => {
             if let (Some(neo4j), Some(cid)) = (&qs.neo4j, &req.conversation_id) {
                 let att_meta: Vec<_> = attachments.iter()
@@ -46,7 +54,7 @@ pub async fn handle_query(
                     neo4j, &user.sub, cid,
                     &req.query, &user.name, &att_meta, raw_messages,
                     &response.answer, &response.sources, response.tool_calls_made,
-                    vec![], None, None,
+                    vec![], None, None, response.provider_used.as_ref(),
                 ).await;
 
                 let msg_count = compacted.len() + 2;
@@ -76,6 +84,7 @@ pub async fn handle_query_stream(
     State(qs): State<Arc<QueryState>>,
     Json(req): Json<QueryRequest>,
 ) -> impl IntoResponse {
+    let selection = selection_from(&req);
     let attachments = req.attachments.unwrap_or_default();
     let (raw_messages, history) = load_context_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
     let compacted = qs.agent.compact_history(&history).await;
@@ -96,8 +105,9 @@ pub async fn handle_query_stream(
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         let query_for_agent     = query.clone();
         let compacted_for_agent = compacted.clone();
+        let selection_for_agent = selection.clone();
         tokio::spawn(async move {
-            agent.query_streaming(&query_for_agent, &compacted_for_agent, &attachments, agent_tx).await;
+            agent.query_streaming(&query_for_agent, &compacted_for_agent, &attachments, selection_for_agent.as_ref(), agent_tx).await;
         });
 
         let mut chain_builder = ChainBuilder::new();
@@ -123,7 +133,7 @@ pub async fn handle_query_stream(
             }
 
             let new_title = if let (
-                AgentEvent::Done { answer, sources, tool_calls_made },
+                AgentEvent::Done { answer, sources, tool_calls_made, provider_used },
                 Some(cid),
                 Some(neo4j),
             ) = (&event, &conv_id, &neo4j) {
@@ -133,6 +143,7 @@ pub async fn handle_query_stream(
                     &query, &username, &att_meta, raw_messages.clone(),
                     answer, sources, *tool_calls_made,
                     chain, pending_question.clone(), pending_confirm_action.clone(),
+                    provider_used.as_ref(),
                 ).await;
                 let msg_count = compacted.len() + 2;
                 maybe_regenerate_title(neo4j, &*llm, cid, &compacted, &query, answer, msg_count).await
