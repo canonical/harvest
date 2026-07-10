@@ -20,6 +20,7 @@ export default defineConfig({
       '/agents':           'http://localhost:8080',
       '/agent':            { target: 'http://localhost:8080', ws: true },
       '/tool-description': 'http://localhost:8080',
+      '/llm':              'http://localhost:8080',
     },
     allowedHosts: [
       "harvest-development.thinking-dragon.net",
