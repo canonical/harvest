@@ -161,6 +161,8 @@ pub struct MeResponse {
     pub name: String,
     pub role: String,
     pub last_project_id: Option<String>,
+    pub last_llm_provider_id: Option<String>,
+    pub last_llm_model: Option<String>,
 }
 
 pub async fn me(
@@ -169,24 +171,33 @@ pub async fn me(
 ) -> Result<impl IntoResponse, ApiError> {
     let claims = extract_claims(&state.config.jwt_secret, &jar)?;
     let rows = state.neo4j.query_read(
-        "MATCH (u:User {id: $id}) RETURN u.last_project_id AS last_project_id",
+        "MATCH (u:User {id: $id})
+         RETURN u.last_project_id AS last_project_id,
+                u.last_llm_provider_id AS last_llm_provider_id,
+                u.last_llm_model AS last_llm_model",
         json!({ "id": claims.sub }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let last_project_id = rows.into_iter()
-        .next()
-        .and_then(|r| r["last_project_id"].as_str().map(String::from));
+    let row = rows.into_iter().next();
+    let field = |name: &str| row.as_ref().and_then(|r| r[name].as_str().map(String::from));
     Ok(Json(MeResponse {
         id: claims.sub,
         email: claims.email,
         name: claims.name,
         role: claims.role,
-        last_project_id,
+        last_project_id: field("last_project_id"),
+        last_llm_provider_id: field("last_llm_provider_id"),
+        last_llm_model: field("last_llm_model"),
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct UpdateMeBody {
-    pub last_project_id: String,
+    #[serde(default)]
+    pub last_project_id: Option<String>,
+    #[serde(default)]
+    pub last_llm_provider_id: Option<String>,
+    #[serde(default)]
+    pub last_llm_model: Option<String>,
 }
 
 pub async fn update_me(
@@ -195,10 +206,29 @@ pub async fn update_me(
     Json(body): Json<UpdateMeBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let claims = extract_claims(&state.config.jwt_secret, &jar)?;
-    state.neo4j.query_read(
-        "MATCH (u:User {id: $id}) SET u.last_project_id = $pid RETURN u.id",
-        json!({ "id": claims.sub, "pid": body.last_project_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+
+    let mut sets = Vec::new();
+    let mut params = json!({ "id": claims.sub });
+
+    if let Some(pid) = body.last_project_id {
+        sets.push("u.last_project_id = $pid");
+        params["pid"] = json!(pid);
+    }
+    if let Some(provider_id) = body.last_llm_provider_id {
+        sets.push("u.last_llm_provider_id = $provider_id");
+        params["provider_id"] = json!(provider_id);
+    }
+    if let Some(model) = body.last_llm_model {
+        sets.push("u.last_llm_model = $model");
+        params["model"] = json!(model);
+    }
+
+    if !sets.is_empty() {
+        let cypher = format!("MATCH (u:User {{id: $id}}) SET {} RETURN u.id", sets.join(", "));
+        state.neo4j.query_read(&cypher, params).await
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    }
+
     Ok(Json(json!({ "ok": true })))
 }
 
