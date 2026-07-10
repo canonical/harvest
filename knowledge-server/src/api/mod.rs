@@ -1,5 +1,6 @@
 pub mod docs;
 pub mod graph;
+pub mod llm;
 pub mod query;
 pub mod repositories;
 pub mod tool_description;
@@ -193,6 +194,11 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .route("/graph/:repo/:version/source",      get(graph::handle_get_symbol_source))
         .with_state(Arc::clone(&graph_state));
 
+    let llm_state = Arc::new(llm::LlmState::new(Arc::clone(&state.llm)));
+    let llm_router = Router::new()
+        .route("/llm/providers", get(llm::list_providers))
+        .with_state(llm_state);
+
     let me_router = Router::new()
         .route("/auth/me", get(auth_handlers::me).patch(auth_handlers::update_me))
         .with_state(Arc::clone(&auth_state));
@@ -272,6 +278,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .merge(conv_router)
         .merge(agent_router)
         .merge(graph_router)
+        .merge(llm_router)
         .merge(project_router)
         .merge(machines_protected)
         .merge(skills_read_router);
