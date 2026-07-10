@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::{
     retry,
-    types::{ContentPart, LlmResponse, Message, MessageContent, Role, ToolCall, ToolDefinition},
+    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, ToolCall, ToolDefinition},
     LlmProvider,
 };
 
@@ -19,15 +19,16 @@ pub struct GeminiProvider {
     client: Client,
     base_url: String,
     max_retries: u32,
+    meta: ProviderMeta,
 }
 
 impl GeminiProvider {
-    pub fn new(model: String, api_key: String, timeout_secs: u64, max_retries: u32) -> Self {
+    pub fn new(model: String, api_key: String, timeout_secs: u64, max_retries: u32, meta: ProviderMeta) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .expect("failed to build HTTP client");
-        Self { model, api_key, client, base_url: API_BASE.to_string(), max_retries }
+        Self { model, api_key, client, base_url: API_BASE.to_string(), max_retries, meta }
     }
 
     #[cfg(test)]
@@ -36,14 +37,53 @@ impl GeminiProvider {
         self
     }
 
-    fn endpoint_url(&self) -> String {
-        format!("{}/{}:generateContent?key={}", self.base_url, self.model, self.api_key)
+    fn endpoint_url(&self, model: &str) -> String {
+        format!("{}/{}:generateContent?key={}", self.base_url, model, self.api_key)
+    }
+
+    fn models_url(&self) -> String {
+        format!("{}?key={}", self.base_url, self.api_key)
     }
 }
 
 #[async_trait]
 impl LlmProvider for GeminiProvider {
-    async fn chat(&self, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
+    fn id(&self) -> &str { &self.meta.id }
+    fn kind(&self) -> &str { "gemini" }
+    fn default_model(&self) -> &str { &self.model }
+    fn expose_to_ui(&self) -> bool { self.meta.expose_to_ui }
+    fn name(&self) -> Option<&str> { self.meta.name.as_deref() }
+    fn configured_models(&self) -> Option<&[String]> { self.meta.models.as_deref() }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let fallback = vec![ModelInfo { id: self.model.clone(), display_name: None }];
+        let Ok(response) = self.client.get(self.models_url()).send().await else { return Ok(fallback) };
+        if !response.status().is_success() {
+            return Ok(fallback);
+        }
+        let Ok(json) = response.json::<Value>().await else { return Ok(fallback) };
+        let Some(models) = json["models"].as_array() else { return Ok(fallback) };
+        let parsed: Vec<ModelInfo> = models.iter()
+            .filter(|m| {
+                m["supportedGenerationMethods"].as_array()
+                    .map(|methods| methods.iter().any(|v| v.as_str() == Some("generateContent")))
+                    .unwrap_or(false)
+            })
+            .filter(|m| {
+                m["name"].as_str()
+                    .map(|name| is_chat_model(name.strip_prefix("models/").unwrap_or(name)))
+                    .unwrap_or(false)
+            })
+            .filter_map(|m| m["name"].as_str().map(|name| ModelInfo {
+                id: name.strip_prefix("models/").unwrap_or(name).to_string(),
+                display_name: m["displayName"].as_str().map(str::to_string),
+            }))
+            .collect();
+        if parsed.is_empty() { Ok(fallback) } else { Ok(parsed) }
+    }
+
+    async fn chat_with(&self, model: Option<&str>, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
+        let resolved_model = model.unwrap_or(&self.model);
         let system_text = messages
             .iter()
             .find(|m| matches!(m.role, Role::System))
@@ -73,7 +113,7 @@ impl LlmProvider for GeminiProvider {
             }]);
         }
 
-        let url = self.endpoint_url();
+        let url = self.endpoint_url(resolved_model);
 
         let response = retry::send_with_retry(
             self.max_retries,
@@ -135,6 +175,14 @@ fn to_gemini_message(msg: &Message) -> Value {
     }
 }
 
+const NON_CHAT_KEYWORDS: &[&str] = &["tts", "image", "robotics", "embedding", "aqa"];
+
+fn is_chat_model(id: &str) -> bool {
+    let is_gemini_family = id.starts_with("gemini-") || id.starts_with("gemma-");
+    let has_excluded_capability = NON_CHAT_KEYWORDS.iter().any(|kw| id.contains(kw));
+    is_gemini_family && !has_excluded_capability
+}
+
 fn to_gemini_tool(tool: &ToolDefinition) -> Value {
     json!({
         "name":        tool.name,
@@ -192,7 +240,7 @@ mod tests {
     use serde_json::json;
 
     fn make_provider(base_url: &str) -> GeminiProvider {
-        GeminiProvider::new("gemini-test".into(), "test-key".into(), 30, 0)
+        GeminiProvider::new("gemini-test".into(), "test-key".into(), 30, 0, ProviderMeta::new("gemini-1"))
             .with_base_url(base_url)
     }
 
@@ -495,6 +543,135 @@ mod tests {
             LlmResponse::Message { text } => assert_eq!(text, "all good"),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn chat_with_model_override_hits_that_models_endpoint() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/override-model:generateContent");
+            then.status(200).json_body(text_response_body());
+        });
+
+        let provider = make_provider(&server.base_url());
+        provider.chat_with(Some("override-model"), &[Message::user("hi")], &[]).await.unwrap();
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn chat_with_none_uses_configured_default_model() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/gemini-test:generateContent");
+            then.status(200).json_body(text_response_body());
+        });
+
+        let provider = make_provider(&server.base_url());
+        provider.chat_with(None, &[Message::user("hi")], &[]).await.unwrap();
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn list_models_parses_gemini_shape_and_filters_unsupported() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("GET").path("/");
+            then.status(200).json_body(json!({
+                "models": [
+                    {
+                        "name": "models/gemini-2.5-flash",
+                        "displayName": "Gemini 2.5 Flash",
+                        "supportedGenerationMethods": ["generateContent"]
+                    },
+                    {
+                        "name": "models/embedding-001",
+                        "displayName": "Embedding",
+                        "supportedGenerationMethods": ["embedContent"]
+                    }
+                ]
+            }));
+        });
+
+        let provider = make_provider(&server.base_url());
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gemini-2.5-flash");
+        assert_eq!(models[0].display_name.as_deref(), Some("Gemini 2.5 Flash"));
+    }
+
+    #[test]
+    fn is_chat_model_accepts_plain_gemini_and_gemma_models() {
+        assert!(is_chat_model("gemini-2.5-flash"));
+        assert!(is_chat_model("gemini-3.1-pro-preview"));
+        assert!(is_chat_model("gemma-4-26b-a4b-it"));
+    }
+
+    #[test]
+    fn is_chat_model_rejects_tts_image_and_robotics_variants() {
+        assert!(!is_chat_model("gemini-2.5-flash-preview-tts"));
+        assert!(!is_chat_model("gemini-2.5-flash-image"));
+        assert!(!is_chat_model("gemini-3-pro-image-preview"));
+        assert!(!is_chat_model("gemini-robotics-er-1.5-preview"));
+    }
+
+    #[test]
+    fn is_chat_model_rejects_non_gemini_families() {
+        assert!(!is_chat_model("lyria-3-pro-preview"));
+        assert!(!is_chat_model("nano-banana-pro-preview"));
+        assert!(!is_chat_model("deep-research-preview-04-2026"));
+        assert!(!is_chat_model("antigravity-preview-05-2026"));
+    }
+
+    #[tokio::test]
+    async fn list_models_excludes_tts_image_and_non_gemini_entries() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("GET").path("/");
+            then.status(200).json_body(json!({
+                "models": [
+                    { "name": "models/gemini-2.5-flash", "displayName": "Gemini 2.5 Flash", "supportedGenerationMethods": ["generateContent"] },
+                    { "name": "models/gemini-2.5-flash-preview-tts", "displayName": "Gemini 2.5 Flash Preview TTS", "supportedGenerationMethods": ["generateContent"] },
+                    { "name": "models/gemini-2.5-flash-image", "displayName": "Nano Banana", "supportedGenerationMethods": ["generateContent"] },
+                    { "name": "models/lyria-3-pro-preview", "displayName": "Lyria 3 Pro Preview", "supportedGenerationMethods": ["generateContent"] },
+                    { "name": "models/gemini-robotics-er-1.5-preview", "displayName": "Gemini Robotics-ER 1.5 Preview", "supportedGenerationMethods": ["generateContent"] },
+                    { "name": "models/gemma-4-31b-it", "displayName": "Gemma 4 31B IT", "supportedGenerationMethods": ["generateContent"] }
+                ]
+            }));
+        });
+
+        let provider = make_provider(&server.base_url());
+        let models = provider.list_models().await.unwrap();
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["gemini-2.5-flash", "gemma-4-31b-it"]);
+    }
+
+    #[tokio::test]
+    async fn list_models_falls_back_to_default_on_error_status() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("GET").path("/");
+            then.status(500);
+        });
+
+        let provider = make_provider(&server.base_url());
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models, vec![ModelInfo { id: "gemini-test".into(), display_name: None }]);
+    }
+
+    #[test]
+    fn expose_to_ui_reflects_constructor_value() {
+        let visible = GeminiProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("a"));
+        let hidden  = GeminiProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "b".into(), expose_to_ui: false, name: None, models: None });
+        assert!(visible.expose_to_ui());
+        assert!(!hidden.expose_to_ui());
+    }
+
+    #[test]
+    fn name_reflects_constructor_value() {
+        let named   = GeminiProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "a".into(), expose_to_ui: true, name: Some("Gemini Direct".into()), models: None });
+        let unnamed = GeminiProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("b"));
+        assert_eq!(named.name(), Some("Gemini Direct"));
+        assert_eq!(unnamed.name(), None);
     }
 
     #[tokio::test]

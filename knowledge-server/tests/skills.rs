@@ -20,7 +20,7 @@ use knowledge_server::{
     auth::{self, jwt},
     llm::{
         LlmProvider,
-        types::{LlmResponse, Message, ToolDefinition},
+        types::{LlmResponse, Message, ModelInfo, ToolDefinition},
     },
     machines::MachineRegistry,
     neo4j::Neo4jClient,
@@ -44,7 +44,11 @@ impl FixedTextLlm {
 }
 #[async_trait]
 impl LlmProvider for FixedTextLlm {
-    async fn chat(&self, _: &[Message], _: &[ToolDefinition]) -> anyhow::Result<LlmResponse> {
+    fn id(&self) -> &str { "fixed-text" }
+    fn kind(&self) -> &str { "mock" }
+    fn default_model(&self) -> &str { "mock-model" }
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> { Ok(vec![]) }
+    async fn chat_with(&self, _model: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> anyhow::Result<LlmResponse> {
         Ok(LlmResponse::Message { text: self.0.clone() })
     }
 }
