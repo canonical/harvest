@@ -88,4 +88,14 @@ describe('fetchLlmProviders', () => {
     const result = await fetchLlmProviders();
     expect(result).toEqual({ providers: [] });
   });
+
+  it('returns an empty providers list without throwing when the body is not valid JSON', async () => {
+    global.fetch = vi.fn(() => Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () => Promise.reject(new SyntaxError('Unexpected token <')),
+    }));
+    const result = await fetchLlmProviders();
+    expect(result).toEqual({ providers: [] });
+  });
 });
