@@ -94,7 +94,7 @@ export async function fetchLlmProviders() {
   try {
     const response = await fetch(LLM_PROVIDERS_URL);
     if (!response.ok) return { providers: [] };
-    return response.json();
+    return await response.json();
   } catch {
     return { providers: [] };
   }
