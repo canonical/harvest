@@ -63,16 +63,24 @@ emit_llm_block() {
   eval "models=\"\${${prefix}_MODELS:-}\""
 
   : "${provider:?${prefix}_PROVIDER environment variable is required}"
-  : "${api_key:?${prefix}_API_KEY environment variable is required}"
 
   if [ -z "$id" ] && [ "$prefix" != "LLM" ]; then
     id=$(printf '%s' "${prefix#LLM_}" | tr '[:upper:]' '[:lower:]')
   fi
 
   case "$provider" in
-    anthropic)         default_model="claude-sonnet-4-6" ;;
-    gemini)             default_model="gemini-2.5-flash-preview-05-20" ;;
+    anthropic)
+      : "${api_key:?${prefix}_API_KEY environment variable is required}"
+      default_model="claude-sonnet-4-6"
+      ;;
+    gemini)
+      : "${api_key:?${prefix}_API_KEY environment variable is required}"
+      default_model="gemini-2.5-flash-preview-05-20"
+      ;;
     openai-compatible)
+      # api_key may be left empty for self-hosted endpoints that don't
+      # require auth — openai_compat.rs skips the Authorization header
+      # when it's empty rather than sending it blank.
       : "${base_url:?${prefix}_BASE_URL is required when ${prefix}_PROVIDER=openai-compatible}"
       default_model=""
       ;;
