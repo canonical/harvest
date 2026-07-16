@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod artifacts;
 pub mod skills;
 pub mod agent;
 pub mod api;
