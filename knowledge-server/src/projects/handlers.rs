@@ -1450,6 +1450,48 @@ pub async fn delete_memory(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn list_artifacts(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path(project_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let rows = state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact)
+         RETURN a.id AS id, a.title AS title, a.kind AS kind,
+                a.created_at AS created_at, a.updated_at AS updated_at,
+                a.created_by AS created_by
+         ORDER BY a.created_at DESC",
+        json!({ "pid": project_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(Json(rows))
+}
+
+#[derive(serde::Deserialize)]
+pub struct CreateArtifactBody {
+    pub title:   String,
+    pub kind:    String,
+    pub content: String,
+}
+
+pub async fn create_artifact_route(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path(project_id): Path<String>,
+    Json(body): Json<CreateArtifactBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let kind = crate::artifacts::handlers::ArtifactKind::parse(&body.kind)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "kind must be 'markdown' or 'pdf'"))?;
+    if body.title.trim().is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "title is required"));
+    }
+    let result = crate::artifacts::handlers::create_artifact(
+        &state.neo4j, &project_id, kind, &body.title, &body.content, &user.sub,
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok((StatusCode::CREATED, Json(result)))
+}
+
 pub async fn list_project_skills(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
