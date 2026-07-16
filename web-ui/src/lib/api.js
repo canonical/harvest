@@ -376,6 +376,20 @@ export async function deleteProjectMemory(projectId, memoryId) {
   }
 }
 
+const ARTIFACTS_URL = '/artifacts';
+const artifactUrl = (id) => `${ARTIFACTS_URL}/${encodeURIComponent(id)}`;
+
+export const listProjectArtifacts  = (projectId) => projectFetch(`${projectUrl(projectId)}/artifacts`);
+export const getArtifact           = (id)         => projectFetch(artifactUrl(id));
+export const artifactDownloadUrl   = (id)         => `${artifactUrl(id)}/download`;
+export async function deleteArtifact(id) {
+  const res = await fetch(artifactUrl(id), { method: 'DELETE' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
+}
+
 export const listGlobalSkills  = ()       => projectFetch('/skills');
 export const getGlobalSkill    = (id)     => projectFetch(`/skills/${encodeURIComponent(id)}`);
 export const createGlobalSkill = (body)   => adminFetch('/admin/skills', { method: 'POST', body: JSON.stringify(body) });
