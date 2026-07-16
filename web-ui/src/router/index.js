@@ -9,6 +9,8 @@ const routes = [
   { path: '/agents',         component: () => import('../views/AgentsView.vue'),         meta: { requiresProject: true } },
   { path: '/agents/:agentId/console', component: () => import('../views/AgentConsoleView.vue'), meta: { requiresProject: true } },
   { path: '/memories',       component: () => import('../views/MemoriesView.vue'),       meta: { requiresProject: true } },
+  { path: '/artifacts',      component: () => import('../views/ArtifactsView.vue'),      meta: { requiresProject: true } },
+  { path: '/artifacts/:id',  component: () => import('../views/ArtifactsView.vue'),      meta: { directEntry: true } },
   { path: '/skills',         component: () => import('../views/SkillsView.vue'),         meta: { requiresProject: true } },
   { path: '/docs',           component: () => import('../views/DocumentationView.vue'),  meta: { requiresProject: true, feature: 'docs' } },
   { path: '/repositories',   component: () => import('../views/RepositoriesView.vue'),   meta: { requiresProject: true } },
@@ -32,7 +34,7 @@ router.beforeEach(async (to, from) => {
 
   if (to.meta.feature && !auth.features[to.meta.feature]) return '/';
 
-  if (from.matched.length === 0 && to.path !== '/') return '/';
+  if (!to.meta.directEntry && from.matched.length === 0 && to.path !== '/') return '/';
 
   return true;
 });
