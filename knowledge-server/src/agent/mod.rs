@@ -1,3 +1,4 @@
+pub mod artifact_tools;
 pub mod chain;
 pub mod graph_tools;
 pub mod lxd_tools;

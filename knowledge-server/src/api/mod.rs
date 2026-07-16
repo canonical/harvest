@@ -15,7 +15,8 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::agent::{graph_tools, lxd_tools, machine_tools, port_forward_tools, skill_tools, Agent};
+use crate::agent::{artifact_tools, graph_tools, lxd_tools, machine_tools, port_forward_tools, skill_tools, Agent};
+use crate::artifacts::handlers::{self as artifact_handlers, ArtifactState};
 use crate::skills::{handlers as skill_handlers, SkillStore};
 use crate::auth::{self, handlers as auth_handlers, AuthState};
 use crate::config::UiConfig;
@@ -121,6 +122,11 @@ impl ProjectAgentBuilder {
         tools.push(Box::new(port_forward_tools::DeletePortForwardTool {
             neo4j:      Arc::clone(&self.neo4j),
             project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(artifact_tools::GenerateArtifactTool {
+            neo4j:      Arc::clone(&self.neo4j),
+            project_id: project_id.clone(),
+            server_url: self.server_url.clone(),
         }));
         Arc::new(
             Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
@@ -241,6 +247,8 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                get(proj_handlers::get_memory)
                .put(proj_handlers::update_memory)
                .delete(proj_handlers::delete_memory))
+        .route("/projects/:pid/artifacts",
+               get(proj_handlers::list_artifacts).post(proj_handlers::create_artifact_route))
         .route("/projects/:pid/skills",
                get(proj_handlers::list_project_skills).post(proj_handlers::create_project_skill))
         .route("/projects/:pid/skills/:sid",
@@ -273,6 +281,13 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .route("/skills/:id", get(skill_handlers::get_global_skill))
         .with_state(Arc::clone(&skill_store));
 
+    let artifact_state = Arc::new(ArtifactState { neo4j: Arc::clone(&state.neo4j) });
+    let artifact_router = Router::new()
+        .route("/artifacts/:id",
+               get(artifact_handlers::get_artifact).delete(artifact_handlers::delete_artifact))
+        .route("/artifacts/:id/download", get(artifact_handlers::download_artifact))
+        .with_state(artifact_state);
+
     let mut protected_router = Router::new()
         .merge(me_router)
         .merge(conv_router)
@@ -281,7 +296,8 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .merge(llm_router)
         .merge(project_router)
         .merge(machines_protected)
-        .merge(skills_read_router);
+        .merge(skills_read_router)
+        .merge(artifact_router);
 
     if let Some(docs_dir) = state.docs_dir {
         let docs_router = Router::new()
