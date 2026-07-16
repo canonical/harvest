@@ -25,6 +25,9 @@ export function renderPreviewToHtml(text, filePath = null) {
     if (parsed?.__type === 'markdown' && typeof parsed.content === 'string') {
       return `<div class="tool-data__markdown">${renderMarkdown(parsed.content)}</div>`;
     }
+    if (parsed?.__type === 'link' && typeof parsed.href === 'string' && typeof parsed.label === 'string') {
+      return `<a class="tool-data__link" href="${esc(parsed.href)}">${esc(parsed.label)}</a>`;
+    }
     if (Array.isArray(parsed) && parsed.length === 0) {
       return '<span class="tool-data__empty">No results returned</span>';
     }
