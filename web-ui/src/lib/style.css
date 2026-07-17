@@ -1092,6 +1092,8 @@ details.tc-group[open] {
   vertical-align: top;
   color: var(--text-primary);
   background: var(--bg-surface);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .tool-data__table thead th {
