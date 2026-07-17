@@ -8,6 +8,17 @@ const EXT_TO_LANG = {
   rb: 'ruby', sh: 'bash', toml: 'toml', yaml: 'yaml', yml: 'yaml',
 };
 
+const SOURCE_LIKE_KEYS = ['source', 'code', 'content'];
+const HTML_LIKE_RE = /<\/?[a-zA-Z][^\n>]*>/;
+
+function findSourceKey(item) {
+  if (!isPlainObject(item)) return null;
+  for (const key of SOURCE_LIKE_KEYS) {
+    if (typeof item[key] === 'string' && item[key].length > 0) return key;
+  }
+  return null;
+}
+
 export function renderJsonToHtml(value) {
   if (value === null || value === undefined) return '<em>—</em>';
   if (typeof value === 'string') return esc(value);
@@ -49,7 +60,12 @@ export function renderPreviewToHtml(text, filePath = null) {
   const truncatedSourceHtml = tryExtractTruncatedSource(text, filePath);
   if (truncatedSourceHtml !== null) return truncatedSourceHtml;
 
-  return `<span class="tool-data__fallback">${esc(text)}</span>`;
+  if (HTML_LIKE_RE.test(text)) {
+    const highlighted = hljs.highlight(text, { language: 'xml', ignoreIllegals: true }).value;
+    return `<pre class="tool-data__fallback"><code class="hljs language-xml">${highlighted}</code></pre>`;
+  }
+
+  return `<pre class="tool-data__fallback"><code>${esc(text)}</code></pre>`;
 }
 
 function renderObject(obj) {
@@ -100,10 +116,17 @@ function shortenAbsPath(str) {
 
 function tryExtractTruncatedSource(text, filePath) {
   const t = text.trimStart();
-  if (!t.startsWith('[') || !t.includes('"source"')) return null;
+  if (!t.startsWith('[')) return null;
 
-  const keyIdx = t.indexOf('"source"');
-  let pos = keyIdx + 8;
+  let matchedKey = null;
+  let keyIdx = -1;
+  for (const key of SOURCE_LIKE_KEYS) {
+    const idx = t.indexOf(`"${key}"`);
+    if (idx !== -1) { matchedKey = key; keyIdx = idx; break; }
+  }
+  if (matchedKey === null) return null;
+
+  let pos = keyIdx + matchedKey.length + 2;
   while (pos < t.length && /[\s:]/.test(t[pos])) pos++;
   if (pos >= t.length || t[pos] !== '"') return null;
   pos++;
@@ -138,7 +161,7 @@ function tryExtractTruncatedSource(text, filePath) {
   const endMatch   = t.match(/"end_line"\s*:\s*(\d+)/);
 
   const items = [{
-    source,
+    [matchedKey]: source,
     name: nameMatch?.[1] ?? null,
     start_line: startMatch ? parseInt(startMatch[1]) : null,
     end_line:   endMatch   ? parseInt(endMatch[1])   : null,
@@ -151,10 +174,13 @@ function tryExtractTruncatedSource(text, filePath) {
 
 function tryRenderAsSource(parsed, filePath) {
   if (!Array.isArray(parsed) || parsed.length === 0) return null;
-  if (!parsed.every(item => isPlainObject(item) && typeof item.source === 'string')) return null;
+  const withKeys = parsed
+    .map(item => ({ item, key: findSourceKey(item) }))
+    .filter(({ key }) => key !== null);
+  if (withKeys.length === 0) return null;
 
   const lang = langFromPath(filePath);
-  const blocks = parsed.map(item => {
+  const blocks = withKeys.map(({ item, key }) => {
     const parts = [];
     if (item.version) parts.push(item.version);
     if (item.name) parts.push(item.name);
@@ -164,7 +190,7 @@ function tryRenderAsSource(parsed, filePath) {
     const meta = parts.length > 0
       ? `<div class="tool-source__meta">${esc(parts.join(' · '))}</div>`
       : '';
-    const highlighted = hljs.highlight(item.source, { language: lang, ignoreIllegals: true }).value;
+    const highlighted = hljs.highlight(item[key], { language: lang, ignoreIllegals: true }).value;
     return `${meta}<pre class="tool-source__pre"><code class="hljs language-${esc(lang)}">${highlighted}</code></pre>`;
   });
   return `<div class="tool-source">${blocks.join('')}</div>`;
