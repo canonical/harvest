@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::auth::jwt::Claims;
 use crate::neo4j::Neo4jClient;
+use super::bundle;
 
 type ApiError = (StatusCode, Json<Value>);
 
@@ -27,23 +28,54 @@ pub struct ArtifactState {
 pub enum ArtifactKind {
     Markdown,
     Pdf,
+    Terraform,
+    Terragrunt,
 }
 
 impl ArtifactKind {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "markdown" => Some(Self::Markdown),
-            "pdf"      => Some(Self::Pdf),
-            _          => None,
+            "markdown"   => Some(Self::Markdown),
+            "pdf"        => Some(Self::Pdf),
+            "terraform"  => Some(Self::Terraform),
+            "terragrunt" => Some(Self::Terragrunt),
+            _            => None,
         }
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Markdown => "markdown",
-            Self::Pdf      => "pdf",
+            Self::Markdown   => "markdown",
+            Self::Pdf        => "pdf",
+            Self::Terraform  => "terraform",
+            Self::Terragrunt => "terragrunt",
         }
     }
+}
+
+pub(crate) fn validate_content_for_kind(kind: ArtifactKind, content: &str) -> Result<(), String> {
+    if matches!(kind, ArtifactKind::Terraform | ArtifactKind::Terragrunt) {
+        let files = bundle::parse_bundle(content)?;
+        bundle::validate_bundle(&files)?;
+    }
+    Ok(())
+}
+
+fn validate_update(
+    existing_kind: ArtifactKind,
+    kind: ArtifactKind,
+    title: &str,
+    content: &str,
+) -> Result<String, String> {
+    if kind != existing_kind {
+        return Err("kind cannot be changed on update".to_string());
+    }
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("title is required".to_string());
+    }
+    validate_content_for_kind(kind, content)?;
+    Ok(title.to_string())
 }
 
 fn sanitize_filename(title: &str) -> String {
@@ -86,6 +118,7 @@ pub async fn create_artifact(
 ) -> anyhow::Result<Value> {
     let title = title.trim();
     anyhow::ensure!(!title.is_empty(), "title is required");
+    validate_content_for_kind(kind, content).map_err(|e| anyhow::anyhow!(e))?;
     let id  = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     neo4j.query_read(
@@ -102,6 +135,62 @@ pub async fn create_artifact(
         }),
     ).await?;
     Ok(json!({ "id": id, "title": title, "kind": kind.as_str(), "created_at": now }))
+}
+
+pub async fn update_artifact(
+    neo4j: &Neo4jClient,
+    artifact_id: &str,
+    existing_kind: ArtifactKind,
+    kind: ArtifactKind,
+    title: &str,
+    content: &str,
+) -> anyhow::Result<Value> {
+    let title = validate_update(existing_kind, kind, title, content).map_err(|e| anyhow::anyhow!(e))?;
+    let now = chrono::Utc::now().to_rfc3339();
+    neo4j.query_read(
+        "MATCH (:Project)-[:HAS_ARTIFACT]->(a:Artifact {id: $id})
+         SET a.title = $title, a.content = $content, a.updated_at = $now
+         RETURN a.id AS id",
+        json!({ "id": artifact_id, "title": title, "content": content, "now": now }),
+    ).await?;
+    Ok(json!({ "id": artifact_id, "title": title, "kind": kind.as_str(), "updated_at": now }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateArtifactBody {
+    pub title:   String,
+    pub kind:    String,
+    pub content: String,
+}
+
+pub async fn update_artifact_route(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ArtifactState>>,
+    Path(artifact_id): Path<String>,
+    Json(body): Json<UpdateArtifactBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let row = require_artifact_access(&state.neo4j, &user.sub, &user.role, &artifact_id).await?;
+    let existing_kind = ArtifactKind::parse(row["kind"].as_str().unwrap_or(""))
+        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let kind = ArtifactKind::parse(&body.kind)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "kind must be 'markdown', 'pdf', 'terraform', or 'terragrunt'"))?;
+    let result = update_artifact(&state.neo4j, &artifact_id, existing_kind, kind, &body.title, &body.content)
+        .await
+        .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    Ok(Json(result))
+}
+
+pub async fn get_artifact_in_project(
+    neo4j: &Neo4jClient,
+    project_id: &str,
+    artifact_id: &str,
+) -> anyhow::Result<Option<Value>> {
+    let rows = neo4j.query_read(
+        "MATCH (p:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact {id: $aid})
+         RETURN a.id AS id, a.title AS title, a.kind AS kind, a.content AS content",
+        json!({ "pid": project_id, "aid": artifact_id }),
+    ).await?;
+    Ok(rows.into_iter().next())
 }
 
 pub async fn get_artifact(
@@ -156,6 +245,16 @@ pub async fn download_artifact(
                 err(StatusCode::INTERNAL_SERVER_ERROR, "failed to render pdf").into_response()
             }
         }
+    } else if kind == "terraform" || kind == "terragrunt" {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"))
+            .header(
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_str(&format!("attachment; filename=\"{slug}.json\"")).unwrap(),
+            )
+            .body(Body::from(content))
+            .unwrap()
     } else {
         Response::builder()
             .status(StatusCode::OK)
@@ -197,7 +296,67 @@ mod tests {
     fn artifact_kind_parses_known_values_only() {
         assert_eq!(ArtifactKind::parse("markdown"), Some(ArtifactKind::Markdown));
         assert_eq!(ArtifactKind::parse("pdf"), Some(ArtifactKind::Pdf));
+        assert_eq!(ArtifactKind::parse("terraform"), Some(ArtifactKind::Terraform));
+        assert_eq!(ArtifactKind::parse("terragrunt"), Some(ArtifactKind::Terragrunt));
         assert_eq!(ArtifactKind::parse("docx"), None);
+    }
+
+    #[test]
+    fn artifact_kind_as_str_round_trips() {
+        for kind in [ArtifactKind::Markdown, ArtifactKind::Pdf, ArtifactKind::Terraform, ArtifactKind::Terragrunt] {
+            assert_eq!(ArtifactKind::parse(kind.as_str()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn validate_content_for_kind_skips_validation_for_markdown() {
+        assert!(validate_content_for_kind(ArtifactKind::Markdown, "anything goes").is_ok());
+    }
+
+    #[test]
+    fn validate_content_for_kind_skips_validation_for_pdf() {
+        assert!(validate_content_for_kind(ArtifactKind::Pdf, "# report").is_ok());
+    }
+
+    #[test]
+    fn validate_content_for_kind_rejects_non_bundle_terraform_content() {
+        let e = validate_content_for_kind(ArtifactKind::Terraform, "# just markdown").unwrap_err();
+        assert!(e.contains("JSON"));
+    }
+
+    #[test]
+    fn validate_content_for_kind_accepts_bundle_for_terragrunt() {
+        assert!(validate_content_for_kind(ArtifactKind::Terragrunt, r#"{"terragrunt.hcl":"..."}"#).is_ok());
+    }
+
+    #[test]
+    fn validate_update_rejects_kind_change() {
+        let e = validate_update(ArtifactKind::Markdown, ArtifactKind::Pdf, "T", "content").unwrap_err();
+        assert!(e.contains("kind"));
+    }
+
+    #[test]
+    fn validate_update_rejects_empty_title() {
+        let e = validate_update(ArtifactKind::Markdown, ArtifactKind::Markdown, "   ", "content").unwrap_err();
+        assert!(e.contains("title"));
+    }
+
+    #[test]
+    fn validate_update_validates_terraform_bundle() {
+        let e = validate_update(ArtifactKind::Terraform, ArtifactKind::Terraform, "T", "not json").unwrap_err();
+        assert!(e.contains("JSON"));
+    }
+
+    #[test]
+    fn validate_update_accepts_valid_terraform_bundle() {
+        let title = validate_update(ArtifactKind::Terraform, ArtifactKind::Terraform, "T", r#"{"main.tf":"..."}"#).unwrap();
+        assert_eq!(title, "T");
+    }
+
+    #[test]
+    fn validate_update_accepts_markdown_content_unchanged() {
+        let title = validate_update(ArtifactKind::Markdown, ArtifactKind::Markdown, "  T  ", "# hi").unwrap();
+        assert_eq!(title, "T");
     }
 
     #[test]

@@ -7,7 +7,7 @@ use axum::extract::ws::Message;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::{sync::Arc, time::Instant};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -19,16 +19,75 @@ pub struct ResultBody {
     pub exit_code:  i32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerraformFlavor {
+    Terraform,
+    Terragrunt,
+}
+
+impl TerraformFlavor {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "terraform"  => Some(Self::Terraform),
+            "terragrunt" => Some(Self::Terragrunt),
+            _            => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Terraform  => "terraform",
+            Self::Terragrunt => "terragrunt",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerraformAction {
+    Plan,
+    Apply,
+    Destroy,
+}
+
+impl TerraformAction {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "plan"    => Some(Self::Plan),
+            "apply"   => Some(Self::Apply),
+            "destroy" => Some(Self::Destroy),
+            _         => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Plan    => "plan",
+            Self::Apply   => "apply",
+            Self::Destroy => "destroy",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerToAgent {
-    Registered { agent_token: String },
+    Registered   { agent_token: String },
     HelloAck,
-    Execute    { request_id: String, command: String, timeout_secs: u64 },
-    OpenShell  { session_id: String, cols: u16, rows: u16 },
-    OpenTunnel { session_id: String, port: u16 },
+    Execute      { request_id: String, command: String, timeout_secs: u64 },
+    RunTerraform {
+        request_id:   String,
+        artifact_id:  String,
+        flavor:       TerraformFlavor,
+        action:       TerraformAction,
+        files:        BTreeMap<String, String>,
+        timeout_secs: u64,
+    },
+    OpenShell    { session_id: String, cols: u16, rows: u16 },
+    OpenTunnel   { session_id: String, port: u16 },
     Uninstall,
-    Error      { message: String },
+    Error        { message: String },
 }
 
 #[derive(Debug)]
@@ -106,10 +165,11 @@ impl MachineRegistry {
             .collect()
     }
 
-    pub async fn execute(
+    async fn send_and_await(
         &self,
         agent_id: &str,
-        command:  String,
+        request_id: String,
+        message: ServerToAgent,
         timeout_secs: u64,
     ) -> Result<CommandResult, String> {
         let sender = self
@@ -119,7 +179,6 @@ impl MachineRegistry {
             .sender
             .clone();
 
-        let request_id = Uuid::new_v4().to_string();
         let (result_tx, result_rx) = oneshot::channel();
 
         self.pending.insert(request_id.clone(), PendingResult {
@@ -128,11 +187,7 @@ impl MachineRegistry {
         });
 
         sender
-            .send(ServerToAgent::Execute {
-                request_id: request_id.clone(),
-                command,
-                timeout_secs,
-            })
+            .send(message)
             .await
             .map_err(|_| "agent disconnected before send".to_string())?;
 
@@ -141,6 +196,40 @@ impl MachineRegistry {
             .await
             .map_err(|_| "timed out waiting for command result".to_string())?
             .map_err(|_| "result channel closed".to_string())?
+    }
+
+    pub async fn execute(
+        &self,
+        agent_id: &str,
+        command:  String,
+        timeout_secs: u64,
+    ) -> Result<CommandResult, String> {
+        let request_id = Uuid::new_v4().to_string();
+        self.send_and_await(
+            agent_id,
+            request_id.clone(),
+            ServerToAgent::Execute { request_id, command, timeout_secs },
+            timeout_secs,
+        ).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_terraform(
+        &self,
+        agent_id:     &str,
+        artifact_id:  String,
+        flavor:       TerraformFlavor,
+        action:       TerraformAction,
+        files:        BTreeMap<String, String>,
+        timeout_secs: u64,
+    ) -> Result<CommandResult, String> {
+        let request_id = Uuid::new_v4().to_string();
+        self.send_and_await(
+            agent_id,
+            request_id.clone(),
+            ServerToAgent::RunTerraform { request_id, artifact_id, flavor, action, files, timeout_secs },
+            timeout_secs,
+        ).await
     }
 
     pub async fn open_console_session(
@@ -274,6 +363,89 @@ mod tests {
         let h = hash_token("some-token");
         assert_eq!(h.len(), 64, "SHA-256 hex is 64 chars: {h}");
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()), "not hex: {h}");
+    }
+
+    #[test]
+    fn terraform_flavor_parses_known_values_only() {
+        assert_eq!(TerraformFlavor::parse("terraform"), Some(TerraformFlavor::Terraform));
+        assert_eq!(TerraformFlavor::parse("terragrunt"), Some(TerraformFlavor::Terragrunt));
+        assert_eq!(TerraformFlavor::parse("cloudformation"), None);
+    }
+
+    #[test]
+    fn terraform_flavor_as_str_round_trips() {
+        for flavor in [TerraformFlavor::Terraform, TerraformFlavor::Terragrunt] {
+            assert_eq!(TerraformFlavor::parse(flavor.as_str()), Some(flavor));
+        }
+    }
+
+    #[test]
+    fn terraform_action_parses_known_values_only() {
+        assert_eq!(TerraformAction::parse("plan"), Some(TerraformAction::Plan));
+        assert_eq!(TerraformAction::parse("apply"), Some(TerraformAction::Apply));
+        assert_eq!(TerraformAction::parse("destroy"), Some(TerraformAction::Destroy));
+        assert_eq!(TerraformAction::parse("delete"), None);
+    }
+
+    #[test]
+    fn terraform_action_as_str_round_trips() {
+        for action in [TerraformAction::Plan, TerraformAction::Apply, TerraformAction::Destroy] {
+            assert_eq!(TerraformAction::parse(action.as_str()), Some(action));
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_terraform_unknown_agent_returns_error() {
+        let registry = MachineRegistry::new();
+        let e = registry.execute_terraform(
+            "nonexistent",
+            "artifact-1".into(),
+            TerraformFlavor::Terraform,
+            TerraformAction::Plan,
+            BTreeMap::new(),
+            30,
+        ).await.unwrap_err();
+        assert!(e.contains("not connected"), "got: {e}");
+    }
+
+    #[tokio::test]
+    async fn execute_terraform_sends_run_terraform_message_and_resolves_result() {
+        let registry = MachineRegistry::new();
+        let mut rx = register_agent(&registry, "a1");
+
+        let mut files = BTreeMap::new();
+        files.insert("main.tf".to_string(), "resource \"local_file\" \"x\" {}".to_string());
+
+        let registry_clone = Arc::clone(&registry);
+        let files_clone = files.clone();
+        let handle = tokio::spawn(async move {
+            registry_clone.execute_terraform(
+                "a1",
+                "artifact-1".into(),
+                TerraformFlavor::Terraform,
+                TerraformAction::Plan,
+                files_clone,
+                30,
+            ).await
+        });
+
+        let request_id = match rx.recv().await.unwrap() {
+            ServerToAgent::RunTerraform { request_id, artifact_id, flavor, action, files: sent_files, timeout_secs } => {
+                assert_eq!(artifact_id, "artifact-1");
+                assert_eq!(flavor, TerraformFlavor::Terraform);
+                assert_eq!(action, TerraformAction::Plan);
+                assert_eq!(sent_files, files);
+                assert_eq!(timeout_secs, 30);
+                request_id
+            }
+            other => panic!("expected RunTerraform, got {other:?}"),
+        };
+
+        let (_, pending) = registry.pending.remove(&request_id).unwrap();
+        pending.tx.send(Ok(CommandResult { stdout: "planned".into(), stderr: String::new(), exit_code: 0 })).unwrap();
+
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(result.stdout, "planned");
     }
 
     fn register_agent(registry: &MachineRegistry, agent_id: &str) -> mpsc::Receiver<ServerToAgent> {

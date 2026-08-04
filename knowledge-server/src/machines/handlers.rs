@@ -26,8 +26,11 @@ use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream};
 use uuid::Uuid;
 
-use crate::{auth::jwt::Claims, lxd::{Flavor, LxdClient}, neo4j::Neo4jClient};
-use super::{lxd_provision, port_forwards, ConnectedAgent, MachineRegistry, ResultBody, ServerToAgent, hash_token};
+use crate::{
+    artifacts::{bundle as tf_bundle, handlers::{require_artifact_access, ArtifactKind}},
+    auth::jwt::Claims, lxd::{Flavor, LxdClient}, neo4j::Neo4jClient,
+};
+use super::{lxd_provision, port_forwards, ConnectedAgent, MachineRegistry, ResultBody, ServerToAgent, TerraformAction, TerraformFlavor, hash_token};
 
 const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 25;
 const DEFAULT_EXECUTE_TIMEOUT_SECS: u64 = 30;
@@ -154,6 +157,7 @@ pub fn machines_protected_router(state: Arc<MachineState>) -> Router {
         .route("/projects/:pid/agents",                      get(list_agents))
         .route("/projects/:pid/agents/:aid",                 delete(delete_agent))
         .route("/projects/:pid/agents/:aid/execute",         post(execute_command))
+        .route("/projects/:pid/agents/:aid/terraform",       post(run_terraform_command))
         .route("/projects/:pid/agents/:aid/console",         get(agent_console_open_handler))
         .route("/projects/:pid/agents/:aid/start",           post(start_agent))
         .route("/projects/:pid/agents/:aid/stop",            post(stop_agent))
@@ -490,6 +494,56 @@ pub async fn execute_command(
 
     let timeout = body.timeout_secs.min(MAX_EXECUTE_TIMEOUT_SECS);
     match state.registry.execute(&agent_id, body.command, timeout).await {
+        Ok(r) => Ok(Json(json!({
+            "stdout":    r.stdout,
+            "stderr":    r.stderr,
+            "exit_code": r.exit_code,
+        }))),
+        Err(e) => Err(err(StatusCode::BAD_GATEWAY, &e)),
+    }
+}
+
+const DEFAULT_TERRAFORM_TIMEOUT_SECS: u64 = 300;
+const MAX_TERRAFORM_TIMEOUT_SECS:     u64 = 1800;
+
+fn default_terraform_timeout() -> u64 { DEFAULT_TERRAFORM_TIMEOUT_SECS }
+
+#[derive(serde::Deserialize)]
+pub struct RunTerraformBody {
+    pub artifact_id: String,
+    pub action:      String,
+    #[serde(default = "default_terraform_timeout")]
+    pub timeout_secs: u64,
+}
+
+pub async fn run_terraform_command(
+    Extension(user): Extension<Claims>,
+    State(state):    State<Arc<MachineState>>,
+    Path((project_id, agent_id)): Path<(String, String)>,
+    Json(body):      Json<RunTerraformBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let neo4j = neo4j_or_err(&state)?;
+    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+
+    let artifact = require_artifact_access(neo4j, &user.sub, &user.role, &body.artifact_id).await?;
+    if artifact["project_id"].as_str() != Some(project_id.as_str()) {
+        return Err(err(StatusCode::NOT_FOUND, "not found"));
+    }
+
+    let flavor = match ArtifactKind::parse(artifact["kind"].as_str().unwrap_or("")) {
+        Some(ArtifactKind::Terraform)  => TerraformFlavor::Terraform,
+        Some(ArtifactKind::Terragrunt) => TerraformFlavor::Terragrunt,
+        _ => return Err(err(StatusCode::BAD_REQUEST, "artifact is not a terraform or terragrunt artifact")),
+    };
+
+    let action = TerraformAction::parse(&body.action)
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "action must be 'plan', 'apply', or 'destroy'"))?;
+
+    let files = tf_bundle::parse_bundle(artifact["content"].as_str().unwrap_or(""))
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+
+    let timeout = body.timeout_secs.min(MAX_TERRAFORM_TIMEOUT_SECS);
+    match state.registry.execute_terraform(&agent_id, body.artifact_id, flavor, action, files, timeout).await {
         Ok(r) => Ok(Json(json!({
             "stdout":    r.stdout,
             "stderr":    r.stderr,

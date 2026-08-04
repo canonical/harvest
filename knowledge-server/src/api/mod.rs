@@ -15,7 +15,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::agent::{artifact_tools, graph_tools, lxd_tools, machine_tools, port_forward_tools, skill_tools, Agent};
+use crate::agent::{artifact_tools, graph_tools, lxd_tools, machine_tools, port_forward_tools, skill_tools, terraform_tools, Agent};
 use crate::artifacts::handlers::{self as artifact_handlers, ArtifactState};
 use crate::skills::{handlers as skill_handlers, SkillStore};
 use crate::auth::{self, handlers as auth_handlers, AuthState};
@@ -127,6 +127,21 @@ impl ProjectAgentBuilder {
             neo4j:      Arc::clone(&self.neo4j),
             project_id: project_id.clone(),
             server_url: self.server_url.clone(),
+        }));
+        tools.push(Box::new(terraform_tools::RunTerraformPlanTool {
+            neo4j:      Arc::clone(&self.neo4j),
+            registry:   Arc::clone(&self.registry),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(terraform_tools::RunTerraformApplyTool {
+            neo4j:      Arc::clone(&self.neo4j),
+            registry:   Arc::clone(&self.registry),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(terraform_tools::RunTerraformDestroyTool {
+            neo4j:      Arc::clone(&self.neo4j),
+            registry:   Arc::clone(&self.registry),
+            project_id: project_id.clone(),
         }));
         Arc::new(
             Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
@@ -284,7 +299,9 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let artifact_state = Arc::new(ArtifactState { neo4j: Arc::clone(&state.neo4j) });
     let artifact_router = Router::new()
         .route("/artifacts/:id",
-               get(artifact_handlers::get_artifact).delete(artifact_handlers::delete_artifact))
+               get(artifact_handlers::get_artifact)
+               .put(artifact_handlers::update_artifact_route)
+               .delete(artifact_handlers::delete_artifact))
         .route("/artifacts/:id/download", get(artifact_handlers::download_artifact))
         .with_state(artifact_state);
 
