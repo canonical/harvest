@@ -1482,10 +1482,12 @@ pub async fn create_artifact_route(
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let kind = crate::artifacts::handlers::ArtifactKind::parse(&body.kind)
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "kind must be 'markdown' or 'pdf'"))?;
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "kind must be 'markdown', 'pdf', 'terraform', or 'terragrunt'"))?;
     if body.title.trim().is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "title is required"));
     }
+    crate::artifacts::handlers::validate_content_for_kind(kind, &body.content)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
     let result = crate::artifacts::handlers::create_artifact(
         &state.neo4j, &project_id, kind, &body.title, &body.content, &user.sub,
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
