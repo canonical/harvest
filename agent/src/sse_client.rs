@@ -4,7 +4,11 @@ use serde::Deserialize;
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
 
-use crate::{config::Config, console, executor, tunnel};
+use crate::{
+    config::Config, console, executor, terraform,
+    terraform::{TerraformAction, TerraformFlavor},
+    tunnel,
+};
 
 const PING_INTERVAL_SECS: u64 = 30;
 const PING_TIMEOUT_SECS: u64 = 10;
@@ -24,6 +28,15 @@ enum ServerMsg {
         #[serde(default = "default_command_timeout")]
         timeout_secs: u64,
     },
+    RunTerraform {
+        request_id:   String,
+        artifact_id:  String,
+        flavor:       TerraformFlavor,
+        action:       TerraformAction,
+        files:        std::collections::BTreeMap<String, String>,
+        #[serde(default = "default_command_timeout")]
+        timeout_secs: u64,
+    },
     OpenShell {
         session_id: String,
         cols:       u16,
@@ -40,6 +53,36 @@ enum ServerMsg {
 }
 
 fn default_command_timeout() -> u64 { DEFAULT_COMMAND_TIMEOUT_SECS }
+
+async fn post_result(
+    client:      &reqwest::Client,
+    results_url: &str,
+    token:       &str,
+    request_id:  String,
+    result:      Result<executor::CommandResult, String>,
+) {
+    let body = match result {
+        Ok(r) => serde_json::json!({
+            "request_id": request_id,
+            "stdout":     r.stdout,
+            "stderr":     r.stderr,
+            "exit_code":  r.exit_code,
+        }),
+        Err(e) => serde_json::json!({
+            "request_id": request_id,
+            "stdout":     "",
+            "stderr":     e,
+            "exit_code":  -1,
+        }),
+    };
+    let _ = client
+        .post(results_url)
+        .header("Authorization", format!("Bearer {token}"))
+        .timeout(Duration::from_secs(RESULT_POST_TIMEOUT_SECS))
+        .json(&body)
+        .send()
+        .await;
+}
 
 fn hostname() -> String {
     hostname::get()
@@ -158,28 +201,19 @@ async fn connect_and_run(
                         let token_ref      = Arc::clone(&shared_token);
                         tokio::spawn(async move {
                             let result = executor::run_command(&command, timeout_secs).await;
-                            let body = match result {
-                                Ok(r) => serde_json::json!({
-                                    "request_id": request_id,
-                                    "stdout":     r.stdout,
-                                    "stderr":     r.stderr,
-                                    "exit_code":  r.exit_code,
-                                }),
-                                Err(e) => serde_json::json!({
-                                    "request_id": request_id,
-                                    "stdout":     "",
-                                    "stderr":     e,
-                                    "exit_code":  -1,
-                                }),
-                            };
                             let token = token_ref.lock().await.clone();
-                            let _ = command_client
-                                .post(&results_url)
-                                .header("Authorization", format!("Bearer {}", token))
-                                .timeout(Duration::from_secs(RESULT_POST_TIMEOUT_SECS))
-                                .json(&body)
-                                .send()
-                                .await;
+                            post_result(&command_client, &results_url, &token, request_id, result).await;
+                        });
+                    }
+
+                    Ok(ServerMsg::RunTerraform { request_id, artifact_id, flavor, action, files, timeout_secs }) => {
+                        let command_client = client.clone();
+                        let results_url    = results_url.clone();
+                        let token_ref      = Arc::clone(&shared_token);
+                        tokio::spawn(async move {
+                            let result = terraform::run(&artifact_id, flavor, action, &files, timeout_secs).await;
+                            let token = token_ref.lock().await.clone();
+                            post_result(&command_client, &results_url, &token, request_id, result).await;
                         });
                     }
 
@@ -244,6 +278,37 @@ mod tests {
         let data = line.strip_prefix("data: ").unwrap();
         let msg: serde_json::Value = serde_json::from_str(data).unwrap();
         assert_eq!(msg["type"], "hello_ack");
+    }
+
+    #[test]
+    fn run_terraform_message_deserializes_with_expected_fields() {
+        let data = r#"{"type":"run_terraform","request_id":"r1","artifact_id":"art1","flavor":"terraform","action":"plan","files":{"main.tf":"..."},"timeout_secs":120}"#;
+        let msg: ServerMsg = serde_json::from_str(data).unwrap();
+        match msg {
+            ServerMsg::RunTerraform { request_id, artifact_id, flavor, action, files, timeout_secs } => {
+                assert_eq!(request_id, "r1");
+                assert_eq!(artifact_id, "art1");
+                assert_eq!(flavor, TerraformFlavor::Terraform);
+                assert_eq!(action, TerraformAction::Plan);
+                assert_eq!(files.get("main.tf").unwrap(), "...");
+                assert_eq!(timeout_secs, 120);
+            }
+            other => panic!("expected RunTerraform, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_terraform_message_defaults_timeout_when_omitted() {
+        let data = r#"{"type":"run_terraform","request_id":"r1","artifact_id":"art1","flavor":"terragrunt","action":"destroy","files":{}}"#;
+        let msg: ServerMsg = serde_json::from_str(data).unwrap();
+        match msg {
+            ServerMsg::RunTerraform { timeout_secs, flavor, action, .. } => {
+                assert_eq!(timeout_secs, DEFAULT_COMMAND_TIMEOUT_SECS);
+                assert_eq!(flavor, TerraformFlavor::Terragrunt);
+                assert_eq!(action, TerraformAction::Destroy);
+            }
+            other => panic!("expected RunTerraform, got {other:?}"),
+        }
     }
 
     #[test]
