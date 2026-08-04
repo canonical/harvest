@@ -272,6 +272,17 @@ export async function executeAgentCommand(projectId, agentId, command, timeoutSe
   return response.json();
 }
 
+export async function runTerraformArtifact(projectId, agentId, artifactId, action, timeoutSecs = 300) {
+  const response = await fetch(`${projectUrl(projectId)}/agents/${agentId}/terraform`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ artifact_id: artifactId, action, timeout_secs: timeoutSecs }),
+  });
+  handleUnauthorized(response.status);
+  if (!response.ok) throw new Error(`Server error: ${response.status}`);
+  return response.json();
+}
+
 export async function deleteAgent(projectId, agentId) {
   return projectFetch(`${projectUrl(projectId)}/agents/${encodeURIComponent(agentId)}`, { method: 'DELETE' });
 }

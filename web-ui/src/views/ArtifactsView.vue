@@ -51,6 +51,14 @@
                 </div>
               </div>
               <div class="artifacts-article__actions">
+                <button
+                  v-if="isTerraformKind(selectedArtifact.kind)"
+                  class="p-button--base run-on-agent-btn"
+                  type="button"
+                  @click="openRunModal"
+                >
+                  Run on agent
+                </button>
                 <a
                   class="p-button--positive artifact-download-btn"
                   :href="artifactDownloadUrl(selectedArtifact.id)"
@@ -88,6 +96,55 @@
         </div>
       </div>
     </div>
+
+    <div v-if="runModalOpen" class="modal" @click.self="closeRunModal">
+      <div class="modal-content">
+        <button class="modal-close" type="button" @click="closeRunModal">✕</button>
+        <h3>Run on agent</h3>
+
+        <div class="form-group">
+          <label for="run-agent-select">Agent</label>
+          <select id="run-agent-select" v-model="selectedAgentId">
+            <option value="" disabled>Select an agent</option>
+            <option v-for="a in availableAgents" :key="a.id" :value="a.id">{{ a.hostname }}</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="run-action-select">Action</label>
+          <select id="run-action-select" v-model="selectedAction">
+            <option value="plan">Plan</option>
+            <option value="apply">Apply</option>
+            <option value="destroy">Destroy</option>
+          </select>
+        </div>
+
+        <label v-if="selectedAction !== 'plan'" class="run-modal-confirm">
+          <input v-model="confirmDangerous" type="checkbox" />
+          This may create, change, or destroy real infrastructure.
+        </label>
+
+        <div v-if="runError" class="p-notification--negative">
+          <div class="p-notification__content">
+            <p class="p-notification__message">{{ runError }}</p>
+          </div>
+        </div>
+
+        <pre v-if="runResult" class="run-modal-result">{{ formattedRunResult }}</pre>
+
+        <div class="modal-actions">
+          <button class="p-button--base" type="button" @click="closeRunModal">Cancel</button>
+          <button
+            :class="selectedAction === 'plan' ? 'p-button--positive' : 'p-button--negative'"
+            type="button"
+            :disabled="!canSubmitRun || running"
+            @click="submitRun"
+          >
+            {{ running ? 'Running…' : 'Run' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -100,6 +157,8 @@ import {
   getArtifact,
   deleteArtifact,
   artifactDownloadUrl,
+  listProjectAgents,
+  runTerraformArtifact,
 } from '../lib/api.js';
 
 const props = defineProps({
@@ -119,16 +178,98 @@ const submitting       = ref(false);
 
 const routeArtifactId = computed(() => route.params.id ?? null);
 
-const renderedContent = computed(() =>
-  selectedArtifact.value ? renderMarkdown(selectedArtifact.value.content, {}, {}) : ''
-);
+const runModalOpen     = ref(false);
+const availableAgents  = ref([]);
+const selectedAgentId  = ref('');
+const selectedAction   = ref('plan');
+const confirmDangerous = ref(false);
+const running          = ref(false);
+const runResult        = ref(null);
+const runError         = ref(null);
+
+function isTerraformKind(kind) {
+  return kind === 'terraform' || kind === 'terragrunt';
+}
+
+function bundleToMarkdown(content) {
+  try {
+    const files = JSON.parse(content);
+    return Object.entries(files)
+      .map(([path, text]) => `### ${path}\n\n\`\`\`hcl\n${text}\n\`\`\`\n`)
+      .join('\n');
+  } catch {
+    return `\`\`\`\n${content}\n\`\`\`\n`;
+  }
+}
+
+const renderedContent = computed(() => {
+  if (!selectedArtifact.value) return '';
+  const content = isTerraformKind(selectedArtifact.value.kind)
+    ? bundleToMarkdown(selectedArtifact.value.content)
+    : selectedArtifact.value.content;
+  return renderMarkdown(content, {}, {});
+});
 
 function kindLabel(kind) {
-  return kind === 'pdf' ? 'PDF' : 'Markdown';
+  if (kind === 'pdf') return 'PDF';
+  if (kind === 'terraform') return 'Terraform';
+  if (kind === 'terragrunt') return 'Terragrunt';
+  return 'Markdown';
 }
 
 function kindBadgeClass(kind) {
-  return kind === 'pdf' ? 'artifact-kind-badge--pdf' : 'artifact-kind-badge--markdown';
+  if (kind === 'pdf') return 'artifact-kind-badge--pdf';
+  if (isTerraformKind(kind)) return 'artifact-kind-badge--terraform';
+  return 'artifact-kind-badge--markdown';
+}
+
+const canSubmitRun = computed(() => {
+  if (!selectedAgentId.value) return false;
+  if (selectedAction.value !== 'plan' && !confirmDangerous.value) return false;
+  return true;
+});
+
+const formattedRunResult = computed(() => {
+  if (!runResult.value) return '';
+  const parts = [];
+  if (runResult.value.stdout) parts.push(runResult.value.stdout);
+  if (runResult.value.stderr) parts.push(runResult.value.stderr);
+  parts.push(`exit code: ${runResult.value.exit_code}`);
+  return parts.join('\n');
+});
+
+async function openRunModal() {
+  runModalOpen.value  = true;
+  selectedAgentId.value  = '';
+  selectedAction.value   = 'plan';
+  confirmDangerous.value = false;
+  runResult.value = null;
+  runError.value   = null;
+  try {
+    availableAgents.value = await listProjectAgents(props.projectId);
+  } catch {
+    availableAgents.value = [];
+  }
+}
+
+function closeRunModal() {
+  runModalOpen.value = false;
+}
+
+async function submitRun() {
+  if (!canSubmitRun.value || !selectedArtifact.value) return;
+  running.value   = true;
+  runResult.value = null;
+  runError.value  = null;
+  try {
+    runResult.value = await runTerraformArtifact(
+      props.projectId, selectedAgentId.value, selectedArtifact.value.id, selectedAction.value,
+    );
+  } catch (e) {
+    runError.value = e.message || 'Run failed';
+  } finally {
+    running.value = false;
+  }
 }
 
 function createdByLabel(createdBy) {
