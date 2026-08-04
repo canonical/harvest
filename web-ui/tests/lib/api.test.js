@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { queryStream, fetchLlmProviders, projectQueryStart } from '../../src/lib/api.js';
+import { queryStream, fetchLlmProviders, projectQueryStart, runTerraformArtifact } from '../../src/lib/api.js';
 
 function mockStreamResponse() {
   return {
@@ -68,6 +68,35 @@ describe('projectQueryStart', () => {
     const body = JSON.parse(options.body);
     expect(body.provider_id).toBe('gemini-1');
     expect(body.model).toBe('gemini-2.5-flash');
+  });
+});
+
+describe('runTerraformArtifact', () => {
+  beforeEach(() => { vi.restoreAllMocks(); });
+
+  it('posts artifact_id, action, and timeout_secs to the terraform route', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ stdout: 'ok', stderr: '', exit_code: 0 })));
+    await runTerraformArtifact('proj1', 'agent1', 'art1', 'plan', 600);
+
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/projects/proj1/agents/agent1/terraform');
+    expect(options.method).toBe('POST');
+    const body = JSON.parse(options.body);
+    expect(body).toEqual({ artifact_id: 'art1', action: 'plan', timeout_secs: 600 });
+  });
+
+  it('defaults timeout_secs to 300 when omitted', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ stdout: '', stderr: '', exit_code: 0 })));
+    await runTerraformArtifact('proj1', 'agent1', 'art1', 'apply');
+
+    const [, options] = global.fetch.mock.calls[0];
+    const body = JSON.parse(options.body);
+    expect(body.timeout_secs).toBe(300);
+  });
+
+  it('throws on a non-ok response', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ error: 'nope' }, false, 500)));
+    await expect(runTerraformArtifact('proj1', 'agent1', 'art1', 'destroy')).rejects.toThrow();
   });
 });
 
