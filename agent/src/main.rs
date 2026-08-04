@@ -2,6 +2,7 @@ mod config;
 mod console;
 mod executor;
 mod sse_client;
+mod terraform;
 mod tunnel;
 mod ws_url;
 
