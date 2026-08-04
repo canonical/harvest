@@ -4888,6 +4888,32 @@ a.source-chip:hover .source-chip__name {
   background: var(--citation-bg);
 }
 
+.artifact-kind-badge--terraform {
+  color: var(--success-text, #1a7f37);
+  background: var(--success-bg, rgba(26, 127, 55, 0.12));
+}
+
+.run-modal-confirm {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  color: var(--text-secondary);
+  margin: 0.75rem 0;
+}
+
+.run-modal-result {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  max-height: 16rem;
+  overflow: auto;
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--bg-surface-alt);
+  border-radius: 0.375rem;
+}
+
 .artifacts-detail {
   flex: 1;
   overflow-y: auto;
