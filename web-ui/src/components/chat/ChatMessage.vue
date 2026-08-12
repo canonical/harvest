@@ -63,8 +63,8 @@
             <ProvisionSteps v-if="item.steps.length" :steps="item.steps" />
 
             <div v-if="isLast && item.status === 'pending'" class="confirm-actions">
-              <button class="p-button--negative" type="button" @click="$emit('confirm', item.id)">Confirm</button>
-              <button class="p-button--base" type="button" @click="$emit('deny', item.id)">Cancel</button>
+              <button class="p-button--negative is-dense" type="button" @click="$emit('confirm', item.id)">Confirm</button>
+              <button class="p-button--base is-dense" type="button" @click="$emit('deny', item.id)">Cancel</button>
             </div>
             <p v-else-if="item.status === 'running'" class="confirm-status confirm-status--running">
               {{ runningVerb(item.name) }}
@@ -76,7 +76,7 @@
         </template>
 
         <div v-if="isLast && pendingConfirmCount > 1" class="confirm-actions confirm-actions--all">
-          <button class="p-button--negative" type="button" @click="$emit('confirmAll')">Approve all</button>
+          <button class="p-button--negative is-dense" type="button" @click="$emit('confirmAll')">Approve all</button>
         </div>
       </div>
 

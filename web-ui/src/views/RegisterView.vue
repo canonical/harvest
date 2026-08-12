@@ -24,7 +24,7 @@
           <p class="p-notification__message">{{ error }}</p>
         </div>
       </div>
-      <button class="p-button--positive u-no-margin--bottom" type="submit" style="width:100%" :disabled="loading">Create account</button>
+      <button class="p-button--positive u-no-margin--bottom is-dense" type="submit" style="width:100%" :disabled="loading">Create account</button>
     </form>
     <p>Already have an account? <router-link to="/login">Sign in</router-link></p>
   </div>

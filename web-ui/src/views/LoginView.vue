@@ -18,7 +18,7 @@
             <p class="p-notification__message">{{ error }}</p>
           </div>
         </div>
-        <button class="p-button--positive u-no-margin--bottom" type="submit" style="width:100%" :disabled="loading">Sign in</button>
+        <button class="p-button--positive u-no-margin--bottom is-dense" type="submit" style="width:100%" :disabled="loading">Sign in</button>
       </form>
     </section>
 

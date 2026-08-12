@@ -3,7 +3,7 @@
     <div class="repo-source-panel__body">
       <div class="repo-source-panel__head">
         <button
-          class="p-button--base has-icon u-no-margin source-panel-expand"
+          class="p-button--base has-icon u-no-margin source-panel-expand is-dense"
           type="button"
           :aria-label="isExpanded ? 'Shrink source panel' : 'Expand source panel'"
           @click="toggleExpand"
