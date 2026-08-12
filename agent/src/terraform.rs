@@ -1,8 +1,10 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use tokio::sync::mpsc;
 
 use crate::executor;
+use crate::executor::OutputLine;
 
 pub const WORKSPACE_ROOT: &str = "/var/lib/harvest-agent/terraform";
 
@@ -128,28 +130,31 @@ pub fn compose_command(dir: &Path, flavor: TerraformFlavor, action: TerraformAct
     )
 }
 
-pub async fn run_in(
-    root: &Path,
-    artifact_id: &str,
-    flavor: TerraformFlavor,
-    action: TerraformAction,
-    files: &BTreeMap<String, String>,
-    timeout_secs: u64,
-) -> Result<executor::CommandResult, String> {
-    let dir = workspace_dir(root, artifact_id);
-    sync_workspace(&dir, files).map_err(|e| format!("failed to sync workspace: {e}"))?;
-    let command = compose_command(&dir, flavor, action);
-    executor::run_command(&command, timeout_secs).await
-}
-
 pub async fn run(
     artifact_id: &str,
     flavor: TerraformFlavor,
     action: TerraformAction,
     files: &BTreeMap<String, String>,
     timeout_secs: u64,
+    on_line: Option<mpsc::UnboundedSender<OutputLine>>,
 ) -> Result<executor::CommandResult, String> {
-    run_in(Path::new(WORKSPACE_ROOT), artifact_id, flavor, action, files, timeout_secs).await
+    run_in_streaming(Path::new(WORKSPACE_ROOT), artifact_id, flavor, action, files, timeout_secs, on_line).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_in_streaming(
+    root: &Path,
+    artifact_id: &str,
+    flavor: TerraformFlavor,
+    action: TerraformAction,
+    files: &BTreeMap<String, String>,
+    timeout_secs: u64,
+    on_line: Option<mpsc::UnboundedSender<OutputLine>>,
+) -> Result<executor::CommandResult, String> {
+    let dir = workspace_dir(root, artifact_id);
+    sync_workspace(&dir, files).map_err(|e| format!("failed to sync workspace: {e}"))?;
+    let command = compose_command(&dir, flavor, action);
+    executor::run_command_streaming(&command, timeout_secs, on_line).await
 }
 
 #[cfg(test)]
@@ -307,13 +312,14 @@ mod tests {
         let mut files = BTreeMap::new();
         files.insert("main.tf".to_string(), "resource \"local_file\" \"x\" {}".to_string());
 
-        let result = run_in(
+        let result = run_in_streaming(
             workspace_root.path(),
             "artifact-1",
             TerraformFlavor::Terraform,
             TerraformAction::Plan,
             &files,
             10,
+            None,
         ).await;
 
         std::env::set_var("PATH", original_path);
@@ -323,5 +329,43 @@ mod tests {
         assert!(result.stdout.contains("ran: plan"), "stdout: {}", result.stdout);
         assert_eq!(result.exit_code, 0);
         assert!(workspace_root.path().join("artifact-1").join("main.tf").exists());
+    }
+
+    #[tokio::test]
+    async fn run_in_streaming_forwards_lines_as_they_are_produced() {
+        let workspace_root = TempDir::new().unwrap();
+        let bin_dir = TempDir::new().unwrap();
+        let fake_terraform = bin_dir.path().join("terraform");
+        std::fs::write(&fake_terraform, "#!/bin/sh\necho \"ran: $*\"\n").unwrap();
+        std::fs::set_permissions(&fake_terraform, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", bin_dir.path().display(), original_path));
+
+        let mut files = BTreeMap::new();
+        files.insert("main.tf".to_string(), "resource \"local_file\" \"x\" {}".to_string());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = run_in_streaming(
+            workspace_root.path(),
+            "artifact-2",
+            TerraformFlavor::Terraform,
+            TerraformAction::Plan,
+            &files,
+            10,
+            Some(tx),
+        ).await;
+
+        std::env::set_var("PATH", original_path);
+        let result = result.unwrap();
+
+        let mut streamed_stdout = String::new();
+        while let Ok(line) = rx.try_recv() {
+            assert!(!line.stderr);
+            streamed_stdout.push_str(&line.line);
+            streamed_stdout.push('\n');
+        }
+        assert_eq!(streamed_stdout, result.stdout);
+        assert!(streamed_stdout.contains("ran: plan"), "stdout: {}", streamed_stdout);
     }
 }
