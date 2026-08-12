@@ -15,13 +15,17 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::agent::{artifact_tools, graph_tools, lxd_tools, machine_tools, port_forward_tools, skill_tools, terraform_tools, Agent};
+use crate::agent::{
+    artifact_tools, deployment_tools, graph_tools, lxd_tools, machine_tools, port_forward_tools,
+    prompt, skill_tools, terraform_tools, tool, Agent,
+};
 use crate::artifacts::handlers::{self as artifact_handlers, ArtifactState};
 use crate::skills::{handlers as skill_handlers, SkillStore};
 use crate::auth::{self, handlers as auth_handlers, AuthState};
 use crate::config::UiConfig;
 use crate::config::AuthConfig;
 use crate::conversations::handlers::{self as conv_handlers, ConvState};
+use crate::deployments::{self, handlers as deployment_handlers};
 use crate::llm::LlmProvider;
 use crate::lxd::LxdClient;
 use crate::machines::{
@@ -75,7 +79,7 @@ pub struct ProjectAgentBuilder {
 }
 
 impl ProjectAgentBuilder {
-    pub fn build(&self, project_id: String) -> Arc<Agent> {
+    fn base_tools(&self, project_id: String) -> Vec<Box<dyn tool::Tool>> {
         let mut tools = graph_tools::all_tools(Arc::clone(&self.neo4j));
         tools.push(Box::new(machine_tools::ListAgentsTool {
             registry:   Arc::clone(&self.registry),
@@ -143,9 +147,103 @@ impl ProjectAgentBuilder {
             registry:   Arc::clone(&self.registry),
             project_id: project_id.clone(),
         }));
+        tools
+    }
+
+    fn provision_diagnosis_tools(&self, project_id: String) -> Vec<Box<dyn tool::Tool>> {
+        let mut tools = graph_tools::all_tools(Arc::clone(&self.neo4j));
+        tools.push(Box::new(machine_tools::ListAgentsTool {
+            registry:   Arc::clone(&self.registry),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(machine_tools::RunReadOnlyCommandTool {
+            registry:   Arc::clone(&self.registry),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(skill_tools::ListSkillsTool {
+            store:      Arc::clone(&self.skills),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(skill_tools::LoadSkillTool {
+            store:      Arc::clone(&self.skills),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(port_forward_tools::ListPortForwardsTool {
+            neo4j:      Arc::clone(&self.neo4j),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(terraform_tools::RunTerraformPlanTool {
+            neo4j:      Arc::clone(&self.neo4j),
+            registry:   Arc::clone(&self.registry),
+            project_id: project_id.clone(),
+        }));
+        tools
+    }
+
+    pub fn build(&self, project_id: String) -> Arc<Agent> {
+        let tools = self.base_tools(project_id);
         Arc::new(
             Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
                 .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last),
+        )
+    }
+
+    pub fn build_for_deployment(
+        &self,
+        project_id: String,
+        group_id:   String,
+        ctx:        &deployments::DeploymentContext,
+    ) -> Arc<Agent> {
+        let mut tools = self.base_tools(project_id.clone());
+        tools.push(Box::new(deployment_tools::LinkDeploymentArtifactTool {
+            neo4j:         Arc::clone(&self.neo4j),
+            project_id:    project_id.clone(),
+            deployment_id: ctx.deployment_id.clone(),
+        }));
+        tools.push(Box::new(deployment_tools::UpdateProductTemplateTool {
+            neo4j:         Arc::clone(&self.neo4j),
+            group_id,
+            deployment_id: ctx.deployment_id.clone(),
+        }));
+        Arc::new(
+            Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
+                .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+                .with_system_prompt(prompt::deployment_system_prompt(ctx)),
+        )
+    }
+
+    /// Like `build_for_deployment`, but a one-shot autonomous run triggered automatically after a
+    /// deploy/redeploy/destroy failure: adds tools to read and propose changes to the Terraform/
+    /// Terragrunt bundle, and uses the diagnosis system prompt (no `ask_user`, no chat framing —
+    /// there is no user on the other end). Uses `provision_diagnosis_tools` instead of
+    /// `base_tools` — deploying, redeploying, and destroying are deliberately not available here
+    /// (those are direct actions the user triggers from the Provision UI), and `run_command` is
+    /// the read-only-restricted `RunReadOnlyCommandTool` rather than the unrestricted one, since
+    /// this run's job is to diagnose and propose a bundle diff, never to fix the environment by
+    /// hand.
+    pub fn build_for_provision_diagnosis(
+        &self,
+        project_id: String,
+        _group_id:  String,
+        ctx:        &deployments::DeploymentContext,
+        run_id:     &str,
+    ) -> Arc<Agent> {
+        let mut tools = self.provision_diagnosis_tools(project_id.clone());
+        tools.push(Box::new(deployment_tools::ReadProvisionBundleTool {
+            neo4j:         Arc::clone(&self.neo4j),
+            project_id:    project_id.clone(),
+            deployment_id: ctx.deployment_id.clone(),
+        }));
+        tools.push(Box::new(deployment_tools::ProposeProvisionBundleTool {
+            neo4j:         Arc::clone(&self.neo4j),
+            project_id:    project_id.clone(),
+            deployment_id: ctx.deployment_id.clone(),
+            run_id:        run_id.to_string(),
+        }));
+        Arc::new(
+            Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
+                .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+                .with_system_prompt(prompt::provision_diagnosis_system_prompt(ctx)),
         )
     }
 }
@@ -278,6 +376,32 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                post(proj_handlers::run_task))
         .route("/projects/:pid/tasks/:tid/logs",
                get(proj_handlers::get_task_logs))
+        .route("/projects/:pid/deployments",
+               get(deployment_handlers::list_deployments).post(deployment_handlers::create_deployment))
+        .route("/projects/:pid/deployments/:did",
+               get(deployment_handlers::get_deployment)
+               .patch(deployment_handlers::update_deployment)
+               .delete(deployment_handlers::delete_deployment))
+        .route("/projects/:pid/deployments/:did/deploy",   post(deployment_handlers::deploy_deployment))
+        .route("/projects/:pid/deployments/:did/redeploy", post(deployment_handlers::redeploy_deployment))
+        .route("/projects/:pid/deployments/:did/destroy",  post(deployment_handlers::destroy_deployment))
+        .route("/projects/:pid/deployments/:did/runs",     get(deployment_handlers::list_deployment_runs))
+        .route("/projects/:pid/deployments/:did/environment/questions",
+               post(deployment_handlers::generate_environment_questions))
+        .route("/projects/:pid/deployments/:did/design/generate",  post(deployment_handlers::generate_design))
+        .route("/projects/:pid/deployments/:did/design/decisions", post(deployment_handlers::generate_design_decisions))
+        .route("/projects/:pid/deployments/:did/design/revise",    post(deployment_handlers::revise_design))
+        .route("/projects/:pid/deployments/:did/provision/generate", post(deployment_handlers::generate_provision))
+        .route("/projects/:pid/deployments/:did/provision/propose-change", post(deployment_handlers::propose_provision_change))
+        .route("/projects/:pid/deployments/:did/provision/apply-change", post(deployment_handlers::apply_provision_change))
+        .route("/projects/:pid/deployments/:did/provision/diagnose", post(deployment_handlers::diagnose_provision_failure))
+        .route("/projects/:pid/deployments/:did/provision/diagnose/dismiss", post(deployment_handlers::dismiss_provision_diagnosis))
+        .route("/groups/:gid/templates",
+               get(deployment_handlers::list_templates).post(deployment_handlers::create_template))
+        .route("/groups/:gid/templates/:tid",
+               get(deployment_handlers::get_template)
+               .put(deployment_handlers::update_template)
+               .delete(deployment_handlers::delete_template))
         .with_state(project_state);
 
     let machine_state = Arc::new(MachineState {

@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::artifacts::{bundle, handlers::{get_artifact_in_project, ArtifactKind}};
+use crate::deployments;
 use crate::llm::types::ToolDefinition;
 use crate::machines::{MachineRegistry, TerraformAction, TerraformFlavor};
 use crate::neo4j::Neo4jClient;
@@ -61,15 +62,33 @@ async fn run_terraform(
         _ => anyhow::bail!("artifact {artifact_id} is not a terraform or terragrunt artifact"),
     };
 
-    let files = bundle::parse_bundle(artifact["content"].as_str().unwrap_or(""))
-        .map_err(|e| anyhow!(e))?;
+    let live_content = artifact["content"].as_str().unwrap_or("");
+    let content = deployments::resolve_run_content(neo4j, project_id, &artifact_id, action, live_content).await?;
 
-    match registry.execute_terraform(&agent_id, artifact_id, flavor, action, files, timeout_secs).await {
-        Ok(r) => Ok(serde_json::to_string_pretty(&json!({
-            "stdout":    r.stdout,
-            "stderr":    r.stderr,
-            "exit_code": r.exit_code,
-        }))?),
+    let files = bundle::parse_bundle(&content).map_err(|e| anyhow!(e))?;
+    let files_json = serde_json::to_string(&files)?;
+
+    let result = registry.execute_terraform(&agent_id, artifact_id.clone(), flavor, action, files, timeout_secs, None).await;
+
+    let (exit_code, stdout, stderr) = match &result {
+        Ok(r)  => (Some(r.exit_code), r.stdout.clone(), r.stderr.clone()),
+        Err(e) => (None, String::new(), e.clone()),
+    };
+    let success          = exit_code == Some(0);
+    let applied_content  = (action == TerraformAction::Apply && success).then_some(files_json.as_str());
+    let infra_state = deployments::record_run_and_update_state(
+        neo4j, project_id, &artifact_id, action, exit_code, &stdout, &stderr,
+        applied_content, "agent", None,
+    ).await.ok().flatten();
+
+    match result {
+        Ok(r) => {
+            let mut value = json!({ "stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code });
+            if let Some(state) = infra_state {
+                value["infra_state"] = json!(state);
+            }
+            Ok(serde_json::to_string_pretty(&value)?)
+        }
         Err(e) => anyhow::bail!("terraform run failed: {e}"),
     }
 }

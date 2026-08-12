@@ -1,5 +1,6 @@
 pub mod artifact_tools;
 pub mod chain;
+pub mod deployment_tools;
 pub mod graph_tools;
 pub mod lxd_tools;
 pub mod machine_tools;
@@ -113,6 +114,7 @@ pub struct Agent {
     max_iterations: usize,
     compaction_threshold_chars: usize,
     compaction_keep_last: usize,
+    system_prompt_override: Option<String>,
 }
 
 impl Agent {
@@ -127,11 +129,21 @@ impl Agent {
             max_iterations,
             compaction_threshold_chars: usize::MAX,
             compaction_keep_last: 6,
+            system_prompt_override: None,
         }
     }
 
     pub fn llm(&self) -> &Arc<dyn LlmProvider> {
         &self.llm
+    }
+
+    pub fn with_system_prompt(mut self, prompt: String) -> Self {
+        self.system_prompt_override = Some(prompt);
+        self
+    }
+
+    fn effective_system_prompt(&self) -> String {
+        self.system_prompt_override.clone().unwrap_or_else(prompt::system_prompt)
     }
 
     pub fn with_compaction(mut self, threshold_chars: usize, keep_last: usize) -> Self {
@@ -193,6 +205,35 @@ impl Agent {
         let mut response = None;
         let mut error = None;
         while let Some(event) = receiver.recv().await {
+            match event {
+                AgentEvent::Done { answer, sources, tool_calls_made, provider_used } => {
+                    response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used });
+                }
+                AgentEvent::Error { message } => {
+                    error = Some(anyhow::anyhow!(message));
+                }
+                _ => {}
+            }
+        }
+
+        response.ok_or_else(|| error.unwrap_or_else(|| anyhow::anyhow!("agent produced no response")))
+    }
+
+    pub async fn query_with_progress(
+        &self,
+        user_query: &str,
+        history: &[HistoryMessage],
+        attachments: &[Attachment],
+        selection: Option<&ProviderSelection>,
+        progress: mpsc::Sender<AgentEvent>,
+    ) -> Result<QueryResponse> {
+        let (event_sender, mut receiver) = mpsc::channel::<AgentEvent>(64);
+        self.query_streaming(user_query, history, attachments, selection, event_sender).await;
+
+        let mut response = None;
+        let mut error = None;
+        while let Some(event) = receiver.recv().await {
+            let _ = progress.send(event.clone()).await;
             match event {
                 AgentEvent::Done { answer, sources, tool_calls_made, provider_used } => {
                     response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used });
@@ -289,7 +330,7 @@ impl Agent {
         let tool_map  = self.build_tool_map();
 
         let compacted = self.compact_history(history).await;
-        let mut messages = vec![Message::system(prompt::system_prompt())];
+        let mut messages = vec![Message::system(self.effective_system_prompt())];
         messages.extend(history_to_messages(&compacted));
         messages.push(build_user_message(user_query, attachments));
 
@@ -403,10 +444,12 @@ impl Agent {
             let mut text_buf     = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut stop_reason  = String::new();
+            let mut thinking_streamed = false;
 
             while let Some(ev) = stream_rx.recv().await {
                 match ev {
                     StreamEvent::ThinkingDelta { text } => {
+                        thinking_streamed = true;
                         let _ = event_sender.send(AgentEvent::ThinkingDelta { text }).await;
                     }
                     StreamEvent::TextDelta { text } => {
@@ -511,7 +554,7 @@ impl Agent {
                 return LoopOutcome::Paused { messages, iterations, text_buf, pending, provider_used: last_provider_used };
             }
 
-            if text_buf.is_empty() {
+            if text_buf.is_empty() && !thinking_streamed {
                 let thinking = self.describe_tool_calls_batch(&tool_calls).await;
                 if !thinking.is_empty() {
                     let _ = event_sender.send(AgentEvent::Thinking { text: thinking }).await;
@@ -672,6 +715,46 @@ mod tests {
         async fn chat_with(&self, _model: Option<&str>, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
             self.responses.lock().unwrap().pop_front()
                 .ok_or_else(|| anyhow::anyhow!("MockLlm: no more responses"))
+        }
+    }
+
+    /// Mimics a provider (like Gemini) that streams real `ThinkingDelta` events
+    /// directly, rather than only returning a final response for `chat_with`.
+    struct MockStreamingLlm {
+        rounds: Mutex<VecDeque<Vec<StreamEvent>>>,
+    }
+
+    impl MockStreamingLlm {
+        fn new(rounds: Vec<Vec<StreamEvent>>) -> Arc<Self> {
+            Arc::new(Self { rounds: Mutex::new(rounds.into()) })
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for MockStreamingLlm {
+        fn id(&self) -> &str { "mock-streaming-llm" }
+        fn kind(&self) -> &str { "mock" }
+        fn default_model(&self) -> &str { "mock-model" }
+
+        async fn list_models(&self) -> Result<Vec<crate::llm::types::ModelInfo>> { Ok(vec![]) }
+
+        async fn chat_with(&self, _model: Option<&str>, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
+            Err(anyhow::anyhow!("MockStreamingLlm only supports chat_stream_with"))
+        }
+
+        async fn chat_stream_with(
+            &self,
+            _model: Option<&str>,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            tx: mpsc::Sender<StreamEvent>,
+        ) -> Result<()> {
+            let events = self.rounds.lock().unwrap().pop_front()
+                .ok_or_else(|| anyhow::anyhow!("MockStreamingLlm: no more rounds"))?;
+            for event in events {
+                let _ = tx.send(event).await;
+            }
+            Ok(())
         }
     }
 
@@ -840,6 +923,39 @@ mod tests {
         let resp = agent.query("hi", &[], &[], None).await.unwrap();
         assert_eq!(resp.answer, "result arrived");
         assert_eq!(resp.tool_calls_made, 1);
+    }
+
+    #[tokio::test]
+    async fn query_with_progress_returns_the_same_response_as_query() {
+        let llm = MockLlm::new(vec![
+            tool_call("my_tool"),
+            text("Calling my_tool"),
+            text("result arrived"),
+        ]);
+        let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(64);
+        let resp = agent.query_with_progress("hi", &[], &[], None, tx).await.unwrap();
+        assert_eq!(resp.answer, "result arrived");
+        assert_eq!(resp.tool_calls_made, 1);
+    }
+
+    #[tokio::test]
+    async fn query_with_progress_forwards_tool_call_and_done_events() {
+        let llm = MockLlm::new(vec![
+            tool_call("my_tool"),
+            text("Calling my_tool"),
+            text("result arrived"),
+        ]);
+        let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5);
+        let (tx, mut rx) = mpsc::channel::<AgentEvent>(64);
+        agent.query_with_progress("hi", &[], &[], None, tx).await.unwrap();
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ToolCall { name, .. } if name == "my_tool")));
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Done { answer, .. } if answer == "result arrived")));
     }
 
     #[tokio::test]
@@ -1068,6 +1184,65 @@ mod tests {
         assert_eq!(answer.as_deref(), Some("streaming answer"));
     }
 
+    struct CapturingLlm {
+        response: Mutex<VecDeque<LlmResponse>>,
+        captured_system: Mutex<Option<String>>,
+    }
+
+    impl CapturingLlm {
+        fn new(responses: Vec<LlmResponse>) -> Arc<Self> {
+            Arc::new(Self {
+                response: Mutex::new(responses.into()),
+                captured_system: Mutex::new(None),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CapturingLlm {
+        fn id(&self) -> &str { "capturing-llm" }
+        fn kind(&self) -> &str { "mock" }
+        fn default_model(&self) -> &str { "mock-model" }
+        async fn list_models(&self) -> Result<Vec<crate::llm::types::ModelInfo>> { Ok(vec![]) }
+
+        async fn chat_with(&self, _model: Option<&str>, messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
+            if let Some(first) = messages.first() {
+                if matches!(first.role, crate::llm::types::Role::System) {
+                    if let crate::llm::types::MessageContent::Text(t) = &first.content {
+                        *self.captured_system.lock().unwrap() = Some(t.clone());
+                    }
+                }
+            }
+            self.response.lock().unwrap().pop_front()
+                .ok_or_else(|| anyhow::anyhow!("CapturingLlm: no more responses"))
+        }
+    }
+
+    #[tokio::test]
+    async fn with_system_prompt_override_replaces_the_default_system_message() {
+        let llm = CapturingLlm::new(vec![text("done")]);
+        let agent = Arc::new(
+            Agent::new(Arc::clone(&llm) as Arc<dyn LlmProvider>, vec![], 5)
+                .with_system_prompt("You are a deployment assistant.".to_string()),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        agent.query_streaming("hi", &[], &[], None, tx).await;
+        while rx.try_recv().is_ok() {}
+
+        assert_eq!(llm.captured_system.lock().unwrap().as_deref(), Some("You are a deployment assistant."));
+    }
+
+    #[tokio::test]
+    async fn without_override_uses_prompt_system_prompt() {
+        let llm = CapturingLlm::new(vec![text("done")]);
+        let agent = Arc::new(Agent::new(Arc::clone(&llm) as Arc<dyn LlmProvider>, vec![], 5));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        agent.query_streaming("hi", &[], &[], None, tx).await;
+        while rx.try_recv().is_ok() {}
+
+        assert_eq!(llm.captured_system.lock().unwrap().as_deref(), Some(prompt::system_prompt().as_str()));
+    }
+
     async fn collect_agent_events(agent: Arc<Agent>, query: &str) -> Vec<AgentEvent> {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(128);
         agent.query_streaming(query, &[], &[], None, tx).await;
@@ -1131,6 +1306,35 @@ mod tests {
 
         let has_delta_before_tool = events[..tool_pos].iter().any(|e| matches!(e, AgentEvent::TextDelta { .. }));
         assert!(!has_delta_before_tool, "no TextDelta expected before tool call when preamble is empty");
+    }
+
+    #[tokio::test]
+    async fn real_thinking_delta_suppresses_synthesized_thinking_event() {
+        let llm = MockStreamingLlm::new(vec![
+            vec![
+                StreamEvent::ThinkingDelta { text: "Let me look at this closely".into() },
+                StreamEvent::ToolCallReady(ToolCall {
+                    id: "tc_1".into(), name: "my_tool".into(), input: serde_json::json!({}), thought_signature: None,
+                }),
+                StreamEvent::Done { stop_reason: "tool_use".into() },
+            ],
+            vec![
+                StreamEvent::TextDelta { text: "done".into() },
+                StreamEvent::Done { stop_reason: "end_turn".into() },
+            ],
+        ]);
+        let agent = Arc::new(agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5));
+        let events = collect_agent_events(agent, "hi").await;
+
+        let thinking_delta_pos = events.iter().position(|e| matches!(e, AgentEvent::ThinkingDelta { .. }))
+            .expect("expected a streamed ThinkingDelta event");
+        let tool_pos = events.iter().position(|e| matches!(e, AgentEvent::ToolCall { .. }))
+            .expect("expected ToolCall event");
+        assert!(thinking_delta_pos < tool_pos, "ThinkingDelta must precede ToolCall");
+
+        let has_synthesized_thinking = events.iter().any(|e| matches!(e, AgentEvent::Thinking { .. }));
+        assert!(!has_synthesized_thinking,
+            "no synthesized Thinking event expected — real ThinkingDelta already streamed live");
     }
 
     #[tokio::test]
