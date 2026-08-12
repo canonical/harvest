@@ -2,10 +2,12 @@ use anyhow::Result;
 use futures_util::StreamExt as _;
 use serde::Deserialize;
 use std::{path::Path, sync::Arc, time::Duration};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
 use crate::{
-    config::Config, console, executor, terraform,
+    config::Config, console, executor,
+    executor::OutputLine,
+    terraform,
     terraform::{TerraformAction, TerraformFlavor},
     tunnel,
 };
@@ -84,6 +86,27 @@ async fn post_result(
         .await;
 }
 
+async fn post_output(
+    client:      &reqwest::Client,
+    outputs_url: &str,
+    token:       &str,
+    request_id:  &str,
+    line:        &OutputLine,
+) {
+    let body = serde_json::json!({
+        "request_id": request_id,
+        "stream":     if line.stderr { "stderr" } else { "stdout" },
+        "line":       line.line,
+    });
+    let _ = client
+        .post(outputs_url)
+        .header("Authorization", format!("Bearer {token}"))
+        .timeout(Duration::from_secs(RESULT_POST_TIMEOUT_SECS))
+        .json(&body)
+        .send()
+        .await;
+}
+
 fn hostname() -> String {
     hostname::get()
         .map(|h| h.to_string_lossy().into_owned())
@@ -122,6 +145,7 @@ async fn connect_and_run(
     let host        = hostname();
     let events_url  = format!("{}/agent/events", config.server_url);
     let results_url = format!("{}/agent/results", config.server_url);
+    let outputs_url = format!("{}/agent/output", config.server_url);
     let ping_url    = format!("{}/agent/ping", config.server_url);
 
     tracing::info!(url = %events_url, "connecting via SSE");
@@ -209,9 +233,24 @@ async fn connect_and_run(
                     Ok(ServerMsg::RunTerraform { request_id, artifact_id, flavor, action, files, timeout_secs }) => {
                         let command_client = client.clone();
                         let results_url    = results_url.clone();
+                        let outputs_url    = outputs_url.clone();
                         let token_ref      = Arc::clone(&shared_token);
                         tokio::spawn(async move {
-                            let result = terraform::run(&artifact_id, flavor, action, &files, timeout_secs).await;
+                            let (line_tx, mut line_rx) = mpsc::unbounded_channel::<OutputLine>();
+
+                            let output_client   = command_client.clone();
+                            let output_token_ref = Arc::clone(&token_ref);
+                            let output_request_id = request_id.clone();
+                            let output_task = tokio::spawn(async move {
+                                while let Some(line) = line_rx.recv().await {
+                                    let token = output_token_ref.lock().await.clone();
+                                    post_output(&output_client, &outputs_url, &token, &output_request_id, &line).await;
+                                }
+                            });
+
+                            let result = terraform::run(&artifact_id, flavor, action, &files, timeout_secs, Some(line_tx)).await;
+                            let _ = output_task.await;
+
                             let token = token_ref.lock().await.clone();
                             post_result(&command_client, &results_url, &token, request_id, result).await;
                         });
