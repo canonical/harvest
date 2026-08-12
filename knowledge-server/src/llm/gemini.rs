@@ -1,17 +1,40 @@
 use anyhow::{bail, Result};
 use async_trait::async_trait;
+use futures::StreamExt as _;
 use reqwest::Client;
 use serde_json::{json, Value};
+use tokio::sync::mpsc;
 
 use super::{
     retry,
-    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, ToolCall, ToolDefinition},
+    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, StreamEvent, ToolCall, ToolDefinition},
     LlmProvider,
 };
 
 const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const MAX_OUTPUT_TOKENS: u32 = 8192;
+const THINKING_BUDGET_TOKENS: i32 = 4096;
 const OVERLOAD_STATUS_CODES: &[u16] = &[503];
+
+/// Gemma models don't support extended thinking — only the Gemini family does.
+fn supports_thinking(model: &str) -> bool {
+    !model.starts_with("gemma-")
+}
+
+fn generation_config(model: &str) -> Value {
+    if supports_thinking(model) {
+        // Gemini counts thinking tokens against maxOutputTokens, so budget extra
+        // room on top of MAX_OUTPUT_TOKENS — otherwise a long tool call (e.g. a
+        // full corrected Terraform bundle) can get truncated mid-generation,
+        // leaving no tool call at all for that turn.
+        json!({
+            "maxOutputTokens": MAX_OUTPUT_TOKENS + THINKING_BUDGET_TOKENS as u32,
+            "thinkingConfig": { "includeThoughts": true, "thinkingBudget": THINKING_BUDGET_TOKENS },
+        })
+    } else {
+        json!({ "maxOutputTokens": MAX_OUTPUT_TOKENS })
+    }
+}
 
 pub struct GeminiProvider {
     model: String,
@@ -39,6 +62,10 @@ impl GeminiProvider {
 
     fn endpoint_url(&self, model: &str) -> String {
         format!("{}/{}:generateContent?key={}", self.base_url, model, self.api_key)
+    }
+
+    fn stream_endpoint_url(&self, model: &str) -> String {
+        format!("{}/{}:streamGenerateContent?alt=sse&key={}", self.base_url, model, self.api_key)
     }
 
     fn models_url(&self) -> String {
@@ -84,35 +111,7 @@ impl LlmProvider for GeminiProvider {
 
     async fn chat_with(&self, model: Option<&str>, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
         let resolved_model = model.unwrap_or(&self.model);
-        let system_text = messages
-            .iter()
-            .find(|m| matches!(m.role, Role::System))
-            .and_then(|m| match &m.content {
-                MessageContent::Text(t) => Some(t.clone()),
-                _ => None,
-            });
-
-        let contents: Vec<Value> = messages
-            .iter()
-            .filter(|m| !matches!(m.role, Role::System))
-            .map(to_gemini_message)
-            .collect();
-
-        let mut body = json!({
-            "contents": contents,
-            "generationConfig": { "maxOutputTokens": MAX_OUTPUT_TOKENS },
-        });
-
-        if let Some(text) = system_text {
-            body["system_instruction"] = json!({ "parts": [{ "text": text }] });
-        }
-
-        if !tools.is_empty() {
-            body["tools"] = json!([{
-                "function_declarations": tools.iter().map(to_gemini_tool).collect::<Vec<_>>()
-            }]);
-        }
-
+        let body = build_body(resolved_model, messages, tools);
         let url = self.endpoint_url(resolved_model);
 
         let response = retry::send_with_retry(
@@ -133,6 +132,153 @@ impl LlmProvider for GeminiProvider {
 
         parse_gemini_response(json)
     }
+
+    async fn chat_stream_with(
+        &self,
+        model: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<()> {
+        self.stream(model, messages, tools, tx).await
+    }
+}
+
+impl GeminiProvider {
+    async fn stream(
+        &self,
+        model: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<()> {
+        let resolved_model = model.unwrap_or(&self.model);
+        let body = build_body(resolved_model, messages, tools);
+        let url = self.stream_endpoint_url(resolved_model);
+
+        let response = retry::send_with_retry(
+            self.max_retries,
+            OVERLOAD_STATUS_CODES,
+            "Gemini",
+            || self.client.post(&url).json(&body).send(),
+        ).await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await?;
+            bail!("Gemini API error {status}: {body_text}");
+        }
+
+        let mut byte_stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut saw_tool_call = false;
+        let mut finish_reason: Option<String> = None;
+
+        while let Some(chunk) = byte_stream.next().await {
+            let bytes = chunk?;
+            // Gemini's SSE stream frames events with "\r\n\r\n", unlike the bare
+            // "\n\n" other providers use — normalize so the split below works.
+            buffer.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
+
+            while let Some(pos) = buffer.find("\n\n") {
+                let event_text = buffer[..pos].to_string();
+                buffer.drain(..pos + 2);
+
+                let data_line = event_text
+                    .lines()
+                    .find(|l| l.starts_with("data:"))
+                    .map(|l| l[5..].trim().to_string());
+
+                let Some(data) = data_line else { continue };
+                let Ok(json) = serde_json::from_str::<Value>(&data) else { continue };
+                process_stream_event(&json, &mut saw_tool_call, &mut finish_reason, &tx).await?;
+            }
+        }
+
+        let stop_reason = if saw_tool_call {
+            "tool_use".to_string()
+        } else {
+            finish_reason.unwrap_or_else(|| "end_turn".to_string())
+        };
+        let _ = tx.send(StreamEvent::Done { stop_reason }).await;
+
+        Ok(())
+    }
+}
+
+fn build_body(model: &str, messages: &[Message], tools: &[ToolDefinition]) -> Value {
+    let system_text = messages
+        .iter()
+        .find(|m| matches!(m.role, Role::System))
+        .and_then(|m| match &m.content {
+            MessageContent::Text(t) => Some(t.clone()),
+            _ => None,
+        });
+
+    let contents: Vec<Value> = messages
+        .iter()
+        .filter(|m| !matches!(m.role, Role::System))
+        .map(to_gemini_message)
+        .collect();
+
+    let mut body = json!({
+        "contents": contents,
+        "generationConfig": generation_config(model),
+    });
+
+    if let Some(text) = system_text {
+        body["system_instruction"] = json!({ "parts": [{ "text": text }] });
+    }
+
+    if !tools.is_empty() {
+        body["tools"] = json!([{
+            "function_declarations": tools.iter().map(to_gemini_tool).collect::<Vec<_>>()
+        }]);
+    }
+
+    body
+}
+
+async fn process_stream_event(
+    event: &Value,
+    saw_tool_call: &mut bool,
+    finish_reason: &mut Option<String>,
+    tx: &mpsc::Sender<StreamEvent>,
+) -> Result<()> {
+    if let Some(err) = event.get("error") {
+        bail!("Gemini API error: {err}");
+    }
+
+    let candidate = &event["candidates"][0];
+    if let Some(reason) = candidate["finishReason"].as_str() {
+        *finish_reason = Some(if reason == "STOP" { "end_turn".to_string() } else { reason.to_string() });
+    }
+
+    let Some(parts) = candidate["content"]["parts"].as_array() else { return Ok(()) };
+    for part in parts {
+        if let Some(fc) = part.get("functionCall") {
+            let name = fc["name"].as_str().unwrap_or("").to_string();
+            let call = ToolCall {
+                id:                name.clone(),
+                name,
+                input:             fc["args"].clone(),
+                thought_signature: part["thoughtSignature"].as_str().map(str::to_string),
+            };
+            *saw_tool_call = true;
+            let _ = tx.send(StreamEvent::ToolCallReady(call)).await;
+            continue;
+        }
+
+        let Some(text) = part["text"].as_str() else { continue };
+        if text.is_empty() { continue; }
+        if part["thought"].as_bool().unwrap_or(false) {
+            let _ = tx.send(StreamEvent::ThinkingDelta { text: text.to_string() }).await;
+        } else {
+            let _ = tx.send(StreamEvent::TextDelta { text: text.to_string() }).await;
+        }
+    }
+
+    Ok(())
 }
 
 fn to_gemini_message(msg: &Message) -> Value {
@@ -848,5 +994,146 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn generation_config_includes_thinking_for_gemini_models() {
+        let cfg = generation_config("gemini-3.1-pro-preview");
+        assert_eq!(cfg["thinkingConfig"]["includeThoughts"], true);
+    }
+
+    #[test]
+    fn generation_config_omits_thinking_for_gemma_models() {
+        let cfg = generation_config("gemma-4-31b-it");
+        assert!(cfg.get("thinkingConfig").is_none());
+    }
+
+    #[test]
+    fn generation_config_budgets_extra_output_tokens_on_top_of_thinking_for_gemini_models() {
+        // Thinking tokens count against maxOutputTokens on Gemini, so the
+        // answer/tool-call budget must not shrink just because thinking is on —
+        // otherwise a long tool call can get truncated before it completes.
+        let cfg = generation_config("gemini-3.1-pro-preview");
+        let max_output = cfg["maxOutputTokens"].as_u64().unwrap();
+        let thinking_budget = cfg["thinkingConfig"]["thinkingBudget"].as_i64().unwrap();
+        assert!(
+            max_output as i64 - thinking_budget >= MAX_OUTPUT_TOKENS as i64,
+            "expected at least {MAX_OUTPUT_TOKENS} tokens left over for the answer after thinking, got maxOutputTokens={max_output} thinkingBudget={thinking_budget}",
+        );
+    }
+
+    #[test]
+    fn generation_config_max_output_tokens_unaffected_for_gemma_models() {
+        let cfg = generation_config("gemma-4-31b-it");
+        assert_eq!(cfg["maxOutputTokens"], MAX_OUTPUT_TOKENS);
+    }
+
+    // Real Gemini SSE responses frame events with "\r\n\r\n" (confirmed against
+    // the live API), not the bare "\n\n" other providers use — match that here
+    // so these tests actually exercise the real wire format.
+    fn sse_body(events: &[Value]) -> String {
+        events.iter().map(|e| format!("data: {}\r\n\r\n", e)).collect::<String>()
+    }
+
+    async fn collect_stream_events(provider: &GeminiProvider) -> Vec<StreamEvent> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        provider.stream(None, &[Message::user("hi")], &[], tx).await.unwrap();
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn stream_text_delta_emits_text_delta_event() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/gemini-test:streamGenerateContent");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "candidates": [{ "content": { "parts": [{ "text": "Hello" }] } }] }),
+                    json!({ "candidates": [{ "content": { "parts": [{ "text": " world" }] }, "finishReason": "STOP" }] }),
+                ]));
+        });
+
+        let provider = make_provider(&server.base_url());
+        let events = collect_stream_events(&provider).await;
+
+        let text_deltas: Vec<_> = events.iter().filter_map(|e| match e {
+            StreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(text_deltas, vec!["Hello", " world"]);
+
+        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason } if stop_reason == "end_turn"));
+        assert!(done, "expected Done(end_turn) event");
+    }
+
+    #[tokio::test]
+    async fn stream_thinking_delta_emits_thinking_delta_event() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/gemini-test:streamGenerateContent");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "candidates": [{ "content": { "parts": [{ "text": "I should search", "thought": true }] } }] }),
+                    json!({ "candidates": [{ "content": { "parts": [{ "functionCall": { "name": "search", "args": {} } }] }, "finishReason": "STOP" }] }),
+                ]));
+        });
+
+        let provider = make_provider(&server.base_url());
+        let events = collect_stream_events(&provider).await;
+
+        let thinking: Vec<_> = events.iter().filter_map(|e| match e {
+            StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(thinking, vec!["I should search"]);
+
+        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason } if stop_reason == "tool_use"));
+        assert!(done, "expected Done(tool_use) event since a tool call was streamed");
+    }
+
+    #[tokio::test]
+    async fn stream_tool_call_carries_thought_signature() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/gemini-test:streamGenerateContent");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "candidates": [{ "content": { "parts": [{
+                        "functionCall": { "name": "search_symbols", "args": { "query": "alpha" } },
+                        "thoughtSignature": "CsIBCsMB=="
+                    }] } }] }),
+                ]));
+        });
+
+        let provider = make_provider(&server.base_url());
+        let events = collect_stream_events(&provider).await;
+
+        let call = events.iter().find_map(|e| match e {
+            StreamEvent::ToolCallReady(c) => Some(c),
+            _ => None,
+        }).expect("expected a ToolCallReady event");
+        assert_eq!(call.name, "search_symbols");
+        assert_eq!(call.input["query"], "alpha");
+        assert_eq!(call.thought_signature.as_deref(), Some("CsIBCsMB=="));
+    }
+
+    #[tokio::test]
+    async fn stream_4xx_returns_error() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/gemini-test:streamGenerateContent");
+            then.status(400).json_body(json!({ "error": { "message": "bad request" } }));
+        });
+
+        let provider = make_provider(&server.base_url());
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        assert!(provider.stream(None, &[Message::user("hi")], &[], tx).await.is_err());
     }
 }
