@@ -2,7 +2,7 @@
   <div class="agents-view">
     <div class="page-header">
       <h2>Agents</h2>
-      <button id="install-agent-btn" class="p-button--positive" type="button" @click="handleAddAgentClick">Add agent</button>
+      <button id="install-agent-btn" class="p-button--positive is-dense" type="button" @click="handleAddAgentClick">Add agent</button>
     </div>
 
     <template v-if="agents.length > 0">
@@ -73,8 +73,8 @@
           This cannot be undone.
         </p>
         <div class="modal-actions">
-          <button class="p-button--base" type="button" @click="deletingAgent = null">Cancel</button>
-          <button class="p-button--negative" type="button" :disabled="deleting" @click="confirmDelete">Delete</button>
+          <button class="p-button--base is-dense" type="button" @click="deletingAgent = null">Cancel</button>
+          <button class="p-button--negative is-dense" type="button" :disabled="deleting" @click="confirmDelete">Delete</button>
         </div>
       </div>
     </div>
@@ -171,10 +171,10 @@
           <p v-if="managedError" class="managed-agent-error">{{ managedError }}</p>
 
           <div class="modal-actions">
-            <button class="p-button--base" type="button" @click="closeManagedModal">Cancel</button>
+            <button class="p-button--base is-dense" type="button" @click="closeManagedModal">Cancel</button>
             <button
               id="create-managed-agent-btn"
-              class="p-button--positive"
+              class="p-button--positive is-dense"
               type="button"
               :disabled="!managedName.trim() || !selectedFlavor"
               @click="submitManagedAgent"
@@ -190,8 +190,8 @@
           <p v-if="managedError" class="managed-agent-error">{{ managedError }}</p>
 
           <div class="modal-actions">
-            <button v-if="managedError" class="p-button--base" type="button" @click="resetManagedForm">Try again</button>
-            <button class="p-button--base" type="button" @click="closeManagedModal">{{ provisionDone || managedError ? 'Close' : 'Cancel' }}</button>
+            <button v-if="managedError" class="p-button--base is-dense" type="button" @click="resetManagedForm">Try again</button>
+            <button class="p-button--base is-dense" type="button" @click="closeManagedModal">{{ provisionDone || managedError ? 'Close' : 'Cancel' }}</button>
           </div>
         </template>
       </div>

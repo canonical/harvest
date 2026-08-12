@@ -53,14 +53,14 @@
               <div class="artifacts-article__actions">
                 <button
                   v-if="isTerraformKind(selectedArtifact.kind)"
-                  class="p-button--base run-on-agent-btn"
+                  class="p-button--base run-on-agent-btn is-dense"
                   type="button"
                   @click="openRunModal"
                 >
                   Run on agent
                 </button>
                 <a
-                  class="p-button--positive artifact-download-btn"
+                  class="p-button--positive artifact-download-btn is-dense"
                   :href="artifactDownloadUrl(selectedArtifact.id)"
                   download
                 >
@@ -91,8 +91,8 @@
         <h3>Delete artifact</h3>
         <p>Delete <strong>{{ deletingArtifact.title }}</strong>? This cannot be undone.</p>
         <div class="modal-actions">
-          <button class="p-button--base" type="button" @click="deletingArtifact = null">Cancel</button>
-          <button class="p-button--negative" type="button" :disabled="submitting" @click="submitDeleteArtifact">Delete</button>
+          <button class="p-button--base is-dense" type="button" @click="deletingArtifact = null">Cancel</button>
+          <button class="p-button--negative is-dense" type="button" :disabled="submitting" @click="submitDeleteArtifact">Delete</button>
         </div>
       </div>
     </div>
@@ -133,9 +133,9 @@
         <pre v-if="runResult" class="run-modal-result">{{ formattedRunResult }}</pre>
 
         <div class="modal-actions">
-          <button class="p-button--base" type="button" @click="closeRunModal">Cancel</button>
+          <button class="p-button--base is-dense" type="button" @click="closeRunModal">Cancel</button>
           <button
-            :class="selectedAction === 'plan' ? 'p-button--positive' : 'p-button--negative'"
+            :class="selectedAction === 'plan' ? 'p-button--positive is-dense' : 'p-button--negative is-dense'"
             type="button"
             :disabled="!canSubmitRun || running"
             @click="submitRun"

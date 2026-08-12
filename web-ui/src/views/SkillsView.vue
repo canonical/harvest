@@ -35,7 +35,7 @@
           <h2>Global skills</h2>
           <button
             v-if="auth.isAdmin"
-            class="p-button--positive"
+            class="p-button--positive is-dense"
             data-testid="add-global-skill"
             type="button"
             @click="openCreate('global')"
@@ -74,13 +74,13 @@
                 <h2>{{ selectedGlobalSkill.name }}</h2>
                 <div v-if="auth.isAdmin && !editingGlobal">
                   <button
-                    class="p-button--base"
+                    class="p-button--base is-dense"
                     :data-testid="`edit-skill-${selectedGlobalSkill.id}`"
                     type="button"
                     @click="enterEditGlobal"
                   >Edit</button>
                   <button
-                    class="p-button--negative"
+                    class="p-button--negative is-dense"
                     :data-testid="`delete-skill-${selectedGlobalSkill.id}`"
                     type="button"
                     @click="confirmDelete('global', selectedGlobalSkill)"
@@ -112,13 +112,13 @@
                   </div>
                 </div>
                 <button
-                  class="p-button--base"
+                  class="p-button--base is-dense"
                   :data-testid="`cancel-edit-${selectedGlobalSkill.id}`"
                   type="button"
                   @click="cancelEditGlobal"
                 >Cancel</button>
                 <button
-                  class="p-button--positive"
+                  class="p-button--positive is-dense"
                   :data-testid="`save-skill-${selectedGlobalSkill.id}`"
                   type="button"
                   :disabled="!editGlobalName || savingEdit"
@@ -135,7 +135,7 @@
         <div class="skills-header">
           <h2>This project's skills</h2>
           <button
-            class="p-button--positive"
+            class="p-button--positive is-dense"
             data-testid="add-project-skill"
             type="button"
             @click="openCreate('project')"
@@ -174,13 +174,13 @@
                 <h2>{{ selectedProjectSkill.name }}</h2>
                 <div v-if="!editingProject">
                   <button
-                    class="p-button--base"
+                    class="p-button--base is-dense"
                     :data-testid="`edit-skill-${selectedProjectSkill.id}`"
                     type="button"
                     @click="enterEditProject"
                   >Edit</button>
                   <button
-                    class="p-button--negative"
+                    class="p-button--negative is-dense"
                     :data-testid="`delete-skill-${selectedProjectSkill.id}`"
                     type="button"
                     @click="confirmDelete('project', selectedProjectSkill)"
@@ -212,13 +212,13 @@
                   </div>
                 </div>
                 <button
-                  class="p-button--base"
+                  class="p-button--base is-dense"
                   :data-testid="`cancel-edit-${selectedProjectSkill.id}`"
                   type="button"
                   @click="cancelEditProject"
                 >Cancel</button>
                 <button
-                  class="p-button--positive"
+                  class="p-button--positive is-dense"
                   :data-testid="`save-skill-${selectedProjectSkill.id}`"
                   type="button"
                   :disabled="!editProjectName || savingEdit"
@@ -238,9 +238,9 @@
         <h3>Delete skill</h3>
         <p>Delete <strong>{{ deletingSkill.name }}</strong>? This cannot be undone.</p>
         <div class="modal-actions">
-          <button class="p-button--base" type="button" @click="deletingSkill = null">Cancel</button>
+          <button class="p-button--base is-dense" type="button" @click="deletingSkill = null">Cancel</button>
           <button
-            class="p-button--negative"
+            class="p-button--negative is-dense"
             data-testid="confirm-delete"
             type="button"
             :disabled="deleting"
@@ -272,7 +272,7 @@
           </div>
         </div>
         <button
-          class="p-button--positive"
+          class="p-button--positive is-dense"
           data-testid="save-create"
           type="button"
           :disabled="!newName || submitting"

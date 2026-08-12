@@ -72,7 +72,7 @@
                 </div>
               </td>
               <td>
-                <button class="p-button p-button--small" type="button" @click="openEditUser(u)">Edit</button>
+                <button class="p-button is-dense" type="button" @click="openEditUser(u)">Edit</button>
               </td>
             </tr>
           </tbody>
@@ -82,7 +82,7 @@
 
     <div v-if="activeTab === 'groups'" class="admin-panel" role="tabpanel">
       <div class="admin-panel-toolbar">
-        <button class="p-button--positive" type="button" @click="openCreateGroup">+ Add group</button>
+        <button class="p-button--positive is-dense" type="button" @click="openCreateGroup">+ Add group</button>
       </div>
       <p class="u-text--muted admin-panel-hint">Default groups are automatically assigned to every new user on registration.</p>
       <div v-if="!groups.length" class="admin-empty">
@@ -110,7 +110,7 @@
                 </label>
               </td>
               <td>
-                <button class="p-button--negative p-button--small" type="button" :aria-label="`Delete group ${g.name}`" @click="doDeleteGroup(g)">Delete</button>
+                <button class="p-button--negative is-dense" type="button" :aria-label="`Delete group ${g.name}`" @click="doDeleteGroup(g)">Delete</button>
               </td>
             </tr>
           </tbody>
@@ -153,7 +153,7 @@
           </div>
         </div>
         <div class="modal-actions">
-          <button class="p-button--positive" type="button" :disabled="submitting" @click="submitEditUser">Save</button>
+          <button class="p-button--positive is-dense" type="button" :disabled="submitting" @click="submitEditUser">Save</button>
           <button type="button" @click="showEditUser = false">Cancel</button>
         </div>
       </div>
@@ -177,7 +177,7 @@
           </div>
         </div>
         <div class="modal-actions">
-          <button class="p-button--positive" type="button" :disabled="!newGroupName || submitting" @click="submitCreateGroup">Create</button>
+          <button class="p-button--positive is-dense" type="button" :disabled="!newGroupName || submitting" @click="submitCreateGroup">Create</button>
           <button type="button" @click="showCreateGroup = false">Cancel</button>
         </div>
       </div>

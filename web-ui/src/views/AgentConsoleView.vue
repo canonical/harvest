@@ -78,8 +78,8 @@
           This cannot be undone.
         </p>
         <div class="modal-actions">
-          <button class="p-button--base" type="button" @click="showDeleteConfirm = false">Cancel</button>
-          <button id="console-delete-confirm-btn" class="p-button--negative" type="button" :disabled="deleting" @click="confirmDelete">Delete</button>
+          <button class="p-button--base is-dense" type="button" @click="showDeleteConfirm = false">Cancel</button>
+          <button id="console-delete-confirm-btn" class="p-button--negative is-dense" type="button" :disabled="deleting" @click="confirmDelete">Delete</button>
         </div>
       </div>
     </div>
@@ -91,7 +91,7 @@
         <template v-if="!forwardFormOpen">
           <div class="page-header portforward-manager-header">
             <h3>Port Forwards</h3>
-            <button id="portforward-add-btn" class="p-button--positive" type="button" @click="openAddForwardModal">Add</button>
+            <button id="portforward-add-btn" class="p-button--positive is-dense" type="button" @click="openAddForwardModal">Add</button>
           </div>
           <p v-if="portForwardsError" class="console-action-error">{{ portForwardsError }}</p>
           <table v-if="portForwards.length" class="p-table">
@@ -131,8 +131,8 @@
           </label>
           <p v-if="forwardFormError" class="console-action-error">{{ forwardFormError }}</p>
           <div class="modal-actions">
-            <button class="p-button--base" type="button" @click="forwardFormOpen = false">Cancel</button>
-            <button id="portforward-save-btn" class="p-button--positive" type="button" :disabled="savingForward" @click="saveForward">Save</button>
+            <button class="p-button--base is-dense" type="button" @click="forwardFormOpen = false">Cancel</button>
+            <button id="portforward-save-btn" class="p-button--positive is-dense" type="button" :disabled="savingForward" @click="saveForward">Save</button>
           </div>
         </template>
       </div>
