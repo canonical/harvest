@@ -7,6 +7,7 @@ use axum::extract::ws::Message;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -129,6 +130,8 @@ pub struct MachineRegistry {
     pub token_index:     DashMap<String, String>,
     pub console_pending: DashMap<String, PendingConsoleSession>,
     pub tunnel_pending:  DashMap<String, PendingTunnelSession>,
+    /// Live stdout/stderr line subscribers for in-flight `execute_terraform` calls, keyed by request_id.
+    pub output:          DashMap<String, mpsc::Sender<Value>>,
 }
 
 impl MachineRegistry {
@@ -213,6 +216,8 @@ impl MachineRegistry {
         ).await
     }
 
+    /// `output_tx`, if given, receives a `{"stream": "stdout"|"stderr", "line": "..."}` value
+    /// for each line the agent produces while the command runs.
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_terraform(
         &self,
@@ -222,14 +227,20 @@ impl MachineRegistry {
         action:       TerraformAction,
         files:        BTreeMap<String, String>,
         timeout_secs: u64,
+        output_tx:    Option<mpsc::Sender<Value>>,
     ) -> Result<CommandResult, String> {
         let request_id = Uuid::new_v4().to_string();
-        self.send_and_await(
+        if let Some(tx) = output_tx {
+            self.output.insert(request_id.clone(), tx);
+        }
+        let result = self.send_and_await(
             agent_id,
             request_id.clone(),
-            ServerToAgent::RunTerraform { request_id, artifact_id, flavor, action, files, timeout_secs },
+            ServerToAgent::RunTerraform { request_id: request_id.clone(), artifact_id, flavor, action, files, timeout_secs },
             timeout_secs,
-        ).await
+        ).await;
+        self.output.remove(&request_id);
+        result
     }
 
     pub async fn open_console_session(
@@ -404,6 +415,7 @@ mod tests {
             TerraformAction::Plan,
             BTreeMap::new(),
             30,
+            None,
         ).await.unwrap_err();
         assert!(e.contains("not connected"), "got: {e}");
     }
@@ -426,6 +438,7 @@ mod tests {
                 TerraformAction::Plan,
                 files_clone,
                 30,
+                None,
             ).await
         });
 
@@ -446,6 +459,45 @@ mod tests {
 
         let result = handle.await.unwrap().unwrap();
         assert_eq!(result.stdout, "planned");
+    }
+
+    #[tokio::test]
+    async fn execute_terraform_registers_and_cleans_up_output_channel() {
+        let registry = MachineRegistry::new();
+        let mut rx = register_agent(&registry, "a1");
+
+        let (output_tx, mut output_rx) = mpsc::channel::<Value>(8);
+
+        let registry_clone = Arc::clone(&registry);
+        let handle = tokio::spawn(async move {
+            registry_clone.execute_terraform(
+                "a1",
+                "artifact-1".into(),
+                TerraformFlavor::Terraform,
+                TerraformAction::Plan,
+                BTreeMap::new(),
+                30,
+                Some(output_tx),
+            ).await
+        });
+
+        let request_id = match rx.recv().await.unwrap() {
+            ServerToAgent::RunTerraform { request_id, .. } => request_id,
+            other => panic!("expected RunTerraform, got {other:?}"),
+        };
+
+        assert!(registry.output.contains_key(&request_id), "output channel should be registered while the run is in flight");
+
+        let sender = registry.output.get(&request_id).unwrap().clone();
+        sender.send(serde_json::json!({"stream": "stdout", "line": "Initializing..."})).await.unwrap();
+        let line = output_rx.recv().await.unwrap();
+        assert_eq!(line["line"], "Initializing...");
+
+        let (_, pending) = registry.pending.remove(&request_id).unwrap();
+        pending.tx.send(Ok(CommandResult { stdout: String::new(), stderr: String::new(), exit_code: 0 })).unwrap();
+        handle.await.unwrap().unwrap();
+
+        assert!(!registry.output.contains_key(&request_id), "output channel should be cleaned up once the run completes");
     }
 
     fn register_agent(registry: &MachineRegistry, agent_id: &str) -> mpsc::Receiver<ServerToAgent> {

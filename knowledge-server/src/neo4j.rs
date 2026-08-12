@@ -1,5 +1,5 @@
 use anyhow::Result;
-use neo4rs::{query, Graph, Row};
+use neo4rs::{query, BoltNull, BoltType, Graph, Row};
 use serde_json::Value;
 
 pub struct Neo4jClient {
@@ -27,7 +27,7 @@ impl Neo4jClient {
                     Value::Number(n) if n.is_i64() => q.param(&key, n.as_i64().unwrap()),
                     Value::Number(n)  => q.param(&key, n.as_f64().unwrap()),
                     Value::Bool(b)    => q.param(&key, b),
-                    Value::Null       => q,
+                    Value::Null       => q.param(&key, BoltType::Null(BoltNull)),
                     Value::Array(arr) => {
                         let items: Vec<String> = arr.into_iter()
                             .map(|v| match v {
