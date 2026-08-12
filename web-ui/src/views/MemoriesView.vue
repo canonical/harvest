@@ -7,7 +7,7 @@
     <template v-else>
       <div class="memories-header">
         <h2>Memories</h2>
-        <button class="p-button--positive add-memory-btn" data-testid="add-memory" type="button" @click="openCreate">+ Add memory</button>
+        <button class="p-button--positive add-memory-btn is-dense" data-testid="add-memory" type="button" @click="openCreate">+ Add memory</button>
       </div>
 
       <div class="memories-layout">
@@ -41,7 +41,7 @@
             <div class="memories-article__header">
               <h2>{{ selectedMemory.title }}</h2>
               <button
-                class="p-button--negative delete-memory-btn"
+                class="p-button--negative delete-memory-btn is-dense"
                 type="button"
                 @click="confirmDeleteMemory(selectedMemory)"
               >Delete</button>
@@ -59,8 +59,8 @@
         <h3>Delete memory</h3>
         <p>Delete <strong>{{ deletingMemory.title }}</strong>? This cannot be undone.</p>
         <div class="modal-actions">
-          <button class="p-button--base" type="button" @click="deletingMemory = null">Cancel</button>
-          <button class="p-button--negative" type="button" :disabled="submitting" @click="submitDeleteMemory">Delete</button>
+          <button class="p-button--base is-dense" type="button" @click="deletingMemory = null">Cancel</button>
+          <button class="p-button--negative is-dense" type="button" :disabled="submitting" @click="submitDeleteMemory">Delete</button>
         </div>
       </div>
     </div>
@@ -82,7 +82,7 @@
             <p class="p-notification__message">{{ createError }}</p>
           </div>
         </div>
-        <button class="p-button--positive" type="button" :disabled="!newTitle || submitting" @click="submitCreate">Save</button>
+        <button class="p-button--positive is-dense" type="button" :disabled="!newTitle || submitting" @click="submitCreate">Save</button>
       </div>
     </div>
   </div>

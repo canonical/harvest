@@ -7,7 +7,7 @@
     <template v-else>
       <div class="tasks-header">
         <h2>Tasks</h2>
-        <button class="p-button--positive create-task-btn" data-testid="create-task" type="button" @click="openCreate">+ Create task</button>
+        <button class="p-button--positive create-task-btn is-dense" data-testid="create-task" type="button" @click="openCreate">+ Create task</button>
       </div>
 
       <div class="tasks-layout">
@@ -22,13 +22,13 @@
           <div class="tdp-header__toolbar">
             <button
               type="button"
-              class="p-button--base has-icon u-no-margin source-panel-expand"
+              class="p-button--base has-icon u-no-margin source-panel-expand is-dense"
               :aria-label="panelExpanded ? 'Shrink panel' : 'Expand panel'"
               @click="toggleExpand"
             ><i :class="panelExpanded ? 'p-icon--chevron-right' : 'p-icon--chevron-left'"></i></button>
             <div class="tdp-actions">
               <button
-                class="p-button--positive p-button--small"
+                class="p-button--positive is-dense"
                 type="button"
                 :disabled="running || !selectedTask"
                 @click="selectedTask && runTask(selectedTask.id)"
@@ -36,10 +36,10 @@
                 <svg viewBox="0 0 10 10" width="8" height="8" fill="currentColor" aria-hidden="true" style="flex-shrink:0"><polygon points="2,1 9,5 2,9"/></svg>
                 Run
               </button>
-              <button class="p-button p-button--small" type="button" :disabled="!selectedTask" @click="selectedTask && openEdit(selectedTask)">Edit</button>
-              <button class="p-button--negative p-button--small" type="button" :disabled="!selectedTask" @click="selectedTask && confirmDeleteTask(selectedTask.id)">Delete</button>
+              <button class="p-button is-dense" type="button" :disabled="!selectedTask" @click="selectedTask && openEdit(selectedTask)">Edit</button>
+              <button class="p-button--negative is-dense" type="button" :disabled="!selectedTask" @click="selectedTask && confirmDeleteTask(selectedTask.id)">Delete</button>
             </div>
-            <button type="button" class="p-button--base has-icon u-no-margin tdp-close-btn" aria-label="Close panel" @click="closePanel">
+            <button type="button" class="p-button--base has-icon u-no-margin tdp-close-btn is-dense" aria-label="Close panel" @click="closePanel">
               <i class="p-icon--close"></i>
             </button>
           </div>
@@ -98,7 +98,7 @@
       <div class="task-edit-modal">
         <div class="task-edit-modal__header">
           <h3 class="task-edit-modal__title">Create task</h3>
-          <button type="button" class="p-button--base has-icon u-no-margin" aria-label="Close" @click="showCreate = false">
+          <button type="button" class="p-button--base has-icon u-no-margin is-dense" aria-label="Close" @click="showCreate = false">
             <i class="p-icon--close"></i>
           </button>
         </div>
@@ -160,9 +160,9 @@
         </div>
 
         <div class="task-edit-modal__footer">
-          <button class="p-button--base" type="button" @click="showCreate = false">Cancel</button>
+          <button class="p-button--base is-dense" type="button" @click="showCreate = false">Cancel</button>
           <button
-            class="p-button--positive"
+            class="p-button--positive is-dense"
             type="button"
             :disabled="!newName || !newPrompt || submitting"
             @click="submitCreate"
@@ -175,7 +175,7 @@
       <div class="task-edit-modal">
         <div class="task-edit-modal__header">
           <h3 class="task-edit-modal__title">Edit task</h3>
-          <button type="button" class="p-button--base has-icon u-no-margin" aria-label="Close" @click="showEdit = false">
+          <button type="button" class="p-button--base has-icon u-no-margin is-dense" aria-label="Close" @click="showEdit = false">
             <i class="p-icon--close"></i>
           </button>
         </div>
@@ -236,9 +236,9 @@
         </div>
 
         <div class="task-edit-modal__footer">
-          <button class="p-button--base" type="button" @click="showEdit = false">Cancel</button>
+          <button class="p-button--base is-dense" type="button" @click="showEdit = false">Cancel</button>
           <button
-            class="p-button--positive"
+            class="p-button--positive is-dense"
             type="button"
             :disabled="!editName || !editPrompt || submitting"
             @click="submitEdit"
@@ -253,8 +253,8 @@
         <h3>Delete task</h3>
         <p>Delete <strong>{{ tasks.find(t => t.id === deletingTaskId)?.name }}</strong>? This cannot be undone.</p>
         <div class="modal-actions">
-          <button class="p-button--base" type="button" @click="deletingTaskId = null">Cancel</button>
-          <button class="p-button--negative" type="button" :disabled="submitting" @click="submitDeleteTask">Delete</button>
+          <button class="p-button--base is-dense" type="button" @click="deletingTaskId = null">Cancel</button>
+          <button class="p-button--negative is-dense" type="button" :disabled="submitting" @click="submitDeleteTask">Delete</button>
         </div>
       </div>
     </div>
