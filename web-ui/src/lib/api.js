@@ -207,7 +207,7 @@ export const getProject         = (id)       => projectFetch(projectUrl(id));
 export const updateProject      = (id, body) => projectFetch(projectUrl(id), { method: 'PUT',  body: JSON.stringify(body) });
 export const deleteProject      = (id)       => projectFetch(projectUrl(id), { method: 'DELETE' });
 
-export const listProjectConversations   = (projectId)           => projectFetch(`${projectUrl(projectId)}/conversations`);
+export const listProjectConversations   = (projectId) => projectFetch(`${projectUrl(projectId)}/conversations`);
 export const createProjectConversation  = (projectId, body)     => projectFetch(`${projectUrl(projectId)}/conversations`, { method: 'POST', body: JSON.stringify(body) });
 export const getProjectConversation     = (projectId, convId)   => projectFetch(conversationUrl(projectId, convId));
 export const updateProjectConversation  = (projectId, convId, body) => projectFetch(conversationUrl(projectId, convId), { method: 'PUT',  body: JSON.stringify(body) });
@@ -395,6 +395,59 @@ export const getArtifact           = (id)         => projectFetch(artifactUrl(id
 export const artifactDownloadUrl   = (id)         => `${artifactUrl(id)}/download`;
 export async function deleteArtifact(id) {
   const res = await fetch(artifactUrl(id), { method: 'DELETE' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
+}
+
+const deploymentUrl = (projectId, id) => `${projectUrl(projectId)}/deployments/${encodeURIComponent(id)}`;
+
+export const listProjectDeployments  = (projectId)       => projectFetch(`${projectUrl(projectId)}/deployments`);
+export const createProjectDeployment = (projectId, body) => projectFetch(`${projectUrl(projectId)}/deployments`, { method: 'POST', body: JSON.stringify(body) });
+export const getProjectDeployment    = (projectId, id)   => projectFetch(deploymentUrl(projectId, id));
+export const updateProjectDeployment = (projectId, id, body) => projectFetch(deploymentUrl(projectId, id), { method: 'PATCH', body: JSON.stringify(body) });
+export async function deleteProjectDeployment(projectId, id) {
+  const res = await fetch(deploymentUrl(projectId, id), { method: 'DELETE' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
+}
+export const deployDeployment   = (projectId, id, body) => projectFetch(`${deploymentUrl(projectId, id)}/deploy`,   { method: 'POST', body: JSON.stringify(body) });
+export const redeployDeployment = (projectId, id, body) => projectFetch(`${deploymentUrl(projectId, id)}/redeploy`, { method: 'POST', body: JSON.stringify(body) });
+export const destroyDeployment  = (projectId, id, body) => projectFetch(`${deploymentUrl(projectId, id)}/destroy`,  { method: 'POST', body: JSON.stringify(body) });
+export const listDeploymentRuns = (projectId, id)        => projectFetch(`${deploymentUrl(projectId, id)}/runs`);
+
+export const generateEnvironmentQuestions = (projectId, id) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/environment/questions`, { method: 'POST' });
+export const generateDesign = (projectId, id) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/design/generate`, { method: 'POST' });
+export const generateDesignDecisions = (projectId, id) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/design/decisions`, { method: 'POST' });
+export const reviseDesign = (projectId, id, body) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/design/revise`, { method: 'POST', body: JSON.stringify(body) });
+export const generateProvision = (projectId, id) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/provision/generate`, { method: 'POST' });
+export const proposeProvisionChange = (projectId, id, body) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/provision/propose-change`, { method: 'POST', body: JSON.stringify(body) });
+export const applyProvisionChange = (projectId, id, body) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/provision/apply-change`, { method: 'POST', body: JSON.stringify(body) });
+export const diagnoseProvisionFailure = (projectId, id) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/provision/diagnose`, { method: 'POST' });
+export const dismissProvisionDiagnosis = (projectId, id) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/provision/diagnose/dismiss`, { method: 'POST' });
+
+const GROUPS_URL = '/groups';
+const groupUrl = (id) => `${GROUPS_URL}/${encodeURIComponent(id)}`;
+const templateUrl = (groupId, id) => `${groupUrl(groupId)}/templates/${encodeURIComponent(id)}`;
+
+export const listGroupTemplates  = (groupId)           => projectFetch(`${groupUrl(groupId)}/templates`);
+export const createGroupTemplate = (groupId, body)     => projectFetch(`${groupUrl(groupId)}/templates`, { method: 'POST', body: JSON.stringify(body) });
+export const getGroupTemplate    = (groupId, id)       => projectFetch(templateUrl(groupId, id));
+export const updateGroupTemplate = (groupId, id, body) => projectFetch(templateUrl(groupId, id), { method: 'PUT', body: JSON.stringify(body) });
+export async function deleteGroupTemplate(groupId, id) {
+  const res = await fetch(templateUrl(groupId, id), { method: 'DELETE' });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `Request failed (${res.status})`);
