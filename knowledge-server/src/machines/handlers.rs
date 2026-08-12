@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::{
     artifacts::{bundle as tf_bundle, handlers::{require_artifact_access, ArtifactKind}},
-    auth::jwt::Claims, lxd::{Flavor, LxdClient}, neo4j::Neo4jClient,
+    auth::jwt::Claims, deployments, lxd::{Flavor, LxdClient}, neo4j::Neo4jClient,
 };
 use super::{lxd_provision, port_forwards, ConnectedAgent, MachineRegistry, ResultBody, ServerToAgent, TerraformAction, TerraformFlavor, hash_token};
 
@@ -146,6 +146,7 @@ pub fn machines_router(state: Arc<MachineState>) -> Router {
         .route("/agents/binary/harvest-agent",   get(binary_handler))
         .route("/agent/events",                  get(agent_events_handler))
         .route("/agent/results",                 post(agent_results_handler))
+        .route("/agent/output",                  post(agent_output_handler))
         .route("/agent/ping",                    post(agent_ping_handler))
         .route("/agent/console/:session_id",     get(agent_console_claim_handler))
         .route("/agent/tunnel/:session_id",      get(agent_tunnel_claim_handler))
@@ -410,6 +411,34 @@ async fn agent_results_handler(
     StatusCode::OK.into_response()
 }
 
+#[derive(serde::Deserialize)]
+struct AgentOutputBody {
+    request_id: String,
+    stream:     String,
+    line:       String,
+}
+
+async fn agent_output_handler(
+    State(state): State<Arc<MachineState>>,
+    headers:      HeaderMap,
+    Json(body):   Json<AgentOutputBody>,
+) -> impl IntoResponse {
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t,
+        None    => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+
+    if state.registry.token_index.get(&hash_token(&token)).is_none() {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    if let Some(tx) = state.registry.output.get(&body.request_id) {
+        let _ = tx.try_send(json!({ "stream": body.stream, "line": body.line }));
+    }
+
+    StatusCode::OK.into_response()
+}
+
 async fn agent_ping_handler(
     State(state): State<Arc<MachineState>>,
     headers:      HeaderMap,
@@ -539,16 +568,37 @@ pub async fn run_terraform_command(
     let action = TerraformAction::parse(&body.action)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "action must be 'plan', 'apply', or 'destroy'"))?;
 
-    let files = tf_bundle::parse_bundle(artifact["content"].as_str().unwrap_or(""))
+    let live_content = artifact["content"].as_str().unwrap_or("");
+    let content = deployments::resolve_run_content(neo4j, &project_id, &body.artifact_id, action, live_content)
+        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let files = tf_bundle::parse_bundle(&content)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+    let files_json = serde_json::to_string(&files)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let timeout = body.timeout_secs.min(MAX_TERRAFORM_TIMEOUT_SECS);
-    match state.registry.execute_terraform(&agent_id, body.artifact_id, flavor, action, files, timeout).await {
-        Ok(r) => Ok(Json(json!({
-            "stdout":    r.stdout,
-            "stderr":    r.stderr,
-            "exit_code": r.exit_code,
-        }))),
+    let artifact_id = body.artifact_id.clone();
+    let result = state.registry.execute_terraform(&agent_id, body.artifact_id, flavor, action, files, timeout, None).await;
+
+    let (exit_code, stdout, stderr) = match &result {
+        Ok(r)  => (Some(r.exit_code), r.stdout.clone(), r.stderr.clone()),
+        Err(e) => (None, String::new(), e.clone()),
+    };
+    let success         = exit_code == Some(0);
+    let applied_content = (action == TerraformAction::Apply && success).then_some(files_json.as_str());
+    let infra_state = deployments::record_run_and_update_state(
+        neo4j, &project_id, &artifact_id, action, exit_code, &stdout, &stderr,
+        applied_content, "user", None,
+    ).await.ok().flatten();
+
+    match result {
+        Ok(r) => {
+            let mut value = json!({ "stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code });
+            if let Some(state) = infra_state {
+                value["infra_state"] = json!(state);
+            }
+            Ok(Json(value))
+        }
         Err(e) => Err(err(StatusCode::BAD_GATEWAY, &e)),
     }
 }
