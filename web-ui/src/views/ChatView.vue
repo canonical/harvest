@@ -151,8 +151,8 @@
       <h3>Delete conversation</h3>
       <p>Delete <strong>{{ deletingConv.title || 'this conversation' }}</strong>? This cannot be undone.</p>
       <div class="modal-actions">
-        <button class="p-button--base" type="button" @click="deletingConv = null">Cancel</button>
-        <button class="p-button--negative" type="button" @click="submitDeleteConversation">Delete</button>
+        <button class="p-button--base is-dense" type="button" @click="deletingConv = null">Cancel</button>
+        <button class="p-button--negative is-dense" type="button" @click="submitDeleteConversation">Delete</button>
       </div>
     </div>
   </div>
@@ -180,14 +180,9 @@ import {
   getConversation,
   deleteConversation as apiDeleteConversation,
   fetchRepositories,
-  provisionLxdAgent,
-  deleteAgent,
-  createPortForward,
-  updatePortForward,
-  deletePortForward,
   resumeConfirmAction,
 } from '../lib/api.js';
-import { initialProvisionSteps, applyProvisionEvent, isProvisionDone, isProvisionError } from '../lib/lxd-provision.js';
+import { runConfirmableAction as runConfirmableActionShared } from '../lib/confirmable-actions.js';
 
 const props = defineProps({
   projectId: { type: String, default: null },
@@ -479,65 +474,7 @@ async function submitResolvedResults(items) {
 }
 
 async function runConfirmableAction(action) {
-  if (action.name === 'create_lxd_agent') {
-    chat.updateConfirmActionItem(action.id, { status: 'running', steps: initialProvisionSteps() });
-    try {
-      await provisionLxdAgent(props.projectId, {
-        name: action.input.name,
-        description: action.input.description ?? '',
-        flavor: action.input.flavor,
-      }, (event) => {
-        const current = findConfirmAction(action.id);
-        if (!current) return;
-        chat.updateConfirmActionItem(action.id, { steps: applyProvisionEvent(current.steps, event) });
-        if (isProvisionDone(event)) {
-          chat.updateConfirmActionItem(action.id, { status: 'done', resultText: `Agent '${action.input.name}' created.` });
-        } else if (isProvisionError(event)) {
-          chat.updateConfirmActionItem(action.id, { status: 'error', resultText: event.message });
-        }
-      });
-    } catch (e) {
-      chat.updateConfirmActionItem(action.id, { status: 'error', resultText: e.message || 'Failed to create agent' });
-    }
-  } else if (action.name === 'delete_agent') {
-    chat.updateConfirmActionItem(action.id, { status: 'running' });
-    try {
-      await deleteAgent(props.projectId, action.input.agent_id);
-      chat.updateConfirmActionItem(action.id, { status: 'done', resultText: 'Agent deleted.' });
-    } catch (e) {
-      chat.updateConfirmActionItem(action.id, { status: 'error', resultText: e.message || 'Failed to delete agent' });
-    }
-  } else if (action.name === 'create_port_forward') {
-    chat.updateConfirmActionItem(action.id, { status: 'running' });
-    try {
-      await createPortForward(props.projectId, action.input.agent_id, {
-        port: action.input.port,
-        routeName: action.input.route_name,
-      });
-      chat.updateConfirmActionItem(action.id, { status: 'done', resultText: `Port forward '${action.input.route_name}' created.` });
-    } catch (e) {
-      chat.updateConfirmActionItem(action.id, { status: 'error', resultText: e.message || 'Failed to create port forward' });
-    }
-  } else if (action.name === 'update_port_forward') {
-    chat.updateConfirmActionItem(action.id, { status: 'running' });
-    try {
-      await updatePortForward(props.projectId, action.input.agent_id, action.input.forward_id, {
-        port: action.input.port,
-        routeName: action.input.route_name,
-      });
-      chat.updateConfirmActionItem(action.id, { status: 'done', resultText: 'Port forward updated.' });
-    } catch (e) {
-      chat.updateConfirmActionItem(action.id, { status: 'error', resultText: e.message || 'Failed to update port forward' });
-    }
-  } else if (action.name === 'delete_port_forward') {
-    chat.updateConfirmActionItem(action.id, { status: 'running' });
-    try {
-      await deletePortForward(props.projectId, action.input.agent_id, action.input.forward_id);
-      chat.updateConfirmActionItem(action.id, { status: 'done', resultText: 'Port forward deleted.' });
-    } catch (e) {
-      chat.updateConfirmActionItem(action.id, { status: 'error', resultText: e.message || 'Failed to delete port forward' });
-    }
-  }
+  await runConfirmableActionShared(props.projectId, action, chat);
 }
 
 async function handleConfirmAction(id) {

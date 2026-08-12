@@ -42,7 +42,7 @@
               </a>
               <div class="p-panel__controls u-hide--medium u-hide--large">
                 <button
-                  class="p-button--base has-icon u-no-margin"
+                  class="p-button--base has-icon u-no-margin is-dense"
                   type="button"
                   aria-label="Close navigation"
                   @click="closeNav"
@@ -100,6 +100,12 @@
                     <router-link to="/" exact-active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
                       <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                       <span class="p-side-navigation__label">Chat</span>
+                    </router-link>
+                  </li>
+                  <li class="p-side-navigation__item">
+                    <router-link to="/deployments" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
+                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                      <span class="p-side-navigation__label">Deployment</span>
                     </router-link>
                   </li>
                   <li class="p-side-navigation__item">
@@ -216,7 +222,7 @@
         </div>
         <p v-if="createProjectError" class="auth-error">{{ createProjectError }}</p>
         <button
-          class="p-button--positive"
+          class="p-button--positive is-dense"
           type="button"
           :disabled="!newProjectName || !newProjectGroupId || creatingProject"
           @click="submitCreateProject"
