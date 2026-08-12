@@ -1,5 +1,8 @@
+use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 #[derive(Debug)]
@@ -9,19 +12,76 @@ pub struct CommandResult {
     pub exit_code: i32,
 }
 
+/// A single line of output as it's produced, tagged with which stream it came from.
+#[derive(Debug, Clone)]
+pub struct OutputLine {
+    pub stderr: bool,
+    pub line:   String,
+}
+
 pub async fn run_command(command: &str, timeout_secs: u64) -> Result<CommandResult, String> {
+    run_command_streaming(command, timeout_secs, None).await
+}
+
+/// Runs `command`, forwarding each line of stdout/stderr to `on_line` as it's produced
+/// (in addition to accumulating the full output for the final result, same as `run_command`).
+pub async fn run_command_streaming(
+    command:      &str,
+    timeout_secs: u64,
+    on_line:      Option<mpsc::UnboundedSender<OutputLine>>,
+) -> Result<CommandResult, String> {
     let fut = async {
-        let output = Command::new("bash")
+        let mut child = Command::new("bash")
             .arg("-c")
             .arg(command)
-            .output()
-            .await
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| format!("spawn failed: {e}"))?;
 
+        let mut stdout_lines = BufReader::new(child.stdout.take().expect("piped stdout")).lines();
+        let mut stderr_lines = BufReader::new(child.stderr.take().expect("piped stderr")).lines();
+
+        let mut stdout_buf = String::new();
+        let mut stderr_buf = String::new();
+        let mut stdout_open = true;
+        let mut stderr_open = true;
+
+        while stdout_open || stderr_open {
+            tokio::select! {
+                res = stdout_lines.next_line(), if stdout_open => {
+                    match res.map_err(|e| format!("read stdout failed: {e}"))? {
+                        Some(line) => {
+                            stdout_buf.push_str(&line);
+                            stdout_buf.push('\n');
+                            if let Some(tx) = &on_line {
+                                let _ = tx.send(OutputLine { stderr: false, line });
+                            }
+                        }
+                        None => stdout_open = false,
+                    }
+                }
+                res = stderr_lines.next_line(), if stderr_open => {
+                    match res.map_err(|e| format!("read stderr failed: {e}"))? {
+                        Some(line) => {
+                            stderr_buf.push_str(&line);
+                            stderr_buf.push('\n');
+                            if let Some(tx) = &on_line {
+                                let _ = tx.send(OutputLine { stderr: true, line });
+                            }
+                        }
+                        None => stderr_open = false,
+                    }
+                }
+            }
+        }
+
+        let status = child.wait().await.map_err(|e| format!("wait failed: {e}"))?;
+
         Ok(CommandResult {
-            stdout:    String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr:    String::from_utf8_lossy(&output.stderr).into_owned(),
-            exit_code: output.status.code().unwrap_or(-1),
+            stdout:    stdout_buf,
+            stderr:    stderr_buf,
+            exit_code: status.code().unwrap_or(-1),
         })
     };
 
