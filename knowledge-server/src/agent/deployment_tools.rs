@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -214,69 +213,6 @@ impl Tool for ReadProvisionBundleTool {
     }
 }
 
-pub struct ProposeProvisionBundleTool {
-    pub neo4j:         Arc<Neo4jClient>,
-    pub project_id:    String,
-    pub deployment_id: String,
-    pub run_id:        String,
-}
-
-fn propose_provision_bundle_parameters() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "explanation": {
-                "type":        "string",
-                "description": "A short explanation of what was wrong and what this change fixes"
-            },
-            "files": {
-                "type":        "string",
-                "description": "A JSON object, encoded as a string, mapping every file path in the \
-                                corrected bundle to its full content, e.g. \
-                                {\"main.tf\": \"...\", \"variables.tf\": \"...\"}. Include every \
-                                file, whether changed or not."
-            }
-        },
-        "required": ["explanation", "files"]
-    })
-}
-
-#[async_trait]
-impl Tool for ProposeProvisionBundleTool {
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "propose_provision_bundle".into(),
-            description: "Propose a corrected version of this deployment's Terraform/Terragrunt \
-                          bundle. This does not apply anything — it stages a diff for the user to \
-                          review and apply themselves in the UI. Always include every file (changed \
-                          or not), not just the ones you edited."
-                .into(),
-            parameters: propose_provision_bundle_parameters(),
-        }
-    }
-
-    async fn execute(&self, params: Value) -> Result<String> {
-        let explanation = required_str(&params, "explanation")?;
-        let files_str = required_str(&params, "files")?;
-        let files: BTreeMap<String, String> = serde_json::from_str(&files_str)
-            .map_err(|e| anyhow!("files must be a JSON object mapping path to content: {e}"))?;
-        bundle::validate_bundle(&files).map_err(|e| anyhow!(e))?;
-
-        load_runnable_bundle(&self.neo4j, &self.project_id, &self.deployment_id).await.map_err(map_api_err)?;
-
-        crate::deployments::complete_diagnosis(
-            &self.neo4j, &self.project_id, &self.deployment_id, &self.run_id,
-            &explanation, &files_str,
-        ).await?;
-
-        Ok(serde_json::to_string(&json!({
-            "proposed":    true,
-            "explanation": explanation,
-            "file_count":  files.len(),
-        }))?)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,37 +278,4 @@ mod tests {
         assert_eq!(e.to_string(), "nothing to destroy");
     }
 
-    #[test]
-    fn propose_provision_bundle_rejects_missing_explanation() {
-        let files: BTreeMap<String, String> = serde_json::from_value(json!({ "main.tf": "x" })).unwrap();
-        bundle::validate_bundle(&files).unwrap();
-        let e = required_str(&json!({ "files": files }), "explanation").unwrap_err();
-        assert!(e.to_string().contains("explanation"));
-    }
-
-    #[test]
-    fn propose_provision_bundle_rejects_invalid_files() {
-        let mut files = BTreeMap::new();
-        files.insert("../etc/passwd".to_string(), "x".to_string());
-        assert!(bundle::validate_bundle(&files).is_err());
-    }
-
-    #[test]
-    fn propose_provision_bundle_parameters_has_no_additional_properties() {
-        let params = propose_provision_bundle_parameters();
-        assert!(!params.to_string().contains("additionalProperties"));
-    }
-
-    #[test]
-    fn propose_provision_bundle_parameters_types_files_as_a_string() {
-        let params = propose_provision_bundle_parameters();
-        assert_eq!(params["properties"]["files"]["type"], "string");
-    }
-
-    #[test]
-    fn propose_provision_bundle_files_param_parses_from_json_string() {
-        let files_str = json!({ "main.tf": "x" }).to_string();
-        let files: BTreeMap<String, String> = serde_json::from_str(&files_str).unwrap();
-        assert_eq!(files.get("main.tf"), Some(&"x".to_string()));
-    }
 }

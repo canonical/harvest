@@ -2,6 +2,7 @@ pub mod artifact_tools;
 pub mod chain;
 pub mod deployment_tools;
 pub mod graph_tools;
+pub mod issue_tools;
 pub mod lxd_tools;
 pub mod machine_tools;
 pub mod port_forward_tools;

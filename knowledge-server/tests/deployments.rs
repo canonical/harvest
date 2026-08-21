@@ -24,13 +24,17 @@ use knowledge_server::{
     deployments::{
         handlers::{
             apply_provision_change, create_deployment, create_template, delete_deployment, delete_template,
-            deploy_deployment, destroy_deployment, diagnose_provision_failure, dismiss_provision_diagnosis,
+            deploy_deployment, destroy_deployment,
             generate_design, generate_design_decisions,
             generate_environment_questions, generate_provision, get_deployment, get_template,
             list_deployment_runs, list_deployments, list_templates, propose_provision_change,
             redeploy_deployment, revise_design, update_deployment, update_template,
         },
         last_applied_bundle_for_artifact, record_run_and_update_state,
+    },
+    issues::handlers::{
+        apply_issue_solution, create_issue_comment, get_issue, issue_chat, list_issues,
+        redeploy_from_issue, update_issue_status_route,
     },
     llm::{
         LlmProvider,
@@ -156,8 +160,13 @@ fn deployments_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn LlmProvider>) 
         .route("/projects/:pid/deployments/:did/provision/generate",       route_post(generate_provision))
         .route("/projects/:pid/deployments/:did/provision/propose-change", route_post(propose_provision_change))
         .route("/projects/:pid/deployments/:did/provision/apply-change",   route_post(apply_provision_change))
-        .route("/projects/:pid/deployments/:did/provision/diagnose",         route_post(diagnose_provision_failure))
-        .route("/projects/:pid/deployments/:did/provision/diagnose/dismiss", route_post(dismiss_provision_diagnosis))
+        .route("/projects/:pid/issues", route_get(list_issues))
+        .route("/projects/:pid/issues/:iid", route_get(get_issue))
+        .route("/projects/:pid/issues/:iid/status", axum::routing::patch(update_issue_status_route))
+        .route("/projects/:pid/issues/:iid/comments", route_post(create_issue_comment))
+        .route("/projects/:pid/issues/:iid/apply-solution", route_post(apply_issue_solution))
+        .route("/projects/:pid/issues/:iid/redeploy", route_post(redeploy_from_issue))
+        .route("/projects/:pid/issues/:iid/chat", route_post(issue_chat))
         .route("/groups/:gid/templates",
                route_get(list_templates).post(create_template))
         .route("/groups/:gid/templates/:tid",
@@ -173,6 +182,7 @@ async fn setup_constraints(neo4j: &Neo4jClient) {
     neo4j.run("CREATE CONSTRAINT project_id IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE").await.unwrap();
     neo4j.run("CREATE CONSTRAINT deployment_id IF NOT EXISTS FOR (d:Deployment) REQUIRE d.id IS UNIQUE").await.unwrap();
     neo4j.run("CREATE CONSTRAINT template_id IF NOT EXISTS FOR (t:ProductTemplate) REQUIRE t.id IS UNIQUE").await.unwrap();
+    neo4j.run("CREATE CONSTRAINT issue_id IF NOT EXISTS FOR (i:Issue) REQUIRE i.id IS UNIQUE").await.unwrap();
 }
 
 macro_rules! neo4j {
@@ -1399,7 +1409,7 @@ async fn apply_provision_change_rejects_unsafe_paths() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-// ---- provision diagnosis (auto-triggered after a failed run) ----
+// ---- issue triage (auto-triggered after a failed run) ----
 
 async fn seed_failed_run(neo4j: &Neo4jClient, project_id: &str, artifact_id: &str) {
     record_run_and_update_state(
@@ -1408,118 +1418,134 @@ async fn seed_failed_run(neo4j: &Neo4jClient, project_id: &str, artifact_id: &st
     ).await.unwrap();
 }
 
-fn diagnosis_bundle_llm() -> Arc<ClosureLlm> {
+fn triage_creates_issue_llm() -> Arc<ClosureLlm> {
     ClosureLlm::new(|messages| {
         match tool_result_contents(messages).len() {
-            0 => tool_call_response("propose_provision_bundle", json!({
+            0 => tool_call_response("list_deployment_issues", json!({})),
+            1 => tool_call_response("create_or_link_issue", json!({
+                "action": "create",
+                "title": "Apply fails on security group",
+                "description": "connection refused reaching the health check port",
+                "fingerprint": "sg-health-check-refused",
+            })),
+            2 => tool_call_response("read_provision_bundle", json!({})),
+            3 => tool_call_response("propose_issue_solution", json!({
+                "issue_id": "placeholder",
                 "explanation": "the security group blocked the health check port",
                 "files": "{\"main.tf\":\"resource \\\"y\\\" {}\"}",
             })),
-            _ => text_response("Proposed a fix."),
+            _ => text_response("Triaged the failure."),
         }
     })
 }
 
-async fn wait_for_diagnosis_status(app: &Router, tok: &str, pid: &str, did: &str, want: &str) -> Value {
+async fn wait_for_issue_count(app: &Router, tok: &str, pid: &str, want: usize) -> Vec<Value> {
     for _ in 0..200 {
-        let (_, body) = send(app.clone(), req_get(&format!("/projects/{pid}/deployments/{did}"), tok)).await;
-        if body["diagnosis"]["status"] == want {
-            return body;
+        let (_, body) = send(app.clone(), req_get(&format!("/projects/{pid}/issues"), tok)).await;
+        if body.as_array().map(|a| a.len()) == Some(want) {
+            return body.as_array().unwrap().clone();
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    panic!("timed out waiting for diagnosis status to become {want}");
+    panic!("timed out waiting for {want} issue(s) to appear");
 }
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn diagnose_provision_failure_requires_a_failed_run() {
+async fn failed_apply_triggers_triage_and_creates_an_issue() {
     neo4j!(c, neo4j);
     let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
     let gid = make_group(&neo4j, "eng").await;
     join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let (app, registry) = deployments_app_with_llm(Arc::clone(&neo4j), triage_creates_issue_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
     link_terraform_bundle(&neo4j, &did, &aid).await;
 
-    let (status, _) = send(app, req_post(&format!("/projects/{pid}/deployments/{did}/provision/diagnose"), &tok, json!({}))).await;
+    let rx = register_agent(&registry, "agent-1", &pid);
+    spawn_fake_agent_with_script(rx, Arc::clone(&registry), |_| 1);
+
+    send(app.clone(), req_post(
+        &format!("/projects/{pid}/deployments/{did}/deploy"), &tok, json!({ "agent_id": "agent-1" }),
+    )).await;
+
+    let issues = wait_for_issue_count(&app, &tok, &pid, 1).await;
+    assert_eq!(issues[0]["title"], "Apply fails on security group");
+    assert_eq!(issues[0]["status"], "untriaged");
+    assert_eq!(issues[0]["deployment"]["id"], did);
+}
+
+// ---- issue status transitions ----
+
+async fn seed_issue_via_triage(app: &Router, neo4j: &Neo4jClient, tok: &str, pid: &str, aid: &str) -> String {
+    seed_failed_run(neo4j, pid, aid).await;
+    let issues = wait_for_issue_count(app, tok, pid, 1).await;
+    issues[0]["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn update_issue_status_allows_untriaged_to_in_progress() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), triage_creates_issue_llm());
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
+    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let iid = seed_issue_via_triage(&app, &neo4j, &tok, &pid, &aid).await;
+
+    let (status, body) = send(
+        app,
+        req_patch(&format!("/projects/{pid}/issues/{iid}/status"), &tok, json!({ "status": "in_progress" })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "in_progress");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn update_issue_status_rejects_skipping_straight_to_fixed() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), triage_creates_issue_llm());
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
+    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let iid = seed_issue_via_triage(&app, &neo4j, &tok, &pid, &aid).await;
+
+    let (status, _) = send(
+        app,
+        req_patch(&format!("/projects/{pid}/issues/{iid}/status"), &tok, json!({ "status": "fixed" })),
+    ).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn diagnose_provision_failure_persists_proposed_bundle() {
+async fn create_issue_comment_appends_a_user_comment() {
     neo4j!(c, neo4j);
     let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
     let gid = make_group(&neo4j, "eng").await;
     join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), diagnosis_bundle_llm());
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), triage_creates_issue_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
     link_terraform_bundle(&neo4j, &did, &aid).await;
-    seed_failed_run(&neo4j, &pid, &aid).await;
-
-    let (status, body) = send(
-        app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/diagnose"), &tok, json!({})),
-    ).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["started"], true);
-
-    let deployment = wait_for_diagnosis_status(&app, &tok, &pid, &did, "proposed").await;
-    assert_eq!(deployment["diagnosis"]["explanation"], "the security group blocked the health check port");
-    assert_eq!(deployment["diagnosis"]["files"]["main.tf"], "resource \"y\" {}");
-}
-
-#[tokio::test]
-#[ignore = "requires Docker"]
-async fn diagnose_provision_failure_marks_failed_when_no_bundle_proposed() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let llm = ScriptedLlm::new(vec![text_response("I couldn't figure out a fix.")]);
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
-    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
-    seed_failed_run(&neo4j, &pid, &aid).await;
-
-    let (status, _) = send(
-        app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/diagnose"), &tok, json!({})),
-    ).await;
-    assert_eq!(status, StatusCode::OK);
-
-    let deployment = wait_for_diagnosis_status(&app, &tok, &pid, &did, "failed").await;
-    assert_eq!(deployment["diagnosis"]["error"], "diagnosis finished without proposing a fix");
-}
-
-#[tokio::test]
-#[ignore = "requires Docker"]
-async fn dismiss_provision_diagnosis_resets_state() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), diagnosis_bundle_llm());
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
-    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
-    seed_failed_run(&neo4j, &pid, &aid).await;
-
-    send(app.clone(), req_post(&format!("/projects/{pid}/deployments/{did}/provision/diagnose"), &tok, json!({}))).await;
-    wait_for_diagnosis_status(&app, &tok, &pid, &did, "proposed").await;
+    let iid = seed_issue_via_triage(&app, &neo4j, &tok, &pid, &aid).await;
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/diagnose/dismiss"), &tok, json!({})),
+        req_post(&format!("/projects/{pid}/issues/{iid}/comments"), &tok, json!({ "body": "Looking into this now." })),
     ).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["diagnosis"], Value::Null);
+    let comments = body["comments"].as_array().unwrap();
+    assert!(comments.iter().any(|c| c["body"] == "Looking into this now." && c["author_type"] == "user"));
 }

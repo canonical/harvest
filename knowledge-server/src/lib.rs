@@ -7,6 +7,7 @@ pub mod auth;
 pub mod config;
 pub mod conversations;
 pub mod deployments;
+pub mod issues;
 pub mod llm;
 pub mod lxd;
 pub mod machines;
