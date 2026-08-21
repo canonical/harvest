@@ -6,16 +6,15 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
-    getArtifact:              vi.fn(),
-    generateProvision:        vi.fn(),
-    proposeProvisionChange:   vi.fn(),
-    applyProvisionChange:     vi.fn(),
-    deployDeployment:         vi.fn(),
-    redeployDeployment:       vi.fn(),
-    destroyDeployment:        vi.fn(),
-    openProjectEvents:        vi.fn(),
-    diagnoseProvisionFailure: vi.fn(),
-    dismissProvisionDiagnosis: vi.fn(),
+    getArtifact:            vi.fn(),
+    generateProvision:      vi.fn(),
+    proposeProvisionChange: vi.fn(),
+    applyProvisionChange:   vi.fn(),
+    deployDeployment:       vi.fn(),
+    redeployDeployment:     vi.fn(),
+    destroyDeployment:      vi.fn(),
+    openProjectEvents:      vi.fn(),
+    listProjectIssues:      vi.fn(),
   };
 });
 
@@ -39,6 +38,7 @@ const FAILED_RUN = {
 function mountPhase(deployment, runs = [], agents = AGENTS) {
   return mount(ProvisionPhase, {
     props: { projectId: 'proj-1', deployment, runs, agents },
+    global: { stubs: { RouterLink: { props: ['to'], template: '<a :href="typeof to === \'string\' ? to : to.path"><slot /></a>' } } },
   });
 }
 
@@ -52,8 +52,7 @@ describe('ProvisionPhase', () => {
       capturedOnEvent = onEvent;
       return { close: vi.fn() };
     });
-    api.diagnoseProvisionFailure.mockResolvedValue({ started: true });
-    api.dismissProvisionDiagnosis.mockResolvedValue({});
+    api.listProjectIssues.mockResolvedValue([]);
   });
 
   it('with no bundle yet, automatically generates deployment artifacts, shows a busy state, and emits refresh', async () => {
@@ -114,7 +113,7 @@ describe('ProvisionPhase', () => {
 
     expect(w.find('[data-testid="deploy-btn"]').exists()).toBe(true);
     expect(w.find('[data-testid="redeploy-btn"]').exists()).toBe(true);
-    expect(w.find('[data-testid="diagnosis-trace"]').exists()).toBe(false);
+    expect(w.find('[data-testid="broken-issues-banner"]').exists()).toBe(false);
     expect(w.find('[data-testid="deploy-btn"]').attributes('disabled')).toBeUndefined();
     expect(w.find('[data-testid="redeploy-btn"]').attributes('disabled')).toBeDefined();
     expect(w.find('[data-testid="destroy-btn"]').attributes('disabled')).toBeDefined();
@@ -226,7 +225,7 @@ describe('ProvisionPhase', () => {
     expect(w.find('[data-testid="destroy-btn"]').attributes('disabled')).toBeUndefined();
   });
 
-  it('Apply does not auto-redeploy when infra was healthy (not broken) beforehand', async () => {
+  it('Apply does not auto-redeploy', async () => {
     api.getArtifact.mockResolvedValue({ id: 'a1', content: JSON.stringify({ 'main.tf': 'a' }) });
     api.proposeProvisionChange.mockResolvedValue({
       explanation: 'x', current_files: { 'main.tf': 'a' }, proposed_files: { 'main.tf': 'b' },
@@ -261,139 +260,31 @@ describe('ProvisionPhase', () => {
     expect(w.find('.diff-view').exists()).toBe(false);
   });
 
-  it('on mount in a broken state with a failed run, auto-triggers diagnosis instead of calling proposeProvisionChange', async () => {
-    let resolveDiagnose;
-    api.diagnoseProvisionFailure.mockReturnValue(new Promise(r => { resolveDiagnose = r; }));
-    api.getArtifact.mockResolvedValue({ id: 'a1', content: JSON.stringify({ 'main.tf': 'a' }) });
-    const w = mountPhase(WITH_BUNDLE_BROKEN, [FAILED_RUN]);
-    await nextTick();
-
-    expect(api.proposeProvisionChange).not.toHaveBeenCalled();
-    expect(api.diagnoseProvisionFailure).toHaveBeenCalledWith('proj-1', 'd1');
-    expect(w.text()).toContain('Diagnosing');
-
-    resolveDiagnose({ started: true });
-    await flushPromises();
-  });
-
-  it('does not auto-trigger diagnosis when there is no failed run', async () => {
+  it('shows a banner linking to Issues when the deployment is broken, with an open-issue count', async () => {
     api.getArtifact.mockResolvedValue({ id: 'a1', content: '{}' });
-    mountPhase(WITH_BUNDLE_BROKEN, []);
-    await flushPromises();
-
-    expect(api.diagnoseProvisionFailure).not.toHaveBeenCalled();
-  });
-
-  it('does not re-trigger diagnosis for a failed run that already has a running diagnosis', async () => {
-    api.getArtifact.mockResolvedValue({ id: 'a1', content: '{}' });
-    const deployment = { ...WITH_BUNDLE_BROKEN, diagnosis: { status: 'running', run_id: 'r1' } };
-    mountPhase(deployment, [FAILED_RUN]);
-    await flushPromises();
-
-    expect(api.diagnoseProvisionFailure).not.toHaveBeenCalled();
-  });
-
-  it('streams live diagnosis status while diagnosing, with Redeploy/Destroy still available', async () => {
-    let resolveDiagnose;
-    api.diagnoseProvisionFailure.mockReturnValue(new Promise(r => { resolveDiagnose = r; }));
-    api.getArtifact.mockResolvedValue({ id: 'a1', content: '{}' });
+    api.listProjectIssues.mockResolvedValue([
+      { id: 'i1', status: 'untriaged' },
+      { id: 'i2', status: 'in_progress' },
+      { id: 'i3', status: 'fixed' },
+    ]);
     const w = mountPhase(WITH_BUNDLE_BROKEN, [FAILED_RUN]);
     await flushPromises();
 
-    expect(capturedOnEvent).toBeTypeOf('function');
-    capturedOnEvent({ type: 'thinking', deployment_id: 'd1', text: 'Reading the failure logs' });
-    capturedOnEvent({ type: 'tool_call', deployment_id: 'd1', name: 'read_provision_bundle', input: {} });
-    capturedOnEvent({ type: 'tool_call', deployment_id: 'other-deployment', name: 'read_provision_bundle', input: {} });
-    await nextTick();
-
-    expect(w.text()).toContain('Reading the failure logs');
-    expect(w.find('[data-testid="diagnosis-trace"]').findAll('li')).toHaveLength(2);
-    expect(w.find('[data-testid="deploy-btn"]').attributes('disabled')).toBeDefined();
-    expect(w.find('[data-testid="redeploy-btn"]').attributes('disabled')).toBeUndefined();
-    expect(w.find('[data-testid="destroy-btn"]').attributes('disabled')).toBeUndefined();
-
-    resolveDiagnose({ started: true });
-    await flushPromises();
+    expect(api.listProjectIssues).toHaveBeenCalledWith('proj-1', { deploymentId: 'd1' });
+    const banner = w.find('[data-testid="broken-issues-banner"]');
+    expect(banner.exists()).toBe(true);
+    expect(banner.text()).toContain('2 open issues');
+    const link = w.find('[data-testid="view-issues-link"]');
+    expect(link.attributes('href')).toContain('/issues?deployment=d1');
   });
 
-  it('shows the diagnosis diff once proposed, without a chat or free-text input', async () => {
+  it('does not show the broken-issues banner when infra_state is not broken', async () => {
     api.getArtifact.mockResolvedValue({ id: 'a1', content: '{}' });
-    const deployment = {
-      ...WITH_BUNDLE_BROKEN,
-      diagnosis: { status: 'proposed', run_id: 'r1', explanation: 'The security group blocked the health check.', files: { 'main.tf': 'fixed' } },
-    };
-    const w = mountPhase(deployment, [FAILED_RUN]);
+    const w = mountPhase(WITH_BUNDLE_UP);
     await flushPromises();
 
-    expect(api.diagnoseProvisionFailure).not.toHaveBeenCalled();
-    expect(w.text()).toContain('The security group blocked the health check.');
-    expect(w.find('.diff-view').exists()).toBe(true);
-    expect(w.find('[data-testid="approve-change-btn"]').exists()).toBe(true);
-    expect(w.find('textarea').exists()).toBe(false);
-  });
-
-  it('Discard on a proposed diagnosis also dismisses it on the server', async () => {
-    api.getArtifact.mockResolvedValue({ id: 'a1', content: '{}' });
-    const deployment = {
-      ...WITH_BUNDLE_BROKEN,
-      diagnosis: { status: 'proposed', run_id: 'r1', explanation: 'x', files: { 'main.tf': 'fixed' } },
-    };
-    const w = mountPhase(deployment, [FAILED_RUN]);
-    await flushPromises();
-
-    await w.find('[data-testid="discard-change-btn"]').trigger('click');
-    await flushPromises();
-
-    expect(api.dismissProvisionDiagnosis).toHaveBeenCalledWith('proj-1', 'd1');
-    expect(w.emitted('refresh')).toBeTruthy();
-  });
-
-  it('Apply auto-redeploys with the selected agent once infra was broken', async () => {
-    api.getArtifact.mockResolvedValue({ id: 'a1', content: '{}' });
-    api.applyProvisionChange.mockResolvedValue({});
-    api.redeployDeployment.mockResolvedValue({ runs: [{ action: 'apply', exit_code: 0 }] });
-    const deployment = {
-      ...WITH_BUNDLE_BROKEN,
-      diagnosis: { status: 'proposed', run_id: 'r1', explanation: 'x', files: { 'main.tf': 'fixed' } },
-    };
-    const w = mountPhase(deployment, [FAILED_RUN]);
-    await flushPromises();
-
-    await w.find('[data-testid="approve-change-btn"]').trigger('click');
-    await flushPromises();
-
-    expect(api.applyProvisionChange).toHaveBeenCalledWith('proj-1', 'd1', { files: { 'main.tf': 'fixed' } });
-    expect(api.redeployDeployment).toHaveBeenCalledWith('proj-1', 'd1', { agent_id: 'agent-1' });
-  });
-
-  it('shows a failed diagnosis with a Retry button, which re-triggers diagnosis', async () => {
-    api.getArtifact.mockResolvedValue({ id: 'a1', content: '{}' });
-    const deployment = { ...WITH_BUNDLE_BROKEN, diagnosis: { status: 'failed', run_id: 'r1', error: 'agent unreachable' } };
-    const w = mountPhase(deployment, [FAILED_RUN]);
-    await flushPromises();
-
-    expect(api.diagnoseProvisionFailure).not.toHaveBeenCalled();
-    expect(w.text()).toContain('agent unreachable');
-
-    await w.find('[data-testid="retry-diagnosis-btn"]').trigger('click');
-    await flushPromises();
-
-    expect(api.diagnoseProvisionFailure).toHaveBeenCalledWith('proj-1', 'd1');
-  });
-
-  it('a done event for this deployment refreshes so the diagnosis result is picked up', async () => {
-    let resolveDiagnose;
-    api.diagnoseProvisionFailure.mockReturnValue(new Promise(r => { resolveDiagnose = r; }));
-    api.getArtifact.mockResolvedValue({ id: 'a1', content: '{}' });
-    const w = mountPhase(WITH_BUNDLE_BROKEN, [FAILED_RUN]);
-    await flushPromises();
-
-    capturedOnEvent({ type: 'done', deployment_id: 'd1', answer: '' });
-    await nextTick();
-
-    expect(w.emitted('refresh')).toBeTruthy();
-    resolveDiagnose({ started: true });
-    await flushPromises();
+    expect(w.find('[data-testid="broken-issues-banner"]').exists()).toBe(false);
+    expect(api.listProjectIssues).not.toHaveBeenCalled();
   });
 
   it('streams live terraform output lines for the running deployment into the Run History tab', async () => {
@@ -429,7 +320,7 @@ describe('ProvisionPhase', () => {
     expect(close).toHaveBeenCalled();
   });
 
-  it('shows a past failure from run history on a fresh mount when infra_state is not broken, with no auto-diagnosis', async () => {
+  it('shows a past failure from run history on a fresh mount when infra_state is not broken', async () => {
     api.getArtifact.mockResolvedValue({ id: 'a1', content: '{}' });
     const w = mountPhase(WITH_BUNDLE_NONE, [FAILED_RUN]);
     await flushPromises();

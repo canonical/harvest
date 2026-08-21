@@ -39,21 +39,15 @@
         <li v-for="(line, i) in generationStatus" :key="i">{{ line.text }}</li>
       </ul>
 
-      <ul v-if="diagnosing && diagnosisTrace.length" class="provision-generation-status" data-testid="diagnosis-trace">
-        <li v-for="(line, i) in diagnosisTrace" :key="i">{{ line.text }}</li>
-      </ul>
-
-      <template v-if="!diagnosing && diagnosisFailed">
-        <div class="p-notification--negative" data-testid="diagnosis-failed">
-          <div class="p-notification__content"><p class="p-notification__message">{{ diagnosisError }}</p></div>
+      <div v-if="isBroken" class="p-notification--caution" data-testid="broken-issues-banner">
+        <div class="p-notification__content">
+          <p class="p-notification__message">
+            This deployment is broken
+            <template v-if="openIssueCount">— {{ openIssueCount }} open issue{{ openIssueCount === 1 ? '' : 's' }} found.</template>
+            <router-link :to="`/issues?deployment=${deployment.id}`" data-testid="view-issues-link">View issues</router-link>
+          </p>
         </div>
-        <button
-          class="p-button--positive is-dense"
-          data-testid="retry-diagnosis-btn"
-          type="button"
-          @click="retryDiagnosis"
-        >Retry diagnosis</button>
-      </template>
+      </div>
 
       <template v-if="!deployment.terraform_bundle">
         <div v-if="!generating && generateError" class="p-notification--negative">
@@ -84,7 +78,7 @@
               @click="approveChange"
             >{{ applying ? 'Applying…' : 'Apply' }}</button>
           </div>
-          <div v-if="!pendingChange.fromDiagnosis" class="form-group">
+          <div class="form-group">
             <label for="propose-again-instructions">Propose something else instead</label>
             <textarea id="propose-again-instructions" v-model="instructions" rows="3"></textarea>
             <button class="p-button--base is-dense" type="button" :disabled="proposing" @click="proposeChange()">
@@ -168,8 +162,7 @@ import {
   redeployDeployment,
   destroyDeployment,
   openProjectEvents,
-  diagnoseProvisionFailure,
-  dismissProvisionDiagnosis,
+  listProjectIssues,
 } from '../../lib/api.js';
 
 const MAX_RUN_LOG_LINES = 2000;
@@ -179,12 +172,6 @@ const TRACE_EVENT_TYPES = new Set(['thinking', 'thinking_delta', 'tool_call']);
 const TOOL_LABELS = {
   generate_artifact:        'Generating the Terraform/Terragrunt bundle',
   link_deployment_artifact: 'Linking the generated bundle to this deployment',
-};
-const DIAGNOSIS_TOOL_LABELS = {
-  read_provision_bundle:    'Reading the current Terraform/Terragrunt bundle',
-  propose_provision_bundle: 'Proposing a corrected bundle',
-  run_command:               'Running a diagnostic command',
-  run_terraform_plan:        'Running terraform plan',
 };
 
 const props = defineProps({
@@ -208,9 +195,7 @@ const pendingChange   = ref(null);
 const applying         = ref(false);
 const changeError      = ref(null);
 
-const diagnosisStarting = ref(false);
-const diagnosisTrace    = ref([]);
-let diagnosisRequestedForRunId = null;
+const openIssueCount = ref(0);
 
 const canDeploy   = computed(() => ['none', 'destroyed'].includes(props.deployment.infra_state));
 const canRedeploy = computed(() => ['up', 'broken', 'destroy_failed'].includes(props.deployment.infra_state));
@@ -228,14 +213,8 @@ watch(() => props.agents, (list) => {
   if (!selectedAgentId.value && list.length === 1) selectedAgentId.value = list[0].id;
 }, { immediate: true });
 
-const diagnosing = computed(() => diagnosisStarting.value || props.deployment.diagnosis?.status === 'running');
-const diagnosisFailed = computed(() => !diagnosing.value && props.deployment.diagnosis?.status === 'failed');
-const diagnosisError  = computed(() => props.deployment.diagnosis?.error || 'Diagnosis failed.');
-const latestFailedRun = computed(() => props.runs.find(r => r.status === 'failed'));
-
 const busyLabel = computed(() => {
   if (generating.value) return 'Generating deployment artifacts…';
-  if (diagnosing.value) return 'Diagnosing the failure…';
   if (running.value) {
     const hostname = props.agents.find(a => a.id === selectedAgentId.value)?.hostname;
     return `${RUNNING_LABELS[runningKind.value]}${hostname ? ` on ${hostname}` : ''}…`;
@@ -255,6 +234,19 @@ async function loadBundleFiles() {
     bundleFiles.value = JSON.parse(artifact.content || '{}');
   } catch {
     bundleFiles.value = {};
+  }
+}
+
+async function loadOpenIssueCount() {
+  if (!isBroken.value) {
+    openIssueCount.value = 0;
+    return;
+  }
+  try {
+    const issues = await listProjectIssues(props.projectId, { deploymentId: props.deployment.id });
+    openIssueCount.value = issues.filter(i => i.status !== 'fixed' && i.status !== 'rejected').length;
+  } catch {
+    openIssueCount.value = 0;
   }
 }
 
@@ -300,58 +292,20 @@ async function proposeChange() {
   }
 }
 
-async function discardChange() {
-  const fromDiagnosis = pendingChange.value?.fromDiagnosis;
+function discardChange() {
   pendingChange.value = null;
   changeError.value = null;
-  if (fromDiagnosis) {
-    try { await dismissProvisionDiagnosis(props.projectId, props.deployment.id); } catch {}
-    emit('refresh');
-  }
-}
-
-function handleDiagnosisEvent(e) {
-  if (e.type === 'tool_call') {
-    diagnosisTrace.value.push({ text: DIAGNOSIS_TOOL_LABELS[e.name] ?? e.name.replace(/_/g, ' ') });
-    return;
-  }
-  const last = diagnosisTrace.value.at(-1);
-  if (e.type === 'thinking_delta' && last) {
-    last.text += e.text ?? '';
-  } else {
-    diagnosisTrace.value.push({ text: e.text ?? '' });
-  }
-}
-
-async function startDiagnosis() {
-  diagnosisTrace.value = [];
-  diagnosisStarting.value = true;
-  try {
-    await diagnoseProvisionFailure(props.projectId, props.deployment.id);
-  } catch {
-    // the deployment simply keeps no diagnosis — the user can retry once a bundle exists
-  } finally {
-    diagnosisStarting.value = false;
-  }
-  emit('refresh');
-}
-
-function retryDiagnosis() {
-  diagnosisRequestedForRunId = null;
-  startDiagnosis();
 }
 
 async function approveChange() {
   if (!pendingChange.value) return;
   applying.value = true;
   changeError.value = null;
-  const shouldRedeploy = isBroken.value && !!selectedAgentId.value;
   try {
     await applyProvisionChange(props.projectId, props.deployment.id, { files: pendingChange.value.proposed_files });
     pendingChange.value = null;
     await loadBundleFiles();
     emit('refresh');
-    if (shouldRedeploy) await runAction('redeploy');
   } catch (e) {
     changeError.value = e.message || 'Failed to apply the change';
   } finally {
@@ -394,7 +348,6 @@ function handleProjectEvent(e) {
   }
   if (!TRACE_EVENT_TYPES.has(e.type)) return;
   if (generating.value) handleGenerationEvent(e);
-  else if (diagnosing.value) handleDiagnosisEvent(e);
 }
 
 onMounted(() => {
@@ -422,24 +375,5 @@ watch(pendingChange, (value) => {
   if (value) rightTab.value = 'artifacts';
 });
 
-watch(() => props.deployment.diagnosis, (diagnosis) => {
-  if (diagnosis?.status === 'proposed') {
-    pendingChange.value = { explanation: diagnosis.explanation, proposed_files: diagnosis.files, fromDiagnosis: true };
-    changeError.value = null;
-  }
-}, { immediate: true });
-
-watch(
-  () => [isBroken.value, props.deployment.terraform_bundle?.id, latestFailedRun.value?.id, props.deployment.diagnosis?.status, props.deployment.diagnosis?.run_id],
-  () => {
-    if (!isBroken.value || !props.deployment.terraform_bundle) return;
-    const runId = latestFailedRun.value?.id;
-    if (!runId) return;
-    if (props.deployment.diagnosis?.run_id === runId) return;
-    if (diagnosisRequestedForRunId === runId) return;
-    diagnosisRequestedForRunId = runId;
-    startDiagnosis();
-  },
-  { immediate: true },
-);
+watch(() => [props.deployment.id, props.deployment.infra_state], loadOpenIssueCount, { immediate: true });
 </script>
