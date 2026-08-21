@@ -44,4 +44,18 @@ describe('router beforeEach fresh-load guard', () => {
     await router.isReady();
     expect(router.currentRoute.value.path).toBe('/');
   });
+
+  it('allows a direct deep link into /issues/:id on a fresh load', async () => {
+    const router = await freshRouter();
+    await router.push('/issues/abc-123');
+    await router.isReady();
+    expect(router.currentRoute.value.path).toBe('/issues/abc-123');
+  });
+
+  it('still redirects /issues to / on a fresh load', async () => {
+    const router = await freshRouter();
+    await router.push('/issues');
+    await router.isReady();
+    expect(router.currentRoute.value.path).toBe('/');
+  });
 });
