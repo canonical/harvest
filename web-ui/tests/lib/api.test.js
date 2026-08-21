@@ -6,7 +6,8 @@ import {
   listGroupTemplates, createGroupTemplate, getGroupTemplate, updateGroupTemplate, deleteGroupTemplate,
   generateEnvironmentQuestions, generateDesign, generateDesignDecisions, reviseDesign,
   generateProvision, proposeProvisionChange, applyProvisionChange,
-  diagnoseProvisionFailure, dismissProvisionDiagnosis,
+  listProjectIssues, getProjectIssue, updateIssueStatus, createIssueComment,
+  applyIssueSolution, redeployFromIssue, sendIssueChatMessage,
 } from '../../src/lib/api.js';
 
 function mockStreamResponse() {
@@ -301,19 +302,70 @@ describe('deployment phase-action API functions', () => {
     expect(JSON.parse(options.body)).toEqual({ files: { 'main.tf': 'x' } });
   });
 
-  it('diagnoseProvisionFailure POSTs to the provision/diagnose route', async () => {
-    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ started: true })));
-    await diagnoseProvisionFailure('proj1', 'd1');
-    const [url, options] = global.fetch.mock.calls[0];
-    expect(url).toBe('/projects/proj1/deployments/d1/provision/diagnose');
-    expect(options.method).toBe('POST');
+});
+
+describe('issue endpoints', () => {
+  beforeEach(() => { vi.restoreAllMocks(); });
+
+  it('listProjectIssues fetches the plain issues route with no filters', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse([])));
+    await listProjectIssues('proj1');
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).toBe('/projects/proj1/issues');
   });
 
-  it('dismissProvisionDiagnosis POSTs to the provision/diagnose/dismiss route', async () => {
-    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ id: 'd1' })));
-    await dismissProvisionDiagnosis('proj1', 'd1');
+  it('listProjectIssues includes status and deployment query params when given', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse([])));
+    await listProjectIssues('proj1', { status: 'untriaged', deploymentId: 'd1' });
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).toBe('/projects/proj1/issues?status=untriaged&deployment=d1');
+  });
+
+  it('getProjectIssue fetches a single issue', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ id: 'i1' })));
+    await getProjectIssue('proj1', 'i1');
+    const [url] = global.fetch.mock.calls[0];
+    expect(url).toBe('/projects/proj1/issues/i1');
+  });
+
+  it('updateIssueStatus PATCHes the status route with the new status', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ id: 'i1' })));
+    await updateIssueStatus('proj1', 'i1', 'in_progress');
     const [url, options] = global.fetch.mock.calls[0];
-    expect(url).toBe('/projects/proj1/deployments/d1/provision/diagnose/dismiss');
-    expect(options.method).toBe('POST');
+    expect(url).toBe('/projects/proj1/issues/i1/status');
+    expect(options.method).toBe('PATCH');
+    expect(JSON.parse(options.body)).toEqual({ status: 'in_progress' });
+  });
+
+  it('createIssueComment POSTs the comment body', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ id: 'i1' })));
+    await createIssueComment('proj1', 'i1', 'Looking into this.');
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/projects/proj1/issues/i1/comments');
+    expect(JSON.parse(options.body)).toEqual({ body: 'Looking into this.' });
+  });
+
+  it('applyIssueSolution POSTs to the apply-solution route', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ issue: {} })));
+    await applyIssueSolution('proj1', 'i1', { agent_id: 'a1' });
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/projects/proj1/issues/i1/apply-solution');
+    expect(JSON.parse(options.body)).toEqual({ agent_id: 'a1' });
+  });
+
+  it('redeployFromIssue POSTs to the redeploy route', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ runs: [] })));
+    await redeployFromIssue('proj1', 'i1', { agent_id: 'a1' });
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/projects/proj1/issues/i1/redeploy');
+    expect(JSON.parse(options.body)).toEqual({ agent_id: 'a1' });
+  });
+
+  it('sendIssueChatMessage POSTs the message to the chat route', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ answer: 'hi' })));
+    await sendIssueChatMessage('proj1', 'i1', 'what broke?');
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/projects/proj1/issues/i1/chat');
+    expect(JSON.parse(options.body)).toEqual({ message: 'what broke?' });
   });
 });

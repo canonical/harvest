@@ -433,10 +433,28 @@ export const proposeProvisionChange = (projectId, id, body) =>
   projectFetch(`${deploymentUrl(projectId, id)}/provision/propose-change`, { method: 'POST', body: JSON.stringify(body) });
 export const applyProvisionChange = (projectId, id, body) =>
   projectFetch(`${deploymentUrl(projectId, id)}/provision/apply-change`, { method: 'POST', body: JSON.stringify(body) });
-export const diagnoseProvisionFailure = (projectId, id) =>
-  projectFetch(`${deploymentUrl(projectId, id)}/provision/diagnose`, { method: 'POST' });
-export const dismissProvisionDiagnosis = (projectId, id) =>
-  projectFetch(`${deploymentUrl(projectId, id)}/provision/diagnose/dismiss`, { method: 'POST' });
+
+const issuesUrl = (projectId) => `${projectUrl(projectId)}/issues`;
+const issueUrl  = (projectId, id) => `${issuesUrl(projectId)}/${encodeURIComponent(id)}`;
+
+export function listProjectIssues(projectId, { status, deploymentId } = {}) {
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  if (deploymentId) params.set('deployment', deploymentId);
+  const qs = params.toString();
+  return projectFetch(`${issuesUrl(projectId)}${qs ? `?${qs}` : ''}`);
+}
+export const getProjectIssue    = (projectId, id) => projectFetch(issueUrl(projectId, id));
+export const updateIssueStatus  = (projectId, id, status) =>
+  projectFetch(`${issueUrl(projectId, id)}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
+export const createIssueComment = (projectId, id, body) =>
+  projectFetch(`${issueUrl(projectId, id)}/comments`, { method: 'POST', body: JSON.stringify({ body }) });
+export const applyIssueSolution = (projectId, id, body) =>
+  projectFetch(`${issueUrl(projectId, id)}/apply-solution`, { method: 'POST', body: JSON.stringify(body) });
+export const redeployFromIssue  = (projectId, id, body) =>
+  projectFetch(`${issueUrl(projectId, id)}/redeploy`, { method: 'POST', body: JSON.stringify(body) });
+export const sendIssueChatMessage = (projectId, id, message) =>
+  projectFetch(`${issueUrl(projectId, id)}/chat`, { method: 'POST', body: JSON.stringify({ message }) });
 
 const GROUPS_URL = '/groups';
 const groupUrl = (id) => `${GROUPS_URL}/${encodeURIComponent(id)}`;
