@@ -43,24 +43,82 @@ pub enum RunEvent {
 
 const PROJECT_NAME_MAX_CHARS: usize = 100;
 
-#[derive(Clone, Default)]
-struct InFlightState {
-    query:           String,
-    username:        String,
-    attachments:     Vec<Value>,
-    text:            String,
-    thinking_blocks: Vec<String>,
-    current_thinking: String,
-    tool_calls:      Vec<InFlightToolCall>,
+#[derive(Clone, Debug)]
+enum InFlightEvent {
+    Thinking   { text: String },
+    TextDelta  { text: String },
+    ToolCall   { name: String, input: Value, description: Option<String>, hostname: Option<String> },
+    ToolResult { name: String, preview: String },
 }
 
-#[derive(Clone)]
-struct InFlightToolCall {
-    name:        String,
-    input:       Value,
+#[derive(Clone, Default)]
+struct InFlightState {
+    query:       String,
+    username:    String,
+    attachments: Vec<Value>,
+    events:      Vec<InFlightEvent>,
+}
+
+fn record_in_flight(
+    state:    &mut InFlightState,
+    event:    &AgentEvent,
     description: Option<String>,
-    preview:     Option<String>,
     hostname:    Option<String>,
+) {
+    match event {
+        AgentEvent::ThinkingDelta { text } => {
+            if let Some(InFlightEvent::Thinking { text: t }) = state.events.last_mut() {
+                t.push_str(text);
+            } else {
+                state.events.push(InFlightEvent::Thinking { text: text.clone() });
+            }
+        }
+        AgentEvent::Thinking { text } => {
+            state.events.push(InFlightEvent::Thinking { text: text.clone() });
+        }
+        AgentEvent::TextDelta { text } => {
+            if let Some(InFlightEvent::TextDelta { text: t }) = state.events.last_mut() {
+                t.push_str(text);
+            } else {
+                state.events.push(InFlightEvent::TextDelta { text: text.clone() });
+            }
+        }
+        AgentEvent::ToolCall { name, input } => {
+            state.events.push(InFlightEvent::ToolCall {
+                name: name.clone(), input: input.clone(), description, hostname,
+            });
+        }
+        AgentEvent::ToolResult { name, preview } => {
+            state.events.push(InFlightEvent::ToolResult {
+                name: name.clone(), preview: preview.clone(),
+            });
+        }
+        _ => {}
+    }
+}
+
+fn build_catchup_events(cid: &str, state: &InFlightState) -> Vec<Value> {
+    state.events.iter().map(|ev| match ev {
+        InFlightEvent::Thinking { text } => json!({
+            "type": "thinking", "conv_id": cid, "text": text,
+        }),
+        InFlightEvent::TextDelta { text } => json!({
+            "type": "text_delta", "conv_id": cid, "text": text,
+        }),
+        InFlightEvent::ToolCall { name, input, description, hostname } => {
+            let mut v = json!({
+                "type": "tool_call", "conv_id": cid,
+                "name": name, "input": input,
+            });
+            if let Some(d) = description { v["description"] = json!(d); }
+            if let Some(h) = hostname    { v["hostname"]    = json!(h); }
+            v
+        }
+        InFlightEvent::ToolResult { name, preview } => json!({
+            "type": "tool_result", "conv_id": cid,
+            "name": name, "preview": preview,
+        }),
+    }).collect()
 }
 
 #[derive(Clone)]
@@ -225,33 +283,8 @@ pub async fn project_events(
                 "username": s.username,
                 "attachments": s.attachments,
             }).to_string())));
-            for t in &s.thinking_blocks {
-                events.push(Ok(Event::default().data(json!({
-                    "type": "thinking", "conv_id": cid, "text": t,
-                }).to_string())));
-            }
-            if !s.current_thinking.is_empty() {
-                events.push(Ok(Event::default().data(json!({
-                    "type": "thinking", "conv_id": cid, "text": s.current_thinking,
-                }).to_string())));
-            }
-            for tc in &s.tool_calls {
-                events.push(Ok(Event::default().data(json!({
-                    "type": "tool_call", "conv_id": cid,
-                    "name": tc.name, "input": tc.input,
-                    "description": tc.description, "hostname": tc.hostname,
-                }).to_string())));
-                if let Some(preview) = &tc.preview {
-                    events.push(Ok(Event::default().data(json!({
-                        "type": "tool_result", "conv_id": cid,
-                        "name": tc.name, "preview": preview,
-                    }).to_string())));
-                }
-            }
-            if !s.text.is_empty() {
-                events.push(Ok(Event::default().data(json!({
-                    "type": "text_delta", "conv_id": cid, "text": s.text,
-                }).to_string())));
+            for v in build_catchup_events(cid, s) {
+                events.push(Ok(Event::default().data(v.to_string())));
             }
             events
         } else {
@@ -596,29 +629,7 @@ async fn drive_turn(
         {
             let mut map = in_flight.write().await;
             if let Some(entry) = map.get_mut(&project_id).and_then(|m| m.get_mut(&conv_id)) {
-                match &event {
-                    AgentEvent::ThinkingDelta { text } => entry.current_thinking.push_str(text),
-                    AgentEvent::Thinking { text } => {
-                        entry.thinking_blocks.push(text.clone());
-                        entry.current_thinking.clear();
-                    }
-                    AgentEvent::TextDelta { text } => entry.text.push_str(text),
-                    AgentEvent::ToolCall { name, input } => entry.tool_calls.push(InFlightToolCall {
-                        name: name.clone(),
-                        input: input.clone(),
-                        description: description.clone(),
-                        preview: None,
-                        hostname: hostname.clone(),
-                    }),
-                    AgentEvent::ToolResult { name, preview } => {
-                        if let Some(tc) = entry.tool_calls.iter_mut().rev()
-                            .find(|tc| tc.name == *name && tc.preview.is_none())
-                        {
-                            tc.preview = Some(preview.clone());
-                        }
-                    }
-                    _ => {}
-                }
+                record_in_flight(entry, &event, description.clone(), hostname.clone());
             }
         }
 
@@ -1298,6 +1309,113 @@ mod provider_selection_tests {
     fn selection_from_parts_is_none_without_provider_id() {
         assert!(selection_from_parts(&None, &Some("claude-sonnet-5".into())).is_none());
         assert!(selection_from_parts(&None, &None).is_none());
+    }
+}
+
+#[cfg(test)]
+mod in_flight_tests {
+    use super::*;
+
+    fn empty_state() -> InFlightState {
+        InFlightState::default()
+    }
+
+    fn event_types(events: &[Value]) -> Vec<&str> {
+        events.iter().map(|e| e["type"].as_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn catchup_preserves_interleaved_order_of_thinking_and_tool_calls() {
+        let mut state = empty_state();
+        record_in_flight(&mut state, &AgentEvent::Thinking { text: "a".into() }, None, None);
+        record_in_flight(&mut state, &AgentEvent::ToolCall { name: "t1".into(), input: json!({}) }, None, None);
+        record_in_flight(&mut state, &AgentEvent::ToolResult { name: "t1".into(), preview: "r1".into() }, None, None);
+        record_in_flight(&mut state, &AgentEvent::Thinking { text: "b".into() }, None, None);
+        record_in_flight(&mut state, &AgentEvent::ToolCall { name: "t2".into(), input: json!({}) }, None, None);
+        record_in_flight(&mut state, &AgentEvent::ToolResult { name: "t2".into(), preview: "r2".into() }, None, None);
+
+        let events = build_catchup_events("c1", &state);
+        assert_eq!(
+            event_types(&events),
+            vec!["thinking", "tool_call", "tool_result", "thinking", "tool_call", "tool_result"]
+        );
+        assert_eq!(events[0]["text"], "a");
+        assert_eq!(events[3]["text"], "b");
+        assert_eq!(events[1]["name"], "t1");
+        assert_eq!(events[4]["name"], "t2");
+        assert_eq!(events[2]["preview"], "r1");
+        assert_eq!(events[5]["preview"], "r2");
+    }
+
+    #[test]
+    fn catchup_coalesces_consecutive_thinking_deltas() {
+        let mut state = empty_state();
+        record_in_flight(&mut state, &AgentEvent::ThinkingDelta { text: "Hello ".into() }, None, None);
+        record_in_flight(&mut state, &AgentEvent::ThinkingDelta { text: "world".into() }, None, None);
+
+        let events = build_catchup_events("c1", &state);
+        assert_eq!(event_types(&events), vec!["thinking"]);
+        assert_eq!(events[0]["text"], "Hello world");
+    }
+
+    #[test]
+    fn catchup_coalesces_consecutive_text_deltas() {
+        let mut state = empty_state();
+        record_in_flight(&mut state, &AgentEvent::TextDelta { text: "foo".into() }, None, None);
+        record_in_flight(&mut state, &AgentEvent::TextDelta { text: "bar".into() }, None, None);
+
+        let events = build_catchup_events("c1", &state);
+        assert_eq!(event_types(&events), vec!["text_delta"]);
+        assert_eq!(events[0]["text"], "foobar");
+    }
+
+    #[test]
+    fn catchup_separates_thinking_blocks_split_by_a_tool_call() {
+        let mut state = empty_state();
+        record_in_flight(&mut state, &AgentEvent::ThinkingDelta { text: "d1".into() }, None, None);
+        record_in_flight(&mut state, &AgentEvent::ToolCall { name: "t".into(), input: json!({}) }, None, None);
+        record_in_flight(&mut state, &AgentEvent::Thinking { text: "block".into() }, None, None);
+
+        let events = build_catchup_events("c1", &state);
+        assert_eq!(event_types(&events), vec!["thinking", "tool_call", "thinking"]);
+        assert_eq!(events[0]["text"], "d1");
+        assert_eq!(events[2]["text"], "block");
+    }
+
+    #[test]
+    fn catchup_includes_description_and_hostname_on_tool_call() {
+        let mut state = empty_state();
+        record_in_flight(
+            &mut state,
+            &AgentEvent::ToolCall { name: "run_command".into(), input: json!({"agent_id": "a1"}) },
+            Some("Running ls".into()),
+            Some("build-box".into()),
+        );
+
+        let events = build_catchup_events("c1", &state);
+        assert_eq!(events[0]["description"], "Running ls");
+        assert_eq!(events[0]["hostname"], "build-box");
+    }
+
+    #[test]
+    fn catchup_omits_description_and_hostname_when_absent() {
+        let mut state = empty_state();
+        record_in_flight(
+            &mut state,
+            &AgentEvent::ToolCall { name: "search".into(), input: json!({}) },
+            None, None,
+        );
+
+        let events = build_catchup_events("c1", &state);
+        assert!(events[0].get("description").is_none());
+        assert!(events[0].get("hostname").is_none());
+    }
+
+    #[test]
+    fn catchup_emits_empty_for_default_state() {
+        let state = empty_state();
+        let events = build_catchup_events("c1", &state);
+        assert!(events.is_empty());
     }
 }
 
