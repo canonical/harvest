@@ -51,6 +51,10 @@ pub fn needs_destroy_before_apply(state: InfraState) -> bool {
     matches!(state, InfraState::Broken | InfraState::DestroyFailed)
 }
 
+pub fn should_trigger_triage(action: TerraformAction, success: bool) -> bool {
+    matches!(action, TerraformAction::Apply | TerraformAction::Destroy) && !success
+}
+
 /// A deployment can end up `broken`/`destroy_failed` with no `last_applied_content` when its
 /// very first apply fails — there's nothing terraform ever actually created, so there's nothing
 /// to destroy either. Without this, the deployment would be permanently stuck: `broken` disables
@@ -166,6 +170,7 @@ pub async fn resolve_run_content(
     Ok(live_content.to_string())
 }
 
+#[derive(Debug, Clone)]
 pub struct FailedRun {
     pub id:              String,
     pub action:         String,
@@ -193,93 +198,6 @@ pub async fn latest_failed_run(
         stdout_preview: r["stdout_preview"].as_str().unwrap_or_default().to_string(),
         stderr_preview: r["stderr_preview"].as_str().unwrap_or_default().to_string(),
     }))
-}
-
-pub async fn start_diagnosis(
-    neo4j:         &Neo4jClient,
-    project_id:    &str,
-    deployment_id: &str,
-    run_id:        &str,
-) -> anyhow::Result<()> {
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         SET d.diagnosis_status = 'running', d.diagnosis_run_id = $rid,
-             d.diagnosis_explanation = null, d.diagnosis_files = null, d.diagnosis_error = null,
-             d.diagnosis_updated_at = $now",
-        json!({
-            "pid": project_id, "did": deployment_id, "rid": run_id,
-            "now": chrono::Utc::now().to_rfc3339(),
-        }),
-    ).await?;
-    Ok(())
-}
-
-pub async fn complete_diagnosis(
-    neo4j:         &Neo4jClient,
-    project_id:    &str,
-    deployment_id: &str,
-    run_id:        &str,
-    explanation:   &str,
-    files_json:    &str,
-) -> anyhow::Result<()> {
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         WHERE d.diagnosis_run_id = $rid
-         SET d.diagnosis_status = 'proposed', d.diagnosis_explanation = $explanation,
-             d.diagnosis_files = $files, d.diagnosis_updated_at = $now",
-        json!({
-            "pid": project_id, "did": deployment_id, "rid": run_id,
-            "explanation": explanation, "files": files_json,
-            "now": chrono::Utc::now().to_rfc3339(),
-        }),
-    ).await?;
-    Ok(())
-}
-
-pub async fn fail_diagnosis(
-    neo4j:         &Neo4jClient,
-    project_id:    &str,
-    deployment_id: &str,
-    run_id:        &str,
-    error:         &str,
-) -> anyhow::Result<()> {
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         WHERE d.diagnosis_run_id = $rid
-         SET d.diagnosis_status = 'failed', d.diagnosis_error = $error, d.diagnosis_updated_at = $now",
-        json!({
-            "pid": project_id, "did": deployment_id, "rid": run_id,
-            "error": error, "now": chrono::Utc::now().to_rfc3339(),
-        }),
-    ).await?;
-    Ok(())
-}
-
-pub async fn dismiss_diagnosis(
-    neo4j:         &Neo4jClient,
-    project_id:    &str,
-    deployment_id: &str,
-) -> anyhow::Result<()> {
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         SET d.diagnosis_status = 'none', d.diagnosis_run_id = null,
-             d.diagnosis_explanation = null, d.diagnosis_files = null, d.diagnosis_error = null",
-        json!({ "pid": project_id, "did": deployment_id }),
-    ).await?;
-    Ok(())
-}
-
-pub async fn diagnosis_status(
-    neo4j:         &Neo4jClient,
-    project_id:    &str,
-    deployment_id: &str,
-) -> anyhow::Result<Option<String>> {
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         RETURN d.diagnosis_status AS diagnosis_status",
-        json!({ "pid": project_id, "did": deployment_id }),
-    ).await?;
-    Ok(rows.into_iter().next().and_then(|r| r["diagnosis_status"].as_str().map(str::to_string)))
 }
 
 pub struct PriorDeploymentSummary {
@@ -415,21 +333,6 @@ fn artifact_ref(row: &Value, id_key: &str, title_key: &str, kind_key: Option<&st
     obj
 }
 
-fn shape_diagnosis(row: &Value) -> Value {
-    let status = row["diagnosis_status"].as_str().unwrap_or("none");
-    if status == "none" {
-        return Value::Null;
-    }
-    let files = row["diagnosis_files"].as_str().and_then(|s| serde_json::from_str::<Value>(s).ok());
-    json!({
-        "status":      status,
-        "run_id":      row["diagnosis_run_id"],
-        "explanation": row["diagnosis_explanation"],
-        "files":       files,
-        "error":       row["diagnosis_error"],
-    })
-}
-
 pub fn shape_deployment(row: &Value) -> Value {
     let template = match opt_str(row, "template_id") {
         Some(id) => json!({ "id": id, "name": opt_str(row, "template_name") }),
@@ -449,7 +352,6 @@ pub fn shape_deployment(row: &Value) -> Value {
         "design_doc":               artifact_ref(row, "design_doc_id", "design_doc_title", None),
         "terraform_bundle":         artifact_ref(row, "terraform_bundle_id", "terraform_bundle_title", Some("terraform_bundle_kind")),
         "guide":                    artifact_ref(row, "guide_id", "guide_title", None),
-        "diagnosis":                shape_diagnosis(row),
     })
 }
 
@@ -544,6 +446,32 @@ mod tests {
     }
 
     #[test]
+    fn should_trigger_triage_true_for_failed_apply() {
+        assert!(should_trigger_triage(TerraformAction::Apply, false));
+    }
+
+    #[test]
+    fn should_trigger_triage_false_for_successful_apply() {
+        assert!(!should_trigger_triage(TerraformAction::Apply, true));
+    }
+
+    #[test]
+    fn should_trigger_triage_true_for_failed_destroy() {
+        assert!(should_trigger_triage(TerraformAction::Destroy, false));
+    }
+
+    #[test]
+    fn should_trigger_triage_false_for_successful_destroy() {
+        assert!(!should_trigger_triage(TerraformAction::Destroy, true));
+    }
+
+    #[test]
+    fn should_trigger_triage_false_for_plan_regardless_of_success() {
+        assert!(!should_trigger_triage(TerraformAction::Plan, true));
+        assert!(!should_trigger_triage(TerraformAction::Plan, false));
+    }
+
+    #[test]
     fn needs_destroy_before_apply_true_only_for_broken_or_destroy_failed() {
         assert!(!needs_destroy_before_apply(InfraState::None));
         assert!(!needs_destroy_before_apply(InfraState::Up));
@@ -630,51 +558,4 @@ mod tests {
         assert_eq!(shaped["infra_state"], "none");
     }
 
-    #[test]
-    fn shape_deployment_diagnosis_is_null_when_status_absent() {
-        let shaped = shape_deployment(&base_row());
-        assert_eq!(shaped["diagnosis"], Value::Null);
-    }
-
-    #[test]
-    fn shape_deployment_diagnosis_is_null_when_status_is_none() {
-        let mut row = base_row();
-        row["diagnosis_status"] = json!("none");
-        let shaped = shape_deployment(&row);
-        assert_eq!(shaped["diagnosis"], Value::Null);
-    }
-
-    #[test]
-    fn shape_deployment_diagnosis_running_has_no_files_yet() {
-        let mut row = base_row();
-        row["diagnosis_status"] = json!("running");
-        row["diagnosis_run_id"] = json!("r1");
-        let shaped = shape_deployment(&row);
-        assert_eq!(shaped["diagnosis"]["status"], "running");
-        assert_eq!(shaped["diagnosis"]["run_id"], "r1");
-        assert_eq!(shaped["diagnosis"]["files"], Value::Null);
-    }
-
-    #[test]
-    fn shape_deployment_diagnosis_proposed_parses_files_json() {
-        let mut row = base_row();
-        row["diagnosis_status"] = json!("proposed");
-        row["diagnosis_run_id"] = json!("r1");
-        row["diagnosis_explanation"] = json!("fixed the security group");
-        row["diagnosis_files"] = json!("{\"main.tf\": \"resource...\"}");
-        let shaped = shape_deployment(&row);
-        assert_eq!(shaped["diagnosis"]["status"], "proposed");
-        assert_eq!(shaped["diagnosis"]["explanation"], "fixed the security group");
-        assert_eq!(shaped["diagnosis"]["files"]["main.tf"], "resource...");
-    }
-
-    #[test]
-    fn shape_deployment_diagnosis_failed_includes_error() {
-        let mut row = base_row();
-        row["diagnosis_status"] = json!("failed");
-        row["diagnosis_error"] = json!("could not reach the agent machine");
-        let shaped = shape_deployment(&row);
-        assert_eq!(shaped["diagnosis"]["status"], "failed");
-        assert_eq!(shaped["diagnosis"]["error"], "could not reach the agent machine");
-    }
 }

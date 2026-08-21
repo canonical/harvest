@@ -17,7 +17,8 @@ use crate::projects::handlers::{require_project_access, ProjectState};
 
 use super::{
     extract_json_block, load_deployment_context, needs_destroy_before_apply,
-    record_run_and_update_state, reset_infra_state_to_none, shape_deployment, InfraState,
+    record_run_and_update_state, reset_infra_state_to_none, shape_deployment, should_trigger_triage,
+    InfraState,
 };
 
 const DEFAULT_RUN_TIMEOUT_SECS: u64 = 300;
@@ -208,10 +209,7 @@ fn deployment_detail_cypher() -> &'static str {
             t.id AS template_id, t.name AS template_name,
             design.id AS design_doc_id, design.title AS design_doc_title,
             tf.id AS terraform_bundle_id, tf.title AS terraform_bundle_title, tf.kind AS terraform_bundle_kind,
-            guide.id AS guide_id, guide.title AS guide_title,
-            d.diagnosis_status AS diagnosis_status, d.diagnosis_run_id AS diagnosis_run_id,
-            d.diagnosis_explanation AS diagnosis_explanation, d.diagnosis_files AS diagnosis_files,
-            d.diagnosis_error AS diagnosis_error"
+            guide.id AS guide_id, guide.title AS guide_title"
 }
 
 async fn fetch_deployment_detail(
@@ -469,6 +467,33 @@ fn spawn_progress_relay(
     tx
 }
 
+/// Fires unconditionally after any failed deploy/redeploy/destroy run, independent of whether
+/// anyone has the Deployment or Issues page open — matches or creates issues for the failure and
+/// proposes a fix for new/updated ones, replacing the old frontend-watcher-triggered diagnosis.
+fn spawn_issue_triage(state: &ProjectState, project_id: &str, deployment_id: &str) {
+    let progress_tx   = spawn_progress_relay(state, project_id, deployment_id);
+    let neo4j         = Arc::clone(&state.neo4j);
+    let agent_builder = Arc::clone(&state.agent_builder);
+    let project_id    = project_id.to_string();
+    let deployment_id = deployment_id.to_string();
+
+    tokio::spawn(async move {
+        let Ok(Some(run)) = super::latest_failed_run(&neo4j, &project_id, &deployment_id).await else { return };
+        let Ok(Some(group_id)) = crate::issues::group_id_for_project(&neo4j, &project_id).await else { return };
+        let Ok(Some(ctx)) = load_deployment_context(&neo4j, &project_id, &deployment_id).await else { return };
+
+        let agent = agent_builder.build_for_issue_triage(project_id.clone(), group_id, &ctx, &run);
+        let query = crate::agent::prompt::issue_triage_query(&run);
+
+        if let Err(e) = agent.query_with_progress(&query, &[], &[], None, progress_tx).await {
+            tracing::warn!(
+                error = %e, project_id = %project_id, deployment_id = %deployment_id,
+                "issue triage run failed",
+            );
+        }
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_and_record(
     state:         &ProjectState,
@@ -502,6 +527,10 @@ async fn execute_and_record(
         &state.neo4j, project_id, artifact_id, action, exit_code, &stdout, &stderr,
         applied_content, "user", reasoning,
     ).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    if should_trigger_triage(action, success) {
+        spawn_issue_triage(state, project_id, deployment_id);
+    }
 
     match result {
         Ok(r) => {
@@ -961,108 +990,7 @@ pub async fn apply_provision_change(
 
     crate::artifacts::handlers::update_artifact(&state.neo4j, &bundle_id, kind, kind, title, &content)
         .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
-    super::dismiss_diagnosis(&state.neo4j, &project_id, &deployment_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
-}
-
-fn diagnosis_already_running(deployment: &Value, run_id: &str) -> bool {
-    deployment["diagnosis"]["status"] == "running" && deployment["diagnosis"]["run_id"] == run_id
-}
-
-pub async fn diagnose_provision_failure(
-    Extension(user): Extension<Claims>,
-    State(state): State<Arc<ProjectState>>,
-    Path((project_id, deployment_id)): Path<(String, String)>,
-) -> Result<impl IntoResponse, ApiError> {
-    let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let group_id = project["group_id"].as_str().unwrap_or_default().to_string();
-
-    let run = super::latest_failed_run(&state.neo4j, &project_id, &deployment_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "no failed run to diagnose"))?;
-
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
-    if diagnosis_already_running(&deployment, &run.id) {
-        return Ok(Json(json!({ "started": false })));
-    }
-
-    let ctx = load_deployment_context(&state.neo4j, &project_id, &deployment_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
-
-    super::start_diagnosis(&state.neo4j, &project_id, &deployment_id, &run.id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-
-    let agent = state.agent_builder.build_for_provision_diagnosis(project_id.clone(), group_id, &ctx, &run.id);
-    let query = crate::agent::prompt::provision_diagnosis_query(&run);
-    let progress_tx = spawn_progress_relay(&state, &project_id, &deployment_id);
-
-    let neo4j          = Arc::clone(&state.neo4j);
-    let project_id_bg  = project_id.clone();
-    let deployment_id_bg = deployment_id.clone();
-    let run_id_bg      = run.id.clone();
-    tokio::spawn(async move {
-        let outcome = agent.query_with_progress(&query, &[], &[], None, progress_tx).await;
-        if let Err(e) = outcome {
-            let _ = super::fail_diagnosis(&neo4j, &project_id_bg, &deployment_id_bg, &run_id_bg, &e.to_string()).await;
-            return;
-        }
-        let status = super::diagnosis_status(&neo4j, &project_id_bg, &deployment_id_bg).await.ok().flatten();
-        if status.as_deref() != Some("proposed") {
-            let _ = super::fail_diagnosis(
-                &neo4j, &project_id_bg, &deployment_id_bg, &run_id_bg,
-                "diagnosis finished without proposing a fix",
-            ).await;
-        }
-    });
-
-    Ok(Json(json!({ "started": true })))
-}
-
-pub async fn dismiss_provision_diagnosis(
-    Extension(user): Extension<Claims>,
-    State(state): State<Arc<ProjectState>>,
-    Path((project_id, deployment_id)): Path<(String, String)>,
-) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    super::dismiss_diagnosis(&state.neo4j, &project_id, &deployment_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
-    Ok(Json(deployment))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn deployment_with_diagnosis(status: &str, run_id: &str) -> Value {
-        json!({ "diagnosis": { "status": status, "run_id": run_id } })
-    }
-
-    #[test]
-    fn diagnosis_already_running_true_for_matching_running_run() {
-        let d = deployment_with_diagnosis("running", "run-1");
-        assert!(diagnosis_already_running(&d, "run-1"));
-    }
-
-    #[test]
-    fn diagnosis_already_running_false_for_a_different_run_id() {
-        let d = deployment_with_diagnosis("running", "run-1");
-        assert!(!diagnosis_already_running(&d, "run-2"));
-    }
-
-    #[test]
-    fn diagnosis_already_running_false_when_proposed() {
-        let d = deployment_with_diagnosis("proposed", "run-1");
-        assert!(!diagnosis_already_running(&d, "run-1"));
-    }
-
-    #[test]
-    fn diagnosis_already_running_false_when_no_diagnosis_yet() {
-        let d = json!({ "diagnosis": Value::Null });
-        assert!(!diagnosis_already_running(&d, "run-1"));
-    }
 }
