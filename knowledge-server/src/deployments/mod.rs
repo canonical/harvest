@@ -1,9 +1,71 @@
 pub mod handlers;
 
 use serde_json::{json, Value};
+use std::collections::{HashMap, VecDeque};
 
 use crate::machines::TerraformAction;
 use crate::neo4j::Neo4jClient;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepAction {
+    Run,
+    Plan,
+    Apply,
+    Destroy,
+}
+
+impl StepAction {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "run"     => Some(Self::Run),
+            "plan"    => Some(Self::Plan),
+            "apply"   => Some(Self::Apply),
+            "destroy" => Some(Self::Destroy),
+            _         => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Run     => "run",
+            Self::Plan    => "plan",
+            Self::Apply   => "apply",
+            Self::Destroy => "destroy",
+        }
+    }
+
+    pub fn to_terraform_action(&self) -> Option<TerraformAction> {
+        match self {
+            Self::Plan    => Some(TerraformAction::Plan),
+            Self::Apply   => Some(TerraformAction::Apply),
+            Self::Destroy => Some(TerraformAction::Destroy),
+            Self::Run     => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepPhase {
+    Deploy,
+    Destroy,
+}
+
+impl StepPhase {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "deploy"  => Some(Self::Deploy),
+            "destroy" => Some(Self::Destroy),
+            _         => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Deploy  => "deploy",
+            Self::Destroy => "destroy",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InfraState {
@@ -333,6 +395,123 @@ fn artifact_ref(row: &Value, id_key: &str, title_key: &str, kind_key: Option<&st
     obj
 }
 
+pub fn shape_context_artifacts(row: &Value) -> Value {
+    let Some(list) = row.get("context_artifacts").and_then(|v| v.as_array()) else {
+        return json!([]);
+    };
+    let shaped: Vec<Value> = list.iter()
+        .filter(|entry| entry.get("id").and_then(|v| v.as_str()).is_some())
+        .map(|entry| json!({
+            "id":    entry["id"],
+            "title": entry["title"],
+            "kind":  entry["kind"],
+        }))
+        .collect();
+    json!(shaped)
+}
+
+pub fn shape_proposal(row: &Value) -> Value {
+    json!({
+        "id":                   row["id"],
+        "target_artifact_id":   row["target_artifact_id"],
+        "target_artifact_kind": row["target_artifact_kind"],
+        "source":               row["source"],
+        "explanation":          row["explanation"],
+        "current_content":      row["current_content"],
+        "proposed_content":     row["proposed_content"],
+        "status":               row["status"],
+        "created_at":           row["created_at"],
+    })
+}
+
+pub fn shape_proposals(rows: &[Value]) -> Value {
+    let shaped: Vec<Value> = rows.iter().map(shape_proposal).collect();
+    json!(shaped)
+}
+
+pub fn shape_execution_step(row: &Value) -> Value {
+    let depends_on: Vec<Value> = row.get("depends_on")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter()
+            .filter_map(|d| d.as_str().map(String::from))
+            .map(Value::String)
+            .collect())
+        .unwrap_or_default();
+    json!({
+        "id":       row["id"],
+        "action":   row["action"],
+        "phase":    row["phase"],
+        "label":    row["label"],
+        "artifact": {
+            "id":    row["artifact_id"],
+            "kind":  row["artifact_kind"],
+            "title": row["artifact_title"],
+        },
+        "depends_on": depends_on,
+    })
+}
+
+pub fn shape_execution_plan(rows: &[Value]) -> Value {
+    let shaped: Vec<Value> = rows.iter().map(shape_execution_step).collect();
+    json!(shaped)
+}
+
+#[derive(Debug, Clone)]
+pub struct StepNode {
+    pub id:         String,
+    pub depends_on: Vec<String>,
+}
+
+pub fn topological_sort(steps: &[StepNode]) -> Result<Vec<String>, String> {
+    let id_set: HashMap<&str, &StepNode> = steps.iter()
+        .map(|s| (s.id.as_str(), s))
+        .collect();
+    for s in steps {
+        for dep in &s.depends_on {
+            if !id_set.contains_key(dep.as_str()) {
+                return Err(format!("step '{}' depends on unknown step '{}'", s.id, dep));
+            }
+        }
+    }
+
+    let mut in_degree: HashMap<&str, usize> = HashMap::new();
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for s in steps {
+        in_degree.entry(s.id.as_str()).or_insert(0);
+        adj.entry(s.id.as_str()).or_default();
+    }
+    for s in steps {
+        for dep in &s.depends_on {
+            adj.get_mut(dep.as_str()).unwrap().push(s.id.as_str());
+            *in_degree.get_mut(s.id.as_str()).unwrap() += 1;
+        }
+    }
+
+    let mut queue: VecDeque<&str> = in_degree.iter()
+        .filter(|(_, &d)| d == 0)
+        .map(|(k, _)| *k)
+        .collect();
+
+    let mut order = Vec::with_capacity(steps.len());
+    while let Some(id) = queue.pop_front() {
+        order.push(id.to_string());
+        if let Some(neighbors) = adj.get(id) {
+            for &neighbor in neighbors {
+                let d = in_degree.get_mut(neighbor).unwrap();
+                *d -= 1;
+                if *d == 0 {
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+    }
+
+    if order.len() != steps.len() {
+        return Err("cycle detected in execution plan".to_string());
+    }
+    Ok(order)
+}
+
 pub fn shape_deployment(row: &Value) -> Value {
     let template = match opt_str(row, "template_id") {
         Some(id) => json!({ "id": id, "name": opt_str(row, "template_name") }),
@@ -352,6 +531,7 @@ pub fn shape_deployment(row: &Value) -> Value {
         "design_doc":               artifact_ref(row, "design_doc_id", "design_doc_title", None),
         "terraform_bundle":         artifact_ref(row, "terraform_bundle_id", "terraform_bundle_title", Some("terraform_bundle_kind")),
         "guide":                    artifact_ref(row, "guide_id", "guide_title", None),
+        "context_artifacts":        shape_context_artifacts(row),
     })
 }
 
@@ -501,6 +681,7 @@ mod tests {
             "design_doc_id": Value::Null, "design_doc_title": Value::Null,
             "terraform_bundle_id": Value::Null, "terraform_bundle_title": Value::Null, "terraform_bundle_kind": Value::Null,
             "guide_id": Value::Null, "guide_title": Value::Null,
+            "context_artifacts": [],
         })
     }
 
@@ -508,6 +689,56 @@ mod tests {
     fn shape_deployment_omits_template_when_absent() {
         let shaped = shape_deployment(&base_row());
         assert_eq!(shaped["template"], Value::Null);
+    }
+
+    #[test]
+    fn shape_deployment_includes_empty_context_artifacts_when_absent() {
+        let mut row = base_row();
+        row.as_object_mut().unwrap().remove("context_artifacts");
+        let shaped = shape_deployment(&row);
+        assert_eq!(shaped["context_artifacts"], json!([]));
+    }
+
+    #[test]
+    fn shape_deployment_includes_context_artifacts_when_present() {
+        let mut row = base_row();
+        row["context_artifacts"] = json!([
+            {"id": "ca1", "title": "Network diagram", "kind": "markdown"},
+            {"id": "ca2", "title": "Prep script", "kind": "bash"},
+        ]);
+        let shaped = shape_deployment(&row);
+        assert_eq!(shaped["context_artifacts"].as_array().unwrap().len(), 2);
+        assert_eq!(shaped["context_artifacts"][0]["id"], "ca1");
+        assert_eq!(shaped["context_artifacts"][0]["title"], "Network diagram");
+        assert_eq!(shaped["context_artifacts"][0]["kind"], "markdown");
+        assert_eq!(shaped["context_artifacts"][1]["kind"], "bash");
+    }
+
+    #[test]
+    fn shape_context_artifacts_drops_null_entries_from_optional_match() {
+        let row = json!({
+            "context_artifacts": [
+                {"id": Value::Null, "title": Value::Null, "kind": Value::Null},
+                {"id": "ca1", "title": "Real", "kind": "markdown"},
+            ],
+        });
+        let shaped = shape_context_artifacts(&row);
+        assert_eq!(shaped.as_array().unwrap().len(), 1);
+        assert_eq!(shaped[0]["id"], "ca1");
+    }
+
+    #[test]
+    fn shape_context_artifacts_returns_empty_for_missing_field() {
+        let row = json!({});
+        let shaped = shape_context_artifacts(&row);
+        assert_eq!(shaped, json!([]));
+    }
+
+    #[test]
+    fn shape_context_artifacts_returns_empty_for_empty_array() {
+        let row = json!({"context_artifacts": []});
+        let shaped = shape_context_artifacts(&row);
+        assert_eq!(shaped, json!([]));
     }
 
     #[test]
@@ -556,6 +787,206 @@ mod tests {
         assert_eq!(shaped["id"], "d1");
         assert_eq!(shaped["name"], "Acme rollout");
         assert_eq!(shaped["infra_state"], "none");
+    }
+
+    fn proposal_row() -> Value {
+        json!({
+            "id": "p1",
+            "target_artifact_id": "a1",
+            "target_artifact_kind": "terraform",
+            "source": "prompt",
+            "explanation": "Added a security group",
+            "current_content": "{\"main.tf\": \"old\"}",
+            "proposed_content": "{\"main.tf\": \"new\"}",
+            "status": "pending",
+            "created_at": "t1",
+        })
+    }
+
+    #[test]
+    fn shape_proposal_passes_through_all_fields() {
+        let shaped = shape_proposal(&proposal_row());
+        assert_eq!(shaped["id"], "p1");
+        assert_eq!(shaped["target_artifact_id"], "a1");
+        assert_eq!(shaped["target_artifact_kind"], "terraform");
+        assert_eq!(shaped["source"], "prompt");
+        assert_eq!(shaped["explanation"], "Added a security group");
+        assert_eq!(shaped["current_content"], "{\"main.tf\": \"old\"}");
+        assert_eq!(shaped["proposed_content"], "{\"main.tf\": \"new\"}");
+        assert_eq!(shaped["status"], "pending");
+        assert_eq!(shaped["created_at"], "t1");
+    }
+
+    #[test]
+    fn shape_proposals_returns_empty_array_for_no_rows() {
+        let shaped = shape_proposals(&[]);
+        assert_eq!(shaped, json!([]));
+    }
+
+    #[test]
+    fn shape_proposals_shapes_each_row_in_order() {
+        let rows = vec![proposal_row(), {
+            let mut r = proposal_row();
+            r["id"] = json!("p2");
+            r["status"] = json!("approved");
+            r
+        }];
+        let shaped = shape_proposals(&rows);
+        let arr = shaped.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"], "p1");
+        assert_eq!(arr[0]["status"], "pending");
+        assert_eq!(arr[1]["id"], "p2");
+        assert_eq!(arr[1]["status"], "approved");
+    }
+
+    #[test]
+    fn step_action_parses_known_values_only() {
+        assert_eq!(StepAction::parse("run"), Some(StepAction::Run));
+        assert_eq!(StepAction::parse("plan"), Some(StepAction::Plan));
+        assert_eq!(StepAction::parse("apply"), Some(StepAction::Apply));
+        assert_eq!(StepAction::parse("destroy"), Some(StepAction::Destroy));
+        assert_eq!(StepAction::parse("delete"), None);
+    }
+
+    #[test]
+    fn step_action_as_str_round_trips() {
+        for action in [StepAction::Run, StepAction::Plan, StepAction::Apply, StepAction::Destroy] {
+            assert_eq!(StepAction::parse(action.as_str()), Some(action));
+        }
+    }
+
+    #[test]
+    fn step_phase_parses_known_values_only() {
+        assert_eq!(StepPhase::parse("deploy"), Some(StepPhase::Deploy));
+        assert_eq!(StepPhase::parse("destroy"), Some(StepPhase::Destroy));
+        assert_eq!(StepPhase::parse("setup"), None);
+    }
+
+    #[test]
+    fn shape_execution_step_passes_through_fields() {
+        let row = json!({
+            "id": "s1", "action": "apply", "phase": "deploy", "label": "Apply infra",
+            "artifact_id": "a1", "artifact_kind": "terraform", "artifact_title": "Infra",
+            "depends_on": ["s0"],
+        });
+        let shaped = shape_execution_step(&row);
+        assert_eq!(shaped["id"], "s1");
+        assert_eq!(shaped["action"], "apply");
+        assert_eq!(shaped["phase"], "deploy");
+        assert_eq!(shaped["label"], "Apply infra");
+        assert_eq!(shaped["artifact"]["id"], "a1");
+        assert_eq!(shaped["artifact"]["kind"], "terraform");
+        assert_eq!(shaped["artifact"]["title"], "Infra");
+        assert_eq!(shaped["depends_on"].as_array().unwrap().len(), 1);
+        assert_eq!(shaped["depends_on"][0], "s0");
+    }
+
+    #[test]
+    fn shape_execution_step_handles_null_depends_on() {
+        let row = json!({
+            "id": "s1", "action": "run", "phase": "deploy", "label": "Prep",
+            "artifact_id": "a1", "artifact_kind": "bash", "artifact_title": "Prep script",
+            "depends_on": [null],
+        });
+        let shaped = shape_execution_step(&row);
+        assert_eq!(shaped["depends_on"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn shape_execution_plan_returns_empty_for_empty_rows() {
+        assert_eq!(shape_execution_plan(&[]), json!([]));
+    }
+
+    #[test]
+    fn shape_execution_plan_shapes_each_step_in_order() {
+        let rows = vec![
+            json!({"id": "s0", "action": "run", "phase": "deploy", "label": "Prep",
+                    "artifact_id": "a0", "artifact_kind": "bash", "artifact_title": "Prep",
+                    "depends_on": []}),
+            json!({"id": "s1", "action": "apply", "phase": "deploy", "label": "Apply",
+                    "artifact_id": "a1", "artifact_kind": "terraform", "artifact_title": "Infra",
+                    "depends_on": ["s0"]}),
+        ];
+        let shaped = shape_execution_plan(&rows);
+        let arr = shaped.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"], "s0");
+        assert_eq!(arr[1]["depends_on"][0], "s0");
+    }
+
+    #[test]
+    fn topological_sort_empty_input_returns_empty() {
+        let steps: Vec<StepNode> = vec![];
+        assert_eq!(topological_sort(&steps).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn topological_sort_single_step_no_deps() {
+        let steps = vec![StepNode { id: "s0".into(), depends_on: vec![] }];
+        assert_eq!(topological_sort(&steps).unwrap(), vec!["s0".to_string()]);
+    }
+
+    #[test]
+    fn topological_sort_linear_chain() {
+        let steps = vec![
+            StepNode { id: "s2".into(), depends_on: vec!["s1".into()] },
+            StepNode { id: "s0".into(), depends_on: vec![] },
+            StepNode { id: "s1".into(), depends_on: vec!["s0".into()] },
+        ];
+        let sorted = topological_sort(&steps).unwrap();
+        let pos_s0 = sorted.iter().position(|s| s == "s0").unwrap();
+        let pos_s1 = sorted.iter().position(|s| s == "s1").unwrap();
+        let pos_s2 = sorted.iter().position(|s| s == "s2").unwrap();
+        assert!(pos_s0 < pos_s1);
+        assert!(pos_s1 < pos_s2);
+    }
+
+    #[test]
+    fn topological_sort_diamond_dependency() {
+        let steps = vec![
+            StepNode { id: "s3".into(), depends_on: vec!["s1".into(), "s2".into()] },
+            StepNode { id: "s1".into(), depends_on: vec!["s0".into()] },
+            StepNode { id: "s2".into(), depends_on: vec!["s0".into()] },
+            StepNode { id: "s0".into(), depends_on: vec![] },
+        ];
+        let sorted = topological_sort(&steps).unwrap();
+        let pos: std::collections::HashMap<&str, usize> = sorted.iter().zip(0..).map(|(s, i)| (s.as_str(), i)).collect();
+        assert!(pos["s0"] < pos["s1"]);
+        assert!(pos["s0"] < pos["s2"]);
+        assert!(pos["s1"] < pos["s3"]);
+        assert!(pos["s2"] < pos["s3"]);
+    }
+
+    #[test]
+    fn topological_sort_detects_cycle() {
+        let steps = vec![
+            StepNode { id: "s0".into(), depends_on: vec!["s1".into()] },
+            StepNode { id: "s1".into(), depends_on: vec!["s0".into()] },
+        ];
+        assert!(topological_sort(&steps).is_err());
+    }
+
+    #[test]
+    fn topological_sort_missing_dependency_errors() {
+        let steps = vec![
+            StepNode { id: "s0".into(), depends_on: vec!["nonexistent".into()] },
+        ];
+        assert!(topological_sort(&steps).is_err());
+    }
+
+    #[test]
+    fn topological_sort_independent_steps_all_present() {
+        let steps = vec![
+            StepNode { id: "s0".into(), depends_on: vec![] },
+            StepNode { id: "s1".into(), depends_on: vec![] },
+            StepNode { id: "s2".into(), depends_on: vec![] },
+        ];
+        let sorted = topological_sort(&steps).unwrap();
+        assert_eq!(sorted.len(), 3);
+        assert!(sorted.contains(&"s0".to_string()));
+        assert!(sorted.contains(&"s1".to_string()));
+        assert!(sorted.contains(&"s2".to_string()));
     }
 
 }
