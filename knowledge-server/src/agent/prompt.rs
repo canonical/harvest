@@ -239,8 +239,9 @@ pub fn issue_triage_query(run: &crate::deployments::FailedRun) -> String {
     let exit = run.exit_code.map(|c| format!(" (exit {c})")).unwrap_or_default();
     format!(
         "The last {} run (id `{}`) failed{}: {}\n\nCall `list_deployment_issues`, decide whether \
-         this matches an existing issue or is new, call `create_or_link_issue` accordingly, and \
-         propose a fix with `propose_issue_solution` for any newly created issue.",
+         this matches an existing issue (change request) or is new, call `create_or_link_issue` \
+         accordingly, and propose a fix with `propose_issue_solution` for any newly created issue \
+         (change request).",
         run.action, run.id, exit, output,
     )
 }
