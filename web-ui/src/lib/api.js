@@ -407,6 +407,7 @@ const deploymentUrl = (projectId, id) => `${projectUrl(projectId)}/deployments/$
 export const listProjectDeployments  = (projectId)       => projectFetch(`${projectUrl(projectId)}/deployments`);
 export const createProjectDeployment = (projectId, body) => projectFetch(`${projectUrl(projectId)}/deployments`, { method: 'POST', body: JSON.stringify(body) });
 export const getProjectDeployment    = (projectId, id)   => projectFetch(deploymentUrl(projectId, id));
+export const getProjectDeploymentSingle = (projectId)   => projectFetch(`${projectUrl(projectId)}/deployment`);
 export const updateProjectDeployment = (projectId, id, body) => projectFetch(deploymentUrl(projectId, id), { method: 'PATCH', body: JSON.stringify(body) });
 export async function deleteProjectDeployment(projectId, id) {
   const res = await fetch(deploymentUrl(projectId, id), { method: 'DELETE' });
@@ -470,6 +471,21 @@ export const runDag = (projectId, id, body) =>
 
 const issuesUrl = (projectId) => `${projectUrl(projectId)}/issues`;
 const issueUrl  = (projectId, id) => `${issuesUrl(projectId)}/${encodeURIComponent(id)}`;
+
+const changeRequestsUrl = (projectId) => `${projectUrl(projectId)}/change-requests`;
+const changeRequestUrl   = (projectId, id) => `${changeRequestsUrl(projectId)}/${encodeURIComponent(id)}`;
+
+export function listChangeRequests(projectId, { status, deploymentId } = {}) {
+  const params = new URLSearchParams();
+  if (status) params.set('status', status);
+  if (deploymentId) params.set('deployment', deploymentId);
+  const qs = params.toString();
+  return projectFetch(`${changeRequestsUrl(projectId)}${qs ? `?${qs}` : ''}`);
+}
+export const getChangeRequest       = (projectId, id) => projectFetch(changeRequestUrl(projectId, id));
+export const applyChangeRequest     = (projectId, id, body) => projectFetch(`${changeRequestUrl(projectId, id)}/apply`, { method: 'POST', body: JSON.stringify(body) });
+export const discardChangeRequest   = (projectId, id) => projectFetch(`${changeRequestUrl(projectId, id)}/discard`, { method: 'POST', body: JSON.stringify({}) });
+export const createChangeRequestComment = (projectId, id, body) => projectFetch(`${changeRequestUrl(projectId, id)}/comments`, { method: 'POST', body: JSON.stringify({ body }) });
 
 export function listProjectIssues(projectId, { status, deploymentId } = {}) {
   const params = new URLSearchParams();
