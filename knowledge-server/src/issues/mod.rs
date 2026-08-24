@@ -5,6 +5,234 @@ use serde_json::{json, Value};
 use crate::deployments::FailedRun;
 use crate::neo4j::Neo4jClient;
 
+pub fn map_issue_status_to_cr(s: &str) -> &'static str {
+    match s {
+        "untriaged"   => "open",
+        "in_progress" => "in_review",
+        "fixed"       => "applied",
+        "rejected"    => "discarded",
+        _             => "open",
+    }
+}
+
+pub fn map_proposal_status_to_cr(s: &str) -> &'static str {
+    match s {
+        "pending"   => "open",
+        "approved"  => "applied",
+        "discarded" => "discarded",
+        _           => "open",
+    }
+}
+
+pub fn cr_status_to_issue_status(s: &str) -> Option<&'static str> {
+    match s {
+        "open"      => Some("untriaged"),
+        "in_review" => Some("in_progress"),
+        "applied"   => Some("fixed"),
+        "discarded" => Some("rejected"),
+        _           => None,
+    }
+}
+
+pub fn cr_status_to_proposal_status(s: &str) -> Option<&'static str> {
+    match s {
+        "open"      => Some("pending"),
+        "applied"   => Some("approved"),
+        "discarded" => Some("discarded"),
+        _           => None,
+    }
+}
+
+pub async fn append_proposal_comment(
+    neo4j:          &Neo4jClient,
+    project_id:     &str,
+    proposal_id:    &str,
+    author_type:    &str,
+    author_name:    &str,
+    body:           &str,
+) -> anyhow::Result<()> {
+    let exists = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment)-[:HAS_PROPOSAL]->(p:Proposal {id: $prid})
+         RETURN p.comments AS comments",
+        json!({ "pid": project_id, "prid": proposal_id }),
+    ).await?;
+    let Some(row) = exists.into_iter().next() else { return Ok(()) };
+    let mut comments: Vec<Value> = row["comments"].as_str()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let now = chrono::Utc::now().to_rfc3339();
+    comments.push(json!({
+        "id":          uuid::Uuid::new_v4().to_string(),
+        "author_type": author_type,
+        "author_name": author_name,
+        "body":        body,
+        "created_at":  now,
+    }));
+    let comments_json = serde_json::to_string(&comments)?;
+    neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment)-[:HAS_PROPOSAL]->(p:Proposal {id: $prid})
+         SET p.comments = $comments",
+        json!({ "pid": project_id, "prid": proposal_id, "comments": comments_json }),
+    ).await?;
+    Ok(())
+}
+
+pub async fn list_change_requests_for_project(
+    neo4j:         &Neo4jClient,
+    project_id:    &str,
+    status:        Option<&str>,
+    deployment_id: Option<&str>,
+) -> anyhow::Result<Vec<Value>> {
+    let cypher = "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)-[:HAS_ISSUE]->(i:Issue)
+                  WHERE ($status IS NULL OR
+                        CASE i.status
+                          WHEN 'untriaged'   THEN 'open'
+                          WHEN 'in_progress' THEN 'in_review'
+                          WHEN 'fixed'       THEN 'applied'
+                          WHEN 'rejected'    THEN 'discarded'
+                        END = $status)
+                    AND ($did IS NULL OR d.id = $did)
+                  RETURN i.id AS id, i.title AS title, i.status AS raw_status, 'issue' AS kind,
+                         i.created_at AS created_at, i.updated_at AS updated_at,
+                         d.id AS deployment_id, d.name AS deployment_name
+
+                  UNION
+
+                  MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)-[:HAS_PROPOSAL]->(p:Proposal)
+                  OPTIONAL MATCH (p)-[:TARGETS]->(a:Artifact)
+                  WHERE ($status IS NULL OR
+                        CASE p.status
+                          WHEN 'pending'   THEN 'open'
+                          WHEN 'approved'  THEN 'applied'
+                          WHEN 'discarded' THEN 'discarded'
+                        END = $status)
+                    AND ($did IS NULL OR d.id = $did)
+                  RETURN p.id AS id, p.source AS title, p.status AS raw_status, 'proposal' AS kind,
+                         p.created_at AS created_at, p.created_at AS updated_at,
+                         d.id AS deployment_id, d.name AS deployment_name";
+    let rows = neo4j.query_read(
+        cypher,
+        json!({ "pid": project_id, "status": status, "did": deployment_id }),
+    ).await?;
+    let shaped: Vec<Value> = rows.iter().map(|row| {
+        let raw = row["raw_status"].as_str().unwrap_or("");
+        let kind = row["kind"].as_str().unwrap_or("issue");
+        let unified = if kind == "proposal" {
+            map_proposal_status_to_cr(raw)
+        } else {
+            map_issue_status_to_cr(raw)
+        };
+        json!({
+            "id":             row["id"],
+            "title":          row["title"],
+            "status":         unified,
+            "kind":           kind,
+            "created_at":     row["created_at"],
+            "updated_at":     row["updated_at"],
+            "deployment":     json!({
+                "id":   row["deployment_id"],
+                "name": row["deployment_name"],
+            }),
+        })
+    }).collect();
+    Ok(shaped)
+}
+
+pub async fn get_change_request_detail(
+    neo4j:      &Neo4jClient,
+    project_id: &str,
+    cr_id:      &str,
+) -> anyhow::Result<Option<Value>> {
+    let issue_rows = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)-[:HAS_ISSUE]->(i:Issue {id: $cr_id})
+         RETURN i.id AS id, i.title AS title, i.description AS description, i.status AS status,
+                i.fingerprint AS fingerprint, i.proposed_solution_summary AS proposed_solution_summary,
+                i.proposed_files AS proposed_files, i.chat_messages AS chat_messages, i.comments AS comments,
+                i.created_by AS created_by, i.created_at AS created_at, i.updated_at AS updated_at,
+                d.id AS deployment_id, d.name AS deployment_name, d.infra_state AS deployment_infra_state",
+        json!({ "pid": project_id, "cr_id": cr_id }),
+    ).await?;
+    if let Some(row) = issue_rows.into_iter().next() {
+        let mut shaped = shape_issue(&row);
+        shaped["kind"] = json!("issue");
+        shaped["status"] = json!(map_issue_status_to_cr(row["status"].as_str().unwrap_or("")));
+        return Ok(Some(shaped));
+    }
+
+    let proposal_rows = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)-[:HAS_PROPOSAL]->(p:Proposal {id: $cr_id})
+         OPTIONAL MATCH (p)-[:TARGETS]->(a:Artifact)
+         RETURN p.id AS id, p.source AS source, p.explanation AS explanation,
+                p.current_content AS current_content, p.proposed_content AS proposed_content,
+                p.status AS status, p.created_at AS created_at, p.comments AS comments,
+                a.id AS target_artifact_id, a.kind AS target_artifact_kind, a.title AS target_artifact_title,
+                d.id AS deployment_id, d.name AS deployment_name, d.infra_state AS deployment_infra_state",
+        json!({ "pid": project_id, "cr_id": cr_id }),
+    ).await?;
+    if let Some(row) = proposal_rows.into_iter().next() {
+        return Ok(Some(json!({
+            "id":                   row["id"],
+            "kind":                 "proposal",
+            "status":               map_proposal_status_to_cr(row["status"].as_str().unwrap_or("")),
+            "title":                row["source"],
+            "source":               row["source"],
+            "explanation":          row["explanation"],
+            "current_content":      row["current_content"],
+            "proposed_content":     row["proposed_content"],
+            "target_artifact_id":   row["target_artifact_id"],
+            "target_artifact_kind": row["target_artifact_kind"],
+            "target_artifact_title":row["target_artifact_title"],
+            "created_at":           row["created_at"],
+            "comments":             parse_json_array(&row, "comments"),
+            "deployment":           json!({
+                "id":          row["deployment_id"],
+                "name":        row["deployment_name"],
+                "infra_state": row["deployment_infra_state"],
+            }),
+        })));
+    }
+    Ok(None)
+}
+
+pub async fn change_request_kind(
+    neo4j:      &Neo4jClient,
+    project_id: &str,
+    cr_id:      &str,
+) -> anyhow::Result<Option<&'static str>> {
+    let issue_rows = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment)-[:HAS_ISSUE]->(i:Issue {id: $cr_id})
+         RETURN 1",
+        json!({ "pid": project_id, "cr_id": cr_id }),
+    ).await?;
+    if !issue_rows.is_empty() {
+        return Ok(Some("issue"));
+    }
+    let proposal_rows = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment)-[:HAS_PROPOSAL]->(p:Proposal {id: $cr_id})
+         RETURN 1",
+        json!({ "pid": project_id, "cr_id": cr_id }),
+    ).await?;
+    if !proposal_rows.is_empty() {
+        return Ok(Some("proposal"));
+    }
+    Ok(None)
+}
+
+pub async fn discard_issue_cr(
+    neo4j:      &Neo4jClient,
+    project_id: &str,
+    issue_id:   &str,
+) -> anyhow::Result<bool> {
+    let rows = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment)-[:HAS_ISSUE]->(i:Issue {id: $iid})
+         WHERE i.status IN ['untriaged', 'in_progress']
+         SET i.status = 'rejected', i.updated_at = $now
+         RETURN 1",
+        json!({ "pid": project_id, "iid": issue_id, "now": chrono::Utc::now().to_rfc3339() }),
+    ).await?;
+    Ok(!rows.is_empty())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueStatus {
     Untriaged,
