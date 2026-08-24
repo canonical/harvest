@@ -30,6 +30,7 @@ pub enum ArtifactKind {
     Pdf,
     Terraform,
     Terragrunt,
+    Bash,
 }
 
 impl ArtifactKind {
@@ -39,6 +40,7 @@ impl ArtifactKind {
             "pdf"        => Some(Self::Pdf),
             "terraform"  => Some(Self::Terraform),
             "terragrunt" => Some(Self::Terragrunt),
+            "bash"       => Some(Self::Bash),
             _            => None,
         }
     }
@@ -49,6 +51,7 @@ impl ArtifactKind {
             Self::Pdf        => "pdf",
             Self::Terraform  => "terraform",
             Self::Terragrunt => "terragrunt",
+            Self::Bash       => "bash",
         }
     }
 }
@@ -173,7 +176,7 @@ pub async fn update_artifact_route(
     let existing_kind = ArtifactKind::parse(row["kind"].as_str().unwrap_or(""))
         .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let kind = ArtifactKind::parse(&body.kind)
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "kind must be 'markdown', 'pdf', 'terraform', or 'terragrunt'"))?;
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "kind must be 'markdown', 'pdf', 'terraform', 'terragrunt', or 'bash'"))?;
     let result = update_artifact(&state.neo4j, &artifact_id, existing_kind, kind, &body.title, &body.content)
         .await
         .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
@@ -255,6 +258,16 @@ pub async fn download_artifact(
             )
             .body(Body::from(content))
             .unwrap()
+    } else if kind == "bash" {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, HeaderValue::from_static("text/x-shellscript; charset=utf-8"))
+            .header(
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_str(&format!("attachment; filename=\"{slug}.sh\"")).unwrap(),
+            )
+            .body(Body::from(content))
+            .unwrap()
     } else {
         Response::builder()
             .status(StatusCode::OK)
@@ -298,14 +311,20 @@ mod tests {
         assert_eq!(ArtifactKind::parse("pdf"), Some(ArtifactKind::Pdf));
         assert_eq!(ArtifactKind::parse("terraform"), Some(ArtifactKind::Terraform));
         assert_eq!(ArtifactKind::parse("terragrunt"), Some(ArtifactKind::Terragrunt));
+        assert_eq!(ArtifactKind::parse("bash"), Some(ArtifactKind::Bash));
         assert_eq!(ArtifactKind::parse("docx"), None);
     }
 
     #[test]
     fn artifact_kind_as_str_round_trips() {
-        for kind in [ArtifactKind::Markdown, ArtifactKind::Pdf, ArtifactKind::Terraform, ArtifactKind::Terragrunt] {
+        for kind in [ArtifactKind::Markdown, ArtifactKind::Pdf, ArtifactKind::Terraform, ArtifactKind::Terragrunt, ArtifactKind::Bash] {
             assert_eq!(ArtifactKind::parse(kind.as_str()), Some(kind));
         }
+    }
+
+    #[test]
+    fn validate_content_for_kind_skips_validation_for_bash() {
+        assert!(validate_content_for_kind(ArtifactKind::Bash, "#!/usr/bin/env bash\necho hi").is_ok());
     }
 
     #[test]
