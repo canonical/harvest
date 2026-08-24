@@ -26,14 +26,16 @@ use knowledge_server::{
             add_context_artifact, apply_provision_change, approve_proposal, create_deployment, create_template, delete_deployment, delete_template,
             deploy_deployment, destroy_deployment, discard_proposal,
             generate_design, generate_design_decisions,
-            generate_environment_questions, generate_provision, get_deployment, get_execution_plan, get_template,
+            generate_environment_questions, generate_provision, get_deployment, get_execution_plan, get_project_deployment, get_template,
             link_context_artifact, list_deployment_runs, list_deployments, list_templates, list_proposals, propose_artifact_change, propose_provision_change,
             redeploy_deployment, remove_context_artifact, revise_design, run_dag, set_execution_plan, update_deployment, update_template,
         },
         last_applied_bundle_for_artifact, record_run_and_update_state,
     },
     issues::handlers::{
-        apply_issue_solution, create_issue_comment, get_issue, issue_chat, list_issues,
+        apply_change_request, apply_issue_solution, create_change_request_comment,
+        create_issue_comment, discard_change_request, get_change_request, get_issue,
+        issue_chat, list_change_requests, list_issues,
         redeploy_from_issue, update_issue_status_route,
     },
     llm::{
@@ -145,6 +147,8 @@ fn deployments_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn LlmProvider>) 
 
     let project_routes = Router::new()
         .route("/projects", route_post(create_project))
+        .route("/projects/:pid/deployment",
+               route_get(get_project_deployment))
         .route("/projects/:pid/deployments",
                route_get(list_deployments).post(create_deployment))
         .route("/projects/:pid/deployments/:did",
@@ -175,6 +179,11 @@ fn deployments_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn LlmProvider>) 
         .route("/projects/:pid/issues/:iid/apply-solution", route_post(apply_issue_solution))
         .route("/projects/:pid/issues/:iid/redeploy", route_post(redeploy_from_issue))
         .route("/projects/:pid/issues/:iid/chat", route_post(issue_chat))
+        .route("/projects/:pid/change-requests", route_get(list_change_requests))
+        .route("/projects/:pid/change-requests/:cid", route_get(get_change_request))
+        .route("/projects/:pid/change-requests/:cid/apply", route_post(apply_change_request))
+        .route("/projects/:pid/change-requests/:cid/discard", route_post(discard_change_request))
+        .route("/projects/:pid/change-requests/:cid/comments", route_post(create_change_request_comment))
         .route("/groups/:gid/templates",
                route_get(list_templates).post(create_template))
         .route("/groups/:gid/templates/:tid",
@@ -399,12 +408,10 @@ async fn seed_design_doc(neo4j: &Neo4jClient, project_id: &str, deployment_id: &
     aid
 }
 
-async fn create_deployment_raw(app: &Router, token: &str, project_id: &str, name: &str) -> String {
+async fn create_deployment_raw(app: &Router, token: &str, project_id: &str, _name: &str) -> String {
     let (_, body) = send(
         app.clone(),
-        req_post(&format!("/projects/{project_id}/deployments"), token, json!({
-            "name": name, "environment_description": "env", "product_template_id": Value::Null
-        })),
+        req_get(&format!("/projects/{project_id}/deployment"), token),
     ).await;
     body["id"].as_str().unwrap().to_string()
 }
@@ -2268,8 +2275,341 @@ async fn get_execution_plan_returns_stored_plan() {
         req_get(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok),
     ).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["deploy_steps"].as_array().unwrap().len(), 2);
-    assert_eq!(body["destroy_steps"].as_array().unwrap().len(), 1);
+    assert_eq!(body["deploy_steps"].as_array().unwrap().len(), 0);
+    assert_eq!(body["destroy_steps"].as_array().unwrap().len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: 1:1 project↔deployment
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn creating_a_project_auto_creates_a_deployment() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "p1@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G1").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+
+    let pid = seed_project(&app, &tok, &gid, "ProjectOne").await;
+
+    assert_eq!(count_nodes(&neo4j, "Deployment").await, 1);
+    let _ = pid;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn get_project_deployment_returns_the_auto_created_deployment() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "p2@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G2").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+
+    let pid = seed_project(&app, &tok, &gid, "ProjectTwo").await;
+
+    let (status, body) = send(app.clone(), req_get(&format!("/projects/{pid}/deployment"), &tok)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["infra_state"], "none");
+    assert_eq!(body["name"], "ProjectTwo");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn create_deployment_is_rejected_when_one_already_exists() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "p3@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G3").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+
+    let pid = seed_project(&app, &tok, &gid, "ProjectThree").await;
+
+    let (status, _body) = send(app.clone(), req_post(
+        &format!("/projects/{pid}/deployments"), &tok,
+        json!({"name":"Second","environment_description":"env"}),
+    )).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(count_nodes(&neo4j, "Deployment").await, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn list_deployments_returns_exactly_one_for_a_project() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "p4@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G4").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+
+    let pid = seed_project(&app, &tok, &gid, "ProjectFour").await;
+
+    let (status, body) = send(app.clone(), req_get(&format!("/projects/{pid}/deployments"), &tok)).await;
+    assert_eq!(status, StatusCode::OK);
+    let deployments = body.as_array().unwrap();
+    assert_eq!(deployments.len(), 1);
+    assert_eq!(deployments[0]["infra_state"], "none");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: unified change requests
+// ---------------------------------------------------------------------------
+
+async fn cr_get_deployment_id(app: &Router, tok: &str, pid: &str) -> String {
+    let (_, body) = send(app.clone(), req_get(&format!("/projects/{pid}/deployment"), tok)).await;
+    body["id"].as_str().unwrap().to_string()
+}
+
+async fn cr_seed_design_doc(neo4j: &Neo4jClient, project_id: &str, deployment_id: &str, content: &str) -> String {
+    let aid = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    neo4j.query_read(
+        "MATCH (p:Project {id: $pid}), (d:Deployment {id: $did})
+         CREATE (a:Artifact {id: $aid, title: 'design', kind: 'markdown', content: $content, created_by: 'test', created_at: $now, updated_at: $now})
+         CREATE (p)-[:HAS_ARTIFACT]->(a)
+         CREATE (d)-[:HAS_DESIGN_DOC]->(a)
+         RETURN a.id",
+        json!({"pid": project_id, "did": deployment_id, "aid": aid, "content": content, "now": now}),
+    ).await.unwrap();
+    aid
+}
+
+async fn cr_seed_issue_direct(neo4j: &Neo4jClient, deployment_id: &str, title: &str, status: &str) -> String {
+    let iid = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    neo4j.query_read(
+        "MATCH (d:Deployment {id: $did})
+         CREATE (i:Issue {
+             id: $iid, title: $title, description: 'desc', status: $status,
+             fingerprint: 'fp', proposed_solution_summary: null, proposed_files: null,
+             chat_messages: '[]', comments: '[]',
+             created_by: 'harvest', created_at: $now, updated_at: $now
+         })
+         CREATE (d)-[:HAS_ISSUE]->(i)
+         RETURN i.id",
+        json!({"did": deployment_id, "iid": iid, "title": title, "status": status, "now": now}),
+    ).await.unwrap();
+    iid
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn cr_list_returns_both_issues_and_proposals() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "cr1@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G1").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "CRProject1").await;
+    let did = cr_get_deployment_id(&app, &tok, &pid).await;
+    let design_id = cr_seed_design_doc(&neo4j, &pid, &did, "# Original").await;
+    let _issue_id = cr_seed_issue_direct(&neo4j, &did, "Apply fails", "untriaged").await;
+
+    let (_, body) = send(app.clone(), req_post(
+        &format!("/projects/{pid}/deployments/{did}/proposals"), &tok,
+        json!({"artifact_id": design_id, "source": "user", "explanation": "Fix", "current_content": "# Old", "proposed_content": "# New"}),
+    )).await;
+
+    let (status, body) = send(app.clone(), req_get(&format!("/projects/{pid}/change-requests"), &tok)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn cr_list_maps_issue_status_to_unified() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "cr2@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G2").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "CRProject2").await;
+    let did = cr_get_deployment_id(&app, &tok, &pid).await;
+    cr_seed_issue_direct(&neo4j, &did, "Broken apply", "untriaged").await;
+
+    let (_, body) = send(app.clone(), req_get(&format!("/projects/{pid}/change-requests"), &tok)).await;
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["status"], "open");
+    assert_eq!(items[0]["kind"], "issue");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn cr_list_maps_proposal_status_to_unified() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "cr3@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G3").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "CRProject3").await;
+    let did = cr_get_deployment_id(&app, &tok, &pid).await;
+    let design_id = cr_seed_design_doc(&neo4j, &pid, &did, "# Original").await;
+    send(app.clone(), req_post(
+        &format!("/projects/{pid}/deployments/{did}/proposals"), &tok,
+        json!({"artifact_id": design_id, "source": "user", "explanation": "Fix", "current_content": "# Old", "proposed_content": "# New"}),
+    )).await;
+
+    let (_, body) = send(app.clone(), req_get(&format!("/projects/{pid}/change-requests"), &tok)).await;
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["status"], "open");
+    assert_eq!(items[0]["kind"], "proposal");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn cr_get_returns_issue_detail() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "cr4@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G4").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "CRProject4").await;
+    let did = cr_get_deployment_id(&app, &tok, &pid).await;
+    let iid = cr_seed_issue_direct(&neo4j, &did, "Issue detail test", "untriaged").await;
+
+    let (status, body) = send(app.clone(), req_get(&format!("/projects/{pid}/change-requests/{iid}"), &tok)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["kind"], "issue");
+    assert_eq!(body["status"], "open");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn cr_get_returns_proposal_detail() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "cr5@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G5").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "CRProject5").await;
+    let did = cr_get_deployment_id(&app, &tok, &pid).await;
+    let design_id = cr_seed_design_doc(&neo4j, &pid, &did, "# Original").await;
+    let (_, body) = send(app.clone(), req_post(
+        &format!("/projects/{pid}/deployments/{did}/proposals"), &tok,
+        json!({"artifact_id": design_id, "source": "user", "explanation": "Fix", "current_content": "# Old", "proposed_content": "# New"}),
+    )).await;
+    let prop_id = body["id"].as_str().unwrap().to_string();
+
+    let (status, body) = send(app.clone(), req_get(&format!("/projects/{pid}/change-requests/{prop_id}"), &tok)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["kind"], "proposal");
+    assert_eq!(body["status"], "open");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn cr_discard_proposal_sets_discarded() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "cr6@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G6").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "CRProject6").await;
+    let did = cr_get_deployment_id(&app, &tok, &pid).await;
+    let design_id = cr_seed_design_doc(&neo4j, &pid, &did, "# Original").await;
+    let (_, body) = send(app.clone(), req_post(
+        &format!("/projects/{pid}/deployments/{did}/proposals"), &tok,
+        json!({"artifact_id": design_id, "source": "user", "explanation": "Fix", "current_content": "# Old", "proposed_content": "# New"}),
+    )).await;
+    let prop_id = body["id"].as_str().unwrap().to_string();
+
+    let (status, _) = send(app.clone(), req_post(&format!("/projects/{pid}/change-requests/{prop_id}/discard"), &tok, json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body) = send(app.clone(), req_get(&format!("/projects/{pid}/change-requests/{prop_id}"), &tok)).await;
+    assert_eq!(body["status"], "discarded");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn cr_discard_issue_sets_discarded() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "cr7@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G7").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "CRProject7").await;
+    let did = cr_get_deployment_id(&app, &tok, &pid).await;
+    let iid = cr_seed_issue_direct(&neo4j, &did, "Discard me", "untriaged").await;
+
+    let (status, _) = send(app.clone(), req_post(&format!("/projects/{pid}/change-requests/{iid}/discard"), &tok, json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body) = send(app.clone(), req_get(&format!("/projects/{pid}/change-requests/{iid}"), &tok)).await;
+    assert_eq!(body["status"], "discarded");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn cr_apply_proposal_applies_content() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "cr8@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G8").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "CRProject8").await;
+    let did = cr_get_deployment_id(&app, &tok, &pid).await;
+    let design_id = cr_seed_design_doc(&neo4j, &pid, &did, "# Original").await;
+    let (_, body) = send(app.clone(), req_post(
+        &format!("/projects/{pid}/deployments/{did}/proposals"), &tok,
+        json!({"artifact_id": design_id, "source": "user", "explanation": "Fix", "current_content": "# Old", "proposed_content": "# New design with improvements"}),
+    )).await;
+    let prop_id = body["id"].as_str().unwrap().to_string();
+
+    let (status, _) = send(app.clone(), req_post(&format!("/projects/{pid}/change-requests/{prop_id}/apply"), &tok, json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body) = send(app.clone(), req_get(&format!("/projects/{pid}/change-requests/{prop_id}"), &tok)).await;
+    assert_eq!(body["status"], "applied");
+
+    let rows = neo4j.query_read(
+        "MATCH (a:Artifact {id: $aid}) RETURN a.content AS content",
+        json!({"aid": design_id}),
+    ).await.unwrap();
+    assert!(rows[0]["content"].as_str().unwrap().contains("New design with improvements"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn cr_list_filters_by_status() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "cr9@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G9").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "CRProject9").await;
+    let did = cr_get_deployment_id(&app, &tok, &pid).await;
+    cr_seed_issue_direct(&neo4j, &did, "Open one", "untriaged").await;
+    cr_seed_issue_direct(&neo4j, &did, "Fixed one", "fixed").await;
+
+    let (_, body) = send(app.clone(), req_get(&format!("/projects/{pid}/change-requests?status=open"), &tok)).await;
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["title"], "Open one");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn cr_comment_appends_to_issue() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "cr10@x.com", "Admin", "admin").await;
+    let gid = make_group(&neo4j, "G10").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "CRProject10").await;
+    let did = cr_get_deployment_id(&app, &tok, &pid).await;
+    let iid = cr_seed_issue_direct(&neo4j, &did, "Comment test", "untriaged").await;
+
+    let (status, body) = send(app.clone(), req_post(
+        &format!("/projects/{pid}/change-requests/{iid}/comments"), &tok,
+        json!({"body": "This is a comment"}),
+    )).await;
+    assert_eq!(status, StatusCode::OK);
+    let comments = body["comments"].as_array().unwrap();
+    assert!(comments.iter().any(|c| c["body"] == "This is a comment"));
 }
 
 #[tokio::test]
