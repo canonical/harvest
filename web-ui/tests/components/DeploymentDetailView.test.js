@@ -6,6 +6,7 @@ const DEPLOYMENT_FRESH = {
   id: 'd1', name: 'Acme rollout', environment_description: '',
   infra_state: 'none', template: null,
   design_doc: null, terraform_bundle: null, guide: null,
+  context_artifacts: [],
   created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
 };
 
@@ -13,20 +14,27 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
-    getProjectDeployment: vi.fn(),
-    listDeploymentRuns:   vi.fn(),
-    listProjectAgents:    vi.fn(),
+    getProjectDeployment:     vi.fn(),
+    listDeploymentRuns:       vi.fn(),
+    listProjectAgents:        vi.fn(),
+    listDeploymentProposals:  vi.fn(),
   };
 });
 
-vi.mock('../../src/components/deployment/EnvironmentPhase.vue', () => ({
-  default: { template: '<div class="stub-environment-phase" />', props: ['projectId', 'deployment'] },
+vi.mock('../../src/components/deployment/ContextArtifactsPanel.vue', () => ({
+  default: { template: '<div data-testid="context-panel" />', props: ['projectId', 'deployment'] },
 }));
-vi.mock('../../src/components/deployment/DesignPhase.vue', () => ({
-  default: { template: '<div class="stub-design-phase" />', props: ['projectId', 'deployment'] },
+vi.mock('../../src/components/deployment/DesignPanel.vue', () => ({
+  default: { template: '<div data-testid="design-panel" />', props: ['projectId', 'deployment'] },
 }));
-vi.mock('../../src/components/deployment/ProvisionPhase.vue', () => ({
-  default: { template: '<div class="stub-provision-phase" />', props: ['projectId', 'deployment', 'runs', 'agents'] },
+vi.mock('../../src/components/deployment/ArtifactsPanel.vue', () => ({
+  default: { template: '<div data-testid="artifacts-panel" />', props: ['projectId', 'deployment', 'runs', 'agents'] },
+}));
+vi.mock('../../src/components/deployment/GuidePanel.vue', () => ({
+  default: { template: '<div data-testid="guide-panel" />', props: ['projectId', 'deployment'] },
+}));
+vi.mock('../../src/components/deployment/ReviewInbox.vue', () => ({
+  default: { template: '<div data-testid="review-inbox" />', props: ['projectId', 'deploymentId'] },
 }));
 
 import DeploymentDetailView from '../../src/views/DeploymentDetailView.vue';
@@ -39,10 +47,11 @@ function makeRouter() {
   });
 }
 
-async function mountView({ deployment = DEPLOYMENT_FRESH, runs = [] } = {}) {
+async function mountView({ deployment = DEPLOYMENT_FRESH, runs = [], proposals = [] } = {}) {
   api.getProjectDeployment.mockResolvedValue(deployment);
   api.listDeploymentRuns.mockResolvedValue(runs);
   api.listProjectAgents.mockResolvedValue([]);
+  api.listDeploymentProposals.mockResolvedValue(proposals);
 
   const router = makeRouter();
   router.push('/deployments/d1');
@@ -64,55 +73,76 @@ describe('DeploymentDetailView', () => {
     expect(w.text()).toContain('Not deployed');
   });
 
-  it('renders all five phase tabs', async () => {
+  it('renders top tabs for all four sections', async () => {
     const { w } = await mountView();
-    const text = w.text();
-    for (const label of ['Describe environment', 'Design', 'Deploy', 'Validate', 'Guide']) {
-      expect(text).toContain(label);
-    }
+    const tabs = w.findAll('.deployment-tab');
+    const labels = tabs.map(t => t.text());
+    expect(labels.some(l => l.includes('Context'))).toBe(true);
+    expect(labels.some(l => l.includes('Design'))).toBe(true);
+    expect(labels.some(l => l.includes('Artifacts'))).toBe(true);
+    expect(labels.some(l => l.includes('Guide'))).toBe(true);
   });
 
-  it('defaults to the environment phase for a fresh deployment and shows its component', async () => {
+  it('does not render the old phase tab bar or card rail', async () => {
     const { w } = await mountView();
-    expect(w.find('.stub-environment-phase').exists()).toBe(true);
-    expect(w.find('.stub-design-phase').exists()).toBe(false);
+    expect(w.find('.deployment-phase-tabs').exists()).toBe(false);
+    expect(w.find('.deployment-card-rail').exists()).toBe(false);
   });
 
-  it('defaults to the design phase once the environment description is filled in', async () => {
-    const { w } = await mountView({ deployment: { ...DEPLOYMENT_FRESH, environment_description: 'notes' } });
-    expect(w.find('.stub-design-phase').exists()).toBe(true);
-  });
-
-  it('defaults to the provision phase once a design doc exists', async () => {
+  it('shows context artifact count on the context tab', async () => {
     const { w } = await mountView({
-      deployment: { ...DEPLOYMENT_FRESH, environment_description: 'notes', design_doc: { id: 'a1', title: 'Design' } },
+      deployment: { ...DEPLOYMENT_FRESH, context_artifacts: [
+        { id: 'ca1', title: 'Notes', kind: 'markdown' },
+        { id: 'ca2', title: 'Diagram', kind: 'markdown' },
+      ] },
     });
-    expect(w.find('.stub-provision-phase').exists()).toBe(true);
+    const contextTab = w.findAll('.deployment-tab').find(t => t.text().includes('Context'));
+    expect(contextTab.text()).toContain('2');
   });
 
-  it('clicking a tab switches the visible phase component', async () => {
-    const { w } = await mountView({ deployment: { ...DEPLOYMENT_FRESH, environment_description: 'notes', design_doc: { id: 'a1' } } });
-    expect(w.find('.stub-provision-phase').exists()).toBe(true);
-
-    const tabs = w.findAll('.deployment-phase-tab');
-    const envTab = tabs.find(t => t.text().includes('Describe environment'));
-    await envTab.trigger('click');
-    expect(w.find('.stub-environment-phase').exists()).toBe(true);
+  it('shows review button with count when pending proposals exist', async () => {
+    const { w } = await mountView({
+      proposals: [{ id: 'p1', status: 'pending', explanation: 'fix', target_artifact_kind: 'terraform' }],
+    });
+    const btn = w.find('[data-testid="review-toggle"]');
+    expect(btn.exists()).toBe(true);
+    expect(btn.text()).toContain('1');
   });
 
-  it('disables the Validate and Guide tabs', async () => {
+  it('clicking review button opens the review drawer', async () => {
+    const { w } = await mountView({
+      proposals: [{ id: 'p1', status: 'pending', explanation: 'fix', target_artifact_kind: 'terraform' }],
+    });
+    await w.find('[data-testid="review-toggle"]').trigger('click');
+    expect(w.find('[data-testid="review-drawer"]').exists()).toBe(true);
+  });
+
+  it('selecting the context tab shows the context panel', async () => {
     const { w } = await mountView();
-    const tabs = w.findAll('.deployment-phase-tab');
-    const validateTab = tabs.find(t => t.text().includes('Validate'));
-    const guideTab = tabs.find(t => t.text().includes('Guide'));
-    expect(validateTab.attributes('disabled')).toBeDefined();
-    expect(guideTab.attributes('disabled')).toBeDefined();
+    w.findAll('.deployment-tab').find(t => t.text().includes('Context')).trigger('click');
+    await flushPromises();
+    expect(w.find('[data-testid="context-panel"]').exists()).toBe(true);
   });
 
-  it('marks a phase tab done once its condition is met', async () => {
-    const { w } = await mountView({ deployment: { ...DEPLOYMENT_FRESH, environment_description: 'notes' } });
-    const tabs = w.findAll('.deployment-phase-tab');
-    const envTab = tabs.find(t => t.text().includes('Describe environment'));
-    expect(envTab.classes()).toContain('deployment-phase-tab--done');
+  it('selecting the design tab shows the design panel', async () => {
+    const { w } = await mountView();
+    w.findAll('.deployment-tab').find(t => t.text().includes('Design')).trigger('click');
+    await flushPromises();
+    expect(w.find('[data-testid="design-panel"]').exists()).toBe(true);
+  });
+
+  it('selecting the artifacts tab shows the artifacts panel', async () => {
+    const { w } = await mountView();
+    w.findAll('.deployment-tab').find(t => t.text().includes('Artifacts')).trigger('click');
+    await flushPromises();
+    expect(w.find('[data-testid="artifacts-panel"]').exists()).toBe(true);
+  });
+
+  it('shows broken badge and issue link when infra is broken', async () => {
+    const { w } = await mountView({
+      deployment: { ...DEPLOYMENT_FRESH, infra_state: 'broken' },
+    });
+    expect(w.text()).toContain('Broken');
+    expect(w.find('[data-testid="view-issues-link"]').exists()).toBe(true);
   });
 });
