@@ -6,14 +6,14 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
-    getProjectIssue:       vi.fn(),
-    updateIssueStatus:     vi.fn(),
-    createIssueComment:    vi.fn(),
-    applyIssueSolution:    vi.fn(),
-    redeployFromIssue:     vi.fn(),
-    getProjectDeployment:  vi.fn(),
-    getArtifact:           vi.fn(),
-    listProjectAgents:     vi.fn(),
+    getChangeRequest:           vi.fn(),
+    discardChangeRequest:       vi.fn(),
+    applyChangeRequest:         vi.fn(),
+    createChangeRequestComment: vi.fn(),
+    redeployFromIssue:          vi.fn(),
+    getProjectDeploymentSingle: vi.fn(),
+    getArtifact:                vi.fn(),
+    listProjectAgents:          vi.fn(),
   };
 });
 
@@ -26,8 +26,8 @@ import IssueChat from '../../src/components/deployment/IssueChat.vue';
 import * as api from '../../src/lib/api.js';
 
 const BASE_ISSUE = {
-  id: 'i1', title: 'Apply fails on security group', description: 'Details about **the** failure',
-  status: 'untriaged', proposed_solution_summary: null, proposed_files: null,
+  id: 'cr1', title: 'Apply fails on security group', description: 'Details about **the** failure',
+  status: 'open', kind: 'issue', proposed_solution_summary: null, proposed_files: null,
   comments: [], chat_messages: [], runs: [],
   deployment: { id: 'd1', name: 'Acme rollout', infra_state: 'broken' },
 };
@@ -41,20 +41,20 @@ function makeRouter() {
   return createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/issues/:id', component: IssueDetailView },
-      { path: '/deployments/:id', component: { template: '<div />' } },
+      { path: '/change-requests/:id', component: IssueDetailView },
+      { path: '/deploy', component: { template: '<div />' } },
     ],
   });
 }
 
 async function mountView({ issue = BASE_ISSUE, deployment = DEPLOYMENT, agents = [{ id: 'agent-1', hostname: 'host-1' }] } = {}) {
-  api.getProjectIssue.mockResolvedValue(structuredClone(issue));
-  api.getProjectDeployment.mockResolvedValue(structuredClone(deployment));
+  api.getChangeRequest.mockResolvedValue(structuredClone(issue));
+  api.getProjectDeploymentSingle.mockResolvedValue(structuredClone(deployment));
   api.getArtifact.mockResolvedValue({ content: JSON.stringify({ 'main.tf': 'resource "x" {}' }) });
   api.listProjectAgents.mockResolvedValue(agents);
 
   const router = makeRouter();
-  router.push('/issues/i1');
+  router.push('/change-requests/cr1');
   await router.isReady();
   const w = mount(IssueDetailView, {
     props: { projectId: 'proj-1' },
@@ -64,20 +64,20 @@ async function mountView({ issue = BASE_ISSUE, deployment = DEPLOYMENT, agents =
   return { w, router };
 }
 
-describe('IssueDetailView', () => {
+describe('IssueDetailView (Change Request detail)', () => {
   beforeEach(() => { vi.restoreAllMocks(); });
 
-  it('renders the issue title, status, and description', async () => {
+  it('renders the change request title, status, and description', async () => {
     const { w } = await mountView();
     expect(w.text()).toContain('Apply fails on security group');
-    expect(w.find('[data-testid="issue-status-badge"]').text()).toBe('Untriaged');
+    expect(w.find('[data-testid="issue-status-badge"]').text()).toBe('Open');
     expect(w.find('[data-testid="issue-description"]').html()).toContain('<strong>the</strong>');
   });
 
-  it('links to the issue\'s deployment', async () => {
+  it('links to the deployment page', async () => {
     const { w } = await mountView();
     const link = w.find('[data-testid="view-deployment-link"]');
-    expect(link.attributes('href')).toContain('/deployments/d1');
+    expect(link.attributes('href')).toBe('/deploy');
     expect(link.text()).toContain('Acme rollout');
   });
 
@@ -103,8 +103,8 @@ describe('IssueDetailView', () => {
     expect(panel.text()).toContain('widened the security group');
   });
 
-  it('apply-solution button calls applyIssueSolution with the selected agent and reloads', async () => {
-    api.applyIssueSolution.mockResolvedValue({ issue: {}, redeploy: {} });
+  it('apply-solution button calls applyChangeRequest with the selected agent and reloads', async () => {
+    api.applyChangeRequest.mockResolvedValue({ change_request: {}, redeploy: {} });
     const { w } = await mountView({
       issue: { ...BASE_ISSUE, proposed_solution_summary: 'fix', proposed_files: { 'main.tf': 'fixed' } },
     });
@@ -112,20 +112,20 @@ describe('IssueDetailView', () => {
     await w.find('[data-testid="apply-solution-btn"]').trigger('click');
     await flushPromises();
 
-    expect(api.applyIssueSolution).toHaveBeenCalledWith('proj-1', 'i1', { agent_id: 'agent-1' });
-    expect(api.getProjectIssue).toHaveBeenCalledTimes(2);
+    expect(api.applyChangeRequest).toHaveBeenCalledWith('proj-1', 'cr1', { agent_id: 'agent-1' });
+    expect(api.getChangeRequest).toHaveBeenCalledTimes(2);
   });
 
   it('renders the comment list and posts a new comment', async () => {
     const updated = { ...BASE_ISSUE, comments: [{ id: 'c1', author_type: 'user', author_name: 'Alice', body: 'noted', created_at: '2026-08-07T12:00:00Z' }] };
-    api.createIssueComment.mockResolvedValue(updated);
+    api.createChangeRequestComment.mockResolvedValue(updated);
     const { w } = await mountView();
 
     await w.find('[data-testid="issue-comment-input"]').setValue('noted');
     await w.find('[data-testid="post-comment-btn"]').trigger('click');
     await flushPromises();
 
-    expect(api.createIssueComment).toHaveBeenCalledWith('proj-1', 'i1', 'noted');
+    expect(api.createChangeRequestComment).toHaveBeenCalledWith('proj-1', 'cr1', 'noted');
     expect(w.text()).toContain('noted');
   });
 
@@ -135,24 +135,24 @@ describe('IssueDetailView', () => {
     });
     const chat = w.findComponent(IssueChat);
     expect(chat.exists()).toBe(true);
-    expect(chat.props('issueId')).toBe('i1');
+    expect(chat.props('issueId')).toBe('cr1');
     expect(chat.props('history')).toEqual([{ role: 'user', text: 'hi' }]);
     expect(chat.props('proposedFiles')).toEqual({ 'main.tf': 'fixed' });
     expect(chat.props('proposedSummary')).toBe('fix');
   });
 
-  it('only offers the untriaged->in_progress move button for an untriaged issue', async () => {
+  it('offers the open->in_review move button for an open change request', async () => {
     const { w } = await mountView();
-    expect(w.find('[data-testid="move-issue-in_progress"]').exists()).toBe(true);
-    expect(w.find('[data-testid="move-issue-fixed"]').exists()).toBe(false);
+    expect(w.find('[data-testid="move-issue-in_review"]').exists()).toBe(true);
+    expect(w.find('[data-testid="move-issue-applied"]').exists()).toBe(false);
   });
 
-  it('clicking a move button updates the status badge', async () => {
-    api.updateIssueStatus.mockResolvedValue({});
-    const { w } = await mountView();
-    await w.find('[data-testid="move-issue-in_progress"]').trigger('click');
+  it('discarding a change request calls discardChangeRequest', async () => {
+    api.discardChangeRequest.mockResolvedValue({});
+    const { w } = await mountView({ issue: { ...BASE_ISSUE, status: 'in_review' } });
+    await w.find('[data-testid="move-issue-discarded"]').trigger('click');
     await flushPromises();
-    expect(w.find('[data-testid="issue-status-badge"]').text()).toBe('In Progress');
+    expect(api.discardChangeRequest).toHaveBeenCalledWith('proj-1', 'cr1');
   });
 
   it('redeploy button calls redeployFromIssue with the selected agent', async () => {
@@ -160,7 +160,7 @@ describe('IssueDetailView', () => {
     const { w } = await mountView();
     await w.find('[data-testid="issue-redeploy-btn"]').trigger('click');
     await flushPromises();
-    expect(api.redeployFromIssue).toHaveBeenCalledWith('proj-1', 'i1', { agent_id: 'agent-1' });
+    expect(api.redeployFromIssue).toHaveBeenCalledWith('proj-1', 'cr1', { agent_id: 'agent-1' });
   });
 
   it('disables apply-solution and redeploy buttons when no agent is available', async () => {

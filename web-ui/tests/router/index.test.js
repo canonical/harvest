@@ -31,31 +31,31 @@ describe('router beforeEach fresh-load guard', () => {
     expect(router.currentRoute.value.path).toBe('/');
   });
 
-  it('allows a direct deep link into /deployments/:id on a fresh load', async () => {
+  it('redirects /deployments/:id to /deploy on a fresh load', async () => {
     const router = await freshRouter();
     await router.push('/deployments/abc-123');
     await router.isReady();
-    expect(router.currentRoute.value.path).toBe('/deployments/abc-123');
+    expect(router.currentRoute.value.path).toBe('/deploy');
   });
 
-  it('still redirects /deployments to / on a fresh load', async () => {
+  it('redirects /deployments to /deploy on a fresh load', async () => {
     const router = await freshRouter();
     await router.push('/deployments');
     await router.isReady();
-    expect(router.currentRoute.value.path).toBe('/');
+    expect(router.currentRoute.value.path).toBe('/deploy');
   });
 
-  it('allows a direct deep link into /issues/:id on a fresh load', async () => {
+  it('redirects /issues/:id to /change-requests/:id on a fresh load', async () => {
     const router = await freshRouter();
     await router.push('/issues/abc-123');
     await router.isReady();
-    expect(router.currentRoute.value.path).toBe('/issues/abc-123');
+    expect(router.currentRoute.value.path).toBe('/change-requests/abc-123');
   });
 
-  it('still redirects /issues to / on a fresh load', async () => {
+  it('redirects /issues to /change-requests on a fresh load', async () => {
     const router = await freshRouter();
     await router.push('/issues');
     await router.isReady();
-    expect(router.currentRoute.value.path).toBe('/');
+    expect(router.currentRoute.value.path).toBe('/change-requests');
   });
 });

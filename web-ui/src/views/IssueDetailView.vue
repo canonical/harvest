@@ -10,7 +10,7 @@
         <span class="issue-status-badge" :class="`issue-status-badge--${issue.status}`" data-testid="issue-status-badge">
           {{ statusLabel(issue.status) }}
         </span>
-        <router-link :to="`/deployments/${issue.deployment.id}`" class="issue-detail-header__deployment-link" data-testid="view-deployment-link">
+        <router-link to="/deploy" class="issue-detail-header__deployment-link" data-testid="view-deployment-link">
           View deployment: {{ issue.deployment.name }}
         </router-link>
 
@@ -103,10 +103,10 @@ import DiffView from '../components/deployment/DiffView.vue';
 import IssueCommentList from '../components/deployment/IssueCommentList.vue';
 import IssueChat from '../components/deployment/IssueChat.vue';
 import { renderMarkdown } from '../lib/markdown.js';
-import { nextStatusOptions } from '../lib/issue-transitions.js';
+import { nextStatusOptions } from '../lib/change-request-transitions.js';
 import {
-  getProjectIssue, updateIssueStatus, createIssueComment, applyIssueSolution, redeployFromIssue,
-  getProjectDeployment, getArtifact, listProjectAgents,
+  getChangeRequest, discardChangeRequest, createChangeRequestComment, applyChangeRequest, redeployFromIssue,
+  getProjectDeploymentSingle, getArtifact, listProjectAgents,
 } from '../lib/api.js';
 
 const props = defineProps({
@@ -125,8 +125,8 @@ const applying     = ref(false);
 const redeploying  = ref(false);
 const selectedAgentId = ref('');
 
-const STATUS_LABELS = { untriaged: 'Untriaged', in_progress: 'In Progress', fixed: 'Fixed', rejected: 'Rejected' };
-const ACTION_LABELS = { in_progress: 'Start work', fixed: 'Mark fixed', rejected: 'Reject' };
+const STATUS_LABELS = { open: 'Open', in_review: 'In Review', applied: 'Applied', discarded: 'Discarded' };
+const ACTION_LABELS = { in_review: 'Review', applied: 'Apply', discarded: 'Discard' };
 
 function statusLabel(status) {
   return STATUS_LABELS[status] ?? status;
@@ -137,7 +137,7 @@ function actionLabel(target) {
 
 async function loadIssue() {
   if (!props.projectId || !issueId.value) return;
-  issue.value = await getProjectIssue(props.projectId, issueId.value);
+  issue.value = await getChangeRequest(props.projectId, issueId.value);
 }
 
 async function loadBundleFiles() {
@@ -146,7 +146,7 @@ async function loadBundleFiles() {
     return;
   }
   try {
-    const deployment = await getProjectDeployment(props.projectId, issue.value.deployment.id);
+    const deployment = await getProjectDeploymentSingle(props.projectId);
     if (!deployment.terraform_bundle) {
       bundleFiles.value = {};
       return;
@@ -181,16 +181,20 @@ async function moveStatus(target) {
   const previous = issue.value.status;
   issue.value.status = target;
   try {
-    await updateIssueStatus(props.projectId, issue.value.id, target);
+    if (target === 'discarded') {
+      await discardChangeRequest(props.projectId, issue.value.id);
+    } else if (target === 'applied') {
+      await applyChangeRequest(props.projectId, issue.value.id, { agent_id: selectedAgentId.value });
+    }
   } catch (e) {
     issue.value.status = previous;
-    actionError.value = e.message || 'Failed to move issue';
+    actionError.value = e.message || 'Failed to move change request';
   }
 }
 
 async function postComment(text) {
   try {
-    issue.value = await createIssueComment(props.projectId, issue.value.id, text);
+    issue.value = await createChangeRequestComment(props.projectId, issue.value.id, text);
   } catch (e) {
     actionError.value = e.message || 'Failed to post comment';
   }
@@ -201,7 +205,7 @@ async function applySolution() {
   applying.value = true;
   actionError.value = null;
   try {
-    await applyIssueSolution(props.projectId, issue.value.id, { agent_id: selectedAgentId.value });
+    await applyChangeRequest(props.projectId, issue.value.id, { agent_id: selectedAgentId.value });
     await load();
   } catch (e) {
     actionError.value = e.message || 'Failed to apply the proposed solution';

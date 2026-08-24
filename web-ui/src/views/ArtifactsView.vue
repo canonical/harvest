@@ -27,6 +27,7 @@
           >
             <span class="artifacts-list-item__title">{{ a.title }}</span>
             <span class="artifacts-list-item__meta">
+              <span v-if="artifactRole(a.id)" class="artifact-role-badge" :data-testid="`role-badge-${a.id}`">{{ artifactRole(a.id) }}</span>
               <span class="artifact-kind-badge" :class="kindBadgeClass(a.kind)">{{ kindLabel(a.kind) }}</span>
               <span class="artifacts-list-item__date">{{ formatDate(a.created_at) }}</span>
             </span>
@@ -159,6 +160,7 @@ import {
   artifactDownloadUrl,
   listProjectAgents,
   runTerraformArtifact,
+  getProjectDeploymentSingle,
 } from '../lib/api.js';
 
 const props = defineProps({
@@ -175,6 +177,7 @@ const selectedArtifact = ref(null);
 const contentLoading   = ref(false);
 const deletingArtifact = ref(null);
 const submitting       = ref(false);
+const deploymentRoles  = ref({});
 
 const routeArtifactId = computed(() => route.params.id ?? null);
 
@@ -284,11 +287,30 @@ async function loadList() {
   if (!props.projectId) return;
   loading.value = true;
   try {
-    artifacts.value = await listProjectArtifacts(props.projectId);
+    const [list, dep] = await Promise.all([
+      listProjectArtifacts(props.projectId),
+      getProjectDeploymentSingle(props.projectId).catch(() => null),
+    ]);
+    artifacts.value = list;
+    if (dep) {
+      const roles = {};
+      if (dep.design_doc)      roles[dep.design_doc.id] = 'design';
+      if (dep.guide)           roles[dep.guide.id] = 'guide';
+      if (dep.terraform_bundle) roles[dep.terraform_bundle.id] = 'bundle';
+      for (const ca of (dep.context_artifacts ?? [])) roles[ca.id] = 'context';
+      deploymentRoles.value = roles;
+    } else {
+      deploymentRoles.value = {};
+    }
   } catch {
     artifacts.value = [];
+    deploymentRoles.value = {};
   }
   loading.value = false;
+}
+
+function artifactRole(id) {
+  return deploymentRoles.value[id] ?? null;
 }
 
 async function loadArtifact(id) {

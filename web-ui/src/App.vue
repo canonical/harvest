@@ -103,15 +103,21 @@
                     </router-link>
                   </li>
                   <li class="p-side-navigation__item">
-                    <router-link to="/deployments" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
+                    <router-link to="/design" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
                       <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-                      <span class="p-side-navigation__label">Deployment</span>
+                      <span class="p-side-navigation__label">Design</span>
                     </router-link>
                   </li>
                   <li class="p-side-navigation__item">
-                    <router-link to="/issues" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
+                    <router-link to="/deploy" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
+                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                      <span class="p-side-navigation__label">Deploy</span>
+                    </router-link>
+                  </li>
+                  <li class="p-side-navigation__item">
+                    <router-link to="/change-requests" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
                       <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                      <span class="p-side-navigation__label">Issues</span>
+                      <span class="p-side-navigation__label">Change Requests</span>
                     </router-link>
                   </li>
                   <li class="p-side-navigation__item">
