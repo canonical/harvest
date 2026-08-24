@@ -417,6 +417,8 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                post(proj_handlers::run_task))
         .route("/projects/:pid/tasks/:tid/logs",
                get(proj_handlers::get_task_logs))
+        .route("/projects/:pid/deployment",
+               get(deployment_handlers::get_project_deployment))
         .route("/projects/:pid/deployments",
                get(deployment_handlers::list_deployments).post(deployment_handlers::create_deployment))
         .route("/projects/:pid/deployments/:did",
@@ -458,6 +460,11 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .route("/projects/:pid/issues/:iid/apply-solution", post(issue_handlers::apply_issue_solution))
         .route("/projects/:pid/issues/:iid/redeploy", post(issue_handlers::redeploy_from_issue))
         .route("/projects/:pid/issues/:iid/chat", post(issue_handlers::issue_chat))
+        .route("/projects/:pid/change-requests", get(issue_handlers::list_change_requests))
+        .route("/projects/:pid/change-requests/:cid", get(issue_handlers::get_change_request))
+        .route("/projects/:pid/change-requests/:cid/apply", post(issue_handlers::apply_change_request))
+        .route("/projects/:pid/change-requests/:cid/discard", post(issue_handlers::discard_change_request))
+        .route("/projects/:pid/change-requests/:cid/comments", post(issue_handlers::create_change_request_comment))
         .route("/groups/:gid/templates",
                get(deployment_handlers::list_templates).post(deployment_handlers::create_template))
         .route("/groups/:gid/templates/:tid",

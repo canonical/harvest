@@ -947,6 +947,7 @@ pub async fn create_project(
 
     let id            = Uuid::new_v4().to_string();
     let install_token = Uuid::new_v4().to_string();
+    let deployment_id = Uuid::new_v4().to_string();
     let now           = chrono::Utc::now().to_rfc3339();
     let rows = state.neo4j.query_read(
         "MATCH (g:Group {id: $gid})
@@ -956,6 +957,13 @@ pub async fn create_project(
              install_token: $install_token
          })
          CREATE (g)-[:HAS_PROJECT]->(p)
+         CREATE (d:Deployment {
+             id: $deployment_id, name: $name, environment_description: '',
+             infra_state: 'none', last_applied_content: null,
+             last_applied_artifact_id: null, last_applied_at: null,
+             created_by: $uid, created_at: $now, updated_at: $now
+         })
+         CREATE (p)-[:HAS_DEPLOYMENT]->(d)
          RETURN p.id AS id, p.name AS name, p.description AS description,
                 p.group_id AS group_id, g.name AS group_name,
                 p.created_by AS created_by, p.created_at AS created_at",
@@ -963,6 +971,7 @@ pub async fn create_project(
             "gid": body.group_id, "id": id, "name": name,
             "description": body.description, "uid": user.sub, "now": now,
             "install_token": install_token,
+            "deployment_id": deployment_id,
         }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -1023,6 +1032,15 @@ pub async fn delete_project(
     require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     state.neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation) DETACH DELETE c",
+        json!({ "pid": project_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)
+         OPTIONAL MATCH (d)-[:HAS_RUN]->(r:DeploymentRun)
+         OPTIONAL MATCH (d)-[:HAS_EXECUTION_STEP]->(s:ExecutionStep)
+         OPTIONAL MATCH (d)-[:HAS_ISSUE]->(i:Issue)
+         OPTIONAL MATCH (d)-[:HAS_PROPOSAL]->(pr:Proposal)
+         DETACH DELETE d, r, s, i, pr",
         json!({ "pid": project_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     state.neo4j.query_read(
