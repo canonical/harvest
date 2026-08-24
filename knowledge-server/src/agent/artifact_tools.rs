@@ -19,7 +19,7 @@ fn validate_artifact_params(params: &Value) -> Result<(String, ArtifactKind, Str
     let kind_str = params["kind"].as_str()
         .ok_or_else(|| anyhow!("kind is required"))?;
     let kind = ArtifactKind::parse(kind_str)
-        .ok_or_else(|| anyhow!("kind must be 'markdown', 'pdf', 'terraform', or 'terragrunt'"))?;
+        .ok_or_else(|| anyhow!("kind must be 'markdown', 'pdf', 'terraform', 'terragrunt', or 'bash'"))?;
     let content = params["content"].as_str()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("content is required"))?
@@ -43,12 +43,13 @@ impl Tool for GenerateArtifactTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "generate_artifact".into(),
-            description: "Create a shareable document or Terraform/Terragrunt module and save it \
-                          as a project artifact the user can view, download, and (for terraform/ \
-                          terragrunt) run on a connected agent. Use this when the user asks for a \
-                          report, document, or infrastructure module to keep, share, or deploy, \
-                          rather than just replying in chat. Pass artifact_id to revise an existing \
-                          artifact in place instead of creating a new one."
+            description: "Create a shareable document, bash script, or Terraform/Terragrunt module \
+                          and save it as a project artifact the user can view, download, and (for \
+                          terraform/terragrunt/bash) run on a connected agent. Use this when the \
+                          user asks for a report, document, script, or infrastructure module to \
+                          keep, share, or deploy, rather than just replying in chat. Pass \
+                          artifact_id to revise an existing artifact in place instead of \
+                          creating a new one."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -59,17 +60,18 @@ impl Tool for GenerateArtifactTool {
                     },
                     "kind": {
                         "type":        "string",
-                        "enum":        ["markdown", "pdf", "terraform", "terragrunt"],
+                        "enum":        ["markdown", "pdf", "terraform", "terragrunt", "bash"],
                         "description": "The format to offer for download. Use 'terraform' or \
-                                        'terragrunt' for infrastructure-as-code modules that can \
-                                        be run on an agent."
+                                        'terragrunt' for infrastructure-as-code modules, 'bash' \
+                                        for shell scripts, that can be run on an agent."
                     },
                     "content": {
                         "type":        "string",
                         "description": "For 'markdown'/'pdf', the full document body written in \
                                         Markdown. For 'terraform'/'terragrunt', a JSON object \
                                         mapping relative file path to file text, e.g. \
-                                        {\"main.tf\": \"...\", \"variables.tf\": \"...\"}."
+                                        {\"main.tf\": \"...\", \"variables.tf\": \"...\"}. For \
+                                        'bash', the full shell script text."
                     },
                     "artifact_id": {
                         "type":        "string",
