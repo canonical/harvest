@@ -392,6 +392,7 @@ const artifactUrl = (id) => `${ARTIFACTS_URL}/${encodeURIComponent(id)}`;
 
 export const listProjectArtifacts  = (projectId) => projectFetch(`${projectUrl(projectId)}/artifacts`);
 export const getArtifact           = (id)         => projectFetch(artifactUrl(id));
+export const updateArtifact       = (id, body)   => projectFetch(artifactUrl(id), { method: 'PUT', body: JSON.stringify(body) });
 export const artifactDownloadUrl   = (id)         => `${artifactUrl(id)}/download`;
 export async function deleteArtifact(id) {
   const res = await fetch(artifactUrl(id), { method: 'DELETE' });
@@ -433,6 +434,39 @@ export const proposeProvisionChange = (projectId, id, body) =>
   projectFetch(`${deploymentUrl(projectId, id)}/provision/propose-change`, { method: 'POST', body: JSON.stringify(body) });
 export const applyProvisionChange = (projectId, id, body) =>
   projectFetch(`${deploymentUrl(projectId, id)}/provision/apply-change`, { method: 'POST', body: JSON.stringify(body) });
+
+export const addContextArtifact = (projectId, id, body) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/context-artifacts`, { method: 'POST', body: JSON.stringify(body) });
+export const linkContextArtifact = (projectId, id, body) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/context-artifacts/link`, { method: 'POST', body: JSON.stringify(body) });
+export async function removeContextArtifact(projectId, id, artifactId) {
+  const res = await fetch(`${deploymentUrl(projectId, id)}/context-artifacts/${encodeURIComponent(artifactId)}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
+}
+
+export const listDeploymentProposals = (projectId, id) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/proposals`);
+export const proposeArtifactChange = (projectId, id, body) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/proposals`, { method: 'POST', body: JSON.stringify(body) });
+export const approveProposal = (projectId, id, proposalId, body) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/proposals/${encodeURIComponent(proposalId)}/approve`, { method: 'POST', body: JSON.stringify(body) });
+export async function discardProposal(projectId, id, proposalId) {
+  const res = await fetch(`${deploymentUrl(projectId, id)}/proposals/${encodeURIComponent(proposalId)}/discard`, { method: 'POST' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
+}
+
+export const getExecutionPlan = (projectId, id) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/execution-plan`);
+export const setExecutionPlan = (projectId, id, body) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/execution-plan`, { method: 'POST', body: JSON.stringify(body) });
+export const runDag = (projectId, id, body) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/run-dag`, { method: 'POST', body: JSON.stringify(body) });
 
 const issuesUrl = (projectId) => `${projectUrl(projectId)}/issues`;
 const issueUrl  = (projectId, id) => `${issuesUrl(projectId)}/${encodeURIComponent(id)}`;
