@@ -241,6 +241,37 @@ pub async fn get_deployment(
     Ok(Json(deployment))
 }
 
+pub async fn get_project_deployment(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path(project_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let rows = state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)
+         WITH d ORDER BY d.created_at ASC LIMIT 1
+         OPTIONAL MATCH (d)-[:USES_TEMPLATE]->(t:ProductTemplate)
+         OPTIONAL MATCH (d)-[:HAS_DESIGN_DOC]->(design:Artifact)
+         OPTIONAL MATCH (d)-[:HAS_TERRAFORM_BUNDLE]->(tf:Artifact)
+         OPTIONAL MATCH (d)-[:HAS_GUIDE]->(guide:Artifact)
+         OPTIONAL MATCH (d)-[:HAS_CONTEXT_ARTIFACT]->(ca:Artifact)
+         WITH d, t, design, tf, guide, collect({id: ca.id, title: ca.title, kind: ca.kind}) AS context_artifacts
+         RETURN d.id AS id, d.name AS name, d.environment_description AS environment_description,
+                d.infra_state AS infra_state, d.last_applied_artifact_id AS last_applied_artifact_id,
+                d.last_applied_at AS last_applied_at, d.created_by AS created_by,
+                d.created_at AS created_at, d.updated_at AS updated_at,
+                t.id AS template_id, t.name AS template_name,
+                design.id AS design_doc_id, design.title AS design_doc_title,
+                tf.id AS terraform_bundle_id, tf.title AS terraform_bundle_title, tf.kind AS terraform_bundle_kind,
+                guide.id AS guide_id, guide.title AS guide_title,
+                context_artifacts",
+        json!({ "pid": project_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let row = rows.into_iter().next()
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "deployment not found"))?;
+    Ok(Json(shape_deployment(&row)))
+}
+
 #[derive(serde::Deserialize)]
 pub struct CreateDeploymentBody {
     pub name:                     String,
@@ -258,6 +289,15 @@ pub async fn create_deployment(
     let name = body.name.trim().to_string();
     if name.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "name is required"));
+    }
+
+    let existing = state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)
+         RETURN d.id AS id LIMIT 1",
+        json!({ "pid": project_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    if !existing.is_empty() {
+        return Err(err(StatusCode::CONFLICT, "project already has a deployment"));
     }
 
     if let Some(template_id) = &body.product_template_id {
