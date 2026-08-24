@@ -176,6 +176,11 @@ impl ProjectAgentBuilder {
             group_id,
             deployment_id: ctx.deployment_id.clone(),
         }));
+        tools.push(Box::new(deployment_tools::SetExecutionPlanTool {
+            neo4j:         Arc::clone(&self.neo4j),
+            project_id:    project_id.clone(),
+            deployment_id: ctx.deployment_id.clone(),
+        }));
         Arc::new(
             Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
                 .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
@@ -430,6 +435,22 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .route("/projects/:pid/deployments/:did/provision/generate", post(deployment_handlers::generate_provision))
         .route("/projects/:pid/deployments/:did/provision/propose-change", post(deployment_handlers::propose_provision_change))
         .route("/projects/:pid/deployments/:did/provision/apply-change", post(deployment_handlers::apply_provision_change))
+        .route("/projects/:pid/deployments/:did/context-artifacts",
+               post(deployment_handlers::add_context_artifact))
+        .route("/projects/:pid/deployments/:did/context-artifacts/link",
+               post(deployment_handlers::link_context_artifact))
+        .route("/projects/:pid/deployments/:did/context-artifacts/:aid",
+               delete(deployment_handlers::remove_context_artifact))
+        .route("/projects/:pid/deployments/:did/proposals",
+               get(deployment_handlers::list_proposals).post(deployment_handlers::propose_artifact_change))
+        .route("/projects/:pid/deployments/:did/proposals/:propid/approve",
+               post(deployment_handlers::approve_proposal))
+        .route("/projects/:pid/deployments/:did/proposals/:propid/discard",
+               post(deployment_handlers::discard_proposal))
+        .route("/projects/:pid/deployments/:did/execution-plan",
+               get(deployment_handlers::get_execution_plan).post(deployment_handlers::set_execution_plan))
+        .route("/projects/:pid/deployments/:did/run-dag",
+               post(deployment_handlers::run_dag))
         .route("/projects/:pid/issues", get(issue_handlers::list_issues))
         .route("/projects/:pid/issues/:iid", get(issue_handlers::get_issue))
         .route("/projects/:pid/issues/:iid/status", patch(issue_handlers::update_issue_status_route))
