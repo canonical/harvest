@@ -19,16 +19,16 @@ use uuid::Uuid;
 use knowledge_server::{
     agent::Agent,
     api::ProjectAgentBuilder,
-    artifacts::handlers::{create_artifact, ArtifactKind},
+    artifacts::handlers::{create_artifact, get_artifact_in_project, ArtifactKind},
     auth::{self, jwt},
     deployments::{
         handlers::{
-            apply_provision_change, create_deployment, create_template, delete_deployment, delete_template,
-            deploy_deployment, destroy_deployment,
+            add_context_artifact, apply_provision_change, approve_proposal, create_deployment, create_template, delete_deployment, delete_template,
+            deploy_deployment, destroy_deployment, discard_proposal,
             generate_design, generate_design_decisions,
-            generate_environment_questions, generate_provision, get_deployment, get_template,
-            list_deployment_runs, list_deployments, list_templates, propose_provision_change,
-            redeploy_deployment, revise_design, update_deployment, update_template,
+            generate_environment_questions, generate_provision, get_deployment, get_execution_plan, get_template,
+            link_context_artifact, list_deployment_runs, list_deployments, list_templates, list_proposals, propose_artifact_change, propose_provision_change,
+            redeploy_deployment, remove_context_artifact, revise_design, run_dag, set_execution_plan, update_deployment, update_template,
         },
         last_applied_bundle_for_artifact, record_run_and_update_state,
     },
@@ -160,6 +160,14 @@ fn deployments_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn LlmProvider>) 
         .route("/projects/:pid/deployments/:did/provision/generate",       route_post(generate_provision))
         .route("/projects/:pid/deployments/:did/provision/propose-change", route_post(propose_provision_change))
         .route("/projects/:pid/deployments/:did/provision/apply-change",   route_post(apply_provision_change))
+        .route("/projects/:pid/deployments/:did/context-artifacts",        route_post(add_context_artifact))
+        .route("/projects/:pid/deployments/:did/context-artifacts/link",   route_post(link_context_artifact))
+        .route("/projects/:pid/deployments/:did/context-artifacts/:aid",  axum::routing::delete(remove_context_artifact))
+        .route("/projects/:pid/deployments/:did/proposals",                 route_get(list_proposals).post(propose_artifact_change))
+        .route("/projects/:pid/deployments/:did/proposals/:propid/approve", route_post(approve_proposal))
+        .route("/projects/:pid/deployments/:did/proposals/:propid/discard", route_post(discard_proposal))
+        .route("/projects/:pid/deployments/:did/execution-plan",            axum::routing::get(get_execution_plan).post(set_execution_plan))
+        .route("/projects/:pid/deployments/:did/run-dag",                    route_post(run_dag))
         .route("/projects/:pid/issues", route_get(list_issues))
         .route("/projects/:pid/issues/:iid", route_get(get_issue))
         .route("/projects/:pid/issues/:iid/status", axum::routing::patch(update_issue_status_route))
@@ -183,6 +191,7 @@ async fn setup_constraints(neo4j: &Neo4jClient) {
     neo4j.run("CREATE CONSTRAINT deployment_id IF NOT EXISTS FOR (d:Deployment) REQUIRE d.id IS UNIQUE").await.unwrap();
     neo4j.run("CREATE CONSTRAINT template_id IF NOT EXISTS FOR (t:ProductTemplate) REQUIRE t.id IS UNIQUE").await.unwrap();
     neo4j.run("CREATE CONSTRAINT issue_id IF NOT EXISTS FOR (i:Issue) REQUIRE i.id IS UNIQUE").await.unwrap();
+    neo4j.run("CREATE CONSTRAINT proposal_id IF NOT EXISTS FOR (p:Proposal) REQUIRE p.id IS UNIQUE").await.unwrap();
 }
 
 macro_rules! neo4j {
@@ -330,8 +339,44 @@ fn spawn_fake_agent_with_script(
     });
 }
 
+fn spawn_dag_fake_agent(
+    mut rx: mpsc::Receiver<ServerToAgent>,
+    registry: Arc<MachineRegistry>,
+    exit_code_for: impl Fn(&str) -> i32 + Send + Sync + 'static,
+) {
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                ServerToAgent::RunTerraform { request_id, action, .. } => {
+                    let exit_code = exit_code_for(action.as_str());
+                    if let Some((_, pending)) = registry.pending.remove(&request_id) {
+                        let _ = pending.tx.send(Ok(CommandResult {
+                            stdout: format!("{} ok", action.as_str()), stderr: String::new(), exit_code,
+                        }));
+                    }
+                }
+                ServerToAgent::Execute { request_id, .. } => {
+                    let exit_code = exit_code_for("run");
+                    if let Some((_, pending)) = registry.pending.remove(&request_id) {
+                        let _ = pending.tx.send(Ok(CommandResult {
+                            stdout: "run ok".into(), stderr: String::new(), exit_code,
+                        }));
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
 async fn seed_terraform_artifact(neo4j: &Neo4jClient, project_id: &str, content: &str) -> String {
     let created = create_artifact(neo4j, project_id, ArtifactKind::Terraform, "Infra", content, "system")
+        .await.unwrap();
+    created["id"].as_str().unwrap().to_string()
+}
+
+async fn seed_bash_artifact(neo4j: &Neo4jClient, project_id: &str, content: &str) -> String {
+    let created = create_artifact(neo4j, project_id, ArtifactKind::Bash, "Script", content, "system")
         .await.unwrap();
     created["id"].as_str().unwrap().to_string()
 }
@@ -1543,9 +1588,868 @@ async fn create_issue_comment_appends_a_user_comment() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/issues/{iid}/comments"), &tok, json!({ "body": "Looking into this now." })),
+        req_get(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok),
     ).await;
     assert_eq!(status, StatusCode::OK);
-    let comments = body["comments"].as_array().unwrap();
-    assert!(comments.iter().any(|c| c["body"] == "Looking into this now." && c["author_type"] == "user"));
+    assert_eq!(body["deploy_steps"].as_array().unwrap().len(), 0);
+    assert_eq!(body["destroy_steps"].as_array().unwrap().len(), 0);
+}
+
+// ---- DAG run orchestration ----
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn run_dag_executes_steps_in_topological_order_and_sets_infra_up() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo prep").await;
+    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+
+    let agent_id = "agent-1";
+    let _rx = register_agent(&registry, agent_id, &pid);
+    spawn_dag_fake_agent(_rx, Arc::clone(&registry), |_| 0);
+
+    let (_, _) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [
+                {"artifact_id": bash_aid, "action": "run", "label": "Prep", "depends_on": []},
+                {"artifact_id": tf_aid, "action": "apply", "label": "Apply", "depends_on": [0]}
+            ],
+            "destroy_steps": []
+        })),
+    ).await;
+
+    let (status, body) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
+            "agent_id": agent_id, "timeout_secs": 30
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().all(|r| r["exit_code"] == 0));
+    assert_eq!(body["infra_state"], "up");
+
+    let (status, body) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["infra_state"], "up");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn run_dag_halts_downstream_on_failure_and_sets_infra_broken() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo prep").await;
+    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+
+    let agent_id = "agent-1";
+    let _rx = register_agent(&registry, agent_id, &pid);
+    spawn_dag_fake_agent(_rx, Arc::clone(&registry), |action| {
+        if action == "run" { 0 } else { 1 }
+    });
+
+    let (_, _) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [
+                {"artifact_id": bash_aid, "action": "run", "label": "Prep", "depends_on": []},
+                {"artifact_id": tf_aid, "action": "apply", "label": "Apply", "depends_on": [0]}
+            ],
+            "destroy_steps": []
+        })),
+    ).await;
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
+            "agent_id": agent_id, "timeout_secs": 30
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["exit_code"], 0);
+    assert_eq!(runs[0]["action"], "run");
+    assert_eq!(body["infra_state"], "broken");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn run_dag_400_when_no_plan_set() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let agent_id = "agent-1";
+    let _rx = register_agent(&registry, agent_id, &pid);
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
+            "agent_id": agent_id, "timeout_secs": 30
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("no deploy steps"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn run_dag_404_when_agent_not_in_project() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
+
+    let (_, _) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [{"artifact_id": bash_aid, "action": "run", "depends_on": []}],
+            "destroy_steps": []
+        })),
+    ).await;
+
+    let (status, _body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
+            "agent_id": "nonexistent", "timeout_secs": 30
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ---- Context artifacts ----
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn add_context_artifact_creates_and_links_and_lists_in_deployment() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let (status, body) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/context-artifacts"), &tok, json!({
+            "title": "Network diagram", "kind": "markdown", "content": "# LAN layout\n..."
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let cas = body["context_artifacts"].as_array().unwrap();
+    assert_eq!(cas.len(), 1);
+    assert_eq!(cas[0]["title"], "Network diagram");
+    assert_eq!(cas[0]["kind"], "markdown");
+    assert!(cas[0]["id"].is_string());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn add_context_artifact_rejects_empty_title() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/context-artifacts"), &tok, json!({
+            "title": "  ", "kind": "markdown", "content": "hi"
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("title"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn add_context_artifact_rejects_unknown_kind() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/context-artifacts"), &tok, json!({
+            "title": "X", "kind": "docx", "content": "hi"
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("kind"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn add_context_artifact_accepts_bash_kind() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/context-artifacts"), &tok, json!({
+            "title": "Prep script", "kind": "bash", "content": "#!/usr/bin/env bash\necho hi"
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["context_artifacts"][0]["kind"], "bash");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn link_context_artifact_links_existing_project_artifact() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+
+    let (status, body) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/context-artifacts/link"), &tok, json!({
+            "artifact_id": aid
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["context_artifacts"].as_array().unwrap().len(), 1);
+    assert_eq!(body["context_artifacts"][0]["id"], aid);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn link_context_artifact_rejects_artifact_from_other_project() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
+    let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
+    let did_b = create_deployment_raw(&app, &tok, &pid_b, "Rollout B").await;
+    let aid = seed_terraform_artifact(&neo4j, &pid_a, r#"{"main.tf":"..."}"#).await;
+
+    let (status, _body) = send(
+        app,
+        req_post(&format!("/projects/{pid_b}/deployments/{did_b}/context-artifacts/link"), &tok, json!({
+            "artifact_id": aid
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn remove_context_artifact_unlinks_and_drops_from_list() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let (_, body) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/context-artifacts"), &tok, json!({
+            "title": "Notes", "kind": "markdown", "content": "stuff"
+        })),
+    ).await;
+    let aid = body["context_artifacts"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(body["context_artifacts"].as_array().unwrap().len(), 1);
+
+    let (status, _body) = send(
+        app.clone(),
+        req_del(&format!("/projects/{pid}/deployments/{did}/context-artifacts/{aid}"), &tok),
+    ).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["context_artifacts"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn remove_context_artifact_404_when_not_linked() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let (status, _body) = send(
+        app,
+        req_del(&format!("/projects/{pid}/deployments/{did}/context-artifacts/nonexistent"), &tok),
+    ).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ---- Generic proposals ----
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn propose_artifact_change_creates_pending_proposal_targeting_artifact() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"old"}"#).await;
+
+    let (status, body) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/proposals"), &tok, json!({
+            "artifact_id": aid, "source": "prompt", "explanation": "Added a security group",
+            "current_content": "{\"main.tf\":\"old\"}", "proposed_content": "{\"main.tf\":\"new\"}"
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["status"], "pending");
+    assert_eq!(body["target_artifact_id"], aid);
+    assert_eq!(body["target_artifact_kind"], "terraform");
+    assert_eq!(body["source"], "prompt");
+    assert_eq!(body["proposed_content"], "{\"main.tf\":\"new\"}");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn propose_artifact_change_rejects_missing_explanation() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/proposals"), &tok, json!({
+            "artifact_id": "a1", "explanation": "  ",
+            "current_content": "x", "proposed_content": "y"
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("explanation"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn propose_artifact_change_rejects_artifact_from_other_project() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
+    let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
+    let did_b = create_deployment_raw(&app, &tok, &pid_b, "Rollout B").await;
+    let aid = seed_terraform_artifact(&neo4j, &pid_a, r#"{"main.tf":"..."}"#).await;
+
+    let (status, _body) = send(
+        app,
+        req_post(&format!("/projects/{pid_b}/deployments/{did_b}/proposals"), &tok, json!({
+            "artifact_id": aid, "explanation": "x",
+            "current_content": "a", "proposed_content": "b"
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn list_proposals_returns_all_proposals_newest_first() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"old"}"#).await;
+
+    for i in 0..3 {
+        let (_status, _body) = send(
+            app.clone(),
+            req_post(&format!("/projects/{pid}/deployments/{did}/proposals"), &tok, json!({
+                "artifact_id": aid, "explanation": format!("change {i}"),
+                "current_content": "{\"main.tf\":\"old\"}", "proposed_content": format!("{{\"main.tf\":\"v{i}\"}}")
+            })),
+        ).await;
+    }
+
+    let (status, body) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}/proposals"), &tok),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().unwrap();
+    assert_eq!(arr.len(), 3);
+    assert!(arr.iter().all(|p| p["status"] == "pending"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn approve_proposal_applies_content_to_target_artifact_and_sets_approved() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"old"}"#).await;
+
+    let (_status, proposal) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/proposals"), &tok, json!({
+            "artifact_id": aid, "explanation": "fix",
+            "current_content": "{\"main.tf\":\"old\"}", "proposed_content": "{\"main.tf\":\"new\"}"
+        })),
+    ).await;
+    let propid = proposal["id"].as_str().unwrap().to_string();
+
+    let (status, body) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/proposals/{propid}/approve"), &tok, json!({})),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "approved");
+
+    let artifact = get_artifact_in_project(&neo4j, &pid, &aid).await.unwrap().unwrap();
+    assert_eq!(artifact["content"], "{\"main.tf\":\"new\"}");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn approve_proposal_allows_editing_content_before_applying() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"old"}"#).await;
+
+    let (_, proposal) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/proposals"), &tok, json!({
+            "artifact_id": aid, "explanation": "fix",
+            "current_content": "{\"main.tf\":\"old\"}", "proposed_content": "{\"main.tf\":\"proposed\"}"
+        })),
+    ).await;
+    let propid = proposal["id"].as_str().unwrap().to_string();
+
+    let (status, _body) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/proposals/{propid}/approve"), &tok, json!({
+            "edited_content": "{\"main.tf\":\"user-edited\"}"
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let artifact = get_artifact_in_project(&neo4j, &pid, &aid).await.unwrap().unwrap();
+    assert_eq!(artifact["content"], "{\"main.tf\":\"user-edited\"}");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn approve_proposal_rejects_already_approved_proposal() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"old"}"#).await;
+
+    let (_, proposal) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/proposals"), &tok, json!({
+            "artifact_id": aid, "explanation": "fix",
+            "current_content": "{\"main.tf\":\"old\"}", "proposed_content": "{\"main.tf\":\"new\"}"
+        })),
+    ).await;
+    let propid = proposal["id"].as_str().unwrap().to_string();
+
+    let (status, _body) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/proposals/{propid}/approve"), &tok, json!({})),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/proposals/{propid}/approve"), &tok, json!({})),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("not pending"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn discard_proposal_sets_status_discarded_without_applying() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"old"}"#).await;
+
+    let (_, proposal) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/proposals"), &tok, json!({
+            "artifact_id": aid, "explanation": "fix",
+            "current_content": "{\"main.tf\":\"old\"}", "proposed_content": "{\"main.tf\":\"new\"}"
+        })),
+    ).await;
+    let propid = proposal["id"].as_str().unwrap().to_string();
+
+    let (status, _body) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/proposals/{propid}/discard"), &tok, json!({})),
+    ).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, body) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}/proposals"), &tok),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = body.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["status"], "discarded");
+
+    let artifact = get_artifact_in_project(&neo4j, &pid, &aid).await.unwrap().unwrap();
+    assert_eq!(artifact["content"], "{\"main.tf\":\"old\"}");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn discard_proposal_404_for_nonexistent() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let (status, _body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/proposals/nonexistent/discard"), &tok, json!({})),
+    ).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ---- Execution plan (DAG) ----
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn set_execution_plan_creates_deploy_and_destroy_steps_with_dependencies() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let bash_aid = seed_bash_artifact(&neo4j, &pid, "#!/usr/bin/env bash\necho prep").await;
+    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+
+    let (status, body) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [
+                {"artifact_id": bash_aid, "action": "run", "label": "Prep machine", "depends_on": []},
+                {"artifact_id": tf_aid, "action": "apply", "label": "Apply infra", "depends_on": [0]}
+            ],
+            "destroy_steps": [
+                {"artifact_id": tf_aid, "action": "destroy", "label": "Destroy infra", "depends_on": []}
+            ]
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let deploy = body["deploy_steps"].as_array().unwrap();
+    assert_eq!(deploy.len(), 2);
+    assert_eq!(deploy[0]["action"], "run");
+    assert_eq!(deploy[0]["artifact"]["id"], bash_aid);
+    assert_eq!(deploy[0]["phase"], "deploy");
+    assert_eq!(deploy[0]["label"], "Prep machine");
+    assert!(deploy[0]["depends_on"].as_array().unwrap().is_empty());
+    assert_eq!(deploy[1]["action"], "apply");
+    assert_eq!(deploy[1]["artifact"]["id"], tf_aid);
+    assert_eq!(deploy[1]["depends_on"].as_array().unwrap().len(), 1);
+
+    let destroy = body["destroy_steps"].as_array().unwrap();
+    assert_eq!(destroy.len(), 1);
+    assert_eq!(destroy[0]["action"], "destroy");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn get_execution_plan_returns_stored_plan() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
+    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+
+    let (_, _) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [
+                {"artifact_id": bash_aid, "action": "run", "depends_on": []},
+                {"artifact_id": tf_aid, "action": "apply", "depends_on": [0]}
+            ],
+            "destroy_steps": [
+                {"artifact_id": tf_aid, "action": "destroy", "depends_on": []}
+            ]
+        })),
+    ).await;
+
+    let (status, body) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deploy_steps"].as_array().unwrap().len(), 2);
+    assert_eq!(body["destroy_steps"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn get_execution_plan_returns_empty_plan_when_none_set() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let (status, body) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deploy_steps"].as_array().unwrap().len(), 0);
+    assert_eq!(body["destroy_steps"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn set_execution_plan_rejects_invalid_action_for_artifact_kind() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [{"artifact_id": bash_aid, "action": "apply", "depends_on": []}],
+            "destroy_steps": []
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("not valid"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn set_execution_plan_rejects_cycle_in_deploy_steps() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let aid_a = seed_bash_artifact(&neo4j, &pid, "echo a").await;
+    let aid_b = seed_bash_artifact(&neo4j, &pid, "echo b").await;
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [
+                {"artifact_id": aid_a, "action": "run", "depends_on": [1]},
+                {"artifact_id": aid_b, "action": "run", "depends_on": [0]}
+            ],
+            "destroy_steps": []
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("cycle"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn set_execution_plan_rejects_apply_without_destroy_coverage() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [
+                {"artifact_id": tf_aid, "action": "apply", "label": "Apply", "depends_on": []}
+            ],
+            "destroy_steps": []
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("destroy"));
+    assert!(body["error"].as_str().unwrap().contains(tf_aid.as_str()));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn set_execution_plan_accepts_apply_with_matching_destroy() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+
+    let (status, _body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [
+                {"artifact_id": tf_aid, "action": "apply", "label": "Apply", "depends_on": []}
+            ],
+            "destroy_steps": [
+                {"artifact_id": tf_aid, "action": "destroy", "label": "Destroy", "depends_on": []}
+            ]
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn set_execution_plan_rejects_artifact_from_other_project() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
+    let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
+    let did_b = create_deployment_raw(&app, &tok, &pid_b, "Rollout B").await;
+    let aid = seed_bash_artifact(&neo4j, &pid_a, "echo hi").await;
+
+    let (status, _body) = send(
+        app,
+        req_post(&format!("/projects/{pid_b}/deployments/{did_b}/execution-plan"), &tok, json!({
+            "deploy_steps": [{"artifact_id": aid, "action": "run", "depends_on": []}],
+            "destroy_steps": []
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn set_execution_plan_overwrites_previous_plan() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
+
+    let (_, _) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [{"artifact_id": aid, "action": "run", "depends_on": []}],
+            "destroy_steps": []
+        })),
+    ).await;
+
+    let (_, _) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [],
+            "destroy_steps": []
+        })),
+    ).await;
+
+    let (status, body) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deploy_steps"].as_array().unwrap().len(), 0);
+    assert_eq!(body["destroy_steps"].as_array().unwrap().len(), 0);
 }
