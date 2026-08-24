@@ -13,48 +13,89 @@
         <span v-if="deployment.template" class="deployment-detail-header__template">
           Based on <strong>{{ deployment.template.name }}</strong>
         </span>
+        <button
+          v-if="pendingProposalCount > 0"
+          class="p-button--base is-dense deployment-review-btn"
+          type="button"
+          data-testid="review-toggle"
+          @click="reviewOpen = !reviewOpen"
+        >
+          Review <span class="deployment-review-btn__count">{{ pendingProposalCount }}</span>
+        </button>
       </div>
 
-      <nav class="deployment-phase-tabs">
+      <div
+        v-if="isBroken"
+        class="p-notification--caution deployment-broken-banner"
+        data-testid="broken-issues-banner"
+      >
+        <div class="p-notification__content">
+          <p class="p-notification__message">
+            This deployment is broken —
+            <router-link :to="`/issues?deployment=${deployment.id}`" data-testid="view-issues-link">View issues</router-link>
+          </p>
+        </div>
+      </div>
+
+      <nav class="deployment-tabs">
         <button
-          v-for="phase in phases"
-          :key="phase.id"
-          class="deployment-phase-tab"
-          :class="{
-            'deployment-phase-tab--active': selectedPhase === phase.id,
-            'deployment-phase-tab--done':   phase.done,
-          }"
-          :disabled="phase.inert"
+          v-for="card in cards"
+          :key="card.id"
           type="button"
-          @click="selectedPhase = phase.id"
+          class="deployment-tab"
+          :class="{ 'deployment-tab--active': selectedCard === card.id }"
+          :data-testid="`tab-${card.id}`"
+          @click="selectedCard = card.id"
         >
-          <span class="deployment-phase-tab__marker">{{ phase.done ? '✓' : '' }}</span>
-          {{ phase.label }}
+          <span class="deployment-tab__label">{{ card.label }}</span>
+          <span class="deployment-tab__status">{{ card.status }}</span>
+          <span v-if="card.needsAttention" class="deployment-tab__dot" />
         </button>
       </nav>
 
-      <div class="deployment-phase-content">
-        <EnvironmentPhase
-          v-if="selectedPhase === 'environment'"
+      <div class="deployment-tab-content">
+        <ContextArtifactsPanel
+          v-if="selectedCard === 'context'"
           :project-id="projectId"
           :deployment="deployment"
           @refresh="load"
         />
-        <DesignPhase
-          v-else-if="selectedPhase === 'design'"
+        <DesignPanel
+          v-else-if="selectedCard === 'design'"
           :project-id="projectId"
           :deployment="deployment"
           @refresh="load"
         />
-        <ProvisionPhase
-          v-else-if="selectedPhase === 'provision'"
+        <ArtifactsPanel
+          v-else-if="selectedCard === 'artifacts'"
           :project-id="projectId"
           :deployment="deployment"
           :runs="runs"
           :agents="agents"
           @refresh="load"
         />
+        <GuidePanel
+          v-else-if="selectedCard === 'guide'"
+          :project-id="projectId"
+          :deployment="deployment"
+          @refresh="load"
+        />
       </div>
+
+      <Transition name="review-drawer">
+        <div v-if="reviewOpen" class="review-drawer-overlay" @click.self="reviewOpen = false">
+          <div class="review-drawer" data-testid="review-drawer">
+            <div class="review-drawer__header">
+              <span>Review proposals</span>
+              <button class="review-drawer__close" type="button" @click="reviewOpen = false">✕</button>
+            </div>
+            <ReviewInbox
+              :project-id="projectId"
+              :deployment-id="deployment.id"
+            />
+          </div>
+        </div>
+      </Transition>
     </template>
 
     <div v-else class="deployment-detail-error">Failed to load deployment.</div>
@@ -64,10 +105,12 @@
 <script setup>
 import { ref, computed, watch } from 'vue';
 import { useRoute } from 'vue-router';
-import EnvironmentPhase from '../components/deployment/EnvironmentPhase.vue';
-import DesignPhase from '../components/deployment/DesignPhase.vue';
-import ProvisionPhase from '../components/deployment/ProvisionPhase.vue';
-import { getProjectDeployment, listDeploymentRuns, listProjectAgents } from '../lib/api.js';
+import ContextArtifactsPanel from '../components/deployment/ContextArtifactsPanel.vue';
+import DesignPanel from '../components/deployment/DesignPanel.vue';
+import ArtifactsPanel from '../components/deployment/ArtifactsPanel.vue';
+import GuidePanel from '../components/deployment/GuidePanel.vue';
+import ReviewInbox from '../components/deployment/ReviewInbox.vue';
+import { getProjectDeployment, listDeploymentRuns, listProjectAgents, listDeploymentProposals } from '../lib/api.js';
 
 const props = defineProps({
   projectId: { type: String, default: null },
@@ -78,9 +121,10 @@ const route = useRoute();
 const deployment    = ref(null);
 const runs           = ref([]);
 const agents         = ref([]);
+const proposals      = ref([]);
 const loading        = ref(false);
-const selectedPhase  = ref('environment');
-let phaseInitialized = false;
+const selectedCard   = ref('context');
+const reviewOpen      = ref(false);
 
 const deploymentId = computed(() => route.params.id);
 
@@ -99,40 +143,60 @@ function infraStateClass(state) {
   return 'infra-state-badge--none';
 }
 
-const phases = computed(() => {
+const isBroken = computed(() => ['broken', 'destroy_failed'].includes(deployment.value?.infra_state));
+const pendingProposalCount = computed(() => proposals.value.filter(p => p.status === 'pending').length);
+
+const cards = computed(() => {
   const d = deployment.value;
   if (!d) return [];
-  const everApplied = runs.value.some(r => r.action === 'apply' && r.status === 'success');
+  const contextCount = d.context_artifacts?.length ?? 0;
   return [
-    { id: 'environment', label: 'Describe environment', done: !!d.environment_description?.trim(), inert: false },
-    { id: 'design',      label: 'Design',                done: !!d.design_doc,                      inert: false },
-    { id: 'provision',   label: 'Deploy',                 done: everApplied,                          inert: false },
-    { id: 'validate',    label: 'Validate',                done: false,                                inert: true },
-    { id: 'guide',       label: 'Guide',                    done: false,                                inert: true },
+    {
+      id: 'context',
+      label: 'Context',
+      status: contextCount ? `${contextCount}` : 'Empty',
+      needsAttention: contextCount === 0,
+    },
+    {
+      id: 'design',
+      label: 'Design',
+      status: d.design_doc ? 'Draft' : '—',
+      needsAttention: !d.design_doc,
+    },
+    {
+      id: 'artifacts',
+      label: 'Artifacts',
+      status: artifactStatus(d),
+      needsAttention: false,
+    },
+    {
+      id: 'guide',
+      label: 'Guide',
+      status: d.guide ? 'Draft' : '—',
+      needsAttention: false,
+    },
   ];
 });
 
-function firstIncompletePhase() {
-  const found = phases.value.find(p => !p.inert && !p.done);
-  return found ? found.id : 'environment';
+function artifactStatus(d) {
+  if (!d.terraform_bundle) return '—';
+  return `${d.infra_state ?? 'none'}`;
 }
 
 async function load() {
   if (!props.projectId || !deploymentId.value) return;
   loading.value = true;
   try {
-    const [d, r, a] = await Promise.all([
+    const [d, r, a, p] = await Promise.all([
       getProjectDeployment(props.projectId, deploymentId.value),
       listDeploymentRuns(props.projectId, deploymentId.value).catch(() => []),
       listProjectAgents(props.projectId).catch(() => []),
+      listDeploymentProposals(props.projectId, deploymentId.value).catch(() => []),
     ]);
     deployment.value = d;
     runs.value        = r;
     agents.value       = a;
-    if (!phaseInitialized) {
-      selectedPhase.value = firstIncompletePhase();
-      phaseInitialized     = true;
-    }
+    proposals.value    = p;
   } catch {
     deployment.value = null;
   }
@@ -140,7 +204,8 @@ async function load() {
 }
 
 watch(deploymentId, () => {
-  phaseInitialized = false;
+  selectedCard.value = 'context';
+  reviewOpen.value = false;
   load();
 }, { immediate: true });
 </script>
