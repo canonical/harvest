@@ -14,6 +14,7 @@ use crate::auth::jwt::Claims;
 use crate::conversations::handlers::history_messages_from_raw;
 use crate::deployments::{handlers::{err, redeploy_deployment_core, ApiError}, load_deployment_context};
 use crate::issues::{self, IssueStatus};
+use crate::deployments::handlers::{approve_proposal_core, discard_proposal_core};
 use crate::neo4j::Neo4jClient;
 use crate::projects::handlers::{require_project_access, ProjectState};
 
@@ -309,4 +310,184 @@ pub async fn issue_chat(
         "proposed_solution": proposed_solution,
         "issue":             updated_issue,
     })))
+}
+
+#[derive(serde::Deserialize)]
+pub struct ListChangeRequestsParams {
+    pub status:     Option<String>,
+    pub deployment: Option<String>,
+}
+
+pub async fn list_change_requests(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path(project_id): Path<String>,
+    Query(params): Query<ListChangeRequestsParams>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let crs = issues::list_change_requests_for_project(
+        &state.neo4j, &project_id, params.status.as_deref(), params.deployment.as_deref(),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(Json(crs))
+}
+
+pub async fn get_change_request(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, cr_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let cr = issues::get_change_request_detail(&state.neo4j, &project_id, &cr_id)
+        .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+    Ok(Json(cr))
+}
+
+#[derive(serde::Deserialize)]
+pub struct ApplyChangeRequestBody {
+    pub edited_content: Option<String>,
+    pub agent_id:       Option<String>,
+    #[serde(default = "default_apply_timeout")]
+    pub timeout_secs:   u64,
+}
+
+pub async fn apply_change_request(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, cr_id)): Path<(String, String)>,
+    Json(body): Json<ApplyChangeRequestBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let kind = issues::change_request_kind(&state.neo4j, &project_id, &cr_id)
+        .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+
+    if kind == "proposal" {
+        let rows = state.neo4j.query_read(
+            "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)-[:HAS_PROPOSAL]->(p:Proposal {id: $cr_id})
+             RETURN d.id AS did",
+            json!({ "pid": project_id, "cr_id": cr_id }),
+        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        let did = rows.into_iter().next()
+            .and_then(|r| r["did"].as_str().map(str::to_string))
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+        let result = approve_proposal_core(
+            &state.neo4j, &project_id, &did, &cr_id, body.edited_content.as_deref(),
+        ).await?;
+        Ok(Json(result))
+    } else {
+        let agent_id = body.agent_id.as_deref()
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "agent_id is required to apply an issue change request"))?;
+        require_agent_in_project(&state, agent_id, &project_id)?;
+
+        let issue = issues::get_issue_detail(&state.neo4j, &project_id, &cr_id)
+            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+        let proposed_files = issue["proposed_files"].clone();
+        if proposed_files.is_null() {
+            return Err(err(StatusCode::BAD_REQUEST, "issue has no proposed solution to apply"));
+        }
+        let summary = issue["proposed_solution_summary"].as_str().unwrap_or("").to_string();
+        let deployment_id = issue["deployment"]["id"].as_str()
+            .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
+            .to_string();
+
+        let files: std::collections::BTreeMap<String, String> = serde_json::from_value(proposed_files)
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        bundle::validate_bundle(&files).map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
+
+        let (bundle_id, kind_str, title) = linked_terraform_bundle(&state.neo4j, &project_id, &deployment_id).await?;
+        let kind = ArtifactKind::parse(&kind_str)
+            .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        let content = serde_json::to_string(&files)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        update_artifact(&state.neo4j, &bundle_id, kind, kind, &title, &content)
+            .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+        issues::clear_proposed_solution_and_record_apply(&state.neo4j, &project_id, &cr_id, &summary)
+            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        issues::update_issue_status(&state.neo4j, &project_id, &cr_id, IssueStatus::Fixed, &user.name)
+            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+        let timeout = body.timeout_secs.min(MAX_APPLY_TIMEOUT_SECS);
+        let redeploy = redeploy_deployment_core(&state, &project_id, &deployment_id, agent_id, timeout).await?;
+
+        let updated = issues::get_issue_detail(&state.neo4j, &project_id, &cr_id)
+            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+        Ok(Json(json!({ "change_request": updated, "redeploy": redeploy })))
+    }
+}
+
+pub async fn discard_change_request(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, cr_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let kind = issues::change_request_kind(&state.neo4j, &project_id, &cr_id)
+        .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+
+    if kind == "proposal" {
+        let rows = state.neo4j.query_read(
+            "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)-[:HAS_PROPOSAL]->(p:Proposal {id: $cr_id})
+             RETURN d.id AS did",
+            json!({ "pid": project_id, "cr_id": cr_id }),
+        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        let did = rows.into_iter().next()
+            .and_then(|r| r["did"].as_str().map(str::to_string))
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+        discard_proposal_core(&state.neo4j, &project_id, &did, &cr_id).await?;
+    } else {
+        let ok = issues::discard_issue_cr(&state.neo4j, &project_id, &cr_id)
+            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        if !ok {
+            return Err(err(StatusCode::NOT_FOUND, "open change request not found"));
+        }
+    }
+    Ok(StatusCode::OK)
+}
+
+#[derive(serde::Deserialize)]
+pub struct CreateChangeRequestCommentBody {
+    pub body: String,
+}
+
+pub async fn create_change_request_comment(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, cr_id)): Path<(String, String)>,
+    Json(body): Json<CreateChangeRequestCommentBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let text = body.body.trim().to_string();
+    if text.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "body is required"));
+    }
+    let kind = issues::change_request_kind(&state.neo4j, &project_id, &cr_id)
+        .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+
+    if kind == "issue" {
+        issues::append_issue_comment(&state.neo4j, &project_id, &cr_id, "user", &user.name, &text)
+            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    } else {
+        issues::append_proposal_comment(&state.neo4j, &project_id, &cr_id, "user", &user.name, &text)
+            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    }
+    let cr = issues::get_change_request_detail(&state.neo4j, &project_id, &cr_id)
+        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+    Ok(Json(cr))
+}
+
+pub async fn change_request_chat(
+    Extension(_user): Extension<Claims>,
+    State(_state): State<Arc<ProjectState>>,
+    Path((_project_id, _cr_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let resp = err(StatusCode::NOT_IMPLEMENTED, "change request chat is not yet implemented");
+    Err::<axum::Json<Value>, ApiError>(resp)
 }
