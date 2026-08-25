@@ -23,6 +23,7 @@ export function createConversationThreadState() {
       role: 'assistant', status: 'loading',
       chain: [], tool_calls: [], answer: null, pendingAnswer: '',
       sources: [], tool_calls_made: 0, provider_used: null,
+      intent: null, plan: null,
     });
     loading.value = true;
   }
@@ -118,6 +119,26 @@ export function createConversationThreadState() {
     msg.question = { question, choices };
   }
 
+  function setIntent(mode) {
+    const msg = lastAssistant();
+    if (!msg) return;
+    msg.intent = mode;
+  }
+
+  function setPlan(steps) {
+    const msg = lastAssistant();
+    if (!msg) return;
+    msg.plan = steps;
+  }
+
+  function updatePlanStep(index, status) {
+    const msg = lastAssistant();
+    if (!msg?.plan) return;
+    if (msg.plan[index]) {
+      msg.plan[index].status = status;
+    }
+  }
+
   function addConfirmAction(id, name, input, description) {
     const msg = lastAssistant();
     if (!msg) return;
@@ -178,6 +199,8 @@ export function createConversationThreadState() {
           tool_calls_made: m.tool_calls_made ?? 0,
         };
         if (m.provider_used) saved.provider = m.provider_used;
+        if (m.intent) saved.intent = m.intent;
+        if (m.plan) saved.plan = m.plan;
         return saved;
       });
   });
@@ -225,6 +248,8 @@ export function createConversationThreadState() {
           sources: m.sources ?? [],
           tool_calls_made: m.tool_calls_made ?? 0,
           provider_used: m.provider ?? null,
+          intent: m.intent ?? null,
+          plan: m.plan ?? null,
         };
         if (m.question) msg.question = m.question;
         messages.value.push(msg);
@@ -246,6 +271,7 @@ export function createConversationThreadState() {
     setError, addThinking, addThinkingDelta, addTextDelta, addToolCall,
     completeToolCall, updateToolCallDescription,
     setQuestion, addConfirmAction, updateConfirmActionItem, resumeAssistantMessage, setSuggestions,
+    setIntent, setPlan, updatePlanStep,
     addPendingAttachment, removePendingAttachment, clearPendingAttachments,
     saveableMessages, loadFromHistory, reset,
   };

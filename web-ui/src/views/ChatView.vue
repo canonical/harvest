@@ -320,6 +320,9 @@ function handleProjectEvent(event) {
     case 'tool_result':
     case 'question':
     case 'confirm_action':
+    case 'intent':
+    case 'plan':
+    case 'plan_step_update':
     case 'done':
     case 'suggestions':
     case 'error':
@@ -516,6 +519,9 @@ function handleChatEvent(event) {
     case 'tool_result':    chat.completeToolCall(event.name, event.preview); break;
     case 'question':       chat.setQuestion(event.question, event.choices); break;
     case 'confirm_action': chat.addConfirmAction(event.id, event.name, event.input, event.description); break;
+    case 'intent':         chat.setIntent(event.mode); break;
+    case 'plan':            chat.setPlan(event.steps); break;
+    case 'plan_step_update': chat.updatePlanStep(event.index, event.status); break;
     case 'done':
       chat.finalizeAssistantMessage({
         answer: event.answer, sources: event.sources, tool_calls_made: event.tool_calls_made,
