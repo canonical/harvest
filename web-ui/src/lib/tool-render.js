@@ -39,6 +39,40 @@ export function describeToolCall(name, input, { hostname } = {}) {
         : 'command';
       return `Running "${cmd}" on ${hostname ?? input.agent_id ?? 'agent'}`;
     }
+    case 'create_lxd_agent':
+      return `Provisioning agent ${input.name ?? ''}`.trim();
+    case 'delete_agent':
+      return `Deleting agent ${input.agent_id ?? ''}`.trim();
+    case 'list_port_forwards':
+      return 'Listing port forwards';
+    case 'create_port_forward':
+      return `Creating port forward ${input.local_port ?? ''} → ${input.remote_port ?? ''}`.trim();
+    case 'update_port_forward':
+      return `Updating port forward ${input.id ?? ''}`.trim();
+    case 'delete_port_forward':
+      return `Deleting port forward ${input.id ?? ''}`.trim();
+    case 'generate_artifact':
+      return `Generating artifact ${input.name ?? ''}`.trim();
+    case 'list_deployment_issues':
+      return 'Listing deployment issues';
+    case 'read_provision_bundle':
+      return 'Reading provision bundle';
+    case 'propose_issue_solution':
+      return 'Proposing issue solution';
+    case 'create_or_link_issue':
+      return 'Matching or creating issue';
+    case 'set_execution_plan':
+      return 'Setting execution plan';
+    case 'update_product_template':
+      return 'Updating product template';
+    case 'link_deployment_artifact':
+      return 'Linking deployment artifact';
+    case 'run_terraform_plan':
+      return 'Running terraform plan';
+    case 'run_terraform_apply':
+      return 'Running terraform apply';
+    case 'run_terraform_destroy':
+      return 'Running terraform destroy';
     case 'load_skill':  return `Loading skill ${input.name ?? ''}`.trimEnd();
     default:            return name.replace(/_/g, ' ');
   }

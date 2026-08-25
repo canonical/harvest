@@ -1355,6 +1355,129 @@ a.source-chip:hover {
   flex-shrink: 0;
 }
 
+.intent-badge {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  font-size: 0.72rem;
+  font-weight: 600;
+  border-radius: 1rem;
+  padding: 0.2rem 0.65rem;
+  margin-top: 0.2rem;
+}
+
+.intent-badge--conversational {
+  color: var(--text-muted);
+  background: var(--bg-source-chip);
+  border: 1px solid var(--border-source-chip);
+}
+
+.intent-badge--research {
+  color: #0066cc;
+  background: rgba(0, 102, 204, 0.12);
+  border: 1px solid rgba(0, 102, 204, 0.2);
+}
+
+.intent-badge--action {
+  color: #c7162b;
+  background: rgba(199, 22, 43, 0.1);
+  border: 1px solid rgba(199, 22, 43, 0.2);
+}
+
+.intent-badge--hybrid {
+  color: #0066cc;
+  background: rgba(0, 102, 204, 0.12);
+  border: 1px solid rgba(0, 102, 204, 0.2);
+}
+
+.message-error--muted {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.plan-block {
+  margin: 0.5rem 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.5rem;
+  background: var(--bg-surface, var(--bg-source-chip));
+  overflow: hidden;
+}
+
+.plan-block--sticky {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+
+.plan-block__header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.plan-block__chevron {
+  width: 0.7rem;
+  height: 0.7rem;
+  color: var(--text-muted);
+  transition: transform 0.15s;
+}
+
+.plan-block__title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+.plan-block__progress {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+.plan-block__steps {
+  list-style: none;
+  margin: 0;
+  padding: 0 0.6rem 0.4rem;
+}
+
+.plan-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+  padding: 0.15rem 0;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+.plan-step__icon {
+  flex-shrink: 0;
+  width: 1rem;
+  text-align: center;
+  font-size: 0.75rem;
+}
+
+.plan-step--pending .plan-step__icon {
+  color: var(--text-muted);
+}
+
+.plan-step--running .plan-step__icon {
+  color: #0066cc;
+  animation: cursor-blink 1.2s ease-in-out infinite;
+}
+
+.plan-step--done .plan-step__icon {
+  color: #0e8420;
+}
+
+.plan-step--done .plan-step__text {
+  text-decoration: line-through;
+  color: var(--text-muted);
+}
+
 a.source-chip:hover .source-chip__name {
   text-decoration: underline;
   text-underline-offset: 2px;

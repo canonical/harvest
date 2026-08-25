@@ -87,6 +87,85 @@ describe('assistant message lifecycle', () => {
   });
 });
 
+describe('setIntent', () => {
+  it('sets intent on the last assistant message', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.setIntent('research');
+    expect(last(s).intent).toBe('research');
+  });
+
+  it('startAssistantMessage initializes intent to null', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    expect(last(s).intent).toBeNull();
+  });
+
+  it('intent is persisted in saveableMessages', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.setIntent('action');
+    s.finalizeAssistantMessage({ answer: 'done', sources: [], tool_calls_made: 0 });
+    const saved = s.saveableMessages;
+    const assistantSaved = saved.find(m => m.role === 'assistant');
+    expect(assistantSaved.intent).toBe('action');
+  });
+
+  it('intent is loaded from history', () => {
+    const s = useChatStore();
+    s.loadFromHistory([
+      { role: 'user', text: 'hi' },
+      { role: 'assistant', text: 'answer', intent: 'research', sources: [], chain: [], tool_calls: [], tool_calls_made: 0 },
+    ]);
+    expect(last(s).intent).toBe('research');
+  });
+});
+
+describe('setPlan', () => {
+  it('sets plan on the last assistant message', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.setPlan([{ text: 'Step 1', status: 'pending' }, { text: 'Step 2', status: 'pending' }]);
+    expect(last(s).plan).toHaveLength(2);
+    expect(last(s).plan[0].text).toBe('Step 1');
+  });
+
+  it('startAssistantMessage initializes plan to null', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    expect(last(s).plan).toBeNull();
+  });
+
+  it('updatePlanStep updates the status of a step', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.setPlan([{ text: 'Step 1', status: 'pending' }]);
+    s.updatePlanStep(0, 'done');
+    expect(last(s).plan[0].status).toBe('done');
+  });
+
+  it('plan is persisted in saveableMessages', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.setPlan([{ text: 'Step 1', status: 'done' }]);
+    s.finalizeAssistantMessage({ answer: 'done', sources: [], tool_calls_made: 0 });
+    const saved = s.saveableMessages;
+    const assistantSaved = saved.find(m => m.role === 'assistant');
+    expect(assistantSaved.plan).toHaveLength(1);
+    expect(assistantSaved.plan[0].status).toBe('done');
+  });
+
+  it('plan is loaded from history', () => {
+    const s = useChatStore();
+    s.loadFromHistory([
+      { role: 'user', text: 'hi' },
+      { role: 'assistant', text: 'answer', plan: [{ text: 'Step', status: 'done' }], sources: [], chain: [], tool_calls: [], tool_calls_made: 0 },
+    ]);
+    expect(last(s).plan).toHaveLength(1);
+    expect(last(s).plan[0].text).toBe('Step');
+  });
+});
+
 describe('addThinking', () => {
   it('adds thinking item to chain', () => {
     const s = useChatStore();

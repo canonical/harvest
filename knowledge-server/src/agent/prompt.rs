@@ -7,6 +7,9 @@ fn ask_user_guidance() -> &'static str {
 - **Clarification needed** — missing context, ambiguous intent, unknown environment, or a
   required choice between distinct paths: call `ask_user` before attempting an answer.
   Do not guess; ask first.
+- **Never narrate which tool you are about to call.** Do not write "I will use the
+  ask_user tool to…" or "Let me ask you…". Simply call the tool — the UI presents the
+  question automatically.
 - **Response ends with a question** — move the question into `ask_user`. Include only the
   concrete choices; do not add "Other…" or any catch-all option — the user can type freely.
 - **Response ends with proposed next steps** — list each step as a separate choice and add
@@ -26,8 +29,18 @@ containing the parsed structure of one or more versioned software repositories.
 Be concise and direct. Answer the question asked; skip summaries and
 unsolicited advice. Omit phrases like "Great question".
 
-Before each tool call or set of tool calls, write a single sentence explaining
-what you are looking for and why. Keep it brief — one sentence maximum.
+Before each tool call or set of tool calls, write a single sentence about your
+intent — what you are looking for or trying to accomplish. Never mention tool
+names, API names, or internal mechanisms. The user should understand your goal,
+not your method.
+
+## Context Reuse
+
+Before calling any tool, check whether the conversation history already contains
+the answer. If the user is asking a clarifying question about something you just
+discussed, or a follow-up that can be answered from prior tool results in this
+conversation, answer directly from context. Tool calls are for discovering new
+information, not repeating work you already did.
 
 
 ## Knowledge Graph Schema
@@ -102,6 +115,47 @@ Format (JSON inside the fence):
 Valid `kind` values: function, method, class, struct, trait, interface, enum, module, impl, type.
 Valid `relation` values: calls, uses, inherits, implements, contains, embeds.
 "#, ask_user_guidance())
+}
+
+pub fn intent_classifier_prompt(latest_query: &str, history_snippet: &str) -> String {
+    format!(r#"Classify the user's latest message into one of these intents.
+Reply with a single word only.
+
+- conversational: a follow-up, clarification, or greeting that can be answered
+  from conversation context without new tool calls (e.g. "what does that mean?",
+  "thanks", "summarize that").
+- research: a question about code or architecture that requires searching the
+  knowledge graph (e.g. "how does retry work?", "find all callers of X").
+- action: a request to execute or change something on a machine (e.g.
+  "restart nginx on build-box", "deploy the service", "create an agent").
+- hybrid: a request that requires both research and action (e.g. "find the
+  config file and update the timeout on the agent").
+
+Latest user message: {latest_query}
+Recent conversation context: {history_snippet}
+
+Intent:"#)
+}
+
+pub fn plan_generation_prompt(query: &str) -> String {
+    format!(r#"You are planning a research approach. Create a short 3-5 step plan
+for answering this question using the knowledge graph.
+
+The knowledge graph contains: functions, classes, imports, call relationships,
+and file structure from ingested source code. You can search for symbols,
+read source code, trace callers and callees, run graph queries, and inspect
+imports.
+
+Do NOT reference external documentation, web searches, or anything outside
+the knowledge graph. Each step must be achievable using graph tools only.
+
+Reply with only the steps, one per line, numbered (1. 2. 3. ...).
+Each step should be a concise phrase describing what to look for or trace
+in the codebase.
+
+Question: {query}
+
+Steps:"#)
 }
 
 fn deployment_context_sections(ctx: &crate::deployments::DeploymentContext) -> (String, String) {
@@ -310,6 +364,44 @@ mod tests {
             product_template_content: None,
             prior_deployments: vec![],
         }
+    }
+
+    #[test]
+    fn system_prompt_contains_context_reuse_rule() {
+        let prompt = system_prompt();
+        assert!(prompt.contains("check whether the conversation history already contains"));
+        assert!(prompt.contains("answer directly from context"));
+    }
+
+    #[test]
+    fn system_prompt_contains_anti_narration_rule() {
+        let prompt = system_prompt();
+        assert!(prompt.contains("Never mention tool"));
+        assert!(prompt.contains("Never narrate which tool you are about to call"));
+    }
+
+    #[test]
+    fn system_prompt_pre_tool_call_rule_does_not_mention_why() {
+        let prompt = system_prompt();
+        assert!(prompt.contains("what you are looking for or trying to accomplish"));
+        assert!(!prompt.contains("explaining what you are looking for and why"));
+    }
+
+    #[test]
+    fn intent_classifier_prompt_contains_query_and_options() {
+        let prompt = intent_classifier_prompt("how does retry work?", "[user]: how?\n[assistant]: ...");
+        assert!(prompt.contains("how does retry work?"));
+        assert!(prompt.contains("conversational"));
+        assert!(prompt.contains("research"));
+        assert!(prompt.contains("action"));
+        assert!(prompt.contains("hybrid"));
+    }
+
+    #[test]
+    fn plan_generation_prompt_contains_query() {
+        let prompt = plan_generation_prompt("how does retry work?");
+        assert!(prompt.contains("how does retry work?"));
+        assert!(prompt.contains("3-5 step"));
     }
 
     #[test]

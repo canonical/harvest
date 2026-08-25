@@ -594,15 +594,10 @@ async fn drive_turn(
 
     while let Some(event) = agent_rx.recv().await {
         let (description, hostname) = if let AgentEvent::ToolCall { name, input } = &event {
-            if name == "run_command" || name == "run_cypher" {
-                let desc = agent.describe_tool_call(name, input).await;
-                let host = if name == "run_command" {
-                    input["agent_id"].as_str()
-                        .and_then(|id| registry.agents.get(id).map(|a| a.hostname.clone()))
-                } else {
-                    None
-                };
-                (Some(desc), host)
+            if name == "run_command" {
+                let host = input["agent_id"].as_str()
+                    .and_then(|id| registry.agents.get(id).map(|a| a.hostname.clone()));
+                (None, host)
             } else {
                 (None, None)
             }
@@ -2168,6 +2163,9 @@ async fn run_single_task(
             AgentEvent::Question { .. }      => continue,
             AgentEvent::ConfirmAction { .. } => continue,
             AgentEvent::TitleUpdated { .. }  => continue,
+            AgentEvent::Intent { .. }       => continue,
+            AgentEvent::Plan { .. }         => continue,
+            AgentEvent::PlanStepUpdate { .. } => continue,
         };
         if let Ok(data) = serde_json::to_string(&run_event) {
             let _ = sse_tx.send(data).await;

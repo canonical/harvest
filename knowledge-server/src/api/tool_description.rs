@@ -16,12 +16,11 @@ pub struct ToolDescriptionResponse {
 }
 
 pub async fn handle_tool_description(
-    State(qs): State<Arc<QueryState>>,
+    State(_qs): State<Arc<QueryState>>,
     Json(req): Json<ToolDescriptionRequest>,
 ) -> impl IntoResponse {
     if req.name.is_empty() {
         return (StatusCode::UNPROCESSABLE_ENTITY, "name is required").into_response();
     }
-    let description = qs.agent.describe_tool_call(&req.name, &req.input).await;
-    Json(ToolDescriptionResponse { description }).into_response()
+    Json(ToolDescriptionResponse { description: String::new() }).into_response()
 }
