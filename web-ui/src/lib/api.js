@@ -423,8 +423,8 @@ export const listDeploymentRuns = (projectId, id)        => projectFetch(`${depl
 
 export const generateEnvironmentQuestions = (projectId, id) =>
   projectFetch(`${deploymentUrl(projectId, id)}/environment/questions`, { method: 'POST' });
-export const generateDesign = (projectId, id) =>
-  projectFetch(`${deploymentUrl(projectId, id)}/design/generate`, { method: 'POST' });
+export const generateDesign = (projectId, id, body = {}) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/design/generate`, { method: 'POST', body: JSON.stringify(body) });
 export const generateDesignDecisions = (projectId, id) =>
   projectFetch(`${deploymentUrl(projectId, id)}/design/decisions`, { method: 'POST' });
 export const reviseDesign = (projectId, id, body) =>
