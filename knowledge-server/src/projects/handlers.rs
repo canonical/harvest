@@ -448,7 +448,7 @@ async fn save_project_turn(
     let _ = neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
          SET c.messages = $messages, c.message_count = $count,
-             c.updated_at = $now, c.suggestions = null
+             c.updated_at = $now
          RETURN c.id AS id",
         json!({
             "pid": project_id, "cid": conv_id,
@@ -501,7 +501,7 @@ async fn update_last_assistant_turn(
     let _ = neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
          SET c.messages = $messages, c.message_count = $count,
-             c.updated_at = $now, c.suggestions = null
+             c.updated_at = $now
          RETURN c.id AS id",
         json!({
             "pid": project_id, "cid": conv_id,
@@ -607,6 +607,7 @@ async fn drive_turn(
 
         match &event {
             AgentEvent::TextDelta { text } => chain_builder.text_delta(text),
+            AgentEvent::ThinkingDelta { text } => chain_builder.thinking_delta(text),
             AgentEvent::Thinking { text } => chain_builder.thinking(text),
             AgentEvent::ToolCall { name, input } => {
                 chain_builder.tool_call(name, input, description.as_deref(), hostname.as_deref());
@@ -691,34 +692,6 @@ async fn drive_turn(
                     }).to_string();
                     let ch = channels_t.lock().await;
                     if let Some(sender) = ch.get(&pid_t) {
-                        let _ = sender.send(data);
-                    }
-                }
-            });
-
-            let llm_s      = Arc::clone(&llm);
-            let neo4j_s    = Arc::clone(&neo4j);
-            let channels_s = Arc::clone(&channels);
-            let pid_s      = project_id.clone();
-            let cid_s      = conv_id.clone();
-            let query_s    = query.clone();
-            let answer_s   = answer.clone();
-            tokio::spawn(async move {
-                if let Some(choices) = super::suggestions::generate_suggestions(
-                    &*llm_s, &query_s, &answer_s,
-                ).await {
-                    let _ = neo4j_s.query_read(
-                        "MATCH (:Project {id:$pid})-[:HAS_CONVERSATION]->(c:Conversation {id:$cid})
-                         SET c.suggestions = $suggestions",
-                        json!({ "pid": pid_s, "cid": cid_s, "suggestions": choices }),
-                    ).await;
-                    let data = json!({
-                        "type": "suggestions",
-                        "conv_id": cid_s,
-                        "choices": choices,
-                    }).to_string();
-                    let ch = channels_s.lock().await;
-                    if let Some(sender) = ch.get(&pid_s) {
                         let _ = sender.send(data);
                     }
                 }
@@ -1111,7 +1084,7 @@ pub async fn get_conversation(
     let rows = state.neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
          RETURN c.id AS id, c.title AS title, c.messages AS messages,
-                c.suggestions AS suggestions, c.created_by AS created_by,
+                c.created_by AS created_by,
                 c.created_at AS created_at, c.updated_at AS updated_at",
         json!({ "pid": project_id, "cid": conv_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
@@ -2164,8 +2137,7 @@ async fn run_single_task(
             AgentEvent::ConfirmAction { .. } => continue,
             AgentEvent::TitleUpdated { .. }  => continue,
             AgentEvent::Intent { .. }       => continue,
-            AgentEvent::Plan { .. }         => continue,
-            AgentEvent::PlanStepUpdate { .. } => continue,
+            AgentEvent::Phase { .. }        => continue,
         };
         if let Ok(data) = serde_json::to_string(&run_event) {
             let _ = sse_tx.send(data).await;
