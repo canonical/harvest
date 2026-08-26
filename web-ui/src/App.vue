@@ -157,6 +157,12 @@
                       <span class="p-side-navigation__label">Explore code</span>
                     </router-link>
                   </li>
+                  <li class="p-side-navigation__item">
+                    <router-link to="/product-templates" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
+                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+                      <span class="p-side-navigation__label">Product templates</span>
+                    </router-link>
+                  </li>
                   <li v-if="auth.features.docs" class="p-side-navigation__item">
                     <router-link to="/docs" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
                       <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
