@@ -260,9 +260,9 @@ impl Tool for UpdateProductTemplateTool {
         let now = chrono::Utc::now().to_rfc3339();
 
         let existing = self.neo4j.query_read(
-            "MATCH (:Group {id: $gid})-[:HAS_TEMPLATE]->(t:ProductTemplate)<-[:USES_TEMPLATE]-(:Deployment {id: $did})
+            "MATCH (t:ProductTemplate)<-[:USES_TEMPLATE]-(:Deployment {id: $did})
              RETURN t.id AS id",
-            json!({ "gid": self.group_id, "did": self.deployment_id }),
+            json!({ "did": self.deployment_id }),
         ).await?;
 
         if let Some(template_id) = existing.into_iter().next().and_then(|r| r["id"].as_str().map(str::to_string)) {
@@ -273,9 +273,9 @@ impl Tool for UpdateProductTemplateTool {
             Ok(serde_json::to_string(&json!({ "template_id": template_id, "action": "updated" }))?)
         } else {
             let deployment = self.neo4j.query_read(
-                "MATCH (:Group {id: $gid})-[:HAS_PROJECT]->(:Project)-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
+                "MATCH (:Project)-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
                  RETURN d.name AS name",
-                json!({ "gid": self.group_id, "did": self.deployment_id }),
+                json!({ "did": self.deployment_id }),
             ).await?;
             let name = deployment.into_iter().next()
                 .and_then(|r| r["name"].as_str().map(str::to_string))
@@ -283,14 +283,13 @@ impl Tool for UpdateProductTemplateTool {
 
             let template_id = Uuid::new_v4().to_string();
             self.neo4j.query_read(
-                "MATCH (g:Group {id: $gid}), (:Project)-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
+                "MATCH (:Project)-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
                  CREATE (t:ProductTemplate {
                      id: $tid, name: $name, description: '', content: $content,
                      created_by: 'assistant', created_at: $now, updated_at: $now
                  })
-                 CREATE (g)-[:HAS_TEMPLATE]->(t)
                  CREATE (d)-[:USES_TEMPLATE]->(t)",
-                json!({ "gid": self.group_id, "did": self.deployment_id, "tid": template_id, "name": name, "content": content, "now": now }),
+                json!({ "did": self.deployment_id, "tid": template_id, "name": name, "content": content, "now": now }),
             ).await?;
             Ok(serde_json::to_string(&json!({ "template_id": template_id, "action": "created" }))?)
         }

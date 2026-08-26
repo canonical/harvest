@@ -206,9 +206,9 @@ fn deployments_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn LlmProvider>) 
         .route("/projects/:pid/change-requests/:cid/apply", route_post(apply_change_request))
         .route("/projects/:pid/change-requests/:cid/discard", route_post(discard_change_request))
         .route("/projects/:pid/change-requests/:cid/comments", route_post(create_change_request_comment))
-        .route("/groups/:gid/templates",
+        .route("/templates",
                route_get(list_templates).post(create_template))
-        .route("/groups/:gid/templates/:tid",
+        .route("/templates/:tid",
                route_get(get_template).put(update_template).delete(delete_template))
         .with_state(project_state)
         .layer(from_fn_with_state(Arc::clone(&secret), auth::require_auth));
@@ -451,34 +451,17 @@ async fn create_template_returns_201_and_is_listed() {
 
     let (status, body) = send(
         app.clone(),
-        req_post(&format!("/groups/{gid}/templates"), &tok, json!({
+        req_post("/templates", &tok, json!({
             "name": "Acme Gateway v3", "description": "standard rollout", "content": "# playbook"
         })),
     ).await;
     assert_eq!(status, StatusCode::CREATED);
     assert!(body["id"].is_string());
 
-    let (status, list) = send(app, req_get(&format!("/groups/{gid}/templates"), &tok)).await;
+    let (status, list) = send(app, req_get("/templates", &tok)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert_eq!(list[0]["name"], "Acme Gateway v3");
-}
-
-#[tokio::test]
-#[ignore = "requires Docker"]
-async fn create_template_rejects_non_member() {
-    neo4j!(c, neo4j);
-    let (_, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
-
-    let (status, _) = send(
-        app,
-        req_post(&format!("/groups/{gid}/templates"), &tok, json!({
-            "name": "x", "description": "", "content": ""
-        })),
-    ).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -495,7 +478,7 @@ async fn template_visible_from_two_different_projects_in_the_same_group() {
 
     let (_, created) = send(
         app.clone(),
-        req_post(&format!("/groups/{gid}/templates"), &tok, json!({
+        req_post("/templates", &tok, json!({
             "name": "Acme Gateway v3", "description": "", "content": "playbook v1"
         })),
     ).await;
@@ -534,7 +517,7 @@ async fn update_template_replaces_content() {
 
     let (_, created) = send(
         app.clone(),
-        req_post(&format!("/groups/{gid}/templates"), &tok, json!({
+        req_post("/templates", &tok, json!({
             "name": "x", "description": "", "content": "v1"
         })),
     ).await;
@@ -542,11 +525,11 @@ async fn update_template_replaces_content() {
 
     let (status, _) = send(
         app.clone(),
-        req_put(&format!("/groups/{gid}/templates/{tid}"), &tok, json!({ "content": "v2" })),
+        req_put(&format!("/templates/{tid}"), &tok, json!({ "content": "v2" })),
     ).await;
     assert_eq!(status, StatusCode::OK);
 
-    let (_, got) = send(app, req_get(&format!("/groups/{gid}/templates/{tid}"), &tok)).await;
+    let (_, got) = send(app, req_get(&format!("/templates/{tid}"), &tok)).await;
     assert_eq!(got["content"], "v2");
 }
 
@@ -561,14 +544,14 @@ async fn delete_template_removes_it() {
 
     let (_, created) = send(
         app.clone(),
-        req_post(&format!("/groups/{gid}/templates"), &tok, json!({ "name": "x", "description": "", "content": "" })),
+        req_post("/templates", &tok, json!({ "name": "x", "description": "", "content": "" })),
     ).await;
     let tid = created["id"].as_str().unwrap();
 
-    let (status, _) = send(app.clone(), req_del(&format!("/groups/{gid}/templates/{tid}"), &tok)).await;
+    let (status, _) = send(app.clone(), req_del(&format!("/templates/{tid}"), &tok)).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    let (status, _) = send(app, req_get(&format!("/groups/{gid}/templates/{tid}"), &tok)).await;
+    let (status, _) = send(app, req_get(&format!("/templates/{tid}"), &tok)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -614,7 +597,7 @@ async fn create_deployment_with_template_links_uses_template_edge() {
 
     let (_, created_template) = send(
         app.clone(),
-        req_post(&format!("/groups/{gid}/templates"), &tok, json!({ "name": "x", "description": "", "content": "" })),
+        req_post("/templates", &tok, json!({ "name": "x", "description": "", "content": "" })),
     ).await;
     let tid = created_template["id"].as_str().unwrap();
 
@@ -628,33 +611,6 @@ async fn create_deployment_with_template_links_uses_template_edge() {
 
     let (_, got) = send(app, req_get(&format!("/projects/{pid}/deployments/{}", body["id"].as_str().unwrap()), &tok)).await;
     assert_eq!(got["template"]["id"], tid);
-}
-
-#[tokio::test]
-#[ignore = "requires Docker"]
-async fn create_deployment_rejects_template_from_a_different_group() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid1 = make_group(&neo4j, "eng").await;
-    let gid2 = make_group(&neo4j, "other").await;
-    join_group(&neo4j, &uid, &gid1).await;
-    join_group(&neo4j, &uid, &gid2).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
-    let pid = seed_project(&app, &tok, &gid1, "Customer A").await;
-
-    let (_, created_template) = send(
-        app.clone(),
-        req_post(&format!("/groups/{gid2}/templates"), &tok, json!({ "name": "x", "description": "", "content": "" })),
-    ).await;
-    let tid = created_template["id"].as_str().unwrap();
-
-    let (status, _) = send(
-        app,
-        req_post(&format!("/projects/{pid}/deployments"), &tok, json!({
-            "name": "Rollout", "environment_description": "env", "product_template_id": tid
-        })),
-    ).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
