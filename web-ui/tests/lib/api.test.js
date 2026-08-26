@@ -4,7 +4,7 @@ import {
   listProjectDeployments, createProjectDeployment, getProjectDeployment, updateProjectDeployment,
   deleteProjectDeployment, deployDeployment, redeployDeployment, destroyDeployment, listDeploymentRuns,
   listTemplates, createTemplate, getTemplate, updateTemplate, deleteTemplate,
-  generateEnvironmentQuestions, generateDesign, generateDesignDecisions, reviseDesign,
+  generateEnvironmentQuestions, generateDesign, generateDesignStream, generateDesignDecisions, reviseDesign,
   generateProvision, proposeProvisionChange, applyProvisionChange,
   listProjectIssues, getProjectIssue, updateIssueStatus, createIssueComment,
   applyIssueSolution, redeployFromIssue, sendIssueChatMessage,
@@ -273,6 +273,46 @@ describe('deployment phase-action API functions', () => {
     const [, options] = global.fetch.mock.calls[0];
     expect(options.method).toBe('POST');
     expect(JSON.parse(options.body)).toEqual({ artifact_ids: ['a1', 'a2'], product_template_id: 't1' });
+  });
+
+  it('generateDesignStream POSTs to the design/generate/stream route', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockStreamResponse()));
+    await generateDesignStream('proj1', 'd1', {}, () => {});
+    expect(global.fetch.mock.calls[0][0]).toBe('/projects/proj1/deployments/d1/design/generate/stream');
+  });
+
+  it('generateDesignStream forwards artifact ids and template id in the body', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockStreamResponse()));
+    await generateDesignStream('proj1', 'd1', { artifact_ids: ['a1'], product_template_id: 't1' }, () => {});
+    const [, options] = global.fetch.mock.calls[0];
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({ artifact_ids: ['a1'], product_template_id: 't1' });
+  });
+
+  it('generateDesignStream throws on non-OK response', async () => {
+    global.fetch = vi.fn(() => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'boom' }) }));
+    await expect(generateDesignStream('proj1', 'd1', {}, () => {})).rejects.toThrow('boom');
+  });
+
+  it('generateDesignStream invokes onEvent for each streamed SSE event', async () => {
+    const events = [
+      { type: 'text_delta', text: '# Design' },
+      { type: 'done', answer: '# Design' },
+    ];
+    const sseBody = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+    const reader = (() => {
+      let sent = false;
+      return {
+        read: () => sent
+          ? Promise.resolve({ done: true })
+          : (sent = true, Promise.resolve({ value: new TextEncoder().encode(sseBody), done: false })),
+        releaseLock: () => {},
+      };
+    })();
+    global.fetch = vi.fn(() => Promise.resolve({ ok: true, status: 200, body: { getReader: () => reader } }));
+    const received = [];
+    await generateDesignStream('proj1', 'd1', {}, (e) => received.push(e));
+    expect(received).toEqual(events);
   });
 
   it('createProjectArtifact POSTs title, kind and content to the project artifacts route', async () => {
