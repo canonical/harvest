@@ -352,9 +352,9 @@ onMounted(async () => {
       router.push('/login');
       return;
     }
-    if (user?.last_project_id) project.selectProjectById(user.last_project_id);
   }
   if (auth.isLoggedIn) {
+    if (auth.user?.last_project_id) project.selectProjectById(auth.user.last_project_id);
     await project.fetchProjects();
   }
 });
