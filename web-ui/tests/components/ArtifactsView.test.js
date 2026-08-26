@@ -20,6 +20,7 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
     deleteArtifact:       vi.fn(() => Promise.resolve()),
     listProjectAgents:    vi.fn(),
     runTerraformArtifact: vi.fn(),
+    createProjectArtifact: vi.fn(() => Promise.resolve({ id: 'a9', title: 'New', kind: 'markdown', content: '# Hi', created_by: 'alice', created_at: new Date().toISOString() })),
   };
 });
 
@@ -200,5 +201,116 @@ describe('ArtifactsView', () => {
 
     expect(api.runTerraformArtifact).toHaveBeenCalledWith('proj-1', 'agent-1', 'a3', 'plan');
     expect(w.find('.run-modal-result').text()).toContain('plan output');
+  });
+
+  it('shows Create and Upload buttons in the page header', async () => {
+    const { w } = await mountView();
+    expect(w.find('[data-testid="create-artifact-btn"]').exists()).toBe(true);
+    expect(w.find('[data-testid="upload-artifact-btn"]').exists()).toBe(true);
+  });
+
+  it('does not show Create/Upload buttons when no project is selected', async () => {
+    const { w } = await mountView({ path: '/artifacts', projectId: null });
+    expect(w.find('[data-testid="create-artifact-btn"]').exists()).toBe(false);
+    expect(w.find('[data-testid="upload-artifact-btn"]').exists()).toBe(false);
+  });
+
+  it('opens the create modal with a type selector and content textarea', async () => {
+    const { w } = await mountView();
+    await w.find('[data-testid="create-artifact-btn"]').trigger('click');
+    expect(w.find('[data-testid="create-artifact-modal"]').exists()).toBe(true);
+    expect(w.find('[data-testid="create-artifact-kind"]').exists()).toBe(true);
+    expect(w.find('[data-testid="create-artifact-title"]').exists()).toBe(true);
+    expect(w.find('[data-testid="create-artifact-content"]').exists()).toBe(true);
+  });
+
+  it('creates an artifact from the modal and refreshes the list', async () => {
+    const { w } = await mountView();
+    await w.find('[data-testid="create-artifact-btn"]').trigger('click');
+    await w.find('[data-testid="create-artifact-title"]').setValue('My notes');
+    await w.find('[data-testid="create-artifact-kind"]').setValue('markdown');
+    await w.find('[data-testid="create-artifact-content"]').setValue('# Hello world');
+    await w.find('[data-testid="submit-create-artifact"]').trigger('click');
+    await flushPromises();
+    expect(api.createProjectArtifact).toHaveBeenCalledWith('proj-1', {
+      title: 'My notes', kind: 'markdown', content: '# Hello world',
+    });
+  });
+
+  it('disables the create submit button until title and content are provided', async () => {
+    const { w } = await mountView();
+    await w.find('[data-testid="create-artifact-btn"]').trigger('click');
+    const btn = w.find('[data-testid="submit-create-artifact"]');
+    expect(btn.attributes('disabled')).toBeDefined();
+    await w.find('[data-testid="create-artifact-title"]').setValue('T');
+    expect(btn.attributes('disabled')).toBeDefined();
+    await w.find('[data-testid="create-artifact-content"]').setValue('C');
+    expect(btn.attributes('disabled')).toBeUndefined();
+  });
+
+  it('closes the create modal on cancel', async () => {
+    const { w } = await mountView();
+    await w.find('[data-testid="create-artifact-btn"]').trigger('click');
+    await w.find('[data-testid="cancel-create-artifact"]').trigger('click');
+    expect(w.find('[data-testid="create-artifact-modal"]').exists()).toBe(false);
+  });
+
+  it('shows an error in the create modal when creation fails', async () => {
+    api.createProjectArtifact.mockRejectedValueOnce(new Error('kind must be valid'));
+    const { w } = await mountView();
+    await w.find('[data-testid="create-artifact-btn"]').trigger('click');
+    await w.find('[data-testid="create-artifact-title"]').setValue('Bad');
+    await w.find('[data-testid="create-artifact-content"]').setValue('x');
+    await w.find('[data-testid="submit-create-artifact"]').trigger('click');
+    await flushPromises();
+    expect(w.find('[data-testid="create-artifact-modal"]').text()).toContain('kind must be valid');
+  });
+
+  it('opens the upload modal with a dropzone', async () => {
+    const { w } = await mountView();
+    await w.find('[data-testid="upload-artifact-btn"]').trigger('click');
+    expect(w.find('[data-testid="upload-artifact-modal"]').exists()).toBe(true);
+    expect(w.find('[data-testid="upload-dropzone"]').exists()).toBe(true);
+  });
+
+  function setFiles(input, files) {
+  Object.defineProperty(input, 'files', { value: files, configurable: true, writable: true });
+}
+
+async function pickUploadFile(w, file) {
+  Object.defineProperty(w.find('[data-testid="upload-file-input"]').element, 'files', { value: [file], configurable: true, writable: true });
+  await w.find('[data-testid="upload-file-input"]').trigger('change');
+  await flushPromises();
+}
+
+  it('parses a .md file as a markdown artifact', async () => {
+    const { w } = await mountView();
+    await w.find('[data-testid="upload-artifact-btn"]').trigger('click');
+    await pickUploadFile(w, new File(['# Markdown body'], 'notes.md', { type: 'text/markdown' }));
+    await w.find('[data-testid="submit-upload-artifact"]').trigger('click');
+    await flushPromises();
+    await flushPromises();
+    expect(api.createProjectArtifact).toHaveBeenCalledWith('proj-1', expect.objectContaining({
+      kind: 'markdown', content: '# Markdown body',
+    }));
+  });
+
+  it('parses a .sh file as a bash artifact', async () => {
+    const { w } = await mountView();
+    await w.find('[data-testid="upload-artifact-btn"]').trigger('click');
+    await pickUploadFile(w, new File(['echo hi'], 'run.sh', { type: 'text/x-shellscript' }));
+    await w.find('[data-testid="submit-upload-artifact"]').trigger('click');
+    await flushPromises();
+    await flushPromises();
+    expect(api.createProjectArtifact).toHaveBeenCalledWith('proj-1', expect.objectContaining({
+      kind: 'bash', content: 'echo hi',
+    }));
+  });
+
+  it('rejects unsupported file extensions in the upload modal', async () => {
+    const { w } = await mountView();
+    await w.find('[data-testid="upload-artifact-btn"]').trigger('click');
+    await pickUploadFile(w, new File(['x'], 'image.png', { type: 'image/png' }));
+    expect(w.find('[data-testid="upload-artifact-modal"]').text()).toMatch(/not a supported|unsupported/i);
   });
 });

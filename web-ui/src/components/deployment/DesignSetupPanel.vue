@@ -93,7 +93,7 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue';
-import { listProjectArtifacts, listGroupTemplates, generateDesign } from '../../lib/api.js';
+import { listProjectArtifacts, listTemplates, generateDesign } from '../../lib/api.js';
 import BusyStatus from './BusyStatus.vue';
 
 const props = defineProps({
@@ -156,16 +156,19 @@ async function load() {
   artifactsLoading.value = true;
   error.value = null;
   try {
-    const [list, tpls] = await Promise.all([
+    const [listResult, tplsResult] = await Promise.allSettled([
       listProjectArtifacts(props.projectId),
-      props.groupId ? listGroupTemplates(props.groupId) : Promise.resolve([]),
+      listTemplates(),
     ]);
-    artifacts.value = list;
-    templates.value = tpls;
-  } catch (e) {
-    artifacts.value = [];
-    templates.value = [];
-    error.value = e.message || 'Failed to load context';
+    artifacts.value = listResult.status === 'fulfilled' ? listResult.value : [];
+    templates.value = tplsResult.status === 'fulfilled' ? tplsResult.value : [];
+    if (listResult.status === 'rejected' && tplsResult.status === 'rejected') {
+      error.value = listResult.reason?.message || 'Failed to load context';
+    } else if (listResult.status === 'rejected') {
+      error.value = listResult.reason?.message || 'Failed to load artifacts';
+    } else if (tplsResult.status === 'rejected') {
+      error.value = tplsResult.reason?.message || 'Failed to load templates';
+    }
   } finally {
     artifactsLoading.value = false;
   }
@@ -187,5 +190,5 @@ async function generate() {
   }
 }
 
-watch(() => [props.projectId, props.deploymentId, props.groupId], () => load(), { immediate: true });
+watch(() => [props.projectId, props.deploymentId], () => load(), { immediate: true });
 </script>
