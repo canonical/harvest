@@ -25,7 +25,8 @@ Submit a natural-language question and receive a complete JSON response.
     { "repo": "repo-a", "version": "v2.1.0", "file": "src/auth/middleware.rs", "line": 42 },
     { "repo": "repo-a", "version": "v2.1.0", "file": "src/auth/token.rs",      "line": 17 }
   ],
-  "tool_calls_made": 6
+  "tool_calls_made": 6,
+  "provider_used": { "provider_id": "anthropic-0", "kind": "anthropic", "model": "claude-sonnet-4-6" }
 }
 ```
 
@@ -33,12 +34,19 @@ Submit a natural-language question and receive a complete JSON response.
 
 Same request body as `/query`. The response is a stream of [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events).
 
-| Event type   | Payload fields                              | When                                 |
-|--------------|---------------------------------------------|--------------------------------------|
-| `tool_call`  | `type`, `name`, `input`                     | The LLM invokes a graph tool         |
-| `tool_result`| `type`, `name`, `preview`                   | The tool returns a result            |
-| `done`       | `type`, `answer`, `sources`, `tool_calls_made` | The agentic loop finishes         |
-| `error`      | `type`, `message`                           | An unrecoverable error occurs        |
+| Event type     | Payload fields                              | When                                 |
+|----------------|---------------------------------------------|--------------------------------------|
+| `intent`       | `type`, `mode`                              | After intent classification          |
+| `phase`        | `type`, `label`                             | Before a batch of tool calls         |
+| `thinking_delta` | `type`, `text`                            | Reasoning-model thinking tokens      |
+| `text_delta`   | `type`, `text`                              | Streamed answer text                 |
+| `tool_call`    | `type`, `name`, `input`                     | The LLM invokes a tool               |
+| `tool_result`  | `type`, `name`, `preview`                   | The tool returns a result            |
+| `question`     | `type`, `question`, `choices`               | The LLM called `ask_user`            |
+| `confirm_action` | `type`, `id`, `name`, `input`, `description` | A destructive tool awaits approval |
+| `title_updated`| `type`, `title`                             | A conversation title was generated   |
+| `done`         | `type`, `answer`, `sources`, `tool_calls_made`, `provider_used` | The agentic loop finishes |
+| `error`        | `type`, `message`                           | An unrecoverable error occurs        |
 
 ### `GET /repositories`
 
@@ -137,6 +145,18 @@ Returns a short plain-English description of a tool call, used by the web UI to 
 
 Returns `{"status": "ok"}`.
 
+### `GET /llm/providers`
+
+Returns the LLM providers visible to the chat page's model picker (those with `expose_to_ui = true`), with their discovered or allow-listed models. Used to populate the picker.
+
+### `GET /skills` · `GET /skills/:id`
+
+List or fetch a global skill (markdown with YAML frontmatter). See [Skills](#skills).
+
+### `GET /artifacts/:id` · `GET /artifacts/:id/download`
+
+Fetch an artifact's metadata or download its raw content. See [Artifacts](#artifacts).
+
 ---
 
 ## Configuration Reference
@@ -152,7 +172,8 @@ user     = "neo4j"
 password = "${NEO4J_PASSWORD}"
 
 [auth]
-jwt_secret = "${JWT_SECRET}"    # required; use a long random string in production
+jwt_secret        = "${JWT_SECRET}"    # required; use a long random string in production
+allow_local_login = true               # default; set false to force SSO only
 
 # Optional: Google OAuth 2.0
 [auth.google]
@@ -160,27 +181,56 @@ client_id     = "${GOOGLE_CLIENT_ID}"
 client_secret = "${GOOGLE_CLIENT_SECRET}"
 redirect_uri  = "https://harvest.example.com/auth/google/callback"
 
-# Anthropic Claude
-[llm]
-provider                   = "anthropic"
-model                      = "claude-sonnet-4-6"
-api_key                    = "${ANTHROPIC_API_KEY}"
+# Optional: OIDC SSO (Ubuntu One, Dex, Keycloak, …)
+[auth.oidc]
+issuer_url    = "https://login.example.com"
+client_id     = "harvest"
+client_secret = "${OIDC_CLIENT_SECRET}"
+redirect_uri  = "https://harvest.example.com/auth/oidc/callback"
+display_name  = "Single Sign-On"        # shown on the login page (optional)
+
+# Agent behaviour (all optional, defaults shown)
+[agent]
 max_iterations             = 20        # agentic loop cap (default: 20)
-timeout_secs               = 120       # per-request timeout (default: 120)
-max_retries                = 3         # retry attempts on transient errors (default: 3)
 compaction_threshold_chars = 40000     # compact history when it exceeds this (default: 40000)
 compaction_keep_last       = 6         # keep this many recent messages after compaction (default: 6)
 
+# One or more LLM providers. Define as many [[llm]] blocks as you need.
+# On rate-limit errors they are tried in ascending `priority` order.
+[[llm]]
+provider       = "anthropic"            # "anthropic" | "gemini" | "openai-compatible"
+model          = "claude-sonnet-4-6"
+api_key        = "${ANTHROPIC_API_KEY}"
+id             = "primary"              # optional; defaults to "<kind>-<priority>"
+priority       = 0                      # lower = tried first (default: 0)
+timeout_secs   = 120                    # per-request timeout (default: 120)
+max_retries    = 3                      # retry attempts on transient errors (default: 3)
+expose_to_ui   = true                   # show in the chat-page model picker (default: true)
+name           = "Claude (production)"  # optional display name
+models         = ["claude-sonnet-4-6"]  # optional allowlist for the picker
+
+# — or — Google Gemini
+# [[llm]]
+# provider    = "gemini"
+# model       = "gemini-2.5-flash"
+# api_key     = "${GEMINI_API_KEY}"
+# priority    = 1
+
 # — or — OpenAI-compatible (Groq, Ollama, etc.)
-# [llm]
-# provider       = "openai-compatible"
-# base_url       = "https://api.groq.com/openai/v1"
-# api_key        = "${GROQ_API_KEY}"
-# model          = "llama-3.3-70b-versatile"
+# [[llm]]
+# provider = "openai-compatible"
+# base_url = "https://api.groq.com/openai/v1"
+# api_key  = "${GROQ_API_KEY}"
+# model    = "llama-3.3-70b-versatile"
+# priority = 2
 
 # Optional: serve Diataxis docs generated by the harvester
 [documentation]
 docs_dir = "/var/harvest/docs"    # must match harvester.toml [documentation].docs_dir
+
+# Optional: control the docs page in the web UI
+[ui]
+enable_docs = false              # default; set true to show the Document tab
 
 # Optional: serve the harvest-agent binary and generate install scripts
 [agents]
@@ -203,8 +253,15 @@ profile      = "default"    # LXD profile applied to every container (storage po
 ```
 
 When `[documentation].docs_dir` is omitted, the `/docs` routes are not registered.
+When `[ui].enable_docs` is `false`, the Document tab is hidden in the web UI even if docs are available.
 When `[agents]` is omitted, the `/agents/binary/*` and install-script routes still work but return 404 for the binary.
 When `[lxd]` is omitted, agents can only be added by installing the daemon on an existing machine — the web UI's "Let Harvest create and manage agent" option is hidden (`GET /auth/config` reports `features.lxd: false`).
+
+### Multiple LLM providers and the model picker
+
+`llm` is an array (`[[llm]]`) — define one block per provider. Providers are sorted by `priority` (ascending) and wrapped in a `FallbackProvider`: if a provider returns a rate-limit error (HTTP 429 / `RESOURCE_EXHAUSTED`), the next one is tried. Non-rate-limit errors propagate immediately.
+
+Each block accepts an optional `id` (stable identifier used by the chat page's model picker; defaults to `<kind>-<priority>`), `expose_to_ui` (set `false` to keep a provider as failover-only, hidden from the picker), `name` (display name in the picker), and `models` (curated allowlist of model names to offer in the picker; defaults to every model the provider advertises). `GET /llm/providers` returns the picker-visible providers and their models. A client selects a specific provider/model by sending a `provider`/`model` field on the query request, which the agent forwards as a `ProviderSelection`.
 
 ### Client identity: self-managed vs. manual
 
@@ -222,19 +279,22 @@ Setting `client_cert`/`client_key` explicitly bypasses all of this — `LxdClien
 
 ## LLM Provider Abstraction
 
-The server defines a `LlmProvider` trait backed by two implementations:
+The server defines a `LlmProvider` trait backed by three implementations, plus a `FallbackProvider` that wraps them for priority-based failover.
 
 ### `AnthropicProvider`
 
 Uses the Anthropic Messages API with native tool use. Configure with `provider = "anthropic"`.
 
-Recommended models (most capable first):
+### `GeminiProvider`
 
-| Model ID | Notes |
-|----------|-------|
-| `claude-opus-4-8` | Highest capability |
-| `claude-sonnet-4-6` | Best speed/quality balance (default) |
-| `claude-haiku-4-5-20251001` | Fastest, lowest cost |
+Uses the Google Gemini API with native function calling. Configure with `provider = "gemini"`.
+
+```toml
+[[llm]]
+provider = "gemini"
+model    = "gemini-2.5-flash"
+api_key  = "${GEMINI_API_KEY}"
+```
 
 ### `OpenAiCompatProvider`
 
@@ -242,39 +302,73 @@ Uses the OpenAI Chat Completions API with function calling. Works with any compa
 
 ```toml
 # Groq
-[llm]
+[[llm]]
 provider = "openai-compatible"
 base_url = "https://api.groq.com/openai/v1"
 api_key  = "gsk_..."
 model    = "llama-3.3-70b-versatile"
 
 # Local Ollama (no auth)
-[llm]
+[[llm]]
 provider = "openai-compatible"
 base_url = "http://localhost:11434/v1"
 api_key  = "ollama"
 model    = "qwen2.5-coder:32b"
 ```
 
+### `FallbackProvider`
+
+When more than one `[[llm]]` block is configured, `from_config` sorts providers by `priority` (ascending) and wraps them in a `FallbackProvider`. On a rate-limit error (HTTP 429 / `RESOURCE_EXHAUSTED`) the next provider is tried; any other error propagates immediately. A `ProviderSelection` (`{ provider_id, model }`) sent by the chat page's model picker causes the matching provider to be tried first, with its `model` overridden — falling back to the default order only if that provider is rate-limited or the id is unknown.
+
+Every response carries a `provider_used` block (`{ provider_id, kind, model }`) identifying which provider and model actually answered, so the UI can show it even after a failover.
+
 ---
 
 ## Agentic Workflow
 
 ```
-1. Build system prompt (role, graph schema, citation format rules)
-2. Append user query as first user message
-3. Loop (up to max_iterations):
-   a. Call LLM with current message history + tool definitions
-   b. If response is a plain message → done, return answer
-   c. If response contains tool calls:
-        - execute each tool against Neo4j
-        - append tool results to message history
-        - continue loop
-4. Parse [repo:version:file:line] citations from final answer
-5. Return structured response
+1. Classify intent (conversational / research / action / hybrid)
+   - conversational turns get only ask_user; everything else gets all tools
+2. Optionally compact history if it exceeds compaction_threshold_chars
+3. Build messages: system prompt + compacted history + user message (+ attachments)
+4. Loop (up to max_iterations):
+   a. Stream the LLM response, forwarding thinking_delta / text_delta / tool_call events
+   b. If stop_reason is end_turn (or no tool calls) → done, return answer
+   c. If the LLM called ask_user → emit a question event and end the turn
+   d. Partition tool calls into confirmable (requires_confirmation) and automatic:
+      - confirmable: emit confirm_action events and pause until the user resumes
+      - automatic:   execute concurrently with join_all, append results
+   e. continue loop
+5. If max_iterations is hit, make one final synthesis call over gathered tool results
+6. Parse [repo:version:file:line] citations from the final answer
+7. Return structured response (answer, sources, tool_calls_made, provider_used)
 ```
 
-If `max_iterations` is hit the server returns whatever partial answer the LLM has accumulated.
+### Intent classification
+
+`classify_intent` returns one of `conversational`, `research`, `action`, or `hybrid`. On the first turn with no history, simple keyword heuristics detect action verbs (`run`, `deploy`, `restart`, `destroy`, …) so common commands skip the LLM call entirely. Otherwise a single LLM call classifies the message. `conversational` turns skip the tool set (only `ask_user` is wired up) so follow-ups and greetings don't trigger graph queries.
+
+### Streaming events
+
+`query_streaming` emits these `AgentEvent`s over the SSE channel (or an in-memory channel for the non-streaming `query` wrapper):
+
+| Event | When |
+|-------|------|
+| `Intent` | After classification — `{mode}` |
+| `Phase` | Before a batch of tool calls — derived label like `Searching codebase`, `Reading source`, `Tracing relationships`, `Executing on agents` |
+| `ThinkingDelta` | Reasoning models emit thinking tokens |
+| `TextDelta` | Streamed answer text |
+| `ToolCall` | The LLM invoked a tool |
+| `ToolResult` | A tool returned a result (with a truncated preview) |
+| `Question` | The LLM called `ask_user` — `{question, choices}` |
+| `ConfirmAction` | A confirmable tool awaits approval — `{id, name, input, description}` |
+| `TitleUpdated` | A conversation title was auto-generated |
+| `Done` | Loop finished — `{answer, sources, tool_calls_made, provider_used}` |
+| `Error` | Unrecoverable failure — `{message}` |
+
+### Confirm-action (paused turns)
+
+Tools flagged `requires_confirmation()` (e.g. `run_terraform_apply`, `run_terraform_destroy`, mutating `run_command`) don't execute immediately. The loop emits a `ConfirmAction` event per pending call and returns a `PausedTurn` (the message list, iteration count, and pending call ids). The client approves by calling `POST /projects/:pid/conversations/:cid/confirm-action/resume`, which calls `resume_after_confirm` to push tool results and continue the loop.
 
 ### System Prompt
 
@@ -285,12 +379,17 @@ The system prompt instructs the LLM to:
 - Cite every factual claim about code in the format `[repo:version:file:line]`.
 - Start broad (listing repositories and versions) and then drill down.
 - Prefer specific graph queries over broad ones to keep context small.
+- Emit Mermaid diagrams and inline `harvest-graph` snippets where they clarify structure.
+- Never end a response with plain-text questions — use the `ask_user` tool instead.
+- Reuse conversation context before re-calling tools.
+
+Deployment- and issue-scoped agents use specialised system prompts (see `prompt.rs`) that forbid `ask_user` and mutating tools as appropriate.
 
 ---
 
 ## Graph Query Tools
 
-These tools are exposed to the LLM. Each maps to one or more Cypher queries.
+These graph tools are exposed to the LLM (defined in `agent/graph_tools.rs`). Each maps to one or more Cypher queries. The full tool set also includes machine, skill, infra, terraform, artifact, secret, and interaction tools — see the [README "Agent tools"](../../README.md#agent-tools) table for the complete list and `agent/*_tools.rs` for the implementations.
 
 ### `list_repositories`
 
@@ -392,19 +491,22 @@ The cache is not invalidated automatically — restart the server after re-inges
 
 ## Authentication
 
-All routes except `/health`, `/auth/*`, `/agent/events`, `/agent/results`, `/agent/ping`, and `/agents/binary/*` require a valid JWT session cookie.
+All routes except `/health`, `/auth/*`, `/agent/events`, `/agent/results`, `/agent/output`, `/agent/ping`, `/agent/console/*`, `/agent/tunnel/*`, and `/agents/binary/*` require a valid JWT session cookie.
 
 ### Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET`  | `/auth/config` | Returns `{"google": true/false}` |
+| `GET`  | `/auth/config` | Returns auth capabilities (`google`, `oidc`, `local_login`, `features.lxd`) |
 | `POST` | `/auth/register` | Register with email + password. First user becomes admin. |
 | `POST` | `/auth/login` | Login and receive a JWT cookie. |
 | `POST` | `/auth/logout` | Clear the JWT cookie. |
 | `GET`  | `/auth/me` | Return current user's id, email, name, and role. |
+| `PATCH`| `/auth/me` | Update the current user's name. |
 | `GET`  | `/auth/google` | Redirect to Google OAuth consent screen. |
-| `GET`  | `/auth/google/callback` | OAuth callback — exchanges code for session. |
+| `GET`  | `/auth/google/callback` | Google OAuth callback — exchanges code for session. |
+| `GET`  | `/auth/oidc` | Redirect to the OIDC provider's consent screen. |
+| `GET`  | `/auth/oidc/callback` | OIDC callback — exchanges code for session. |
 
 ### Roles
 
@@ -413,11 +515,13 @@ All routes except `/health`, `/auth/*`, `/agent/events`, `/agent/results`, `/age
 
 The first registered user is automatically assigned the `admin` role.
 
+OIDC endpoints are discovered at startup from the configured `issuer_url` (via `/.well-known/openid-configuration`); if discovery fails the server starts anyway with OIDC login unavailable. Google OAuth and OIDC can both be enabled at the same time, and either can be used alongside or instead of local password login (set `allow_local_login = false` to force SSO).
+
 ---
 
 ## Projects and Conversations
 
-Projects are workspaces that group conversations and agent machines. Access is controlled by group membership.
+Projects are workspaces that group conversations, agents, deployments, secrets, memories, tasks, skills, and artifacts. Access is controlled by group membership.
 
 ### Endpoints
 
@@ -434,6 +538,8 @@ POST   /projects/:pid/conversations         create a conversation
 GET    /projects/:pid/conversations/:cid    get conversation with messages array
 PUT    /projects/:pid/conversations/:cid    update title and messages
 DELETE /projects/:pid/conversations/:cid   delete conversation (owner or admin)
+POST   /projects/:pid/conversations/:cid/confirm-action/resume
+                                             resume a paused turn after confirm_action approval
 
 POST   /projects/:pid/query                 non-streaming query with history
 POST   /projects/:pid/query/stream          streaming query (fire-and-forget; events via project SSE)
@@ -452,9 +558,16 @@ The project event stream delivers:
 | `user_join` | `{user_id, name, conv_id}` | A user opened the events stream |
 | `user_leave` | `{user_id, name}` | A user disconnected |
 | `user_message` | `{query, username, attachments}` | The user's message was accepted |
+| `intent` | `{type, mode}` | After intent classification |
+| `phase` | `{type, label}` | Before a batch of tool calls |
+| `thinking_delta` | `{type, text}` | Reasoning-model thinking tokens |
+| `text_delta` | `{type, text}` | Streamed answer text |
 | `tool_call` | `{type, name, input}` | LLM invoked a tool |
 | `tool_result` | `{type, name, preview}` | Tool returned a result |
-| `done` | `{type, answer, sources, tool_calls_made}` | The agentic loop finished |
+| `question` | `{type, question, choices}` | The LLM called `ask_user` |
+| `confirm_action` | `{type, id, name, input, description}` | A destructive tool awaits approval |
+| `title_updated` | `{type, title}` | A conversation title was generated |
+| `done` | `{type, answer, sources, tool_calls_made, provider_used}` | The agentic loop finished |
 | `error` | `{type, message}` | An error occurred during the query |
 
 ### Conversation History and Compaction
@@ -504,17 +617,190 @@ Generation steps are broadcast over a `broadcast::channel`. Multiple clients can
 
 ---
 
+## Memories
+
+Each project has a persistent memory store — short facts the agent reads and writes during queries to recall context across conversations.
+
+```
+GET    /projects/:pid/memories              list memories
+POST   /projects/:pid/memories              create a memory
+GET    /projects/:pid/memories/:mid         get a memory
+PUT    /projects/:pid/memories/:mid         update a memory
+DELETE /projects/:pid/memories/:mid         delete a memory
+```
+
+---
+
+## Tasks
+
+Runnable project tasks — background agent jobs with captured logs, useful for recurring or one-off automation.
+
+```
+GET    /projects/:pid/tasks                 list tasks
+POST   /projects/:pid/tasks                 create a task
+PATCH  /projects/:pid/tasks/:tid            update task status
+DELETE /projects/:pid/tasks/:tid            delete a task
+POST   /projects/:pid/tasks/:tid/run        run a task (streams events over the project SSE channel)
+GET    /projects/:pid/tasks/:tid/logs       fetch captured task logs
+```
+
+---
+
+## Skills
+
+Skills are markdown playbooks (with YAML frontmatter) the agent loads on demand via the `list_skills` and `load_skill` tools. There are two scopes:
+
+- **Global skills** — seeded at startup from `knowledge-server/skills/*.md` (juju, lxd, ceph, canonical-k8s, landscape, openstack) and managed by admins.
+- **Project skills** — scoped to a single project.
+
+```
+GET    /skills                             list global skills
+GET    /skills/:id                         fetch a global skill
+
+GET    /projects/:pid/skills               list skills available to the project (global + project)
+POST   /projects/:pid/skills               create a project skill
+GET    /projects/:pid/skills/:sid          get a project skill
+PUT    /projects/:pid/skills/:sid          update a project skill
+DELETE /projects/:pid/skills/:sid          delete a project skill
+
+POST   /admin/skills                       create a global skill (admin only)
+PUT    /admin/skills/:id                   update a global skill (admin only)
+DELETE /admin/skills/:id                   delete a global skill (admin only)
+```
+
+---
+
+## Artifacts
+
+Artifacts are generated or uploaded content — terraform bundles, design docs, guides, or arbitrary context — stored in Neo4j and downloadable as raw text.
+
+```
+GET    /projects/:pid/artifacts            list project artifacts
+POST   /projects/:pid/artifacts            create/upload an artifact
+GET    /artifacts/:id                      get artifact metadata
+PUT    /artifacts/:id                      update artifact content
+DELETE /artifacts/:id                      delete an artifact
+GET    /artifacts/:id/download             download raw artifact content
+```
+
+Terraform bundles are stored as a JSON map of `{path: content}`. The `artifact_tools::GenerateArtifactTool` lets the agent produce bundles; `bundle.rs` handles serialising/deserialising them for terraform runs.
+
+---
+
+## Deployments
+
+The deployment pipeline is the IaC arm of Harvest. Each project can hold many deployments; each deployment carries an environment description, a design doc, a terraform/terragrunt bundle, an optional guide, context artifacts, and a topologically-sorted execution plan. Deploys/redeploys/destroys run the bundle on a connected agent and record a `DeploymentRun` with captured stdout/stderr; failed apply/destroy runs trigger automatic issue triage (see [Issues](#issues--change-requests)).
+
+```
+GET    /projects/:pid/deployment                        get the project's current deployment
+GET    /projects/:pid/deployments                       list deployments
+POST   /projects/:pid/deployments                       create a deployment
+GET    /projects/:pid/deployments/:did                  get deployment detail
+PATCH  /projects/:pid/deployments/:did                  update deployment metadata
+DELETE /projects/:pid/deployments/:did                  delete a deployment
+POST   /projects/:pid/deployments/:did/deploy           run the bundle (apply)
+POST   /projects/:pid/deployments/:did/redeploy         re-apply the bundle
+POST   /projects/:pid/deployments/:did/destroy          destroy the infrastructure
+GET    /projects/:pid/deployments/:did/runs             list recorded runs
+POST   /projects/:pid/deployments/:did/environment/questions   LLM interview for env requirements
+POST   /projects/:pid/deployments/:did/design/generate         generate the design doc
+POST   /projects/:pid/deployments/:did/design/decisions        capture design decisions
+POST   /projects/:pid/deployments/:did/design/revise           revise the design
+POST   /projects/:pid/deployments/:did/provision/generate      generate the terraform bundle
+POST   /projects/:pid/deployments/:did/provision/propose-change  propose a bundle edit (staged)
+POST   /projects/:pid/deployments/:did/provision/apply-change    apply a proposed bundle edit
+POST   /projects/:pid/deployments/:did/context-artifacts         add a context artifact
+POST   /projects/:pid/deployments/:did/context-artifacts/link    link an existing artifact
+DELETE /projects/:pid/deployments/:did/context-artifacts/:aid    remove a context artifact
+GET    /projects/:pid/deployments/:did/proposals                list proposed changes
+POST   /projects/:pid/deployments/:did/proposals                propose an artifact change
+POST   /projects/:pid/deployments/:did/proposals/:propid/approve  approve a proposal
+POST   /projects/:pid/deployments/:did/proposals/:propid/discard  discard a proposal
+GET    /projects/:pid/deployments/:did/execution-plan          get the execution plan
+POST   /projects/:pid/deployments/:did/execution-plan          set the execution plan
+POST   /projects/:pid/deployments/:did/run-dag                 execute the plan's DAG
+```
+
+### Infrastructure state
+
+Each deployment tracks an `infra_state`: `none` → `up` (successful apply) / `broken` (failed apply) → `destroyed` (successful destroy) / `destroy_failed` (failed destroy). A `broken` or `destroy_failed` deployment must be destroyed before it can be re-applied. `apply` and `destroy` runs that fail trigger the issue-triage agent automatically.
+
+### Execution plan
+
+The execution plan is a list of steps (`{id, action, phase, label, artifact, depends_on}`) where `action` is `run`/`plan`/`apply`/`destroy` and `phase` is `deploy`/`destroy`. `POST /run-dag` topologically sorts the steps (`deployments::topological_sort`) and executes them in order against a chosen agent, streaming each run's output.
+
+---
+
+## Issues & Change Requests
+
+Failed apply/destroy runs automatically spawn an issue-triage agent (`build_for_issue_triage`) that lists existing issues, matches or creates one per distinct failure (deduplicated by `fingerprint`, reopening regressions if a fixed/rejected issue resurfaces), and proposes a corrected bundle via `propose_issue_solution`. Issues and pending proposals are surfaced together as change requests.
+
+```
+GET    /projects/:pid/issues                         list deployment issues
+GET    /projects/:pid/issues/:iid                    get issue detail (with proposed fix + chat history)
+PATCH  /projects/:pid/issues/:iid/status             transition issue status (untriaged → in_progress → fixed/rejected)
+POST   /projects/:pid/issues/:iid/comments           add a comment
+POST   /projects/:pid/issues/:iid/apply-solution     apply the proposed fix and trigger a redeploy
+POST   /projects/:pid/issues/:iid/redeploy           redeploy from an issue
+POST   /projects/:pid/issues/:iid/chat               chat with the agent about an issue (build_for_issue_chat)
+
+GET    /projects/:pid/change-requests               list issues + proposals as change requests
+GET    /projects/:pid/change-requests/:cid          get a change request
+POST   /projects/:pid/change-requests/:cid/apply    apply a proposal change request
+POST   /projects/:pid/change-requests/:cid/discard  discard a change request
+POST   /projects/:pid/change-requests/:cid/comments comment on a change request
+```
+
+Issue status transitions are validated: `untriaged → in_progress`, `in_progress → fixed`, `in_progress → rejected`. The issue-chat agent is read-only (it can run diagnostic commands and propose a fix, but cannot apply or deploy).
+
+---
+
+## Templates
+
+Product templates are group-scoped reusable designs/bundles that pre-seed a new deployment. `update_product_template` (a deployment tool) saves the current design and bundle as a template; future deployments based on that template get the template content injected into their agent context.
+
+```
+GET    /groups/:gid/templates        list templates in a group
+POST   /groups/:gid/templates        create a template
+GET    /groups/:gid/templates/:tid   get a template
+PUT    /groups/:gid/templates/:tid   update a template
+DELETE /groups/:gid/templates/:tid   delete a template
+```
+
+---
+
 ## Remote Agents (harvest-agent)
 
 ```
-GET  /agents/:pid/install.sh                       generate bash install script
-GET  /agents/binary/harvest-agent                  serve the agent binary
-GET  /projects/:pid/agents                         list agents (online status)
-DELETE /projects/:pid/agents/:aid                  remove an agent
-POST /projects/:pid/agents/:aid/execute            run a command on an agent
-POST /projects/:pid/agents/rotate-install-token    rotate the install token
-GET  /projects/:pid/agents/flavors                 list LXD container sizes (requires [lxd])
-POST /projects/:pid/agents/lxd                     provision an LXD-managed agent (requires [lxd])
+GET    /agents/:pid/install.sh                       generate bash install script
+GET    /agents/binary/harvest-agent                  serve the agent binary
+GET    /projects/:pid/agents                         list agents (online status)
+DELETE /projects/:pid/agents/:aid                    remove an agent
+POST   /projects/:pid/agents/:aid/execute            run a bash command on an agent
+POST   /projects/:pid/agents/:aid/terraform          run a terraform/terragrunt plan|apply|destroy bundle
+GET    /projects/:pid/agents/:aid/console            open an interactive shell (WebSocket, xterm.js)
+POST   /projects/:pid/agents/:aid/start              start an LXD-managed agent container
+POST   /projects/:pid/agents/:aid/stop               stop an LXD-managed agent container
+POST   /projects/:pid/agents/:aid/restart            restart an LXD-managed agent container
+POST   /projects/:pid/agents/rotate-install-token    rotate the install token
+GET    /projects/:pid/agents/flavors                 list LXD container sizes (requires [lxd])
+POST   /projects/:pid/agents/lxd                     provision an LXD-managed agent (requires [lxd])
+GET    /projects/:pid/agents/:aid/port-forwards      list port forwards for an agent
+POST   /projects/:pid/agents/:aid/port-forwards      create a port forward
+PUT    /projects/:pid/agents/:aid/port-forwards/:fid update a port forward
+DELETE /projects/:pid/agents/:aid/port-forwards/:fid delete a port forward
+```
+
+Agent-facing endpoints (token-authenticated, not JWT):
+
+```
+GET  /agent/events                 SSE stream the agent connects to (Registered, HelloAck, Execute,
+                                   RunTerraform, OpenShell, OpenTunnel, Uninstall, Error)
+POST /agent/results                agent posts a finished command/terraform result
+POST /agent/output                 agent posts a streamed stdout/stderr line (terraform runs)
+POST /agent/ping                   agent heartbeat
+GET  /agent/console/:session_id    WebSocket upgrade for an interactive console session
+GET  /agent/tunnel/:session_id     WebSocket upgrade for a reverse tunnel session
 ```
 
 There are two ways an agent joins a project. The web UI's "Add agent" button offers a choice between them whenever `[lxd]` is configured on the server (see `GET /auth/config` → `features.lxd`); otherwise it goes straight to the manual flow.
@@ -546,9 +832,24 @@ Deleting an LXD-managed agent (`DELETE /projects/:pid/agents/:aid`) additionally
 
 1. The LLM calls `run_command` with an `agent_id` and `command`.
 2. The server verifies the agent belongs to the correct project (cross-project isolation).
-3. A `Execute` SSE event is pushed to the agent.
+3. An `Execute` SSE event is pushed to the agent.
 4. The agent runs the command and POSTs the result to `/agent/results`.
 5. A `oneshot` channel delivers the result back to the waiting `run_command` tool call.
+
+**Terraform execution:**
+
+1. The LLM (or a deployment run) calls `run_terraform_plan`/`apply`/`destroy` with an `agent_id`, `artifact_id` (the bundle), and the action.
+2. The server resolves the bundle's file map and pushes a `RunTerraform` SSE event with the flavor (`terraform`/`terragrunt`), action, and files.
+3. The agent writes the files to a temp dir, runs the action, and streams each stdout/stderr line to `/agent/output` (forwarded to any live SSE subscribers) before posting the final result to `/agent/results`.
+4. The server records a `DeploymentRun` (with stdout/stderr previews) and updates the deployment's `infra_state`; on a failed apply/destroy it triggers the issue-triage agent.
+
+**Interactive console:**
+
+`GET /projects/:pid/agents/:aid/console` upgrades to a WebSocket and sends an `OpenShell` event to the agent. The agent opens a PTY and bridges it to the WebSocket, so the browser's xterm.js gets a live shell on the agent's machine. The claim handshake (`GET /agent/console/:session_id`) is authenticated with the agent token and expires after `CONSOLE_CLAIM_TIMEOUT_SECS` (15s).
+
+**Reverse tunnels & port forwards:**
+
+`GET /projects/:pid/agents/:aid/console`-style WebSockets also back port forwards. Creating a port forward opens an `OpenTunnel` session to the agent for the target port; the server then proxies HTTP traffic under `/agents/:agent_id/:route_name/...` (and raw WebSocket upgrades) through the tunnel to the agent's service. This lets the server reach services running on an agent's otherwise-private machine.
 
 ---
 
@@ -563,20 +864,25 @@ PUT  /admin/users/:id/groups    replace group memberships with a new list
 GET  /admin/groups              list all groups
 POST /admin/groups              create a group {name, description?}
 DELETE /admin/groups/:id        delete a group and its relationships
+PUT  /admin/groups/:id/default  set a user's default group
+POST /admin/skills              create a global skill
+PUT  /admin/skills/:id          update a global skill
+DELETE /admin/skills/:id        delete a global skill
 ```
 
 ---
 
 ## Retry Strategy
 
-All LLM providers use a shared retry helper (`llm/retry.rs`) with the following behaviour:
+All LLM providers (Anthropic, Gemini, and OpenAI-compatible) use a shared retry helper (`llm/retry.rs`) with the following behaviour:
 
 | Condition | Action |
 |-----------|--------|
 | Timeout error, retries remaining | Exponential backoff: `2 * 2^min(attempt, 4)` seconds |
 | 429 rate limited | Wait for `retry-after` header value, or `30 * 2^min(attempt, 4)` seconds |
 | 529/503 (Anthropic overload) | Fixed 5-second wait |
+| 503 (Gemini overload) | Fixed 5-second wait |
 | 502/503 (OpenAI overload) | Fixed 5-second wait |
 | Other error | Return immediately |
 
-`max_retries` defaults to 3 and is configurable in `server.toml`.
+`max_retries` defaults to 3 and is configurable per provider in `server.toml`. When multiple providers are configured, a rate-limit error that exhausts a provider's retries triggers failover to the next provider in priority order (see [FallbackProvider](#fallbackprovider)).
