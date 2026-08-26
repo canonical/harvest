@@ -22,6 +22,7 @@ const routes = [
   { path: '/skills',         component: () => import('../views/SkillsView.vue'),         meta: { requiresProject: true } },
   { path: '/docs',           component: () => import('../views/DocumentationView.vue'),  meta: { requiresProject: true, feature: 'docs' } },
   { path: '/repositories',   component: () => import('../views/RepositoriesView.vue'),   meta: { requiresProject: true } },
+  { path: '/product-templates', component: () => import('../views/ProductTemplatesView.vue'), meta: { directEntry: true } },
   { path: '/admin',          component: () => import('../views/AdminView.vue'),          meta: { requiresAuth: true } },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ];

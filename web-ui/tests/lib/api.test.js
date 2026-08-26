@@ -266,6 +266,14 @@ describe('deployment phase-action API functions', () => {
     expect(global.fetch.mock.calls[0][0]).toBe('/projects/proj1/deployments/d1/design/generate');
   });
 
+  it('generateDesign forwards artifact ids and template id in the body', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ id: 'd1' })));
+    await generateDesign('proj1', 'd1', { artifact_ids: ['a1', 'a2'], product_template_id: 't1' });
+    const [, options] = global.fetch.mock.calls[0];
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({ artifact_ids: ['a1', 'a2'], product_template_id: 't1' });
+  });
+
   it('generateDesignDecisions POSTs to the design/decisions route', async () => {
     global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ decisions: [] })));
     await generateDesignDecisions('proj1', 'd1');
