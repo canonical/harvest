@@ -19,7 +19,7 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
   return {
     ...actual,
     listProjectArtifacts: vi.fn(),
-    listGroupTemplates:   vi.fn(),
+    listTemplates:        vi.fn(),
     generateDesign:       vi.fn(),
   };
 });
@@ -53,14 +53,14 @@ describe('DesignSetupPanel', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     api.listProjectArtifacts.mockResolvedValue(ARTIFACTS);
-    api.listGroupTemplates.mockResolvedValue(TEMPLATES);
+    api.listTemplates.mockResolvedValue(TEMPLATES);
     api.generateDesign.mockResolvedValue({});
   });
 
   it('loads project artifacts and group templates on mount', async () => {
     await mountPanel();
     expect(api.listProjectArtifacts).toHaveBeenCalledWith('proj-1');
-    expect(api.listGroupTemplates).toHaveBeenCalledWith('g1');
+    expect(api.listTemplates).toHaveBeenCalled();
   });
 
   it('renders as a full-page setup surface', async () => {
