@@ -40,7 +40,7 @@ use knowledge_server::{
     },
     llm::{
         LlmProvider,
-        types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ToolCall, ToolDefinition},
+        types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, Role, ToolCall, ToolDefinition},
     },
     machines::{CommandResult, ConnectedAgent, MachineRegistry, ServerToAgent, TerraformAction},
     neo4j::Neo4jClient,
@@ -102,6 +102,28 @@ fn tool_result_contents(messages: &[Message]) -> Vec<&str> {
             None
         }
     }).collect()
+}
+
+fn message_text(m: &Message) -> String {
+    match &m.content {
+        MessageContent::Text(t) => t.clone(),
+        MessageContent::Parts(parts) => parts.iter().filter_map(|p| match p {
+            ContentPart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        }).collect::<Vec<_>>().join("\n"),
+    }
+}
+
+fn captured_prompt_for_design(messages: &[Message]) -> (String, String) {
+    let system = messages.iter()
+        .find(|m| matches!(m.role, Role::System))
+        .map(message_text)
+        .unwrap_or_default();
+    let user = messages.iter().rev()
+        .find(|m| matches!(m.role, Role::User))
+        .map(message_text)
+        .unwrap_or_default();
+    (system, user)
 }
 
 struct ClosureLlm(Box<dyn Fn(&[Message]) -> LlmResponse + Send + Sync>);
@@ -1163,6 +1185,123 @@ async fn generate_design_calls_tools_and_links_artifact() {
     assert_eq!(status, StatusCode::OK);
     assert!(body["design_doc"]["id"].is_string());
     assert_eq!(body["design_doc"]["title"], "Design");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn generate_design_includes_selected_artifacts_and_links_template() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "b@x.com", "Bob", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let setup_app = deployments_app(Arc::clone(&neo4j)).0;
+    let pid = seed_project(&setup_app, &tok, &gid, "Customer B").await;
+    let did = create_deployment_raw(&setup_app, &tok, &pid, "Rollout").await;
+
+    let (tpl_status, tpl_body) = send(
+        setup_app.clone(),
+        req_post(&format!("/groups/{gid}/templates"), &tok, json!({
+            "name": "Gateway", "description": "baseline rollout",
+            "content": "# Gateway playbook\nprovision 3 nodes"
+        })),
+    ).await;
+    assert_eq!(tpl_status, StatusCode::CREATED);
+    let tpl_id = tpl_body["id"].as_str().unwrap().to_string();
+
+    let a1 = create_artifact(&neo4j, &pid, ArtifactKind::Markdown, "Requirements", "We need 3 VMs across two zones", "system").await.unwrap();
+    let a1_id = a1["id"].as_str().unwrap().to_string();
+    let a2 = create_artifact(&neo4j, &pid, ArtifactKind::Markdown, "Constraints", "No public IPs are allowed", "system").await.unwrap();
+    let a2_id = a2["id"].as_str().unwrap().to_string();
+
+    let captured = Arc::new(std::sync::Mutex::new(None::<(String, String)>));
+    let captured_for_llm = Arc::clone(&captured);
+    let llm = ClosureLlm::new(move |messages| {
+        let count = tool_result_contents(messages).len();
+        if count == 0 {
+            captured_for_llm.lock().unwrap().replace(captured_prompt_for_design(messages));
+        }
+        match count {
+            0 => tool_call_response("generate_artifact", json!({
+                "title": "Design", "kind": "markdown", "content": "# Design\nUse a single VM."
+            })),
+            1 => {
+                let result: Value = serde_json::from_str(tool_result_contents(messages)[0]).unwrap();
+                let id = result["id"].as_str().unwrap();
+                tool_call_response("link_deployment_artifact", json!({ "artifact_id": id, "role": "design" }))
+            }
+            _ => text_response("Design document created."),
+        }
+    });
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/design/generate"), &tok, json!({
+            "artifact_ids": [a1_id, a2_id],
+            "product_template_id": tpl_id,
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["design_doc"]["id"].is_string());
+
+    let (system_prompt, user_prompt) = captured.lock().unwrap().clone().unwrap();
+    assert!(user_prompt.contains("We need 3 VMs across two zones"));
+    assert!(user_prompt.contains("No public IPs are allowed"));
+    assert!(system_prompt.contains("Gateway playbook"));
+
+    let (_, dep) = send(setup_app, req_get(&format!("/projects/{pid}/deployment"), &tok)).await;
+    assert_eq!(dep["template_id"], tpl_id);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn generate_design_ignores_artifacts_belonging_to_other_projects() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "c@x.com", "Carol", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let setup_app = deployments_app(Arc::clone(&neo4j)).0;
+    let pid = seed_project(&setup_app, &tok, &gid, "Customer C").await;
+    let did = create_deployment_raw(&setup_app, &tok, &pid, "Rollout").await;
+    let other_pid = seed_project(&setup_app, &tok, &gid, "Customer D").await;
+
+    let own = create_artifact(&neo4j, &pid, ArtifactKind::Markdown, "Own", "OWN-MARKER-keep", "system").await.unwrap();
+    let own_id = own["id"].as_str().unwrap().to_string();
+    let foreign = create_artifact(&neo4j, &other_pid, ArtifactKind::Markdown, "Foreign", "FOREIGN-MARKER-leak", "system").await.unwrap();
+    let foreign_id = foreign["id"].as_str().unwrap().to_string();
+
+    let captured = Arc::new(std::sync::Mutex::new(None::<String>));
+    let captured_for_llm = Arc::clone(&captured);
+    let llm = ClosureLlm::new(move |messages| {
+        let count = tool_result_contents(messages).len();
+        if count == 0 {
+            captured_for_llm.lock().unwrap().replace(captured_prompt_for_design(messages).1);
+        }
+        match count {
+            0 => tool_call_response("generate_artifact", json!({
+                "title": "Design", "kind": "markdown", "content": "# Design\n"
+            })),
+            1 => {
+                let result: Value = serde_json::from_str(tool_result_contents(messages)[0]).unwrap();
+                let id = result["id"].as_str().unwrap();
+                tool_call_response("link_deployment_artifact", json!({ "artifact_id": id, "role": "design" }))
+            }
+            _ => text_response("done"),
+        }
+    });
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+
+    let (status, _body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/design/generate"), &tok, json!({
+            "artifact_ids": [own_id.clone(), foreign_id],
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let prompt = captured.lock().unwrap().clone().unwrap();
+    assert!(prompt.contains("OWN-MARKER-keep"));
+    assert!(!prompt.contains("FOREIGN-MARKER-leak"));
 }
 
 #[tokio::test]

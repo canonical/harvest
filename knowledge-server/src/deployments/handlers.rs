@@ -793,23 +793,77 @@ pub async fn generate_design(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
+    body: Json<GenerateDesignBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id).await?;
+    let group_id = project["group_id"].as_str().unwrap_or_default().to_string();
 
-    let prompt = "Write a deployment design document in Markdown, based on the product template \
-                  and customer environment you were given. Cover the architecture, key \
-                  configuration choices, and how it fits the customer's environment. Then call \
-                  generate_artifact with kind \"markdown\" to save it, and immediately call \
-                  link_deployment_artifact with role \"design\" using the returned artifact id. \
-                  Do not call any other tools.";
+    if let Some(template_id) = &body.product_template_id {
+        let exists = state.neo4j.query_read(
+            "MATCH (:Group {id: $gid})-[:HAS_TEMPLATE]->(t:ProductTemplate {id: $tid}) RETURN 1",
+            json!({ "gid": group_id, "tid": template_id }),
+        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        if exists.is_empty() {
+            return Err(err(StatusCode::BAD_REQUEST, "template not found in this group"));
+        }
+        state.neo4j.query_read(
+            "MATCH (d:Deployment {id: $did})
+             OPTIONAL MATCH (d)-[old:USES_TEMPLATE]->(:ProductTemplate)
+             DELETE old
+             WITH d
+             MATCH (t:ProductTemplate {id: $tid})
+             CREATE (d)-[:USES_TEMPLATE]->(t)",
+            json!({ "did": deployment_id, "tid": template_id }),
+        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    }
 
-    agent.query(prompt, &[], &[], None).await
+    let selected_artifacts = if body.artifact_ids.is_empty() {
+        Vec::new()
+    } else {
+        state.neo4j.query_read(
+            "MATCH (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact)
+             WHERE a.id IN $ids
+             RETURN a.id AS id, a.title AS title, a.kind AS kind, a.content AS content
+             ORDER BY a.title",
+            json!({ "pid": project_id, "ids": body.artifact_ids }),
+        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
+    };
+
+    let agent = build_deployment_agent(&state, &project_id, &group_id, &deployment_id).await?;
+
+    let mut prompt = String::from(
+        "Write a deployment design document in Markdown, based on the product template \
+         and customer environment you were given. Cover the architecture, key \
+         configuration choices, and how it fits the customer's environment."
+    );
+    if !selected_artifacts.is_empty() {
+        prompt.push_str("\n\n## Selected context artifacts\n\nThe field engineer selected the \
+                         following project artifacts as relevant context. Read and use them to \
+                         inform the design.\n\n");
+        for a in &selected_artifacts {
+            let title = a["title"].as_str().unwrap_or("(untitled)");
+            let kind  = a["kind"].as_str().unwrap_or("markdown");
+            let content = a["content"].as_str().unwrap_or("");
+            prompt.push_str(&format!("### {title} ({kind})\n\n{content}\n\n"));
+        }
+    }
+    prompt.push_str("Then call generate_artifact with kind \"markdown\" to save it, and \
+                     immediately call link_deployment_artifact with role \"design\" using the \
+                     returned artifact id. Do not call any other tools.");
+
+    agent.query(&prompt, &[], &[], None).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct GenerateDesignBody {
+    #[serde(default)]
+    pub artifact_ids: Vec<String>,
+    #[serde(default)]
+    pub product_template_id: Option<String>,
 }
 
 pub async fn generate_design_decisions(
