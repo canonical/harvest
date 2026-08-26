@@ -3,15 +3,20 @@ use serde_json::{json, Value};
 pub struct ChainBuilder {
     chain: Vec<Value>,
     pending_thinking: String,
+    pending_thinking_delta: String,
 }
 
 impl ChainBuilder {
     pub fn new() -> Self {
-        Self { chain: Vec::new(), pending_thinking: String::new() }
+        Self { chain: Vec::new(), pending_thinking: String::new(), pending_thinking_delta: String::new() }
     }
 
     pub fn text_delta(&mut self, text: &str) {
         self.pending_thinking.push_str(text);
+    }
+
+    pub fn thinking_delta(&mut self, text: &str) {
+        self.pending_thinking_delta.push_str(text);
     }
 
     pub fn thinking(&mut self, text: &str) {
@@ -62,6 +67,10 @@ impl ChainBuilder {
     }
 
     fn flush_pending(&mut self) {
+        if !self.pending_thinking_delta.is_empty() {
+            let text = std::mem::take(&mut self.pending_thinking_delta);
+            self.chain.push(json!({ "type": "thinking", "text": text }));
+        }
         if !self.pending_thinking.is_empty() {
             let text = std::mem::take(&mut self.pending_thinking);
             self.chain.push(json!({ "type": "thinking", "text": text }));
@@ -236,5 +245,37 @@ mod tests {
         b.tool_result("search", "ok");
         b.text_delta("Here is the final answer");
         assert_eq!(b.finish().len(), 1);
+    }
+
+    #[test]
+    fn thinking_delta_accumulates_and_flushes_before_tool_call() {
+        let mut b = ChainBuilder::new();
+        b.thinking_delta("I should ");
+        b.thinking_delta("search");
+        b.tool_call("search", &json!({}), None, None);
+        let chain = b.finish();
+        assert_eq!(chain.len(), 2);
+        assert_eq!(chain[0], json!({"type": "thinking", "text": "I should search"}));
+        assert_eq!(chain[1]["type"], json!("tool_call"));
+    }
+
+    #[test]
+    fn thinking_delta_and_text_delta_produce_separate_thinking_items() {
+        let mut b = ChainBuilder::new();
+        b.thinking_delta("reasoning here");
+        b.text_delta("preamble text");
+        b.tool_call("search", &json!({}), None, None);
+        let chain = b.finish();
+        assert_eq!(chain.len(), 3);
+        assert_eq!(chain[0], json!({"type": "thinking", "text": "reasoning here"}));
+        assert_eq!(chain[1], json!({"type": "thinking", "text": "preamble text"}));
+        assert_eq!(chain[2]["type"], json!("tool_call"));
+    }
+
+    #[test]
+    fn thinking_delta_alone_not_flushed_without_tool_call() {
+        let mut b = ChainBuilder::new();
+        b.thinking_delta("orphan thinking");
+        assert_eq!(b.finish().len(), 0);
     }
 }
