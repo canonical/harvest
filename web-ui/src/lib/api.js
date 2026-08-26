@@ -391,6 +391,7 @@ const ARTIFACTS_URL = '/artifacts';
 const artifactUrl = (id) => `${ARTIFACTS_URL}/${encodeURIComponent(id)}`;
 
 export const listProjectArtifacts  = (projectId) => projectFetch(`${projectUrl(projectId)}/artifacts`);
+export const createProjectArtifact = (projectId, body) => projectFetch(`${projectUrl(projectId)}/artifacts`, { method: 'POST', body: JSON.stringify(body) });
 export const getArtifact           = (id)         => projectFetch(artifactUrl(id));
 export const updateArtifact       = (id, body)   => projectFetch(artifactUrl(id), { method: 'PUT', body: JSON.stringify(body) });
 export const artifactDownloadUrl   = (id)         => `${artifactUrl(id)}/download`;
@@ -506,20 +507,29 @@ export const redeployFromIssue  = (projectId, id, body) =>
 export const sendIssueChatMessage = (projectId, id, message) =>
   projectFetch(`${issueUrl(projectId, id)}/chat`, { method: 'POST', body: JSON.stringify({ message }) });
 
-const GROUPS_URL = '/groups';
-const groupUrl = (id) => `${GROUPS_URL}/${encodeURIComponent(id)}`;
-const templateUrl = (groupId, id) => `${groupUrl(groupId)}/templates/${encodeURIComponent(id)}`;
+const TEMPLATES_URL = '/templates';
+const templateDetailUrl = (id) => `${TEMPLATES_URL}/${encodeURIComponent(id)}`;
 
-export const listGroupTemplates  = (groupId)           => projectFetch(`${groupUrl(groupId)}/templates`);
-export const createGroupTemplate = (groupId, body)     => projectFetch(`${groupUrl(groupId)}/templates`, { method: 'POST', body: JSON.stringify(body) });
-export const getGroupTemplate    = (groupId, id)       => projectFetch(templateUrl(groupId, id));
-export const updateGroupTemplate = (groupId, id, body) => projectFetch(templateUrl(groupId, id), { method: 'PUT', body: JSON.stringify(body) });
-export async function deleteGroupTemplate(groupId, id) {
-  const res = await fetch(templateUrl(groupId, id), { method: 'DELETE' });
+export const listTemplates  = ()           => projectFetch(TEMPLATES_URL);
+export const getTemplate    = (id)         => projectFetch(templateDetailUrl(id));
+export const createTemplate = (body)      => projectFetch(TEMPLATES_URL, { method: 'POST', body: JSON.stringify(body) });
+export const updateTemplate = (id, body)   => projectFetch(templateDetailUrl(id), { method: 'PUT', body: JSON.stringify(body) });
+export async function deleteTemplate(id) {
+  const res = await fetch(templateDetailUrl(id), { method: 'DELETE' });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `Request failed (${res.status})`);
   }
+}
+export async function uploadTemplate(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const res = await fetch(`${TEMPLATES_URL}/upload`, { method: 'POST', body: formData });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
+  return res.json();
 }
 
 export const listGlobalSkills  = ()       => projectFetch('/skills');

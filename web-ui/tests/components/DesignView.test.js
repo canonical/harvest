@@ -9,7 +9,7 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
     ...actual,
     getProjectDeploymentSingle: vi.fn(),
     listProjectArtifacts:       vi.fn(() => Promise.resolve([])),
-    listGroupTemplates:         vi.fn(() => Promise.resolve([])),
+    listTemplates:             vi.fn(() => Promise.resolve([])),
     generateDesign:             vi.fn(() => Promise.resolve({})),
   };
 });

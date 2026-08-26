@@ -3,11 +3,12 @@ import {
   queryStream, fetchLlmProviders, projectQueryStart, runTerraformArtifact,
   listProjectDeployments, createProjectDeployment, getProjectDeployment, updateProjectDeployment,
   deleteProjectDeployment, deployDeployment, redeployDeployment, destroyDeployment, listDeploymentRuns,
-  listGroupTemplates, createGroupTemplate, getGroupTemplate, updateGroupTemplate, deleteGroupTemplate,
+  listTemplates, createTemplate, getTemplate, updateTemplate, deleteTemplate,
   generateEnvironmentQuestions, generateDesign, generateDesignDecisions, reviseDesign,
   generateProvision, proposeProvisionChange, applyProvisionChange,
   listProjectIssues, getProjectIssue, updateIssueStatus, createIssueComment,
   applyIssueSolution, redeployFromIssue, sendIssueChatMessage,
+  createProjectArtifact,
 } from '../../src/lib/api.js';
 
 function mockStreamResponse() {
@@ -212,39 +213,39 @@ describe('deployment API functions', () => {
     expect(global.fetch.mock.calls[0][0]).toBe('/projects/proj1/deployments/d1/runs');
   });
 
-  it('listGroupTemplates GETs the group templates list', async () => {
+  it('listTemplates GETs the global templates list', async () => {
     global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse([])));
-    await listGroupTemplates('grp1');
-    expect(global.fetch.mock.calls[0][0]).toBe('/groups/grp1/templates');
+    await listTemplates();
+    expect(global.fetch.mock.calls[0][0]).toBe('/templates');
   });
 
-  it('createGroupTemplate POSTs name/description/content', async () => {
+  it('createTemplate POSTs name/description/content', async () => {
     global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ id: 't1' })));
-    await createGroupTemplate('grp1', { name: 'X', description: 'd', content: 'c' });
+    await createTemplate({ name: 'X', description: 'd', content: 'c' });
     const [url, options] = global.fetch.mock.calls[0];
-    expect(url).toBe('/groups/grp1/templates');
+    expect(url).toBe('/templates');
     expect(options.method).toBe('POST');
   });
 
-  it('getGroupTemplate GETs a single template', async () => {
+  it('getTemplate GETs a single template', async () => {
     global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ id: 't1' })));
-    await getGroupTemplate('grp1', 't1');
-    expect(global.fetch.mock.calls[0][0]).toBe('/groups/grp1/templates/t1');
+    await getTemplate('t1');
+    expect(global.fetch.mock.calls[0][0]).toBe('/templates/t1');
   });
 
-  it('updateGroupTemplate PUTs a template', async () => {
+  it('updateTemplate PUTs a template', async () => {
     global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ ok: true })));
-    await updateGroupTemplate('grp1', 't1', { content: 'c2' });
+    await updateTemplate('t1', { content: 'c2' });
     const [url, options] = global.fetch.mock.calls[0];
-    expect(url).toBe('/groups/grp1/templates/t1');
+    expect(url).toBe('/templates/t1');
     expect(options.method).toBe('PUT');
   });
 
-  it('deleteGroupTemplate DELETEs a template', async () => {
+  it('deleteTemplate DELETEs a template', async () => {
     global.fetch = vi.fn(() => Promise.resolve({ ok: true, status: 204, json: () => Promise.resolve({}) }));
-    await deleteGroupTemplate('grp1', 't1');
+    await deleteTemplate('t1');
     const [url, options] = global.fetch.mock.calls[0];
-    expect(url).toBe('/groups/grp1/templates/t1');
+    expect(url).toBe('/templates/t1');
     expect(options.method).toBe('DELETE');
   });
 });
@@ -272,6 +273,15 @@ describe('deployment phase-action API functions', () => {
     const [, options] = global.fetch.mock.calls[0];
     expect(options.method).toBe('POST');
     expect(JSON.parse(options.body)).toEqual({ artifact_ids: ['a1', 'a2'], product_template_id: 't1' });
+  });
+
+  it('createProjectArtifact POSTs title, kind and content to the project artifacts route', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ id: 'a9' })));
+    await createProjectArtifact('proj1', { title: 'Notes', kind: 'markdown', content: '# Hi' });
+    const [url, options] = global.fetch.mock.calls[0];
+    expect(url).toBe('/projects/proj1/artifacts');
+    expect(options.method).toBe('POST');
+    expect(JSON.parse(options.body)).toEqual({ title: 'Notes', kind: 'markdown', content: '# Hi' });
   });
 
   it('generateDesignDecisions POSTs to the design/decisions route', async () => {

@@ -121,6 +121,12 @@
                     </router-link>
                   </li>
                   <li class="p-side-navigation__item">
+                    <router-link to="/artifacts" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
+                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
+                      <span class="p-side-navigation__label">Artifacts</span>
+                    </router-link>
+                  </li>
+                  <li class="p-side-navigation__item">
                     <router-link to="/agents" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
                       <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
                       <span class="p-side-navigation__label">Agents</span>
@@ -142,12 +148,6 @@
                     <router-link to="/skills" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
                       <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A6 6 0 1 0 6 9c0 1.5.4 2.6 1.5 3.5A5.4 5.4 0 0 1 9 14"/></svg>
                       <span class="p-side-navigation__label">Skills</span>
-                    </router-link>
-                  </li>
-                  <li class="p-side-navigation__item">
-                    <router-link to="/artifacts" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
-                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
-                      <span class="p-side-navigation__label">Artifacts</span>
                     </router-link>
                   </li>
                   <li class="sidenav-separator" role="separator" aria-hidden="true"></li>
