@@ -1,12 +1,18 @@
 use axum::{
     extract::{Extension, Path, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{HeaderName, HeaderValue, StatusCode},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
     Json,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentEvent};
@@ -832,6 +838,22 @@ pub async fn generate_design(
     Path((project_id, deployment_id)): Path<(String, String)>,
     body: Json<GenerateDesignBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let (agent, prompt) = prepare_design_generation(&state, &user, &project_id, &deployment_id, &body).await?;
+
+    agent.query(&prompt, &[], &[], None).await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    Ok(Json(deployment))
+}
+
+async fn prepare_design_generation(
+    state:         &ProjectState,
+    user:          &Claims,
+    project_id:    &str,
+    deployment_id: &str,
+    body:          &GenerateDesignBody,
+) -> Result<(Arc<Agent>, String), ApiError> {
     let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default().to_string();
 
@@ -866,7 +888,7 @@ pub async fn generate_design(
         ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
     };
 
-    let agent = build_deployment_agent(&state, &project_id, &group_id, &deployment_id).await?;
+    let agent = build_deployment_agent(state, project_id, &group_id, deployment_id).await?;
 
     let mut prompt = String::from(
         "Write a deployment design document in Markdown, based on the product template \
@@ -888,11 +910,39 @@ pub async fn generate_design(
                      immediately call link_deployment_artifact with role \"design\" using the \
                      returned artifact id. Do not call any other tools.");
 
-    agent.query(&prompt, &[], &[], None).await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    Ok((agent, prompt))
+}
 
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
-    Ok(Json(deployment))
+pub async fn generate_design_stream(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, deployment_id)): Path<(String, String)>,
+    body: Json<GenerateDesignBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (agent, prompt) = prepare_design_generation(&state, &user, &project_id, &deployment_id, &body).await?;
+
+    let (tx, rx) = mpsc::channel::<AgentEvent>(64);
+    tokio::spawn(async move {
+        let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
+        tokio::spawn(async move {
+            agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
+        });
+        while let Some(event) = agent_rx.recv().await {
+            let _ = tx.send(event).await;
+        }
+    });
+
+    let stream = ReceiverStream::new(rx).map(|event| {
+        let data = serde_json::to_string(&event).unwrap_or_default();
+        Ok::<Event, Infallible>(Event::default().data(data))
+    });
+
+    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    Ok(response)
 }
 
 #[derive(serde::Deserialize, Default)]
