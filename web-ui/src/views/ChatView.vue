@@ -37,16 +37,6 @@
           />
         </div>
 
-        <div v-if="chat.suggestions.length && !chat.loading" class="message__suggestions">
-          <button
-            v-for="s in chat.suggestions"
-            :key="s"
-            class="btn-suggestion"
-            type="button"
-            @click="sendWithChoice(s)"
-          >{{ s }}</button>
-        </div>
-
         <div class="input-area">
           <div class="input-area__main">
             <div v-if="pendingAttachments.length" class="attachment-tray">
@@ -321,10 +311,8 @@ function handleProjectEvent(event) {
     case 'question':
     case 'confirm_action':
     case 'intent':
-    case 'plan':
-    case 'plan_step_update':
+    case 'phase':
     case 'done':
-    case 'suggestions':
     case 'error':
       if (event.conv_id !== activeConvId.value) break;
       handleChatEvent(event);
@@ -351,7 +339,6 @@ async function loadConversation(id) {
       : await getConversation(id);
     activeConvId.value = id;
     chat.loadFromHistory(Array.isArray(conv.messages) ? conv.messages : []);
-    chat.setSuggestions(Array.isArray(conv.suggestions) ? conv.suggestions : []);
     historyOpen.value = false;
     openEventStream();
     await nextTick();
@@ -508,7 +495,6 @@ async function handleConfirmAllActions() {
 function handleChatEvent(event) {
   switch (event.type) {
     case 'user_message':
-      chat.setSuggestions([]);
       chat.addUserMessage(event.query ?? '', event.username ?? null, event.attachments ?? []);
       chat.startAssistantMessage();
       break;
@@ -520,8 +506,7 @@ function handleChatEvent(event) {
     case 'question':       chat.setQuestion(event.question, event.choices); break;
     case 'confirm_action': chat.addConfirmAction(event.id, event.name, event.input, event.description); break;
     case 'intent':         chat.setIntent(event.mode); break;
-    case 'plan':            chat.setPlan(event.steps); break;
-    case 'plan_step_update': chat.updatePlanStep(event.index, event.status); break;
+    case 'phase':           chat.setPhase(event.label); break;
     case 'done':
       chat.finalizeAssistantMessage({
         answer: event.answer, sources: event.sources, tool_calls_made: event.tool_calls_made,
@@ -529,7 +514,6 @@ function handleChatEvent(event) {
       });
       updateConvTitle();
       break;
-    case 'suggestions':    chat.setSuggestions(event.choices ?? []); break;
     case 'error':          chat.setError(event.message); break;
     case 'title_updated': {
       const idx = conversations.value.findIndex(c => c.id === activeConvId.value);

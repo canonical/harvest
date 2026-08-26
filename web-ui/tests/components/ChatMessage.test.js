@@ -136,6 +136,50 @@ describe('ChatMessage — provider badge', () => {
   });
 });
 
+describe('ChatMessage — status bar (intent + phase)', () => {
+  const loadingWithIntent = {
+    role: 'assistant', status: 'loading',
+    chain: [], tool_calls: [],
+    intent: 'research', phase: 'Reading source',
+    answer: null, pendingAnswer: '', sources: [], tool_calls_made: 0,
+  };
+
+  const doneWithIntent = {
+    role: 'assistant', status: 'done',
+    chain: [], tool_calls: [],
+    intent: 'research', phase: null,
+    answer: 'Done', sources: [], tool_calls_made: 1,
+  };
+
+  it('renders intent badge and phase label in a single status-bar row', () => {
+    const w = mount(ChatMessage, { props: { msg: loadingWithIntent } });
+    const bar = w.find('.message__status-bar');
+    expect(bar.exists()).toBe(true);
+    expect(bar.find('.intent-badge').exists()).toBe(true);
+    expect(bar.find('.phase-label').exists()).toBe(true);
+  });
+
+  it('status bar is sticky while loading', () => {
+    const w = mount(ChatMessage, { props: { msg: loadingWithIntent } });
+    expect(w.find('.message__status-bar--sticky').exists()).toBe(true);
+  });
+
+  it('status bar is not sticky when done', () => {
+    const w = mount(ChatMessage, { props: { msg: doneWithIntent } });
+    expect(w.find('.message__status-bar--sticky').exists()).toBe(false);
+  });
+
+  it('does not show phase label when done', () => {
+    const w = mount(ChatMessage, { props: { msg: doneWithIntent } });
+    expect(w.find('.phase-label').exists()).toBe(false);
+  });
+
+  it('still shows intent badge when done', () => {
+    const w = mount(ChatMessage, { props: { msg: doneWithIntent } });
+    expect(w.find('.intent-badge').exists()).toBe(true);
+  });
+});
+
 describe('ChatMessage — error', () => {
   it('renders error message', () => {
     const w = mount(ChatMessage, { props: { msg: assistantError } });
@@ -154,9 +198,9 @@ describe('ChatMessage — structure', () => {
     expect(w.find('.message__sender').exists()).toBe(true);
   });
 
-  it('assistant answer is inside .message__bubble', () => {
+  it('assistant answer is not inside a bubble (full-width)', () => {
     const w = mount(ChatMessage, { props: { msg: assistantDone } });
-    expect(w.find('.message__bubble').exists()).toBe(true);
+    expect(w.find('.message--assistant .message__bubble').exists()).toBe(false);
   });
 
   it('sources use .source-chips container', () => {
