@@ -20,7 +20,7 @@ toml         = "0.8"
 clap         = { version = "4", features = ["derive"] }
 
 # HTTP server
-axum         = { version = "0.7", features = ["json", "macros", "ws"] }
+axum         = { version = "0.7", features = ["json", "macros", "ws", "multipart"] }
 futures      = { version = "0.3", default-features = false, features = ["std"] }
 tower        = { version = "0.4", features = ["util"] }
 tower-http   = { version = "0.5", features = ["cors", "trace"] }
@@ -62,6 +62,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Artifact PDF rendering
 markdown2pdf = "1.5"
+
+# Archive extraction
+zip = "2"
 
 [dev-dependencies]
 http-body-util       = "0.1.3"

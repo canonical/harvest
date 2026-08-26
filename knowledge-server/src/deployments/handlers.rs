@@ -55,15 +55,13 @@ pub async fn require_group_access(
 pub async fn list_templates(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
-    Path(group_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_group_access(&state.neo4j, &user.sub, &user.role, &group_id).await?;
     let rows = state.neo4j.query_read(
-        "MATCH (:Group {id: $gid})-[:HAS_TEMPLATE]->(t:ProductTemplate)
-         RETURN t.id AS id, t.name AS name, t.description AS description,
-                t.created_by AS created_by, t.created_at AS created_at, t.updated_at AS updated_at
-         ORDER BY t.name",
-        json!({ "gid": group_id }),
+        "MATCH (t:ProductTemplate)
+          RETURN t.id AS id, t.name AS name, t.description AS description,
+                 t.created_by AS created_by, t.created_at AS created_at, t.updated_at AS updated_at
+          ORDER BY t.name",
+        json!({}),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(rows))
 }
@@ -71,14 +69,13 @@ pub async fn list_templates(
 pub async fn get_template(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
-    Path((group_id, template_id)): Path<(String, String)>,
+    Path(template_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_group_access(&state.neo4j, &user.sub, &user.role, &group_id).await?;
     let rows = state.neo4j.query_read(
-        "MATCH (:Group {id: $gid})-[:HAS_TEMPLATE]->(t:ProductTemplate {id: $tid})
-         RETURN t.id AS id, t.name AS name, t.description AS description, t.content AS content,
-                t.created_by AS created_by, t.created_at AS created_at, t.updated_at AS updated_at",
-        json!({ "gid": group_id, "tid": template_id }),
+        "MATCH (t:ProductTemplate {id: $tid})
+          RETURN t.id AS id, t.name AS name, t.description AS description, t.content AS content,
+                 t.created_by AS created_by, t.created_at AS created_at, t.updated_at AS updated_at",
+        json!({ "tid": template_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
@@ -95,10 +92,8 @@ pub struct CreateTemplateBody {
 pub async fn create_template(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
-    Path(group_id): Path<String>,
     Json(body): Json<CreateTemplateBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_group_access(&state.neo4j, &user.sub, &user.role, &group_id).await?;
     let name = body.name.trim().to_string();
     if name.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "name is required"));
@@ -106,14 +101,12 @@ pub async fn create_template(
     let id  = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     state.neo4j.query_read(
-        "MATCH (g:Group {id: $gid})
-         CREATE (t:ProductTemplate {
-             id: $id, name: $name, description: $description, content: $content,
-             created_by: $uid, created_at: $now, updated_at: $now
-         })
-         CREATE (g)-[:HAS_TEMPLATE]->(t)",
+        "CREATE (t:ProductTemplate {
+              id: $id, name: $name, description: $description, content: $content,
+              created_by: $uid, created_at: $now, updated_at: $now
+          }) RETURN t.id AS id",
         json!({
-            "gid": group_id, "id": id, "name": name, "description": body.description,
+            "id": id, "name": name, "description": body.description,
             "content": body.content, "uid": user.sub, "now": now,
         }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
@@ -130,18 +123,17 @@ pub struct UpdateTemplateBody {
 pub async fn update_template(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
-    Path((group_id, template_id)): Path<(String, String)>,
+    Path(template_id): Path<String>,
     Json(body): Json<UpdateTemplateBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_group_access(&state.neo4j, &user.sub, &user.role, &group_id).await?;
     if let Some(ref name) = body.name {
         if name.trim().is_empty() {
             return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
         }
     }
     let exists = state.neo4j.query_read(
-        "MATCH (:Group {id: $gid})-[:HAS_TEMPLATE]->(t:ProductTemplate {id: $tid}) RETURN 1",
-        json!({ "gid": group_id, "tid": template_id }),
+        "MATCH (t:ProductTemplate {id: $tid}) RETURN 1",
+        json!({ "tid": template_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if exists.is_empty() {
         return Err(err(StatusCode::NOT_FOUND, "not found"));
@@ -153,10 +145,10 @@ pub async fn update_template(
     if body.description.is_some() { set_clauses.push("t.description = $description"); }
     if body.content.is_some()     { set_clauses.push("t.content = $content"); }
     let cypher = format!(
-        "MATCH (:Group {{id: $gid}})-[:HAS_TEMPLATE]->(t:ProductTemplate {{id: $tid}}) SET {} RETURN t.id",
+        "MATCH (t:ProductTemplate {{id: $tid}}) SET {} RETURN t.id",
         set_clauses.join(", ")
     );
-    let mut params = json!({ "gid": group_id, "tid": template_id, "now": now });
+    let mut params = json!({ "tid": template_id, "now": now });
     if let Some(name)        = &body.name        { params["name"]        = json!(name.trim()); }
     if let Some(description) = &body.description { params["description"] = json!(description); }
     if let Some(content)     = &body.content     { params["content"]     = json!(content); }
@@ -168,14 +160,60 @@ pub async fn update_template(
 pub async fn delete_template(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
-    Path((group_id, template_id)): Path<(String, String)>,
+    Path(template_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_group_access(&state.neo4j, &user.sub, &user.role, &group_id).await?;
     state.neo4j.query_read(
-        "MATCH (:Group {id: $gid})-[:HAS_TEMPLATE]->(t:ProductTemplate {id: $tid}) DETACH DELETE t",
-        json!({ "gid": group_id, "tid": template_id }),
+        "MATCH (t:ProductTemplate {id: $tid}) DETACH DELETE t",
+        json!({ "tid": template_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn upload_template(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<impl IntoResponse, ApiError> {
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut filename = "upload.harvest".to_string();
+
+    while let Some(field) = multipart.next_field().await
+        .map_err(|e| err(StatusCode::BAD_REQUEST, &format!("multipart error: {e}")))?
+    {
+        if field.name() == Some("file") {
+            if let Some(fname) = field.file_name() {
+                filename = fname.to_string();
+            }
+            let bytes = field.bytes().await
+                .map_err(|e| err(StatusCode::BAD_REQUEST, &format!("failed to read file: {e}")))?;
+            file_bytes = Some(bytes.to_vec());
+        }
+    }
+
+    let bytes = file_bytes
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "no file field in multipart request"))?;
+
+    let parsed = super::harvest::parse_harvest_archive(&bytes)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+
+    let name = super::harvest::derive_template_name(&parsed);
+    let content = serde_json::to_string(&super::harvest::harvest_to_json(&parsed))
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "failed to serialize template content"))?;
+
+    let id  = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    state.neo4j.query_read(
+        "CREATE (t:ProductTemplate {
+              id: $id, name: $name, description: $description, content: $content,
+              created_by: $uid, created_at: $now, updated_at: $now
+          }) RETURN t.id AS id",
+        json!({
+            "id": id, "name": name, "description": format!("Uploaded from {filename}"),
+            "content": content, "uid": user.sub, "now": now,
+        }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+
+    Ok((StatusCode::CREATED, Json(json!({ "id": id, "name": name, "created_at": now }))))
 }
 
 pub async fn list_deployments(
@@ -301,13 +339,12 @@ pub async fn create_deployment(
     }
 
     if let Some(template_id) = &body.product_template_id {
-        let group_id = project["group_id"].as_str().unwrap_or_default();
         let exists = state.neo4j.query_read(
-            "MATCH (:Group {id: $gid})-[:HAS_TEMPLATE]->(t:ProductTemplate {id: $tid}) RETURN 1",
-            json!({ "gid": group_id, "tid": template_id }),
+            "MATCH (t:ProductTemplate {id: $tid}) RETURN 1",
+            json!({ "tid": template_id }),
         ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         if exists.is_empty() {
-            return Err(err(StatusCode::BAD_REQUEST, "template not found in this group"));
+            return Err(err(StatusCode::BAD_REQUEST, "template not found"));
         }
     }
 
@@ -800,11 +837,11 @@ pub async fn generate_design(
 
     if let Some(template_id) = &body.product_template_id {
         let exists = state.neo4j.query_read(
-            "MATCH (:Group {id: $gid})-[:HAS_TEMPLATE]->(t:ProductTemplate {id: $tid}) RETURN 1",
-            json!({ "gid": group_id, "tid": template_id }),
+            "MATCH (t:ProductTemplate {id: $tid}) RETURN 1",
+            json!({ "tid": template_id }),
         ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         if exists.is_empty() {
-            return Err(err(StatusCode::BAD_REQUEST, "template not found in this group"));
+            return Err(err(StatusCode::BAD_REQUEST, "template not found"));
         }
         state.neo4j.query_read(
             "MATCH (d:Deployment {id: $did})

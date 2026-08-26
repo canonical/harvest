@@ -1,4 +1,5 @@
 pub mod handlers;
+pub mod harvest;
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
