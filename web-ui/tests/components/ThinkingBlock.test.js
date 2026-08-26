@@ -24,9 +24,9 @@ describe('ThinkingBlock', () => {
     expect(w.find('.thinking-row').exists()).toBe(true);
   });
 
-  it('shows live badge when streaming prop is true', () => {
+  it('does not show live badge when streaming is true (removed)', () => {
     const w = mount(ThinkingBlock, { props: { text: 'thinking...', streaming: true } });
-    expect(w.find('.thinking-badge--live').exists()).toBe(true);
+    expect(w.find('.thinking-badge--live').exists()).toBe(false);
   });
 
   it('does not show live badge when streaming is false', () => {
@@ -44,7 +44,7 @@ describe('ThinkingBlock', () => {
     expect(w.find('.thinking-cursor').exists()).toBe(false);
   });
 
-  it('streaming defaults to false', () => {
+  it('streaming defaults to false (no live badge)', () => {
     const w = mount(ThinkingBlock, { props: { text: 'test' } });
     expect(w.find('.thinking-badge--live').exists()).toBe(false);
     expect(w.find('.thinking-cursor').exists()).toBe(false);

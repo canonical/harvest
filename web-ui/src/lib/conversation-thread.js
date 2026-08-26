@@ -6,7 +6,6 @@ export function createConversationThreadState() {
   const messages          = ref([]);
   const loading           = ref(false);
   const pendingAttachments = ref([]);
-  const suggestions       = ref([]);
 
   function lastAssistant() {
     return messages.value.findLast(m => m.role === 'assistant');
@@ -23,7 +22,7 @@ export function createConversationThreadState() {
       role: 'assistant', status: 'loading',
       chain: [], tool_calls: [], answer: null, pendingAnswer: '',
       sources: [], tool_calls_made: 0, provider_used: null,
-      intent: null, plan: null,
+      intent: null, phase: null,
     });
     loading.value = true;
   }
@@ -125,18 +124,10 @@ export function createConversationThreadState() {
     msg.intent = mode;
   }
 
-  function setPlan(steps) {
+  function setPhase(label) {
     const msg = lastAssistant();
     if (!msg) return;
-    msg.plan = steps;
-  }
-
-  function updatePlanStep(index, status) {
-    const msg = lastAssistant();
-    if (!msg?.plan) return;
-    if (msg.plan[index]) {
-      msg.plan[index].status = status;
-    }
+    msg.phase = label;
   }
 
   function addConfirmAction(id, name, input, description) {
@@ -162,10 +153,6 @@ export function createConversationThreadState() {
     if (!msg) return;
     msg.status = 'loading';
     loading.value = true;
-  }
-
-  function setSuggestions(choices) {
-    suggestions.value = choices ?? [];
   }
 
   function addPendingAttachment(attachment) {
@@ -200,7 +187,7 @@ export function createConversationThreadState() {
         };
         if (m.provider_used) saved.provider = m.provider_used;
         if (m.intent) saved.intent = m.intent;
-        if (m.plan) saved.plan = m.plan;
+        if (m.phase) saved.phase = m.phase;
         return saved;
       });
   });
@@ -249,7 +236,7 @@ export function createConversationThreadState() {
           tool_calls_made: m.tool_calls_made ?? 0,
           provider_used: m.provider ?? null,
           intent: m.intent ?? null,
-          plan: m.plan ?? null,
+          phase: m.phase ?? null,
         };
         if (m.question) msg.question = m.question;
         messages.value.push(msg);
@@ -262,16 +249,15 @@ export function createConversationThreadState() {
     messages.value = [];
     loading.value  = false;
     pendingAttachments.value = [];
-    suggestions.value = [];
   }
 
   return {
-    messages, loading, pendingAttachments, suggestions,
+    messages, loading, pendingAttachments,
     addUserMessage, startAssistantMessage, finalizeAssistantMessage,
     setError, addThinking, addThinkingDelta, addTextDelta, addToolCall,
     completeToolCall, updateToolCallDescription,
-    setQuestion, addConfirmAction, updateConfirmActionItem, resumeAssistantMessage, setSuggestions,
-    setIntent, setPlan, updatePlanStep,
+    setQuestion, addConfirmAction, updateConfirmActionItem, resumeAssistantMessage,
+    setIntent, setPhase,
     addPendingAttachment, removePendingAttachment, clearPendingAttachments,
     saveableMessages, loadFromHistory, reset,
   };
