@@ -14,12 +14,20 @@
           </span>
         </div>
       </div>
+      <DesignGenerationPanel
+        v-if="generating"
+        :project-id="projectId"
+        :deployment-id="deployment.id"
+        :deployment-name="deployment.name"
+        :body="generateBody"
+        @done="onGenerationDone"
+      />
       <DesignSetupPanel
-        v-if="!deployment.design_doc"
+        v-else-if="!deployment.design_doc"
         :project-id="projectId"
         :deployment-id="deployment.id"
         :group-id="groupId"
-        @refresh="load"
+        @generate="onGenerate"
       />
       <DesignPanel
         v-else
@@ -37,6 +45,7 @@
 import { ref, computed, watch } from 'vue';
 import DesignPanel from '../components/deployment/DesignPanel.vue';
 import DesignSetupPanel from '../components/deployment/DesignSetupPanel.vue';
+import DesignGenerationPanel from '../components/deployment/DesignGenerationPanel.vue';
 import { getProjectDeploymentSingle } from '../lib/api.js';
 import { useProjectStore } from '../stores/project.js';
 
@@ -46,8 +55,10 @@ const props = defineProps({
 
 const projectStore = useProjectStore();
 
-const deployment = ref(null);
-const loading    = ref(false);
+const deployment    = ref(null);
+const loading       = ref(false);
+const generating    = ref(false);
+const generateBody  = ref({});
 
 const groupId = computed(() => projectStore.selectedProject?.group_id ?? null);
 
@@ -60,6 +71,17 @@ async function load() {
     deployment.value = null;
   }
   loading.value = false;
+}
+
+function onGenerate(body) {
+  generateBody.value = body;
+  generating.value = true;
+}
+
+async function onGenerationDone() {
+  generating.value = false;
+  generateBody.value = {};
+  await load();
 }
 
 watch(() => props.projectId, () => load(), { immediate: true });

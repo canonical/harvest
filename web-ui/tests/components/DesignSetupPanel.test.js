@@ -20,7 +20,6 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
     ...actual,
     listProjectArtifacts: vi.fn(),
     listTemplates:        vi.fn(),
-    generateDesign:       vi.fn(),
   };
 });
 
@@ -54,7 +53,6 @@ describe('DesignSetupPanel', () => {
     vi.restoreAllMocks();
     api.listProjectArtifacts.mockResolvedValue(ARTIFACTS);
     api.listTemplates.mockResolvedValue(TEMPLATES);
-    api.generateDesign.mockResolvedValue({});
   });
 
   it('loads project artifacts and group templates on mount', async () => {
@@ -150,18 +148,18 @@ describe('DesignSetupPanel', () => {
     expect(summary.text()).toMatch(/2 artifacts/i);
   });
 
-  it('generate sends selected artifact ids and template id and emits refresh', async () => {
+  it('generate emits the selected artifact ids and template id', async () => {
     const { w } = await mountPanel();
     await w.find('[data-testid="template-select"]').setValue('t1');
     await w.find('[data-testid="artifact-checkbox-a1"]').setValue(true);
     await w.find('[data-testid="artifact-checkbox-a3"]').setValue(true);
     await w.find('[data-testid="generate-design-btn"]').trigger('click');
     await flushPromises();
-    expect(api.generateDesign).toHaveBeenCalledWith('proj-1', 'd1', {
+    expect(w.emitted('generate')).toBeTruthy();
+    expect(w.emitted('generate')[0][0]).toEqual({
       artifact_ids: ['a1', 'a3'],
       product_template_id: 't1',
     });
-    expect(w.emitted('refresh')).toBeTruthy();
   });
 
   it('generate works without a template (sends null)', async () => {
@@ -169,29 +167,9 @@ describe('DesignSetupPanel', () => {
     await w.find('[data-testid="artifact-checkbox-a2"]').setValue(true);
     await w.find('[data-testid="generate-design-btn"]').trigger('click');
     await flushPromises();
-    expect(api.generateDesign).toHaveBeenCalledWith('proj-1', 'd1', expect.objectContaining({
+    expect(w.emitted('generate')[0][0]).toEqual({
       artifact_ids: ['a2'],
       product_template_id: null,
-    }));
-  });
-
-  it('disables the generate button while busy', async () => {
-    let resolveGenerate;
-    api.generateDesign.mockReturnValue(new Promise(r => { resolveGenerate = r; }));
-    const { w } = await mountPanel();
-    await w.find('[data-testid="generate-design-btn"]').trigger('click');
-    await flushPromises();
-    expect(w.find('[data-testid="generate-design-btn"]').attributes('disabled')).toBeDefined();
-    resolveGenerate({});
-    await flushPromises();
-  });
-
-  it('shows an error notification when generation fails', async () => {
-    api.generateDesign.mockRejectedValue(new Error('boom'));
-    const { w } = await mountPanel();
-    await w.find('[data-testid="artifact-checkbox-a1"]').setValue(true);
-    await w.find('[data-testid="generate-design-btn"]').trigger('click');
-    await flushPromises();
-    expect(w.text()).toContain('boom');
+    });
   });
 });

@@ -93,7 +93,7 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue';
-import { listProjectArtifacts, listTemplates, generateDesign } from '../../lib/api.js';
+import { listProjectArtifacts, listTemplates } from '../../lib/api.js';
 import BusyStatus from './BusyStatus.vue';
 
 const props = defineProps({
@@ -101,7 +101,7 @@ const props = defineProps({
   deploymentId: { type: String, required: true },
   groupId:      { type: String, default: null },
 });
-const emit = defineEmits(['refresh']);
+const emit = defineEmits(['generate']);
 
 const artifacts           = ref([]);
 const templates           = ref([]);
@@ -174,20 +174,14 @@ async function load() {
   }
 }
 
-async function generate() {
+function generate() {
   busy.value = true;
   error.value = null;
-  try {
-    await generateDesign(props.projectId, props.deploymentId, {
-      artifact_ids: [...selectedArtifactIds.value],
-      product_template_id: selectedTemplateId.value || null,
-    });
-    emit('refresh');
-  } catch (e) {
-    error.value = e.message || 'Failed to generate design';
-  } finally {
-    busy.value = false;
-  }
+  emit('generate', {
+    artifact_ids: [...selectedArtifactIds.value],
+    product_template_id: selectedTemplateId.value || null,
+  });
+  busy.value = false;
 }
 
 watch(() => [props.projectId, props.deploymentId], () => load(), { immediate: true });
