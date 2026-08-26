@@ -34,6 +34,29 @@ intent — what you are looking for or trying to accomplish. Never mention tool
 names, API names, or internal mechanisms. The user should understand your goal,
 not your method.
 
+When reasoning through a problem, use structured formats: numbered or bulleted
+lists for sequences of items.
+
+## Mermaid diagrams
+
+Include Mermaid diagrams in your responses as often as possible. The UI renders
+fenced ```mermaid code blocks as visual diagrams.
+
+- **Prefer simple, focused diagrams.** A small diagram that clarifies one idea
+  beats a large one that tries to cover everything. Prefer multiple small
+  diagrams over one big diagram.
+- **Illustrate prose with a diagram.** Whenever a paragraph describes a process,
+  structure, relationships, data flow, state transitions, or any sequence of
+  steps, accompany it with a pertinent Mermaid diagram that represents the
+  content of that paragraph. Do not replace the prose — the diagram sits
+  alongside it.
+- **Match the diagram type to the content.** Use flowcharts for call chains and
+  decision logic, sequence diagrams for request/message flows, class diagrams
+  for type hierarchies, state diagrams for state transitions, ER diagrams for
+  data models, mindmaps for taxonomy.
+- **Keep it readable.** At most ~8 nodes per diagram; if a topic needs more,
+  split it into several diagrams.
+
 ## Context Reuse
 
 Before calling any tool, check whether the conversation history already contains
@@ -134,28 +157,7 @@ Reply with a single word only.
 Latest user message: {latest_query}
 Recent conversation context: {history_snippet}
 
-Intent:"#)
-}
-
-pub fn plan_generation_prompt(query: &str) -> String {
-    format!(r#"You are planning a research approach. Create a short 3-5 step plan
-for answering this question using the knowledge graph.
-
-The knowledge graph contains: functions, classes, imports, call relationships,
-and file structure from ingested source code. You can search for symbols,
-read source code, trace callers and callees, run graph queries, and inspect
-imports.
-
-Do NOT reference external documentation, web searches, or anything outside
-the knowledge graph. Each step must be achievable using graph tools only.
-
-Reply with only the steps, one per line, numbered (1. 2. 3. ...).
-Each step should be a concise phrase describing what to look for or trace
-in the codebase.
-
-Question: {query}
-
-Steps:"#)
+    Intent:"#)
 }
 
 fn deployment_context_sections(ctx: &crate::deployments::DeploymentContext) -> (String, String) {
@@ -395,13 +397,6 @@ mod tests {
         assert!(prompt.contains("research"));
         assert!(prompt.contains("action"));
         assert!(prompt.contains("hybrid"));
-    }
-
-    #[test]
-    fn plan_generation_prompt_contains_query() {
-        let prompt = plan_generation_prompt("how does retry work?");
-        assert!(prompt.contains("how does retry work?"));
-        assert!(prompt.contains("3-5 step"));
     }
 
     #[test]

@@ -83,21 +83,11 @@ impl IntentMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanStep {
-    pub text:   String,
-    #[serde(default = "default_plan_step_status")]
-    pub status: String,
-}
-
-fn default_plan_step_status() -> String { "pending".to_string() }
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     Intent { mode: IntentMode },
-    Plan { steps: Vec<PlanStep> },
-    PlanStepUpdate { index: usize, status: String },
+    Phase { label: String },
     Thinking { text: String },
     ThinkingDelta { text: String },
     TextDelta { text: String },
@@ -227,19 +217,6 @@ impl Agent {
         }
     }
 
-    pub async fn generate_plan(
-        &self,
-        user_query: &str,
-        selection: Option<&ProviderSelection>,
-    ) -> Vec<PlanStep> {
-        let prompt = prompt::plan_generation_prompt(user_query);
-        let messages = vec![Message::user(prompt)];
-        match self.llm.chat_routed(selection, &messages, &[]).await {
-            Ok((LlmResponse::Message { text }, _)) => parse_plan_steps(&text),
-            _ => Vec::new(),
-        }
-    }
-
     pub async fn compact_history(&self, history: &[HistoryMessage]) -> Vec<HistoryMessage> {
         if history.is_empty() || estimate_history_chars(history) <= self.compaction_threshold_chars {
             return history.to_vec();
@@ -339,33 +316,7 @@ impl Agent {
     fn build_tool_defs(&self) -> Vec<ToolDefinition> {
         let mut tool_defs: Vec<ToolDefinition> =
             self.tools.iter().map(|t| t.definition()).collect();
-        tool_defs.push(ToolDefinition {
-            name: "ask_user".to_string(),
-            description: "Present a question with predefined choices to the user whenever you \
-                          need information to proceed. Use this instead of asking questions in \
-                          plain text — never end a response with inline questions or a list of \
-                          things you need to know. Call this tool first, then answer once the \
-                          user replies. Only skip this tool if the knowledge graph already \
-                          contains the answer."
-                .to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "question": {
-                        "type": "string",
-                        "description": "The clarifying question to present to the user."
-                    },
-                    "choices": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "2–4 concise answer choices for the user to pick from.",
-                        "minItems": 2,
-                        "maxItems": 4
-                    }
-                },
-                "required": ["question", "choices"]
-            }),
-        });
+        tool_defs.push(ask_user_tool_def());
         tool_defs
     }
 
@@ -384,17 +335,8 @@ impl Agent {
         let mode = self.classify_intent(user_query, history, selection).await;
         let _ = event_sender.send(AgentEvent::Intent { mode }).await;
 
-        let mut plan_len = 0usize;
-        if matches!(mode, IntentMode::Research | IntentMode::Hybrid) {
-            let plan = self.generate_plan(user_query, selection).await;
-            if !plan.is_empty() {
-                plan_len = plan.len();
-                let _ = event_sender.send(AgentEvent::Plan { steps: plan }).await;
-            }
-        }
-
         let (tool_defs, tool_map) = match mode {
-            IntentMode::Conversational => (Vec::new(), HashMap::new()),
+            IntentMode::Conversational => (vec![ask_user_tool_def()], HashMap::new()),
             _ => (self.build_tool_defs(), self.build_tool_map()),
         };
 
@@ -403,7 +345,7 @@ impl Agent {
         messages.extend(history_to_messages(&compacted));
         messages.push(build_user_message(user_query, attachments));
 
-        let outcome = self.run_loop(messages, 0, &tool_defs, &tool_map, selection, &event_sender, plan_len).await;
+        let outcome = self.run_loop(messages, 0, &tool_defs, &tool_map, selection, &event_sender).await;
         self.finish_outcome(outcome, &event_sender).await
     }
 
@@ -429,7 +371,7 @@ impl Agent {
         let tool_defs = self.build_tool_defs();
         let tool_map  = self.build_tool_map();
 
-        let outcome = self.run_loop(messages, iterations, &tool_defs, &tool_map, selection, &event_sender, 0).await;
+        let outcome = self.run_loop(messages, iterations, &tool_defs, &tool_map, selection, &event_sender).await;
         self.finish_outcome(outcome, &event_sender).await
     }
 
@@ -451,7 +393,7 @@ impl Agent {
                 None
             }
             LoopOutcome::EndedWithoutCitations { text, iterations, provider_used } => {
-                let answer = if text.is_empty() { last_resort_fallback() } else { text };
+                let answer = if text.is_empty() { question_fallback() } else { text };
                 let _ = event_sender.send(AgentEvent::Done {
                     answer,
                     sources: vec![],
@@ -461,7 +403,7 @@ impl Agent {
                 None
             }
             LoopOutcome::Paused { messages, iterations, text_buf, pending, provider_used } => {
-                let answer = if text_buf.is_empty() { last_resort_fallback() } else { text_buf };
+                let answer = if text_buf.is_empty() { question_fallback() } else { text_buf };
                 let _ = event_sender.send(AgentEvent::Done {
                     answer,
                     sources: vec![],
@@ -481,14 +423,13 @@ impl Agent {
         tool_map: &HashMap<String, &dyn Tool>,
         selection: Option<&ProviderSelection>,
         event_sender: &mpsc::Sender<AgentEvent>,
-        plan_len: usize,
     ) -> LoopOutcome {
         let mut last_provider_used: Option<UsedProvider> = None;
         let mut accumulated_text = String::new();
-        let mut plan_step = 0usize;
         loop {
             if iterations >= self.max_iterations {
                 tracing::warn!("agent hit max_iterations={} — requesting synthesis", self.max_iterations);
+                let _ = event_sender.send(AgentEvent::Phase { label: "Synthesizing answer".to_string() }).await;
                 let tool_summary = collect_tool_result_summary(&messages);
                 let synthesis_prompt = format!(
                     "You have used the maximum number of tool calls. \
@@ -501,15 +442,16 @@ impl Agent {
                         last_provider_used = Some(used);
                         text
                     }
-                    Ok((LlmResponse::ToolCalls { .. }, used)) => {
+                    Ok((LlmResponse::ToolCalls { preamble, .. }, used)) => {
                         last_provider_used = Some(used);
-                        if !accumulated_text.is_empty() { accumulated_text } else { last_resort_fallback() }
+                        if !preamble.is_empty() { preamble }
+                        else if !accumulated_text.is_empty() { accumulated_text }
+                        else { last_resort_fallback() }
                     }
                     Err(_) => {
                         if !accumulated_text.is_empty() { accumulated_text } else { last_resort_fallback() }
                     }
                 };
-                self.emit_remaining_plan_steps(&event_sender, plan_step, plan_len).await;
                 return LoopOutcome::Finished { text, iterations, provider_used: last_provider_used };
             }
 
@@ -557,7 +499,28 @@ impl Agent {
             }
 
             if stop_reason == "end_turn" || tool_calls.is_empty() {
-                self.emit_remaining_plan_steps(&event_sender, 0, plan_len).await;
+                // Fix 2: Check whether the LLM emitted an ask_user call as a JSON
+                // code block in its text instead of using the proper tool-calling
+                // mechanism. This happens with some models (e.g. Gemini Flash) when
+                // they know about the tool from the system prompt but did not receive
+                // it as a declared function — or simply got confused.
+                if let Some((question, choices, cleaned)) = extract_text_ask_user(&text_buf) {
+                    let answer_text = if !cleaned.is_empty() {
+                        cleaned
+                    } else if !accumulated_text.is_empty() {
+                        accumulated_text.clone()
+                    } else {
+                        // Fix 4: Synthesize a partial answer from gathered context.
+                        match self.synthesize_partial_answer(&messages, selection).await {
+                            Some(synth) => synth,
+                            None => question.clone(),
+                        }
+                    };
+                    let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
+                    return LoopOutcome::EndedWithoutCitations {
+                        text: answer_text, iterations, provider_used: last_provider_used,
+                    };
+                }
                 return LoopOutcome::Finished { text: text_buf, iterations, provider_used: last_provider_used };
             }
 
@@ -572,9 +535,23 @@ impl Agent {
                         .filter(|s| !is_catchall(s))
                         .collect())
                     .unwrap_or_default();
+                // Fix 3: Use accumulated_text when text_buf is empty so the user
+                // sees the findings from prior iterations alongside the question.
+                let answer_text = if !text_buf.is_empty() {
+                    text_buf
+                } else if !accumulated_text.is_empty() {
+                    accumulated_text.clone()
+                } else {
+                    // Fix 4: Synthesize a partial answer from gathered context.
+                    match self.synthesize_partial_answer(&messages, selection).await {
+                        Some(synth) => synth,
+                        None => question.clone(),
+                    }
+                };
                 let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
-                self.emit_remaining_plan_steps(&event_sender, 0, plan_len).await;
-                return LoopOutcome::EndedWithoutCitations { text: text_buf, iterations, provider_used: last_provider_used };
+                return LoopOutcome::EndedWithoutCitations {
+                    text: answer_text, iterations, provider_used: last_provider_used,
+                };
             }
 
             let call_parts: Vec<ContentPart> = tool_calls
@@ -642,22 +619,22 @@ impl Agent {
                     }
                 }
 
-                return LoopOutcome::Paused { messages, iterations, text_buf, pending, provider_used: last_provider_used };
+                let paused_text = if !text_buf.is_empty() {
+                    text_buf
+                } else {
+                    accumulated_text.clone()
+                };
+                return LoopOutcome::Paused { messages, iterations, text_buf: paused_text, pending, provider_used: last_provider_used };
             }
+
+            let phase = derive_phase(&tool_calls);
+            let _ = event_sender.send(AgentEvent::Phase { label: phase.to_string() }).await;
 
             for call in &tool_calls {
                 let _ = event_sender.send(AgentEvent::ToolCall {
                     name:  call.name.clone(),
                     input: call.input.clone(),
                 }).await;
-            }
-
-            if plan_len > 0 && plan_step == 0 {
-                let _ = event_sender.send(AgentEvent::PlanStepUpdate {
-                    index: 0,
-                    status: "running".to_string(),
-                }).await;
-                plan_step = 1;
             }
 
             let results = join_all(
@@ -684,21 +661,6 @@ impl Agent {
         }
     }
 
-    async fn emit_remaining_plan_steps(
-        &self,
-        event_sender: &mpsc::Sender<AgentEvent>,
-        mut from: usize,
-        plan_len: usize,
-    ) {
-        while from < plan_len {
-            let _ = event_sender.send(AgentEvent::PlanStepUpdate {
-                index: from,
-                status: "done".to_string(),
-            }).await;
-            from += 1;
-        }
-    }
-
     async fn execute_tool_call(
         &self,
         call: &ToolCall,
@@ -714,6 +676,34 @@ impl Agent {
                     format!("error: {e}")
                 }
             },
+        }
+    }
+
+    /// Synthesize a short partial answer from the tool results gathered so far.
+    /// Used when the LLM calls `ask_user` with no preamble text and no text was
+    /// accumulated in prior iterations — ensures the user gets a useful answer
+    /// body alongside the follow-up question.
+    async fn synthesize_partial_answer(
+        &self,
+        messages: &[Message],
+        selection: Option<&ProviderSelection>,
+    ) -> Option<String> {
+        let tool_summary = collect_tool_result_summary(messages);
+        if tool_summary == "No tool results were collected." {
+            return None;
+        }
+        let prompt = format!(
+            "You have gathered information from the codebase and are about to ask the user \
+             a follow-up question. In 1–3 sentences, briefly summarize what you've found so far \
+             so the user has context for the question. Do not ask any questions yourself.\n\n\
+             Tool results so far:\n{tool_summary}"
+        );
+        let mut synth_messages = messages.to_vec();
+        synth_messages.push(Message::user(prompt));
+        match self.llm.chat_routed(selection, &synth_messages, &[]).await {
+            Ok((LlmResponse::Message { text }, _)) if !text.is_empty() => Some(text),
+            Ok((LlmResponse::ToolCalls { preamble, .. }, _)) if !preamble.is_empty() => Some(preamble),
+            _ => None,
         }
     }
 
@@ -763,29 +753,26 @@ fn last_resort_fallback() -> String {
         .to_string()
 }
 
-fn parse_plan_steps(text: &str) -> Vec<PlanStep> {
-    text.lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            let step_text = if let Some(pos) = trimmed.find('.') {
-                trimmed[pos + 1..].trim()
-            } else {
-                trimmed
-            };
-            if step_text.is_empty() {
-                None
-            } else {
-                Some(PlanStep {
-                    text: step_text.to_string(),
-                    status: "pending".to_string(),
-                })
-            }
-        })
-        .take(5)
-        .collect()
+fn question_fallback() -> String {
+    "I've gathered what I can from the codebase. \
+     Please answer the question above so I can give you a precise answer."
+        .to_string()
+}
+
+fn derive_phase(tool_calls: &[ToolCall]) -> &'static str {
+    let has = |name: &str| tool_calls.iter().any(|c| c.name == name);
+
+    if has("find_callers") || has("find_callees") || has("run_cypher") {
+        "Tracing relationships"
+    } else if has("get_symbol_source") || has("get_file_symbols") || has("get_imports") || has("compare_symbol_across_versions") {
+        "Reading source"
+    } else if has("list_repositories") || has("search_symbols") {
+        "Searching codebase"
+    } else if has("run_command") || has("list_agents") {
+        "Executing on agents"
+    } else {
+        "Working"
+    }
 }
 
 pub(crate) fn build_user_message(text: &str, attachments: &[Attachment]) -> Message {
@@ -807,6 +794,36 @@ pub(crate) fn build_user_message(text: &str, attachments: &[Attachment]) -> Mess
         }
     }
     Message { role: crate::llm::types::Role::User, content: MessageContent::Parts(parts) }
+}
+
+fn ask_user_tool_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "ask_user".to_string(),
+        description: "Present a question with predefined choices to the user whenever you \
+                      need information to proceed. Use this instead of asking questions in \
+                      plain text — never end a response with inline questions or a list of \
+                      things you need to know. Call this tool first, then answer once the \
+                      user replies. Only skip this tool if the knowledge graph already \
+                      contains the answer."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The clarifying question to present to the user."
+                },
+                "choices": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "2–4 concise answer choices for the user to pick from.",
+                    "minItems": 2,
+                    "maxItems": 4
+                }
+            },
+            "required": ["question", "choices"]
+        }),
+    }
 }
 
 pub(crate) fn estimate_history_chars(history: &[HistoryMessage]) -> usize {
@@ -960,6 +977,10 @@ mod tests {
         }
     }
 
+    fn tool_call_obj(name: &str, input: impl Into<serde_json::Value>) -> ToolCall {
+        ToolCall { id: "tc_1".into(), name: name.into(), input: input.into(), thought_signature: None }
+    }
+
     fn two_tool_calls(a: &str, b: &str) -> LlmResponse {
         LlmResponse::ToolCalls {
             calls: vec![
@@ -1064,7 +1085,6 @@ mod tests {
     async fn one_tool_call_then_text_counts_one_iteration() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search\n2. Retrieve"),
             tool_call("my_tool"),
             text("result arrived"),
         ]);
@@ -1078,7 +1098,6 @@ mod tests {
     async fn query_with_progress_returns_the_same_response_as_query() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search\n2. Read"),
             tool_call("my_tool"),
             text("result arrived"),
         ]);
@@ -1093,7 +1112,6 @@ mod tests {
     async fn query_with_progress_forwards_tool_call_and_done_events() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search\n2. Read"),
             tool_call("my_tool"),
             text("result arrived"),
         ]);
@@ -1113,7 +1131,6 @@ mod tests {
     async fn two_tool_call_turns_count_two_iterations() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search\n2. Read"),
             tool_call("my_tool"),
             tool_call("my_tool"),
             text("done after two rounds"),
@@ -1127,7 +1144,6 @@ mod tests {
     async fn unknown_tool_name_produces_error_string_not_panic() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search"),
             tool_call("nonexistent_tool"),
             text("handled gracefully"),
         ]);
@@ -1196,73 +1212,99 @@ mod tests {
     }
 
     #[test]
-    fn parse_plan_steps_extracts_numbered_steps() {
-        let steps = parse_plan_steps("1. Search for retry functions\n2. Retrieve source\n3. Trace callers");
-        assert_eq!(steps.len(), 3);
-        assert_eq!(steps[0].text, "Search for retry functions");
-        assert_eq!(steps[0].status, "pending");
-        assert_eq!(steps[1].text, "Retrieve source");
-        assert_eq!(steps[2].text, "Trace callers");
+    fn derive_phase_searching_for_search_symbols() {
+        let calls = vec![tool_call_obj("search_symbols", "retry")];
+        assert_eq!(derive_phase(&calls), "Searching codebase");
     }
 
     #[test]
-    fn parse_plan_steps_caps_at_five() {
-        let input = "1. a\n2. b\n3. c\n4. d\n5. e\n6. f";
-        let steps = parse_plan_steps(input);
-        assert_eq!(steps.len(), 5);
+    fn derive_phase_searching_for_list_repositories() {
+        let calls = vec![tool_call_obj("list_repositories", serde_json::json!({}))];
+        assert_eq!(derive_phase(&calls), "Searching codebase");
     }
 
     #[test]
-    fn parse_plan_steps_ignores_blank_lines() {
-        let steps = parse_plan_steps("\n1. Step one\n\n2. Step two\n");
-        assert_eq!(steps.len(), 2);
+    fn derive_phase_reading_source_for_get_symbol_source() {
+        let calls = vec![tool_call_obj("get_symbol_source", "retry_loop")];
+        assert_eq!(derive_phase(&calls), "Reading source");
+    }
+
+    #[test]
+    fn derive_phase_reading_source_for_get_file_symbols() {
+        let calls = vec![tool_call_obj("get_file_symbols", "oidc.py")];
+        assert_eq!(derive_phase(&calls), "Reading source");
+    }
+
+    #[test]
+    fn derive_phase_reading_source_for_get_imports() {
+        let calls = vec![tool_call_obj("get_imports", "oidc.py")];
+        assert_eq!(derive_phase(&calls), "Reading source");
+    }
+
+    #[test]
+    fn derive_phase_tracing_for_find_callers() {
+        let calls = vec![tool_call_obj("find_callers", "retry_loop")];
+        assert_eq!(derive_phase(&calls), "Tracing relationships");
+    }
+
+    #[test]
+    fn derive_phase_tracing_for_find_callees() {
+        let calls = vec![tool_call_obj("find_callees", "retry_loop")];
+        assert_eq!(derive_phase(&calls), "Tracing relationships");
+    }
+
+    #[test]
+    fn derive_phase_tracing_for_run_cypher() {
+        let calls = vec![tool_call_obj("run_cypher", "MATCH (n) RETURN n")];
+        assert_eq!(derive_phase(&calls), "Tracing relationships");
+    }
+
+    #[test]
+    fn derive_phase_executing_for_run_command() {
+        let calls = vec![tool_call_obj("run_command", "ls -la")];
+        assert_eq!(derive_phase(&calls), "Executing on agents");
+    }
+
+    #[test]
+    fn derive_phase_executing_for_list_agents() {
+        let calls = vec![tool_call_obj("list_agents", serde_json::json!({}))];
+        assert_eq!(derive_phase(&calls), "Executing on agents");
+    }
+
+    #[test]
+    fn derive_phase_tracing_takes_priority_over_searching() {
+        let calls = vec![
+            tool_call_obj("search_symbols", "retry"),
+            tool_call_obj("find_callers", "retry_loop"),
+        ];
+        assert_eq!(derive_phase(&calls), "Tracing relationships");
+    }
+
+    #[test]
+    fn derive_phase_reading_takes_priority_over_searching() {
+        let calls = vec![
+            tool_call_obj("search_symbols", "retry"),
+            tool_call_obj("get_symbol_source", "retry_loop"),
+        ];
+        assert_eq!(derive_phase(&calls), "Reading source");
+    }
+
+    #[test]
+    fn derive_phase_unknown_tool_returns_working() {
+        let calls = vec![tool_call_obj("some_unknown_tool", serde_json::json!({}))];
+        assert_eq!(derive_phase(&calls), "Working");
+    }
+
+    #[test]
+    fn derive_phase_empty_calls_returns_working() {
+        let calls: Vec<ToolCall> = vec![];
+        assert_eq!(derive_phase(&calls), "Working");
     }
 
     #[tokio::test]
-    async fn generate_plan_returns_steps_from_llm() {
-        let llm = MockLlm::new(vec![text("1. Search for retry\n2. Get source\n3. Find callers")]);
-        let agent = agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5);
-        let plan = agent.generate_plan("how does retry work?", None).await;
-        assert_eq!(plan.len(), 3);
-        assert_eq!(plan[0].text, "Search for retry");
-    }
-
-    #[tokio::test]
-    async fn generate_plan_returns_empty_on_error() {
-        let llm = MockLlm::new(vec![]);
-        let agent = agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5);
-        let plan = agent.generate_plan("how does retry work?", None).await;
-        assert!(plan.is_empty());
-    }
-
-    #[tokio::test]
-    async fn query_streaming_marks_first_step_running_when_tools_begin() {
+    async fn query_streaming_emits_phase_event_before_tool_execution() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search for retry\n2. Get source\n3. Find callers"),
-            tool_call("search_symbols"),
-            text("done after search"),
-        ]);
-        let agent = Arc::new(agent_with(
-            llm,
-            vec![MockTool::new("search_symbols", "ok")],
-            5,
-        ));
-        let events = collect_agent_events(agent, "how does X work?").await;
-
-        let running_updates: Vec<usize> = events.iter().filter_map(|e| match e {
-            AgentEvent::PlanStepUpdate { index, status } if status == "running" => Some(*index),
-            _ => None,
-        }).collect();
-
-        assert_eq!(running_updates, vec![0], "first step should be marked running when tools begin");
-    }
-
-    #[tokio::test]
-    async fn query_streaming_marks_all_steps_done_on_completion() {
-        let llm = MockLlm::new(vec![
-            text("research"),
-            text("1. Search\n2. Get source\n3. Find callers\n4. Summarize"),
             tool_call("search_symbols"),
             text("final answer"),
         ]);
@@ -1273,37 +1315,52 @@ mod tests {
         ));
         let events = collect_agent_events(agent, "how does X work?").await;
 
-        let done_updates: Vec<usize> = events.iter().filter_map(|e| match e {
-            AgentEvent::PlanStepUpdate { index, status } if status == "done" => Some(*index),
-            _ => None,
-        }).collect();
-
-        assert_eq!(done_updates.len(), 4, "all 4 plan steps should be marked done by the end");
+        let phase_pos = events.iter().position(|e| matches!(e, AgentEvent::Phase { label } if label == "Searching codebase"))
+            .expect("expected a Phase event with 'Searching codebase'");
+        let tool_pos = events.iter().position(|e| matches!(e, AgentEvent::ToolCall { .. }))
+            .expect("expected a ToolCall event");
+        assert!(phase_pos < tool_pos, "Phase event must arrive before ToolCall");
     }
 
     #[tokio::test]
-    async fn query_streaming_does_not_mark_steps_done_per_tool_call() {
+    async fn query_streaming_emits_updated_phase_when_tools_change() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search\n2. Get source\n3. Find callers"),
             tool_call("search_symbols"),
-            tool_call("search_symbols"),
-            tool_call("search_symbols"),
+            tool_call("get_symbol_source"),
             text("final answer"),
         ]);
         let agent = Arc::new(agent_with(
             llm,
-            vec![MockTool::new("search_symbols", "ok")],
+            vec![MockTool::new("search_symbols", "ok"), MockTool::new("get_symbol_source", "source")],
             5,
         ));
         let events = collect_agent_events(agent, "how does X work?").await;
 
-        let last_tool_result_pos = events.iter().rposition(|e| matches!(e, AgentEvent::ToolResult { .. }));
-        let first_done_update_pos = events.iter().position(|e| matches!(e, AgentEvent::PlanStepUpdate { status, .. } if status == "done"));
+        let phases: Vec<String> = events.iter().filter_map(|e| match e {
+            AgentEvent::Phase { label } => Some(label.clone()),
+            _ => None,
+        }).collect();
 
-        if let (Some(last_tool), Some(first_done)) = (last_tool_result_pos, first_done_update_pos) {
-            assert!(first_done > last_tool, "done updates should come after the last tool result, not during tool execution");
-        }
+        assert!(phases.contains(&"Searching codebase".to_string()), "should emit 'Searching codebase' phase");
+        assert!(phases.contains(&"Reading source".to_string()), "should emit 'Reading source' phase");
+    }
+
+    #[tokio::test]
+    async fn query_streaming_emits_synthesizing_phase_on_max_iterations() {
+        let llm = MockLlm::new(vec![
+            text("research"),
+            tool_call("search_symbols"),
+        ]);
+        let agent = Arc::new(agent_with(
+            llm,
+            vec![MockTool::new("search_symbols", "ok")],
+            1,
+        ));
+        let events = collect_agent_events(agent, "how does X work?").await;
+
+        let has_synthesizing = events.iter().any(|e| matches!(e, AgentEvent::Phase { label } if label == "Synthesizing answer"));
+        assert!(has_synthesizing, "should emit 'Synthesizing answer' phase when max_iterations is hit");
     }
 
     #[tokio::test]
@@ -1322,7 +1379,6 @@ mod tests {
     async fn query_streaming_emits_intent_event_first() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search"),
             text("answer"),
         ]);
         let agent = Arc::new(agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5));
@@ -1358,7 +1414,6 @@ mod tests {
     async fn multiple_tool_calls_in_one_turn_all_executed() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search\n2. Read"),
             two_tool_calls("tool_a", "tool_b"),
             text("got both results"),
         ]);
@@ -1376,7 +1431,6 @@ mod tests {
     async fn multi_turn_query_reports_provider_used_from_final_call() {
         let llm = MockLlm::with_id("mock-llm", vec![
             text("research"),
-            text("1. Search\n2. Read"),
             tool_call("my_tool"),
             text("final answer"),
         ]);
@@ -1645,7 +1699,6 @@ mod tests {
     async fn tool_call_preamble_streams_live_as_text_delta() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search"),
             LlmResponse::ToolCalls {
                 calls: vec![ToolCall { id: "t".into(), name: "my_tool".into(), input: serde_json::json!({}), thought_signature: None }],
                 preamble: "Let me check that".into(),
@@ -1669,7 +1722,6 @@ mod tests {
     async fn no_preamble_emits_no_thinking_event_before_tool_call() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search"),
             tool_call("my_tool"),
             text("done"),
         ]);
@@ -1770,7 +1822,6 @@ mod tests {
     async fn multiple_confirmable_calls_in_one_round_all_pause_and_none_execute() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search"),
             two_tool_calls("create_lxd_agent", "delete_agent"),
         ]);
         let agent = Arc::new(agent_with(
@@ -1799,7 +1850,6 @@ mod tests {
     async fn mixed_confirmable_and_automatic_calls_executes_automatic_and_pauses_confirmable() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search"),
             two_tool_calls("my_tool", "delete_agent"),
         ]);
         let agent = Arc::new(agent_with(
@@ -1863,7 +1913,6 @@ mod tests {
     async fn resume_after_confirm_can_pause_again_on_a_second_confirmable_call() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search"),
             tool_call("create_lxd_agent"),
             tool_call("delete_agent"),
         ]);
@@ -1900,7 +1949,6 @@ mod tests {
     async fn non_confirmable_tool_calls_execute_normally_alongside_confirmable_ones_absent() {
         let llm = MockLlm::new(vec![
             text("research"),
-            text("1. Search"),
             tool_call("my_tool"),
             text("done"),
         ]);
@@ -1928,10 +1976,293 @@ mod tests {
         });
         assert_eq!(done_answer, Some("The answer is 42"));
     }
+
+    // ── Fix 1: ask_user available in conversational mode ──
+
+    #[tokio::test]
+    async fn conversational_mode_ask_user_emits_question_event() {
+        let llm = MockLlm::new(vec![
+            text("conversational"),
+            LlmResponse::ToolCalls {
+                calls: vec![ToolCall {
+                    id: "ask_1".into(),
+                    name: "ask_user".into(),
+                    input: serde_json::json!({"question": "Which aspect?", "choices": ["A", "B"]}),
+                    thought_signature: None,
+                }],
+                preamble: String::new(),
+            },
+        ]);
+        let agent = Arc::new(agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5));
+        let events = collect_agent_events_with_history(agent, "what does that mean?", &[
+            HistoryMessage { role: "user".into(), text: "how does X work?".into(), attachments: None },
+            HistoryMessage { role: "assistant".into(), text: "X works like...".into(), attachments: None },
+        ]).await;
+
+        let has_question = events.iter().any(|e| matches!(e, AgentEvent::Question { question, .. } if question == "Which aspect?"));
+        assert!(has_question, "conversational mode should emit Question event when ask_user is called");
+
+        let answer = events.iter().find_map(|e| match e {
+            AgentEvent::Done { answer, .. } => Some(answer.clone()),
+            _ => None,
+        });
+        assert!(answer.is_some(), "should have a Done event");
+        assert!(!answer.as_deref().unwrap().contains("tool-call limit"),
+            "conversational ask_user answer must not claim tool-call limit");
+    }
+
+    // ── Fix 2: extract_text_ask_user ──
+
+    #[test]
+    fn extract_text_ask_user_detects_json_fenced_block_with_question_key() {
+        let input = "Some prose.\n```json\n{\"name\":\"ask_user\",\"arguments\":{\"question\":\"Q?\",\"choices\":[\"A\",\"B\"]}}\n```\nMore prose.";
+        let (q, c, cleaned) = extract_text_ask_user(input).expect("should detect");
+        assert_eq!(q, "Q?");
+        assert_eq!(c, vec!["A", "B"]);
+        assert!(cleaned.contains("Some prose."));
+        assert!(cleaned.contains("More prose."));
+        assert!(!cleaned.contains("ask_user"));
+    }
+
+    #[test]
+    fn extract_text_ask_user_detects_bare_fenced_block_with_message_key() {
+        let input = "```\n{\"name\":\"ask_user\",\"arguments\":{\"message\":\"Which one?\",\"choices\":[\"X\",\"Y\"]}}\n```";
+        let (q, c, _) = extract_text_ask_user(input).expect("should detect");
+        assert_eq!(q, "Which one?");
+        assert_eq!(c, vec!["X", "Y"]);
+    }
+
+    #[test]
+    fn extract_text_ask_user_filters_catchall_choices() {
+        let input = "```json\n{\"name\":\"ask_user\",\"arguments\":{\"question\":\"Q?\",\"choices\":[\"A\",\"Other\",\"B\"]}}\n```";
+        let (_, c, _) = extract_text_ask_user(input).expect("should detect");
+        assert_eq!(c, vec!["A", "B"]);
+    }
+
+    #[test]
+    fn extract_text_ask_user_returns_none_for_non_ask_user_json() {
+        let input = "```json\n{\"name\":\"search_symbols\",\"arguments\":{\"query\":\"foo\"}}\n```";
+        assert!(extract_text_ask_user(input).is_none());
+    }
+
+    #[test]
+    fn extract_text_ask_user_returns_none_when_no_code_blocks() {
+        assert!(extract_text_ask_user("just plain text").is_none());
+    }
+
+    #[test]
+    fn extract_text_ask_user_returns_none_for_empty_question_or_choices() {
+        let input = "```json\n{\"name\":\"ask_user\",\"arguments\":{\"question\":\"\",\"choices\":[\"A\"]}}\n```";
+        assert!(extract_text_ask_user(input).is_none());
+    }
+
+    // ── Fix 3: use accumulated_text when text_buf is empty ──
+
+    #[tokio::test]
+    async fn ask_user_with_empty_text_buf_uses_accumulated_text() {
+        let llm = MockLlm::new(vec![
+            // Consumed by classify_intent
+            text("research"),
+            // Iteration 1: tool call WITH preamble text
+            LlmResponse::ToolCalls {
+                calls: vec![ToolCall {
+                    id: "tc_1".into(),
+                    name: "my_tool".into(),
+                    input: serde_json::json!({}),
+                    thought_signature: None,
+                }],
+                preamble: "I found some relevant code.".into(),
+            },
+            // Iteration 2: ask_user with NO preamble text
+            LlmResponse::ToolCalls {
+                calls: vec![ToolCall {
+                    id: "ask_1".into(),
+                    name: "ask_user".into(),
+                    input: serde_json::json!({"question": "Which?", "choices": ["A", "B"]}),
+                    thought_signature: None,
+                }],
+                preamble: String::new(),
+            },
+        ]);
+        let agent = Arc::new(agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5));
+        let events = collect_agent_events(agent, "hi").await;
+
+        let answer = events.iter().find_map(|e| match e {
+            AgentEvent::Done { answer, .. } => Some(answer.clone()),
+            _ => None,
+        }).expect("should have Done event");
+        assert_eq!(answer, "I found some relevant code.", "answer should use accumulated_text from first turn");
+    }
+
+    // ── Fix 4: synthesis call when both text buffers empty ──
+
+    #[tokio::test]
+    async fn ask_user_with_no_text_anywhere_synthesizes_answer() {
+        let llm = MockLlm::new(vec![
+            // Consumed by classify_intent
+            text("research"),
+            // Iteration 1: tool call with no text preamble
+            LlmResponse::ToolCalls {
+                calls: vec![ToolCall {
+                    id: "tc_1".into(),
+                    name: "my_tool".into(),
+                    input: serde_json::json!({}),
+                    thought_signature: None,
+                }],
+                preamble: String::new(),
+            },
+            // Iteration 2: ask_user with no text preamble
+            LlmResponse::ToolCalls {
+                calls: vec![ToolCall {
+                    id: "ask_1".into(),
+                    name: "ask_user".into(),
+                    input: serde_json::json!({"question": "Which?", "choices": ["A", "B"]}),
+                    thought_signature: None,
+                }],
+                preamble: String::new(),
+            },
+            // Synthesis response (Fix 4)
+            text("Here is what I found: the tool returned ok."),
+        ]);
+        let agent = Arc::new(agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5));
+        let events = collect_agent_events(agent, "hi").await;
+
+        let has_question = events.iter().any(|e| matches!(e, AgentEvent::Question { .. }));
+        assert!(has_question, "should emit Question event");
+
+        let answer = events.iter().find_map(|e| match e {
+            AgentEvent::Done { answer, .. } => Some(answer.clone()),
+            _ => None,
+        }).expect("should have Done event");
+        assert!(answer.contains("Here is what I found"), "answer should use synthesized text, got: {answer}");
+    }
+
+    // ── Fix 5: question_fallback doesn't claim tool-call limit ──
+
+    #[test]
+    fn question_fallback_does_not_claim_tool_limit() {
+        let fb = question_fallback();
+        assert!(!fb.to_lowercase().contains("tool-call limit"));
+        assert!(!fb.to_lowercase().contains("tool call limit"));
+        assert!(!fb.is_empty());
+    }
+
+    #[test]
+    fn last_resort_fallback_still_mentions_tool_limit() {
+        let fb = last_resort_fallback();
+        assert!(fb.to_lowercase().contains("tool-call limit"), "last_resort_fallback should still mention tool-call limit");
+    }
+
+    // ── Fix 6: synthesis ToolCalls with preamble uses preamble ──
+
+    #[tokio::test]
+    async fn max_iterations_synthesis_tool_calls_with_preamble_uses_preamble() {
+        let llm = MockLlm::new(vec![
+            LlmResponse::ToolCalls {
+                calls: vec![ToolCall {
+                    id: "tc_1".into(),
+                    name: "my_tool".into(),
+                    input: serde_json::json!({}),
+                    thought_signature: None,
+                }],
+                preamble: String::new(),
+            },
+            // Synthesis returns ToolCalls with preamble
+            LlmResponse::ToolCalls {
+                calls: vec![],
+                preamble: "Here's what I found from the tools.".into(),
+            },
+        ]);
+        let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 1);
+        let resp = agent.query("hi", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "Here's what I found from the tools.");
+    }
+
+    // ── Helper for tests needing history ──
+
+    async fn collect_agent_events_with_history(agent: Arc<Agent>, query: &str, history: &[HistoryMessage]) -> Vec<AgentEvent> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(128);
+        agent.query_streaming(query, history, &[], None, tx).await;
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() { events.push(e); }
+        events
+    }
 }
 
 fn is_catchall(s: &str) -> bool {
     let lower = s.trim().to_lowercase();
     let stripped = lower.trim_end_matches(|c: char| matches!(c, '.' | '?' | '!') || c == '\u{2026}');
     matches!(stripped.trim(), "other" | "something else" | "none of the above" | "other option")
+}
+
+/// Detect an `ask_user` tool call that the LLM emitted as a JSON code block in
+/// its text output instead of through the proper tool-calling mechanism.
+///
+/// Returns `(question, choices, cleaned_text)` where `cleaned_text` has the
+/// matched code block removed. Handles both `"question"` and `"message"` as the
+/// argument key (some models guess `"message"` when they can't see the schema).
+fn extract_text_ask_user(text: &str) -> Option<(String, Vec<String>, String)> {
+    let blocks = extract_code_blocks(text);
+    for (block_content, span) in blocks {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&block_content) {
+            let name = value.get("name").and_then(|v| v.as_str());
+            if name != Some("ask_user") {
+                continue;
+            }
+            let args = value.get("arguments").or(Some(&value))?;
+            let question = args.get("question").or_else(|| args.get("message"))?
+                .as_str()?
+                .to_string();
+            let choices: Vec<String> = args.get("choices")
+                .and_then(|c| c.as_array())
+                .map(|a| a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .filter(|s| !is_catchall(s))
+                    .collect())
+                .unwrap_or_default();
+            if question.is_empty() || choices.is_empty() {
+                continue;
+            }
+            let mut cleaned = String::with_capacity(text.len());
+            cleaned.push_str(&text[..span.0]);
+            cleaned.push_str(&text[span.1..]);
+            let cleaned = cleaned.trim().to_string();
+            return Some((question, choices, cleaned));
+        }
+    }
+    None
+}
+
+/// Extract fenced code blocks from markdown text.
+/// Returns `(block_content, (start, end))` where `start`/`end` are byte offsets
+/// of the entire fence (including the ``` lines).
+fn extract_code_blocks(text: &str) -> Vec<(String, (usize, usize))> {
+    let mut blocks = Vec::new();
+    let bytes = text.as_bytes();
+    let mut pos = 0;
+    while pos < bytes.len() {
+        // Find the next ```
+        let rest = &text[pos..];
+        let Some(rel_open) = rest.find("```") else { break };
+        let abs_open = pos + rel_open;
+        // Skip optional language tag on the same line
+        let line_end = text[abs_open..].find('\n')
+            .map(|i| abs_open + i)
+            .unwrap_or(text.len());
+        let content_start = line_end + 1;
+        // Find the closing ```
+        if content_start >= text.len() {
+            break;
+        }
+        let Some(rel_close) = text[content_start..].find("```") else { break };
+        let abs_close = content_start + rel_close;
+        // Find end of the closing fence line
+        let fence_end = text[abs_close..].find('\n')
+            .map(|i| abs_close + i + 1)
+            .unwrap_or(text.len());
+        let block_content = text[content_start..abs_close].trim().to_string();
+        blocks.push((block_content, (abs_open, fence_end)));
+        pos = fence_end;
+    }
+    blocks
 }
