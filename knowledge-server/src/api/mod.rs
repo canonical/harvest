@@ -465,9 +465,10 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .route("/projects/:pid/change-requests/:cid/apply", post(issue_handlers::apply_change_request))
         .route("/projects/:pid/change-requests/:cid/discard", post(issue_handlers::discard_change_request))
         .route("/projects/:pid/change-requests/:cid/comments", post(issue_handlers::create_change_request_comment))
-        .route("/groups/:gid/templates",
+        .route("/templates",
                get(deployment_handlers::list_templates).post(deployment_handlers::create_template))
-        .route("/groups/:gid/templates/:tid",
+        .route("/templates/upload", post(deployment_handlers::upload_template))
+        .route("/templates/:tid",
                get(deployment_handlers::get_template)
                .put(deployment_handlers::update_template)
                .delete(deployment_handlers::delete_template))
