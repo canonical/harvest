@@ -117,6 +117,7 @@ pub async fn handle_query_stream(
         while let Some(event) = agent_rx.recv().await {
             match &event {
                 AgentEvent::TextDelta { text } => chain_builder.text_delta(text),
+                AgentEvent::ThinkingDelta { text } => chain_builder.thinking_delta(text),
                 AgentEvent::Thinking { text } => chain_builder.thinking(text),
                 AgentEvent::ToolCall { name, input } => chain_builder.tool_call(name, input, None, None),
                 AgentEvent::ToolResult { name, preview } => chain_builder.tool_result(name, preview),
