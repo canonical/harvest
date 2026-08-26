@@ -43,15 +43,14 @@
         {{ msg.provider_used.model }} · {{ msg.provider_used.kind }}
       </div>
 
-      <div v-if="msg.intent" class="intent-badge" :class="`intent-badge--${msg.intent}`">
-        {{ intentLabel }}
+      <div v-if="msg.intent || (msg.phase && msg.status === 'loading')" class="message__status-bar" :class="{ 'message__status-bar--sticky': msg.status === 'loading' }">
+        <div v-if="msg.intent" class="intent-badge" :class="`intent-badge--${msg.intent}`">
+          {{ intentLabel }}
+        </div>
+        <div v-if="msg.phase && msg.status === 'loading'" class="phase-label">
+          {{ msg.phase }}
+        </div>
       </div>
-
-      <PlanBlock
-        v-if="msg.plan?.length"
-        :steps="msg.plan"
-        :sticky="msg.status === 'loading'"
-      />
 
       <!-- Activity log: preambles + tool calls + confirmable actions, unified left-border track -->
       <div
@@ -91,12 +90,12 @@
       </div>
 
       <!-- Final answer: streaming phase (TextDelta before Done fires) -->
-      <div v-if="msg.pendingAnswer && !msg.answer" class="message__bubble message__bubble--streaming">
-        <div class="message__body">{{ msg.pendingAnswer }}<span class="answer-cursor" aria-hidden="true">▋</span></div>
+      <div v-if="msg.pendingAnswer && !msg.answer" class="message__answer message__answer--streaming">
+        <div ref="answerBodyRef" class="message__body" v-html="renderedPendingAnswer"></div>
       </div>
 
       <!-- Final answer: finalized -->
-      <div v-if="msg.answer" class="message__bubble">
+      <div v-if="msg.answer" class="message__answer">
         <div ref="answerBodyRef" class="message__body" v-html="renderedAnswer" />
       </div>
 
@@ -161,7 +160,6 @@
 import { computed, ref, watch, nextTick, onMounted } from 'vue';
 import ThinkingBlock from './ThinkingBlock.vue';
 import ToolCallStep  from './ToolCallStep.vue';
-import PlanBlock     from './PlanBlock.vue';
 import ProvisionSteps from '../agents/ProvisionSteps.vue';
 import { renderMarkdown, buildCitationIndex } from '../../lib/markdown.js';
 import { mountInlineGraphs } from '../../lib/inline-graph.js';
@@ -210,16 +208,28 @@ const renderedAnswer = computed(() =>
     : ''
 );
 
+const renderedPendingAnswer = computed(() =>
+  props.msg.pendingAnswer
+    ? renderMarkdown(props.msg.pendingAnswer, props.repoUrlMap, buildCitationIndex(props.msg.sources))
+    : ''
+);
+
 onMounted(() => {
   if (answerBodyRef.value) {
     mountInlineGraphs(answerBodyRef.value);
+    import('../../lib/mermaid.js').then(({ mountMermaidDiagrams }) => {
+      if (answerBodyRef.value) mountMermaidDiagrams(answerBodyRef.value);
+    });
     addCopyButtons(answerBodyRef.value);
   }
 });
 
-watch(renderedAnswer, () => nextTick(() => {
+watch([renderedAnswer, renderedPendingAnswer], () => nextTick(() => {
   if (answerBodyRef.value) {
     mountInlineGraphs(answerBodyRef.value);
+    import('../../lib/mermaid.js').then(({ mountMermaidDiagrams }) => {
+      if (answerBodyRef.value) mountMermaidDiagrams(answerBodyRef.value);
+    });
     addCopyButtons(answerBodyRef.value);
   }
 }));

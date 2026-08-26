@@ -24,10 +24,12 @@ setUnauthorizedHandler(() => {
   router.push('/login');
 });
 
-app.mount('#app');
+router.isReady().then(() => {
+  app.mount('#app');
 
-const loading = document.getElementById('app-loading');
-if (loading) {
-  loading.style.opacity = '0';
-  loading.addEventListener('transitionend', () => loading.remove(), { once: true });
-}
+  const loading = document.getElementById('app-loading');
+  if (loading) {
+    loading.style.opacity = '0';
+    loading.addEventListener('transitionend', () => loading.remove(), { once: true });
+  }
+});

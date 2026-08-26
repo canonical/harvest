@@ -121,48 +121,37 @@ describe('setIntent', () => {
   });
 });
 
-describe('setPlan', () => {
-  it('sets plan on the last assistant message', () => {
+describe('setPhase', () => {
+  it('sets phase on the last assistant message', () => {
     const s = useChatStore();
     s.startAssistantMessage();
-    s.setPlan([{ text: 'Step 1', status: 'pending' }, { text: 'Step 2', status: 'pending' }]);
-    expect(last(s).plan).toHaveLength(2);
-    expect(last(s).plan[0].text).toBe('Step 1');
+    s.setPhase('Searching codebase');
+    expect(last(s).phase).toBe('Searching codebase');
   });
 
-  it('startAssistantMessage initializes plan to null', () => {
+  it('startAssistantMessage initializes phase to null', () => {
     const s = useChatStore();
     s.startAssistantMessage();
-    expect(last(s).plan).toBeNull();
+    expect(last(s).phase).toBeNull();
   });
 
-  it('updatePlanStep updates the status of a step', () => {
+  it('phase is persisted in saveableMessages', () => {
     const s = useChatStore();
     s.startAssistantMessage();
-    s.setPlan([{ text: 'Step 1', status: 'pending' }]);
-    s.updatePlanStep(0, 'done');
-    expect(last(s).plan[0].status).toBe('done');
-  });
-
-  it('plan is persisted in saveableMessages', () => {
-    const s = useChatStore();
-    s.startAssistantMessage();
-    s.setPlan([{ text: 'Step 1', status: 'done' }]);
+    s.setPhase('Reading source');
     s.finalizeAssistantMessage({ answer: 'done', sources: [], tool_calls_made: 0 });
     const saved = s.saveableMessages;
     const assistantSaved = saved.find(m => m.role === 'assistant');
-    expect(assistantSaved.plan).toHaveLength(1);
-    expect(assistantSaved.plan[0].status).toBe('done');
+    expect(assistantSaved.phase).toBe('Reading source');
   });
 
-  it('plan is loaded from history', () => {
+  it('phase is loaded from history', () => {
     const s = useChatStore();
     s.loadFromHistory([
       { role: 'user', text: 'hi' },
-      { role: 'assistant', text: 'answer', plan: [{ text: 'Step', status: 'done' }], sources: [], chain: [], tool_calls: [], tool_calls_made: 0 },
+      { role: 'assistant', text: 'answer', phase: 'Tracing relationships', sources: [], chain: [], tool_calls: [], tool_calls_made: 0 },
     ]);
-    expect(last(s).plan).toHaveLength(1);
-    expect(last(s).plan[0].text).toBe('Step');
+    expect(last(s).phase).toBe('Tracing relationships');
   });
 });
 
@@ -422,12 +411,15 @@ describe('updateConfirmActionItem', () => {
   });
 });
 
-describe('suggestions', () => {
-  it('setSuggestions stores choices', () => {
+describe('suggestions (removed)', () => {
+  it('does not expose setSuggestions', () => {
     const s = useChatStore();
-    s.startAssistantMessage();
-    s.setSuggestions(['opt1', 'opt2']);
-    expect(s.suggestions).toEqual(['opt1', 'opt2']);
+    expect(s.setSuggestions).toBeUndefined();
+  });
+
+  it('does not expose a suggestions ref', () => {
+    const s = useChatStore();
+    expect(s.suggestions).toBeUndefined();
   });
 });
 
