@@ -21,6 +21,12 @@ docker compose up -d
 docker compose ps
 ```
 
+The `docker-compose.yml` also defines `server` and `web-ui` services for an
+all-in-one deployment. To run the whole stack at once instead of building each
+component by hand, fill in `LLM_API_KEY` and `JWT_SECRET` in the `.env` file,
+and run `docker compose up -d`. The steps below run each component from source
+for a tighter dev loop.
+
 The Neo4j Browser UI is at http://localhost:7474 (login: `neo4j` / `devpassword`).  
 Apps connect on the Bolt port `localhost:7687`.
 
@@ -88,22 +94,39 @@ uri      = "bolt://localhost:7687"
 user     = "neo4j"
 password = "devpassword"
 
-[llm]
-provider       = "anthropic"
-model          = "claude-sonnet-4-6"
-api_key        = "sk-ant-..."
+[auth]
+jwt_secret = "change-me-in-production"
+
+[agent]
 max_iterations = 20
+
+# One or more LLM providers (define as many [[llm]] blocks as you need).
+[[llm]]
+provider = "anthropic"
+model    = "claude-sonnet-4-6"
+api_key  = "sk-ant-..."
 ```
 
-For Groq / Ollama instead:
+For Gemini instead:
 
 ```toml
-[llm]
-provider  = "openai-compatible"
-base_url  = "https://api.groq.com/openai/v1"   # or http://localhost:11434/v1
-api_key   = "gsk_..."
-model     = "llama-3.3-70b-versatile"
+[[llm]]
+provider = "gemini"
+model    = "gemini-2.5-flash"
+api_key  = "AIza..."
 ```
+
+For Groq / Ollama (OpenAI-compatible) instead:
+
+```toml
+[[llm]]
+provider = "openai-compatible"
+base_url = "https://api.groq.com/openai/v1"   # or http://localhost:11434/v1
+api_key  = "gsk_..."
+model    = "llama-3.3-70b-versatile"
+```
+
+Multiple `[[llm]]` blocks are tried in ascending `priority` order on rate-limit errors; the chat page's model picker lists providers with `expose_to_ui = true`. See [server.md](server.md#configuration-reference) for the full config reference.
 
 ```bash
 cd knowledge-server
@@ -156,7 +179,7 @@ npm run dev
 # Open http://localhost:5173
 ```
 
-The Vite dev server proxies API calls to `localhost:8080` automatically — all `/query`, `/query/stream`, `/repositories`, `/graph`, `/docs`, and `/health` requests are forwarded. The knowledge-server (Step 3) must be running first.
+The web UI is a Vue 3 SPA (Vite, Pinia, Vue Router). The Vite dev server proxies API calls to `localhost:8080` automatically — all `/query`, `/query/stream`, `/repositories`, `/graph`, `/docs`, `/llm`, and `/health` requests are forwarded. The knowledge-server (Step 3) must be running first.
 
 ---
 
@@ -188,11 +211,13 @@ curl "http://localhost:8080/graph/my-repo/v1.2.0" | jq '{nodes: (.nodes | length
 
 ### Browse the web UI pages
 
-Open http://localhost:5173 and use the sidebar to switch between:
+Open http://localhost:5173 and use the sidebar to switch between views. The main ones to verify a fresh setup:
 
-- **Chat** — submit a natural-language question and watch tool calls stream in real time
+- **Chat** — submit a natural-language question and watch intent, phase, thinking, and tool calls stream in real time
 - **Explore** — select a repo and version to see the interactive symbol graph; click a node to open the source panel; use the search box to find symbols
 - **Document** — select a repo and version to read the AI-generated documentation (requires Step 4)
+
+The sidebar also exposes Deploy, Design, Issues, Change Requests, Artifacts, Skills, Memories, Tasks, Agents, Overview, and Admin views — most need a project with connected agents or deployments to be useful.
 
 ---
 

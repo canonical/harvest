@@ -127,6 +127,13 @@ sudo snap set harvest \
   llm.primary.api-key=gsk_... \
   llm.primary.model=llama-3.3-70b-versatile \
   llm.primary.base-url=https://api.groq.com/openai/v1
+
+# Hide a failover-only provider from the picker, customise another's display
+# name and restrict it to a curated model list:
+sudo snap set harvest \
+  llm.backup.expose-to-ui=false \
+  llm.primary.display-name="Claude (production)" \
+  llm.primary.models="claude-sonnet-4-6,claude-opus-4-6"
 ```
 
 | Key | Default | Description |
@@ -138,6 +145,9 @@ sudo snap set harvest \
 | `llm.<name>.timeout-secs` | `120` | Per-request timeout |
 | `llm.<name>.max-retries` | `3` | Retry limit per request |
 | `llm.<name>.priority` | `0` | Lower = tried first on rate limits |
+| `llm.<name>.expose-to-ui` | `true` | Show in the chat page's model picker; set `false` to keep a provider failover-only |
+| `llm.<name>.display-name` | — | Name shown in the model picker (default: the provider kind) |
+| `llm.<name>.models` | — | Comma-separated allowlist of model names to offer in the picker (default: all discovered models) |
 
 ### Agent settings
 

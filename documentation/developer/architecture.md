@@ -1,6 +1,6 @@
 # Architecture Overview
 
-Harvest is a four-component system for extracting, storing, querying, and acting on structural knowledge from versioned source code repositories.
+Harvest is a four-component system for extracting, storing, querying, and acting on structural knowledge from versioned source code repositories — and for driving infrastructure deployments from the same agent loop.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -24,26 +24,32 @@ Harvest is a four-component system for extracting, storing, querying, and acting
 ┌──────────────────────────────────────────────────────────────────────┐
 │                         knowledge-server                             │
 │                                                                      │
-│  POST /query[/stream]  ──► agentic loop: LLM ◄──► Neo4j tools       │
+│  POST /query[/stream]  ──► agentic loop: intent → LLM ◄──► tools    │
 │                               └──► answer + [repo:version:file:line] │
 │                                                                      │
 │  GET /graph/:repo/:version  ──► cached symbol graph (JSON)           │
 │  GET /docs/:repo/:version   ──► Diataxis documentation pages         │
+│  GET /llm/providers         ──► chat-page model picker               │
 │                                                                      │
-│  /auth/*        ──► JWT + Google OAuth, user/group management        │
-│  /projects/*    ──► workspaces, conversations, per-project agents    │
-│  /agents/*      ──► harvest-agent registry, SSE, command execution,  │
-│                     optional LXD container provisioning              │
-│  /admin/*       ──► user role management, group CRUD                 │
+│  /auth/*        ──► JWT + Google OAuth + OIDC, user/group management │
+│  /projects/*    ──► workspaces, conversations, memories, tasks,      │
+│                     secrets, skills, artifacts, overview             │
+│  /projects/:pid/deployments/* ──► IaC pipeline: design, provision,   │
+│                     execution plan, runs, issues, change requests    │
+│  /groups/:gid/templates  ──► reusable product templates              │
+│  /agents/*      ──► harvest-agent registry, SSE, command/terraform   │
+│                     execution, console & tunnel WebSockets,          │
+│                     port-forwards, optional LXD provisioning         │
+│  /admin/*       ──► user role management, group CRUD, global skills  │
 └──────────────────────────────────────────────────────────────────────┘
                           │                │
               ┌───────────▼──┐    ┌────────▼───────┐
               │   web-ui     │    │ harvest-agent  │
-              │  (Vite / JS) │    │ (Rust daemon)  │
+              │  (Vue 3 SPA) │    │ (Rust daemon)  │
               └──────────────┘    └────────────────┘
 ```
 
-All three Rust components communicate via Neo4j and HTTP. The graph store is **Neo4j**. The agentic workflow and documentation pipeline can use either **Claude** (Anthropic API) or any **OpenAI-compatible provider** (Groq, local Ollama, etc.).
+All three Rust components communicate via Neo4j and HTTP. The graph store is **Neo4j**. The agentic workflow and documentation pipeline can use **Claude** (Anthropic API), **Gemini** (Google), or any **OpenAI-compatible provider** (Groq, local Ollama, etc.); multiple providers can be configured with priority-based fallback.
 
 ---
 
@@ -64,37 +70,49 @@ See [harvester.md](harvester.md) for the detailed pipeline, graph schema, and do
 
 ### knowledge-server
 
-An HTTP API server that answers natural-language questions about the harvested code, manages users and projects, and coordinates remote agents. It:
+An HTTP API server that answers natural-language questions about the harvested code, manages users and projects, drives IaC deployments, and coordinates remote agents. It:
 
 1. Accepts queries via `POST /query` (batch) or `POST /query/stream` (SSE).
-2. Runs an **agentic loop**: the LLM is given Neo4j-backed tools and iterates until it has gathered enough context.
-3. Returns a structured response with inline source citations in `[repo:version:file:line]` format.
+2. Runs an **agentic loop**: the LLM classifies the user's intent, then is given tools (graph, machine, skill, infra, secret) and iterates until it has gathered enough context. Destructive tool calls can pause the loop for explicit user approval (confirm-action).
+3. Returns a structured response with inline source citations in `[repo:version:file:line]` format and a `provider_used` block identifying which LLM provider/model answered.
 4. Serves the full symbol graph for any `(repo, version)` pair via `GET /graph/:repo/:version`, backed by an in-memory cache pre-warmed at startup.
 5. Serves Diataxis documentation pages produced by the harvester.
-6. Manages users, groups, and projects. Each project can have multiple conversations, a secret store, and connected agent machines.
-7. Maintains an in-memory registry of connected `harvest-agent` daemons via SSE. The LLM can `run_command` on any connected agent.
-8. Generates AI-powered environment status dashboards (the "overview pipeline") by analysing project conversation history and querying agents.
-9. Optionally provisions and tears down agents itself as LXD containers, when the server is configured with credentials for an LXD cluster.
+6. Manages users, groups, and projects. Each project can have multiple conversations, a secret store, persistent memories, runnable tasks, skills, artifacts, connected agent machines, and an environment overview.
+7. Maintains an in-memory registry of connected `harvest-agent` daemons via SSE. The LLM can `run_command`, run terraform/terragrunt, open interactive consoles and reverse tunnels, and manage port-forwards on any connected agent.
+8. Runs a full IaC **deployment pipeline** per project: an LLM interview captures environment requirements, a design doc and terraform bundle are generated, an execution-plan DAG is defined and executed on an agent, and each run records captured output. Failed apply/destroy runs trigger automatic issue triage; issues and pending proposals are surfaced as change requests.
+9. Generates AI-powered environment status dashboards (the "overview pipeline") by analysing project conversation history and querying agents.
+10. Optionally provisions and tears down agents itself as LXD containers, when the server is configured with credentials for an LXD cluster.
 
 See [server.md](server.md) for the full API reference, tool definitions, and LLM provider configuration.
 
 ### web-ui
 
-A single-page application providing multiple views:
+A Vue 3 single-page application (Vite, Pinia, Vue Router, Canonical Vanilla Framework) providing multiple views:
 
-- **Chat** — streaming query interface with tool-call step timeline, inline symbol graphs, source citations, and file attachments.
+- **Chat** — streaming query interface with intent/phase/thinking indicators, tool-call step timeline, Mermaid diagrams, inline `harvest-graph` snippets, source citations, file attachments, `ask_user` choice cards, and confirm-action approval gating.
 - **Explore** — interactive symbol graph for any `(repo, version)` pair rendered with Cytoscape.js and an off-thread fcose layout; supports full-text and AI-powered symbol search with a source panel.
 - **Document** — Diataxis documentation browser for AI-generated docs organised into Tutorials, How-to Guides, Explanations, and Reference.
-- **Projects** — workspace management: create/edit projects, manage conversations, view collaboration presence.
-- **Agents** — manage connected `harvest-agent` daemons; view online status, run commands, rotate install tokens, and (when an LXD cluster is configured) provision or delete Harvest-managed agents running as LXD containers.
+- **Repositories** — list ingested repositories and versions.
+- **Deploy & Design** — create and manage IaC deployments; generate design docs and terraform bundles; run plan/apply/destroy with streamed output; edit and approve proposed bundle changes; capture design decisions.
+- **Issues & Change Requests** — browse auto-created deployment issues, review and apply proposed fixes, redeploy, chat with the agent about an issue, and apply/discard pending change requests.
+- **Artifacts / Skills / Memories / Tasks** — manage the project's generated artifacts, skill playbooks, persistent memories, and background tasks (with logs).
+- **Agents** — manage connected `harvest-agent` daemons; view online status, open an xterm.js console, run commands, rotate install tokens, manage port-forwards, and (when an LXD cluster is configured) provision or delete Harvest-managed agents running as LXD containers.
 - **Overview** — per-project environment status dashboard generated by the LLM pipeline.
-- **Admin** — user role management, group and membership administration.
+- **Admin** — user role management, group and membership administration, and global skill management.
 
-See [web-ui/README.md](../../web-ui/README.md) for architecture, scripts, and test coverage.
+The web UI source under `web-ui/src/` (views, components, stores, composables) is the authoritative reference for the SPA.
 
 ### harvest-agent
 
-A lightweight Rust daemon that runs on any machine and connects back to the knowledge-server via a long-lived SSE stream. The server pushes `Execute` commands; the agent runs them as bash one-liners and posts results back. This lets the project agent (and through it, the LLM) inspect and control connected machines in real time.
+A lightweight Rust daemon that runs on any machine and connects back to the knowledge-server via a long-lived SSE stream. The server pushes commands; the agent carries them out and posts results back. It handles five message types:
+
+- **`Execute`** — run a bash one-liner with a timeout and post stdout/stderr/exit-code.
+- **`RunTerraform`** — write a terraform or terragrunt bundle to a temp dir, run `plan`/`apply`/`destroy`, stream each output line back as it is produced, then post the final result.
+- **`OpenShell`** — upgrade to a WebSocket and serve an interactive PTY session (consumed by the web UI's xterm.js console).
+- **`OpenTunnel`** — upgrade to a WebSocket and open a reverse tunnel so the server can reach a port on the agent's machine (used by port-forwards).
+- **`Uninstall`** — trigger the uninstall script and exit.
+
+This lets the project agent (and through it, the LLM) inspect and control connected machines in real time, run IaC bundles, and expose local services.
 
 The agent authenticates with a short-lived install token on first connection and is issued a permanent hashed token (`agent_token_hash` stored in Neo4j). The config file never stores the project ID — the server derives project membership from the token hash.
 
@@ -110,18 +128,20 @@ Roles:
 - **admin** — full access to all projects, groups, users, and admin routes. The first registered user is automatically made admin.
 - **regular** — can access projects belonging to groups they are a member of.
 
-Google OAuth 2.0 is optionally supported alongside local password authentication.
+Google OAuth 2.0 and/or OIDC SSO (e.g. Ubuntu One, Dex, Keycloak) are optionally supported alongside local password authentication. Local password login can be disabled by setting `auth.allow_local_login = false`.
 
 ---
 
 ## LLM Retry Strategy
 
-All LLM providers (Anthropic and OpenAI-compatible) share a common retry strategy implemented in `llm/retry.rs`:
+All LLM providers (Anthropic, Gemini, and OpenAI-compatible) share a common retry strategy implemented in `llm/retry.rs`:
 
 - **Timeout errors** — exponential backoff (2, 4, 8, 16, 32 seconds, capped at 32).
 - **429 rate limit** — honours the `retry-after` header if present; falls back to exponential backoff.
-- **Overload (529/503 for Anthropic, 502/503 for OpenAI)** — fixed 5-second delay.
+- **Overload (529/503 for Anthropic, 502/503 for OpenAI, 503 for Gemini)** — fixed 5-second delay.
 - **Other errors** — returned immediately without retrying.
+
+When multiple providers are configured, a `FallbackProvider` tries them in ascending `priority` order on rate-limit errors; the chat page's model picker can also target a specific provider/model directly via `ProviderSelection`.
 
 ---
 
@@ -130,12 +150,15 @@ All LLM providers (Anthropic and OpenAI-compatible) share a common retry strateg
 The `Agent` type in `agent/mod.rs` implements the agentic loop. `query_streaming` is the primary method; `query` is a thin wrapper that collects all events from an internal channel and returns the final `QueryResponse`.
 
 The loop:
-1. Optionally compacts the conversation history if it exceeds `compaction_threshold_chars` (summarises old turns with one LLM call).
-2. Appends the system prompt, compacted history, and the current user message.
-3. Calls the LLM with the current message list and all tool definitions.
-4. If the response is a tool-use batch, executes all tool calls concurrently and appends results.
-5. Repeats until the LLM returns a plain text message or `max_iterations` is reached.
-6. Extracts `[repo:version:file:line]` citations from the final answer.
+1. **Classifies intent** — `conversational`, `research`, `action`, or `hybrid`. Conversational turns skip tools entirely (only `ask_user` is available); the others get the full tool set. Classification uses simple heuristics for first-turn action verbs, otherwise a single LLM call.
+2. Optionally compacts the conversation history if it exceeds `compaction_threshold_chars` (summarises old turns with one LLM call).
+3. Appends the system prompt, compacted history, and the current user message.
+4. Streams the LLM response, forwarding `thinking_delta`, `text_delta`, and `tool_call` events to the client as they arrive.
+5. If the response is a tool-use batch, partitions it into confirmable and automatic calls:
+   - confirmable tools (those flagged `requires_confirmation`) emit `confirm_action` events and **pause** the loop until the user approves via `POST /projects/:pid/conversations/:cid/confirm-action/resume`;
+   - automatic tools execute concurrently with `join_all`.
+6. Repeats until the LLM returns a plain text message (`end_turn`), calls `ask_user` (emits a `question` event and ends the turn), or `max_iterations` is reached (at which point a final synthesis call is made).
+7. Extracts `[repo:version:file:line]` citations from the final answer.
 
 Tools are executed concurrently using `join_all` — multiple tool calls in a single LLM turn run in parallel.
 
@@ -150,13 +173,17 @@ Tools are executed concurrently using `join_all` — multiple tool calls in a si
 | Code parsing         | tree-sitter                                      |
 | Graph database       | Neo4j 5 Community Edition                        |
 | Neo4j Rust driver    | neo4rs                                           |
-| LLM providers        | Claude (Anthropic API) or OpenAI-compatible      |
-| Authentication       | JWT cookies + optional Google OAuth 2.0          |
+| LLM providers        | Claude (Anthropic), Gemini (Google), or OpenAI-compatible |
+| LLM routing          | priority-based `FallbackProvider` across providers |
+| Authentication       | JWT cookies + optional Google OAuth 2.0 + OIDC   |
 | Async runtime        | tokio                                            |
 | Configuration        | TOML                                             |
+| Web UI framework     | Vue 3 + Pinia + Vue Router                       |
 | Web UI build         | Vite                                             |
 | Web UI tests         | Vitest (jsdom)                                   |
 | Graph rendering      | Cytoscape.js + fcose layout (off-thread worker)  |
+| Diagrams             | Mermaid                                          |
+| Terminal             | xterm.js (agent consoles)                        |
 | CSS framework        | Canonical Vanilla Framework                      |
 
 ---
@@ -173,7 +200,7 @@ harvest/
 │   │   ├── parser/             # tree-sitter per-language parsers
 │   │   ├── graph/              # graph model and Neo4j writer
 │   │   ├── documentation/      # LLM-driven Diataxis doc pipeline
-│   │   │   ├── llm.rs          # Anthropic + OpenAI-compat clients
+│   │   │   ├── llm.rs          # Anthropic + Gemini + OpenAI-compat clients
 │   │   │   ├── retry.rs        # shared exponential-backoff retry
 │   │   │   └── workflow.rs     # 4-phase doc generation workflow
 │   │   └── pipeline.rs         # orchestrates ingestion
@@ -181,42 +208,71 @@ harvest/
 ├── knowledge-server/       # server crate
 │   ├── src/
 │   │   ├── main.rs
-│   │   ├── config.rs
+│   │   ├── config.rs           # TOML config (multi-provider LLM, agent, lxd, …)
 │   │   ├── neo4j.rs            # Cypher query helpers
 │   │   ├── api/                # axum router and shared state types
 │   │   ├── agent/              # agentic loop + all tool definitions
-│   │   │   ├── mod.rs          # Agent struct, query/query_streaming
+│   │   │   ├── mod.rs          # Agent struct, query/query_streaming, intent
 │   │   │   ├── tool.rs         # Tool trait + DEFAULT_PREVIEW_CHARS
 │   │   │   ├── graph_tools.rs  # Neo4j graph tools
-│   │   │   ├── machine_tools.rs # list_agents, run_command
-│   │   │   ├── secret_tools.rs # list/get/save secret
-│   │   │   └── prompt.rs       # system prompt
+│   │   │   ├── machine_tools.rs # list_agents, run_command (read-only variant too)
+│   │   │   ├── skill_tools.rs  # list_skills, load_skill
+│   │   │   ├── lxd_tools.rs    # create_lxd_agent, delete_agent
+│   │   │   ├── port_forward_tools.rs # port-forward CRUD
+│   │   │   ├── artifact_tools.rs # generate_artifact
+│   │   │   ├── terraform_tools.rs # run_terraform_plan/apply/destroy
+│   │   │   ├── deployment_tools.rs # deployment-scoped tools
+│   │   │   ├── issue_tools.rs  # issue triage + chat tools
+│   │   │   ├── chain.rs        # agent chain helpers
+│   │   │   └── prompt.rs       # system prompts (chat, deployment, issue triage/chat)
 │   │   ├── llm/                # LLM provider abstraction
-│   │   │   ├── mod.rs          # LlmProvider trait + factory
-│   │   │   ├── types.rs        # Message, ToolCall, LlmResponse, …
+│   │   │   ├── mod.rs          # LlmProvider trait + FallbackProvider + factory
+│   │   │   ├── types.rs        # Message, ToolCall, StreamEvent, ProviderSelection, …
 │   │   │   ├── anthropic.rs    # Anthropic Messages API
+│   │   │   ├── gemini.rs       # Google Gemini API
 │   │   │   ├── openai_compat.rs # OpenAI Chat Completions API
 │   │   │   └── retry.rs        # shared retry helper
-│   │   ├── auth/               # JWT, Google OAuth, password hashing
+│   │   ├── auth/               # JWT, Google OAuth, OIDC, password hashing
 │   │   ├── conversations/      # user conversation history
+│   │   ├── projects/           # project/group CRUD, memories, tasks, per-project query
+│   │   ├── artifacts/          # artifact store + terraform bundle handling
+│   │   ├── deployments/        # IaC pipeline: design, provision, runs, execution plan
+│   │   ├── issues/             # deployment issues + change requests
+│   │   ├── skills/             # global + per-project skill store
 │   │   ├── lxd/                # LXD REST client (networks, instances, exec)
-│   │   ├── machines/           # agent daemon registry + SSE handlers
-│   │   │   └── lxd_provision.rs # provisions LXD-managed agents
+│   │   ├── machines/           # agent daemon registry + SSE/console/tunnel handlers
+│   │   │   ├── lxd_provision.rs # provisions LXD-managed agents
+│   │   │   ├── port_forwards.rs # port-forward persistence
+│   │   │   └── proxy.rs        # HTTP proxying over port-forwards
 │   │   ├── overview/           # environment status pipeline
-│   │   └── projects/           # project/group CRUD + per-project query
+│   │   └── admin/              # user/group/admin route handlers
+│   ├── skills/                 # built-in skill markdown (juju, lxd, ceph, …)
 │   └── Cargo.toml
 ├── agent/                  # harvest-agent daemon crate
 │   ├── src/
 │   │   ├── main.rs
 │   │   ├── config.rs       # server_url + agent_token config
 │   │   ├── executor.rs     # bash command runner with timeout
+│   │   ├── terraform.rs    # terraform/terragrunt bundle runner with streamed output
+│   │   ├── console.rs      # interactive PTY console session over WebSocket
+│   │   ├── tunnel.rs       # reverse-tunnel session over WebSocket
+│   │   ├── ws_url.rs       # WebSocket URL helpers
 │   │   └── sse_client.rs   # SSE reconnect loop + ping task
 │   └── Cargo.toml
-├── web-ui/                 # Vanilla JS SPA (Vite + Vitest)
+├── web-ui/                 # Vue 3 SPA (Vite + Vitest, Pinia, Vue Router)
 │   ├── src/
+│   │   ├── views/          # Chat, Explore, Document, Repositories, Deploy,
+│   │   │                   #   Design, Issues, ChangeRequests, Artifacts,
+│   │   │                   #   Skills, Memories, Tasks, Agents, AgentConsole,
+│   │   │                   #   Admin, Login, Register
+│   │   ├── components/     # chat/, agents/, deployment/, SourcePanel
+│   │   ├── stores/         # Pinia stores
+│   │   ├── composables/    # Vue composables
+│   │   ├── router/         # Vue Router config
+│   │   └── lib/            # API client + helpers
 │   └── tests/
 ├── documentation/
 │   └── developer/          # this directory
-├── docker-compose.yml      # Neo4j (Community 5) with APOC
+├── docker-compose.yml      # Neo4j + server + web-ui (all-in-one)
 └── Cargo.toml              # workspace root
 ```

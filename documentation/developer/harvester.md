@@ -43,11 +43,17 @@ To use the `document` subcommand, add `[llm]` and `[documentation]` sections:
 
 ```toml
 [llm]
-provider     = "anthropic"           # "anthropic" | "openai-compatible"
+provider     = "anthropic"           # "anthropic" | "gemini" | "openai-compatible"
 model        = "claude-sonnet-4-6"
 api_key      = "sk-ant-..."
 timeout_secs = 300                   # per-request timeout (default: 300)
 max_retries  = 3                     # retry attempts on transient errors
+
+# — or — Google Gemini
+# [llm]
+# provider = "gemini"
+# model    = "gemini-2.5-flash"
+# api_key  = "AIza..."
 
 # — or — OpenAI-compatible (Groq, Ollama, etc.)
 # [llm]
@@ -59,6 +65,18 @@ max_retries  = 3                     # retry attempts on transient errors
 [documentation]
 docs_dir = "/var/harvest/docs"       # output directory for generated pages
 ```
+
+### Cloning private repositories over SSH
+
+For repos that require SSH authentication (e.g. `git@github.com:owner/repo.git`), add a `[git]` section pointing at a private key on disk:
+
+```toml
+[git]
+ssh_key_path   = "~/.ssh/id_ed25519"   # expanded against $HOME
+ssh_passphrase = "optional-passphrase"  # omit if the key has no passphrase
+```
+
+libgit2 uses this key for clone/fetch operations. Public HTTPS repos need no `[git]` section.
 
 ---
 
@@ -136,6 +154,7 @@ The generated directory is served verbatim by the knowledge-server when `[docume
 - Shallow clones are **not** used — full history is required to check out arbitrary refs.
 - Tags are listed with `git_repository.tag_names(None)`. Branches and SHAs are resolved with `git_repository.revparse_single`.
 - The resolved commit SHA and tagger/committer timestamp are stored on the `Version` node.
+- For private repos, an optional `[git]` section (`ssh_key_path`, `ssh_passphrase`) configures the SSH key libgit2 uses for clone/fetch. The `~` prefix in `ssh_key_path` is expanded against `$HOME`.
 
 ---
 
