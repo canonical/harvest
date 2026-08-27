@@ -5,7 +5,7 @@ import {
   deleteProjectDeployment, deployDeployment, redeployDeployment, destroyDeployment, listDeploymentRuns,
   listTemplates, createTemplate, getTemplate, updateTemplate, deleteTemplate,
   generateEnvironmentQuestions, generateDesign, generateDesignStream, generateDesignDecisions, reviseDesign,
-  generateProvision, proposeProvisionChange, applyProvisionChange,
+  generateProvision, generateProvisionStream, proposeProvisionChange, applyProvisionChange,
   listProjectIssues, getProjectIssue, updateIssueStatus, createIssueComment,
   applyIssueSolution, redeployFromIssue, sendIssueChatMessage,
   createProjectArtifact,
@@ -342,6 +342,38 @@ describe('deployment phase-action API functions', () => {
     global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ id: 'd1' })));
     await generateProvision('proj1', 'd1');
     expect(global.fetch.mock.calls[0][0]).toBe('/projects/proj1/deployments/d1/provision/generate');
+  });
+
+  it('generateProvisionStream POSTs to the provision/generate/stream route', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockStreamResponse()));
+    await generateProvisionStream('proj1', 'd1', () => {});
+    expect(global.fetch.mock.calls[0][0]).toBe('/projects/proj1/deployments/d1/provision/generate/stream');
+  });
+
+  it('generateProvisionStream throws on non-OK response', async () => {
+    global.fetch = vi.fn(() => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: 'boom' }) }));
+    await expect(generateProvisionStream('proj1', 'd1', () => {})).rejects.toThrow('boom');
+  });
+
+  it('generateProvisionStream invokes onEvent for each streamed SSE event', async () => {
+    const events = [
+      { type: 'tool_call', name: 'generate_artifact' },
+      { type: 'done' },
+    ];
+    const sseBody = events.map(e => `data: ${JSON.stringify(e)}`).join('\n\n') + '\n\n';
+    const reader = (() => {
+      let sent = false;
+      return {
+        read: () => sent
+          ? Promise.resolve({ done: true })
+          : (sent = true, Promise.resolve({ value: new TextEncoder().encode(sseBody), done: false })),
+        releaseLock: () => {},
+      };
+    })();
+    global.fetch = vi.fn(() => Promise.resolve({ ok: true, status: 200, body: { getReader: () => reader } }));
+    const received = [];
+    await generateProvisionStream('proj1', 'd1', (e) => received.push(e));
+    expect(received).toEqual(events);
   });
 
   it('proposeProvisionChange POSTs instructions/error_context to the propose-change route', async () => {

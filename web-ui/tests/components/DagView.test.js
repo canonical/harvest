@@ -2,15 +2,22 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 
 vi.mock('cytoscape', () => {
+  let tapHandler = null;
   const mockCy = {
-    on: vi.fn(),
-    layout: vi.fn(() => ({ run: vi.fn() })),
-    elements: vi.fn(() => ({ remove: vi.fn() })),
-    add: vi.fn(),
-    destroy: vi.fn(),
+    on(evt, selector, handler) {
+      const fn = typeof selector === 'function' ? selector : handler;
+      if (evt === 'tap') tapHandler = fn;
+    },
+    layout() { return { run() {} }; },
+    elements() { return { remove() {} }; },
+    add() {},
+    destroy() {},
+    nodes() { return { forEach() {} }; },
   };
   const mock = vi.fn(() => mockCy);
   mock.use = vi.fn();
+  mock.__getTapHandler = () => tapHandler;
+  mock.__reset = () => { tapHandler = null; };
   return { default: mock };
 });
 vi.mock('cytoscape-fcose', () => ({ default: vi.fn() }));
@@ -45,8 +52,6 @@ const PLAN = {
   ],
 };
 
-const STEP_FILES = { 'main.tf': 'resource "x" "y" {}' };
-
 function mountDag(props = {}) {
   return mount(DagView, {
     props: {
@@ -74,35 +79,26 @@ describe('DagView', () => {
     expect(w.emitted('run-all')).toBeTruthy();
   });
 
-  it('clicking a node shows detail sidebar with file list for terraform', async () => {
-    const w = mountDag({
-      plan: PLAN,
-      stepFiles: { s1: STEP_FILES },
-    });
-    await w.vm.selectNode('s1');
-    await flushPromises();
-    const detail = w.find('[data-testid="node-detail"]');
-    expect(detail.exists()).toBe(true);
-    expect(detail.text()).toContain('main.tf');
-  });
-
-  it('node detail shows plan preview button for terraform artifacts', async () => {
-    const w = mountDag({
-      plan: PLAN,
-      stepFiles: { s1: STEP_FILES },
-    });
-    await w.vm.selectNode('s1');
-    await flushPromises();
-    expect(w.find('[data-testid="plan-preview-btn"]').exists()).toBe(true);
-  });
-
-  it('emits run-node for per-node run', async () => {
+  it('emits select-artifact with the artifact id when a node is tapped', async () => {
+    const cytoscape = (await import('cytoscape')).default;
     const w = mountDag();
-    await w.vm.selectNode('s1');
     await flushPromises();
-    await w.find('[data-testid="run-node-btn"]').trigger('click');
-    expect(w.emitted('run-node')).toBeTruthy();
-    expect(w.emitted('run-node')[0][0]).toBe('s1');
+    const tapHandler = cytoscape.__getTapHandler();
+    expect(tapHandler).toBeTruthy();
+    tapHandler({ target: { data: () => ({ stepId: 's1', artifactId: 'a1' }) } });
+    await flushPromises();
+    expect(w.emitted('select-artifact')).toBeTruthy();
+    expect(w.emitted('select-artifact')[0]).toEqual(['a1']);
+  });
+
+  it('does not emit select-artifact when the tapped node has no artifact', async () => {
+    const cytoscape = (await import('cytoscape')).default;
+    const w = mountDag();
+    await flushPromises();
+    const tapHandler = cytoscape.__getTapHandler();
+    tapHandler({ target: { data: () => ({ stepId: 's1', artifactId: null }) } });
+    await flushPromises();
+    expect(w.emitted('select-artifact')).toBeFalsy();
   });
 
   it('shows per-step status from stepStatus prop', async () => {

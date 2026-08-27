@@ -19,6 +19,7 @@
     "highlight.js": "^11.0.0",
     "marked": "^15.0.0",
     "marked-highlight": "^2.0.0",
+    "monaco-editor": "^0.52.2",
     "pinia": "^2.3.1",
     "playwright": "^1.61.0",
     "vanilla-framework": "^4.51.0",

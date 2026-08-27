@@ -137,6 +137,7 @@ function kindLabel(kind) {
 function kindBadgeClass(kind) {
   if (kind === 'pdf') return 'artifact-kind-badge--pdf';
   if (kind === 'terraform' || kind === 'terragrunt') return 'artifact-kind-badge--terraform';
+  if (kind === 'bash') return 'artifact-kind-badge--bash';
   return 'artifact-kind-badge--markdown';
 }
 

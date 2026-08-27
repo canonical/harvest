@@ -7,6 +7,7 @@ const ARTIFACTS = [
   { id: 'a1', title: 'Deploy report', kind: 'markdown', created_by: 'alice', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
   { id: 'a2', title: 'Incident PDF',  kind: 'pdf',      created_by: 'assistant', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
   { id: 'a3', title: 'Web app infra', kind: 'terraform', created_by: 'assistant', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
+  { id: 'a4', title: 'Prep script',   kind: 'bash',     created_by: 'assistant', created_at: new Date().toISOString(), updated_at: new Date().toISOString() },
 ];
 
 const AGENTS = [{ id: 'agent-1', hostname: 'host-1', online: true }];
@@ -60,6 +61,12 @@ describe('ArtifactsView', () => {
           content: JSON.stringify({ 'main.tf': 'resource "local_file" "x" {}', 'variables.tf': 'variable "x" {}' }),
         });
       }
+      if (id === 'a4') {
+        return Promise.resolve({
+          ...ARTIFACTS.find(a => a.id === id),
+          content: '#!/usr/bin/env bash\necho "prepping"\napt-get update',
+        });
+      }
       return Promise.resolve({ ...ARTIFACTS.find(a => a.id === id), content: '# Hello\n\nBody text.' });
     });
     api.listProjectAgents.mockResolvedValue(AGENTS);
@@ -86,7 +93,7 @@ describe('ArtifactsView', () => {
   it('selecting an artifact loads and renders its content', async () => {
     const { w } = await mountView();
     const items = w.findAll('.artifacts-list-item');
-    expect(items.length).toBe(3);
+    expect(items.length).toBe(4);
     await items[0].trigger('click');
     await flushPromises();
     expect(api.getArtifact).toHaveBeenCalledWith('a1');
@@ -131,6 +138,27 @@ describe('ArtifactsView', () => {
     expect(w.text()).toContain('main.tf');
     expect(w.text()).toContain('variables.tf');
     expect(w.text()).toContain('resource "local_file" "x" {}');
+  });
+
+  it('shows a Bash badge for bash scripts instead of Markdown', async () => {
+    const { w } = await mountView();
+    const items = w.findAll('.artifacts-list-item');
+    const bashItem = items[3];
+    expect(bashItem.text()).toContain('Bash');
+    expect(bashItem.text()).not.toContain('Markdown');
+    expect(bashItem.find('.artifact-kind-badge--bash').exists()).toBe(true);
+  });
+
+  it('renders bash script content inside a code block instead of as markdown', async () => {
+    const { w } = await mountView();
+    const items = w.findAll('.artifacts-list-item');
+    await items[3].trigger('click');
+    await flushPromises();
+    const body = w.find('.artifacts-article__body');
+    expect(body.exists()).toBe(true);
+    expect(body.html()).toContain('<code');
+    expect(body.text()).toContain('#!/usr/bin/env bash');
+    expect(body.text()).toContain('apt-get update');
   });
 
   it('falls back to a raw code block when bundle content is not valid JSON', async () => {

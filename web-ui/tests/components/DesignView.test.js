@@ -61,17 +61,17 @@ describe('DesignView', () => {
     expect(api.getProjectDeploymentSingle).toHaveBeenCalledWith('proj-1');
   });
 
-  it('shows the deployment name in the header', async () => {
+  it('shows the deployment name in the header for the setup state', async () => {
     seedSelectedProject();
-    api.getProjectDeploymentSingle.mockResolvedValue(structuredClone(DEPLOYMENT_WITH_DESIGN));
+    api.getProjectDeploymentSingle.mockResolvedValue(structuredClone(DEPLOYMENT_NO_DESIGN));
     const w = mountView();
     await flushPromises();
     expect(w.text()).toContain('MyProject');
   });
 
-  it('shows a Design eyebrow label in the header', async () => {
+  it('shows a Design eyebrow label in the header for the setup state', async () => {
     seedSelectedProject();
-    api.getProjectDeploymentSingle.mockResolvedValue(structuredClone(DEPLOYMENT_WITH_DESIGN));
+    api.getProjectDeploymentSingle.mockResolvedValue(structuredClone(DEPLOYMENT_NO_DESIGN));
     const w = mountView();
     await flushPromises();
     expect(w.find('[data-testid="design-eyebrow"]').exists()).toBe(true);
