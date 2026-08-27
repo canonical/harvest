@@ -98,11 +98,11 @@
             <div v-if="artifactsLoading" class="design-setup__loading">
               <span class="loading-dots"><span>.</span><span>.</span><span>.</span></span>
             </div>
-            <div v-else-if="!artifacts.length" class="design-setup__empty">
-              <p class="u-text--muted">This project has no artifacts yet.</p>
+            <div v-else-if="!userProvidedArtifacts.length" class="design-setup__empty">
+              <p class="u-text--muted">This project has no user-provided artifacts yet.</p>
             </div>
             <ul v-else class="p-list--divided design-setup__list design-setup__list--modal">
-              <li v-for="a in artifacts" :key="a.id" class="p-list__item design-setup__item">
+              <li v-for="a in userProvidedArtifacts" :key="a.id" class="p-list__item design-setup__item">
                 <div class="p-checkbox design-setup__item-checkbox">
                   <input
                     type="checkbox"
@@ -170,6 +170,16 @@ const artifactsLoading    = ref(false);
 const selectedArtifactIds = ref([]);
 
 const usedArtifactIds = computed(() => new Set((props.deployment.context_artifacts ?? []).map(a => a.id)));
+
+const nonUserProvidedIds = computed(() => {
+  const ids = new Set();
+  if (props.deployment.design_doc)       ids.add(props.deployment.design_doc.id);
+  if (props.deployment.guide)            ids.add(props.deployment.guide.id);
+  if (props.deployment.terraform_bundle) ids.add(props.deployment.terraform_bundle.id);
+  return ids;
+});
+
+const userProvidedArtifacts = computed(() => artifacts.value.filter(a => !nonUserProvidedIds.value.has(a.id)));
 
 const editorContainerRef = ref(null);
 let editor               = null;
