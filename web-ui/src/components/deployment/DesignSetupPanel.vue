@@ -1,8 +1,8 @@
 <template>
   <div class="design-setup" data-testid="design-setup">
     <div class="design-setup__intro">
-      <h2 class="design-setup__title">Generate a design</h2>
-      <p class="design-setup__lede">
+      <h2 class="p-heading--4">Generate a design</h2>
+      <p class="u-text--muted">
         Pick a product template and select the artifacts that should inform the
         design, then generate the first version of the deployment design document.
       </p>
@@ -17,7 +17,7 @@
     <div class="design-setup__grid">
       <section class="design-setup__col">
         <div class="design-setup__step" data-testid="step-template">
-          <span class="design-setup__step-num">1</span>
+          <span class="p-badge">1</span>
           <label for="design-template-select" class="design-setup__label">Product template</label>
         </div>
         <select
@@ -30,22 +30,22 @@
           <option value="">No template</option>
           <option v-for="t in templates" :key="t.id" :value="t.id">{{ t.name }}</option>
         </select>
-        <p v-if="selectedTemplate" class="design-setup__template-desc">{{ selectedTemplate.description }}</p>
+        <p v-if="selectedTemplate" class="p-text--small u-text--muted">{{ selectedTemplate.description }}</p>
       </section>
 
       <section class="design-setup__col">
         <div class="design-setup__step design-setup__step--row" data-testid="step-artifacts">
-          <span class="design-setup__step-num">2</span>
-          <h3 class="design-setup__subtitle">Context artifacts</h3>
-          <span class="design-setup__count" data-testid="selection-count">{{ selectedCount }} selected</span>
+          <span class="p-badge">2</span>
+          <h3 class="p-heading--5">Context artifacts</h3>
+          <span class="p-chip" data-testid="selection-count">{{ selectedCount }} selected</span>
           <span class="design-setup__bulk" v-if="artifacts.length">
-            <button type="button" class="design-setup__bulk-btn" data-testid="select-all-artifacts" :disabled="busy" @click="selectAll">Select all</button>
-            <button type="button" class="design-setup__bulk-btn" data-testid="clear-artifacts" :disabled="busy || !selectedArtifactIds.length" @click="clearAll">Clear</button>
+            <button type="button" class="p-button--base is-dense" data-testid="select-all-artifacts" :disabled="busy" @click="selectAll">Select all</button>
+            <button type="button" class="p-button--base is-dense" data-testid="clear-artifacts" :disabled="busy || !selectedArtifactIds.length" @click="clearAll">Clear</button>
           </span>
         </div>
         <router-link
           to="/artifacts"
-          class="design-setup__artifacts-link"
+          class="p-text--small"
           data-testid="artifacts-link"
         >Add or manage artifacts →</router-link>
 
@@ -53,30 +53,33 @@
           <span class="loading-dots"><span>.</span><span>.</span><span>.</span></span>
         </div>
         <div v-else-if="!artifacts.length" class="design-setup__empty" data-testid="artifacts-empty">
-          <p class="design-setup__empty-text">This project has no artifacts yet.</p>
-          <router-link to="/artifacts" class="design-setup__empty-link" data-testid="artifacts-link">Add an artifact →</router-link>
+          <p class="u-text--muted">This project has no artifacts yet.</p>
+          <router-link to="/artifacts" class="p-text--small" data-testid="artifacts-link">Add an artifact →</router-link>
         </div>
-        <ul v-else class="design-setup__list">
-          <li v-for="a in artifacts" :key="a.id" class="design-setup__item">
-            <label class="design-setup__item-label">
+        <ul v-else class="p-list--divided design-setup__list">
+          <li v-for="a in artifacts" :key="a.id" class="p-list__item design-setup__item">
+            <div class="p-checkbox design-setup__item-checkbox">
               <input
                 type="checkbox"
+                class="p-checkbox__input"
+                :id="`artifact-checkbox-${a.id}`"
                 :value="a.id"
                 v-model="selectedArtifactIds"
                 :data-testid="`artifact-checkbox-${a.id}`"
                 :disabled="busy"
               />
-              <span class="design-setup__item-title">{{ a.title }}</span>
-              <span class="artifact-kind-badge" :class="kindBadgeClass(a.kind)">{{ kindLabel(a.kind) }}</span>
-              <span class="design-setup__item-date">{{ formatDate(a.created_at) }}</span>
-            </label>
+              <label class="p-checkbox__label" :for="`artifact-checkbox-${a.id}`"></label>
+            </div>
+            <label class="design-setup__item-title" :for="`artifact-checkbox-${a.id}`">{{ a.title }}</label>
+            <span class="artifact-kind-badge" :class="kindBadgeClass(a.kind)">{{ kindLabel(a.kind) }}</span>
+            <span class="p-text--small u-text--muted design-setup__item-date">{{ formatDate(a.created_at) }}</span>
           </li>
         </ul>
       </section>
     </div>
 
     <div class="design-setup__footer">
-      <p class="design-setup__summary" data-testid="generation-summary">{{ generationSummary }}</p>
+      <p class="u-text--muted" data-testid="generation-summary">{{ generationSummary }}</p>
       <div class="design-setup__actions">
         <button
           class="p-button--positive"
