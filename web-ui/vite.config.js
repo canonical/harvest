@@ -1,5 +1,8 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
+import { fileURLToPath } from 'node:url';
+
+const monacoStub = fileURLToPath(new URL('./tests/stubs/monaco-editor.js', import.meta.url));
 
 export default defineConfig({
   plugins: [vue()],
@@ -33,5 +36,13 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./tests/setup.js'],
+    alias: {
+      'monaco-editor': monacoStub,
+    },
+    server: {
+      deps: {
+        inline: ['monaco-editor'],
+      },
+    },
   },
 });

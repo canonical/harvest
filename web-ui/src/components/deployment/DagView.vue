@@ -74,7 +74,7 @@ const props = defineProps({
   stepStatus: { type: Object, default: () => ({}) },
 });
 
-defineEmits(['run-all', 'run-node', 'plan-preview']);
+const emit = defineEmits(['run-all', 'run-node', 'plan-preview', 'select-artifact']);
 
 const canvasRef     = ref(null);
 const selectedStep   = ref(null);
@@ -103,6 +103,7 @@ function buildElements(steps) {
       action: s.action,
       kind: s.artifact?.kind ?? 'unknown',
       stepId: s.id,
+      artifactId: s.artifact?.id ?? null,
       color: KIND_COLORS[s.artifact?.kind] ?? '#666',
     },
   }));
@@ -162,7 +163,9 @@ function mountGraph() {
     maxZoom: 3,
   });
   cy.on('tap', 'node', (evt) => {
-    selectNode(evt.target.data('stepId'));
+    const data = evt.target.data();
+    selectNode(data.stepId);
+    if (data.artifactId) emit('select-artifact', data.artifactId);
   });
 }
 

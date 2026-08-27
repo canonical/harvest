@@ -291,9 +291,13 @@ function bundleToMarkdown(content) {
 
 const renderedContent = computed(() => {
   if (!selectedArtifact.value) return '';
-  const content = isTerraformKind(selectedArtifact.value.kind)
-    ? bundleToMarkdown(selectedArtifact.value.content)
-    : selectedArtifact.value.content;
+  const { kind, content } = selectedArtifact.value;
+  if (isTerraformKind(kind)) {
+    return renderMarkdown(bundleToMarkdown(content), {}, {});
+  }
+  if (kind === 'bash') {
+    return renderMarkdown(`\`\`\`bash\n${content}\n\`\`\`\n`, {}, {});
+  }
   return renderMarkdown(content, {}, {});
 });
 
@@ -301,12 +305,14 @@ function kindLabel(kind) {
   if (kind === 'pdf') return 'PDF';
   if (kind === 'terraform') return 'Terraform';
   if (kind === 'terragrunt') return 'Terragrunt';
+  if (kind === 'bash') return 'Bash';
   return 'Markdown';
 }
 
 function kindBadgeClass(kind) {
   if (kind === 'pdf') return 'artifact-kind-badge--pdf';
   if (isTerraformKind(kind)) return 'artifact-kind-badge--terraform';
+  if (kind === 'bash') return 'artifact-kind-badge--bash';
   return 'artifact-kind-badge--markdown';
 }
 
