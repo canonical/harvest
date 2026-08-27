@@ -436,6 +436,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .route("/projects/:pid/deployments/:did/design/decisions", post(deployment_handlers::generate_design_decisions))
         .route("/projects/:pid/deployments/:did/design/revise",    post(deployment_handlers::revise_design))
         .route("/projects/:pid/deployments/:did/provision/generate", post(deployment_handlers::generate_provision))
+        .route("/projects/:pid/deployments/:did/provision/generate/stream", post(deployment_handlers::generate_provision_stream))
         .route("/projects/:pid/deployments/:did/provision/propose-change", post(deployment_handlers::propose_provision_change))
         .route("/projects/:pid/deployments/:did/provision/apply-change", post(deployment_handlers::apply_provision_change))
         .route("/projects/:pid/deployments/:did/context-artifacts",
