@@ -4995,6 +4995,27 @@ a.source-chip:hover .source-chip__name {
   color: var(--text-muted);
 }
 
+.artifacts-accordion {
+  margin: 0;
+}
+
+.artifacts-accordion .p-accordion__tab {
+  padding-left: 1rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.artifacts-accordion .p-accordion__panel {
+  padding-left: 0;
+  margin: 0;
+}
+
+.artifacts-section__empty {
+  padding: 0.5rem 1rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
 .artifact-kind-badge {
   display: inline-flex;
   align-items: center;

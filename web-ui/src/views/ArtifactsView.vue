@@ -24,20 +24,43 @@
           <p v-else-if="!artifacts.length" class="artifacts-list-empty">
             No artifacts yet. Ask the assistant to generate a document and it will show up here.
           </p>
-          <button
-            v-for="a in artifacts"
-            :key="a.id"
-            class="artifacts-list-item"
-            :class="{ 'artifacts-list-item--active': a.id === selectedId }"
-            @click="selectArtifact(a.id)"
-          >
-            <span class="artifacts-list-item__title">{{ a.title }}</span>
-            <span class="artifacts-list-item__meta">
-              <span v-if="artifactRole(a.id)" class="artifact-role-badge" :data-testid="`role-badge-${a.id}`">{{ artifactRole(a.id) }}</span>
-              <span class="artifact-kind-badge" :class="kindBadgeClass(a.kind)">{{ kindLabel(a.kind) }}</span>
-              <span class="artifacts-list-item__date">{{ formatDate(a.created_at) }}</span>
-            </span>
-          </button>
+          <ul v-else class="p-accordion__list artifacts-accordion">
+            <li v-for="section in ARTIFACT_SECTIONS" :key="section.key" class="p-accordion__group">
+              <h3 :id="`artifacts-section-${section.key}-heading`" class="p-accordion__heading">
+                <button
+                  type="button"
+                  class="p-accordion__tab"
+                  :aria-expanded="expandedSections.has(section.key) ? 'true' : 'false'"
+                  :aria-controls="`artifacts-section-${section.key}`"
+                  @click="toggleSection(section.key)"
+                >
+                  {{ section.label }}
+                </button>
+              </h3>
+              <div
+                :id="`artifacts-section-${section.key}`"
+                class="p-accordion__panel"
+                :aria-hidden="expandedSections.has(section.key) ? 'false' : 'true'"
+                :aria-labelledby="`artifacts-section-${section.key}-heading`"
+              >
+                <p v-if="!groupedArtifacts[section.key].length" class="artifacts-section__empty">No artifacts in this section.</p>
+                <button
+                  v-for="a in groupedArtifacts[section.key]"
+                  :key="a.id"
+                  class="artifacts-list-item"
+                  :class="{ 'artifacts-list-item--active': a.id === selectedId }"
+                  @click="selectArtifact(a.id)"
+                >
+                  <span class="artifacts-list-item__title">{{ a.title }}</span>
+                  <span class="artifacts-list-item__meta">
+                    <span v-if="artifactRole(a.id)" class="artifact-role-badge" :data-testid="`role-badge-${a.id}`">{{ artifactRole(a.id) }}</span>
+                    <span class="artifact-kind-badge" :class="kindBadgeClass(a.kind)">{{ kindLabel(a.kind) }}</span>
+                    <span class="artifacts-list-item__date">{{ formatDate(a.created_at) }}</span>
+                  </span>
+                </button>
+              </div>
+            </li>
+          </ul>
         </div>
 
         <div class="artifacts-detail">
@@ -262,6 +285,31 @@ const contentLoading   = ref(false);
 const deletingArtifact = ref(null);
 const submitting       = ref(false);
 const deploymentRoles  = ref({});
+
+const ARTIFACT_SECTIONS = [
+  { key: 'user',       label: 'User provided' },
+  { key: 'design',     label: 'Design' },
+  { key: 'deployment', label: 'Deployment' },
+];
+
+const expandedSections = ref(new Set(['user', 'design', 'deployment']));
+
+function toggleSection(key) {
+  const set = new Set(expandedSections.value);
+  if (set.has(key)) { set.delete(key); } else { set.add(key); }
+  expandedSections.value = set;
+}
+
+const groupedArtifacts = computed(() => {
+  const groups = { user: [], design: [], deployment: [] };
+  for (const a of artifacts.value) {
+    const role = artifactRole(a.id);
+    if (role === 'design') groups.design.push(a);
+    else if (role === 'guide' || role === 'bundle') groups.deployment.push(a);
+    else groups.user.push(a);
+  }
+  return groups;
+});
 
 const routeArtifactId = computed(() => route.params.id ?? null);
 
