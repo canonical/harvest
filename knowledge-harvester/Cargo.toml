@@ -20,7 +20,7 @@ toml         = "0.8"
 clap         = { version = "4", features = ["derive"] }
 
 # Git
-git2         = { version = "0.19", features = ["vendored-openssl"] }
+git2         = { version = "0.20", features = ["vendored-openssl"] }
 
 # Code parsing
 tree-sitter              = "0.22"
