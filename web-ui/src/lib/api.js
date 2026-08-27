@@ -443,6 +443,19 @@ export const generateDesignDecisions = (projectId, id) =>
   projectFetch(`${deploymentUrl(projectId, id)}/design/decisions`, { method: 'POST' });
 export const reviseDesign = (projectId, id, body) =>
   projectFetch(`${deploymentUrl(projectId, id)}/design/revise`, { method: 'POST', body: JSON.stringify(body) });
+export async function proposeDesignChangeStream(projectId, id, body, onEvent) {
+  const response = await fetch(`${deploymentUrl(projectId, id)}/design/propose-change/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    handleUnauthorized(response.status);
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Server error: ${response.status}`);
+  }
+  await consumeSseStream(response, onEvent);
+}
 export const generateProvision = (projectId, id) =>
   projectFetch(`${deploymentUrl(projectId, id)}/provision/generate`, { method: 'POST' });
 export async function generateProvisionStream(projectId, id, onEvent) {
