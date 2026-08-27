@@ -5,7 +5,7 @@
     </div>
 
     <template v-else-if="deployment">
-      <div class="design-view-header">
+      <div v-if="generating || !deployment.design_doc" class="design-view-header">
         <p class="design-view__eyebrow" data-testid="design-eyebrow">Design</p>
         <div class="design-view__title-row">
           <h2 class="design-view__title">{{ deployment.name }}</h2>

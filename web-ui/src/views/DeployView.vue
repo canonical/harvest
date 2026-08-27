@@ -5,42 +5,58 @@
     </div>
 
     <template v-else-if="deployment">
-      <div class="deploy-view-header">
-        <h2>{{ deployment.name }}</h2>
-        <span class="infra-state-badge" :class="infraStateClass(deployment.infra_state)">
-          {{ infraStateLabel(deployment.infra_state) }}
-        </span>
+      <div v-if="!deployment.design_doc" class="deploy-view__needs-design" data-testid="deploy-needs-design">
+        <h2>Generate a design first</h2>
+        <p>
+          A deployment design document is required before you can generate deployment artifacts.
+          <router-link to="/design" data-testid="deploy-go-to-design">Go to the Design page →</router-link>
+        </p>
       </div>
 
-      <div
-        v-if="isBroken"
-        class="p-notification--caution deploy-broken-banner"
-        data-testid="broken-banner"
-      >
-        <div class="p-notification__content">
-          <p class="p-notification__message">
-            This deployment is broken —
-            <router-link to="/change-requests?status=open" data-testid="view-change-requests-link">View change requests</router-link>
-          </p>
-        </div>
-      </div>
-
-      <ArtifactsPanel
+      <DeployGenerationPanel
+        v-else-if="generating"
         :project-id="projectId"
-        :deployment="deployment"
-        :runs="runs"
-        :agents="agents"
-        @refresh="load"
+        :deployment-id="deployment.id"
+        :deployment-name="deployment.name"
+        @done="onGenerationDone"
       />
 
-      <div class="deploy-view__history">
-        <h3>Run history</h3>
-        <RunHistory
-          :runs="runs"
-          :live-entry="liveEntry"
-          :live-log="runLog"
+      <template v-else-if="deployment.terraform_bundle">
+        <div class="deploy-view-header">
+          <p class="deploy-view__eyebrow" data-testid="deploy-eyebrow">Deploy</p>
+          <div class="deploy-view__title-row">
+            <h2 class="deploy-view__title">{{ deployment.name }}</h2>
+          </div>
+        </div>
+
+        <div
+          v-if="isBroken"
+          class="p-notification--caution deploy-broken-banner"
+          data-testid="broken-banner"
+        >
+          <div class="p-notification__content">
+            <p class="p-notification__message">
+              This deployment is broken —
+              <router-link to="/change-requests?status=open" data-testid="view-change-requests-link">View change requests</router-link>
+            </p>
+          </div>
+        </div>
+
+        <DeployArtifacts
+          :project-id="projectId"
+          :deployment="deployment"
+          :agents="agents"
+          @refresh="load"
         />
-      </div>
+      </template>
+
+      <DeployAgentsPanel
+        v-else
+        :project-id="projectId"
+        :agents="agents"
+        :reload="loadAgents"
+        @next="onNext"
+      />
     </template>
 
     <div v-else class="deploy-view-error">Failed to load deployment.</div>
@@ -49,34 +65,33 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
-import ArtifactsPanel from '../components/deployment/ArtifactsPanel.vue';
-import RunHistory from '../components/deployment/RunHistory.vue';
-import { getProjectDeploymentSingle, listDeploymentRuns, listProjectAgents, openProjectEvents } from '../lib/api.js';
+import DeployArtifacts from '../components/deployment/DeployArtifacts.vue';
+import DeployAgentsPanel from '../components/deployment/DeployAgentsPanel.vue';
+import DeployGenerationPanel from '../components/deployment/DeployGenerationPanel.vue';
+import {
+  getProjectDeploymentSingle, listProjectAgents,
+  openProjectEvents,
+} from '../lib/api.js';
 
 const props = defineProps({
   projectId: { type: String, default: null },
 });
 
-const deployment = ref(null);
-const runs       = ref([]);
-const agents     = ref([]);
-const loading    = ref(false);
-const liveEntry  = ref(null);
-const runLog     = ref([]);
-let eventSource  = null;
+const deployment    = ref(null);
+const agents        = ref([]);
+const loading       = ref(false);
+const generating    = ref(false);
+let eventSource     = null;
 
 const isBroken = computed(() => ['broken', 'destroy_failed'].includes(deployment.value?.infra_state));
 
-const INFRA_STATE_LABELS = {
-  none: 'Not deployed', up: 'Up', broken: 'Broken', destroyed: 'Destroyed', destroy_failed: 'Destroy failed',
-};
-
-function infraStateLabel(state) { return INFRA_STATE_LABELS[state] ?? state; }
-function infraStateClass(state) {
-  if (state === 'up') return 'infra-state-badge--up';
-  if (state === 'broken' || state === 'destroy_failed') return 'infra-state-badge--broken';
-  if (state === 'destroyed') return 'infra-state-badge--destroyed';
-  return 'infra-state-badge--none';
+async function loadAgents() {
+  if (!props.projectId) return;
+  try {
+    agents.value = await listProjectAgents(props.projectId);
+  } catch {
+    agents.value = [];
+  }
 }
 
 async function load() {
@@ -85,17 +100,38 @@ async function load() {
   try {
     const d = await getProjectDeploymentSingle(props.projectId);
     deployment.value = d;
-    const [r, a] = await Promise.all([
-      listDeploymentRuns(props.projectId, d.id).catch(() => []),
-      listProjectAgents(props.projectId).catch(() => []),
-    ]);
-    runs.value   = r;
-    agents.value = a;
+    agents.value = await listProjectAgents(props.projectId).catch(() => []);
   } catch {
     deployment.value = null;
   }
   loading.value = false;
 }
+
+function onNext() {
+  generating.value = true;
+}
+
+async function onGenerationDone() {
+  generating.value = false;
+  await load();
+}
+
+function handleProjectEvent(e) {
+  if (!deployment.value || e.deployment_id !== deployment.value.id) return;
+  if (e.type === 'done') {
+    load();
+  }
+}
+
+onMounted(() => {
+  if (props.projectId) {
+    eventSource = openProjectEvents(props.projectId, null, handleProjectEvent);
+  }
+});
+
+onUnmounted(() => {
+  eventSource?.close();
+});
 
 watch(() => props.projectId, () => load(), { immediate: true });
 </script>
