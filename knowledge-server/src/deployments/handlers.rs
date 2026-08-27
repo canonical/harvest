@@ -800,6 +800,17 @@ async fn build_deployment_agent(
     Ok(state.agent_builder.build_for_deployment(project_id.to_string(), group_id.to_string(), &ctx))
 }
 
+async fn build_deployment_agent_text_only(
+    state:         &ProjectState,
+    project_id:    &str,
+    deployment_id: &str,
+) -> Result<Arc<Agent>, ApiError> {
+    let ctx = load_deployment_context(&state.neo4j, project_id, deployment_id)
+        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+    Ok(state.agent_builder.build_for_deployment_text_only(&ctx))
+}
+
 fn generation_failed(response_text: &str) -> ApiError {
     err(
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -1048,6 +1059,105 @@ pub async fn revise_design(
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
+}
+
+#[derive(serde::Deserialize)]
+pub struct ProposeDesignChangeBody {
+    pub explanation: String,
+    #[serde(default)]
+    pub artifact_ids: Vec<String>,
+}
+
+async fn prepare_design_change_proposal(
+    state:         &ProjectState,
+    user:          &Claims,
+    project_id:    &str,
+    deployment_id: &str,
+    body:          &ProposeDesignChangeBody,
+) -> Result<(Arc<Agent>, String), ApiError> {
+    let explanation = body.explanation.trim();
+    if explanation.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "explanation is required"));
+    }
+
+    require_project_access(&state.neo4j, &user.sub, &user.role, project_id).await?;
+    let agent = build_deployment_agent_text_only(state, project_id, deployment_id).await?;
+
+    let deployment = fetch_deployment_detail(&state.neo4j, project_id, deployment_id).await?;
+    let design_doc_id = deployment["design_doc"]["id"].as_str()
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?
+        .to_string();
+    let design = get_artifact_in_project(&state.neo4j, project_id, &design_doc_id)
+        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "design document not found"))?;
+    let current_content = design["content"].as_str().unwrap_or_default().to_string();
+
+    let selected_artifacts = if body.artifact_ids.is_empty() {
+        Vec::new()
+    } else {
+        state.neo4j.query_read(
+            "MATCH (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact)
+             WHERE a.id IN $ids
+             RETURN a.id AS id, a.title AS title, a.kind AS kind, a.content AS content
+             ORDER BY a.title",
+            json!({ "pid": project_id, "ids": body.artifact_ids }),
+        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
+    };
+
+    let mut prompt = format!(
+        "Here is the current design document:\n\n{current_content}\n\n\
+         The field engineer requested the following change:\n\n{explanation}\n\n"
+    );
+    if !selected_artifacts.is_empty() {
+        prompt.push_str("## Additional context artifacts\n\nRead and use these to inform the change.\n\n");
+        for a in &selected_artifacts {
+            let title = a["title"].as_str().unwrap_or("(untitled)");
+            let kind  = a["kind"].as_str().unwrap_or("markdown");
+            let content = a["content"].as_str().unwrap_or("");
+            prompt.push_str(&format!("### {title} ({kind})\n\n{content}\n\n"));
+        }
+    }
+    prompt.push_str(
+        "Write the complete revised design document in Markdown, incorporating this change. \
+         Respond with ONLY the full revised document text — no commentary, explanation, or \
+         surrounding code fences. Do not call generate_artifact, link_deployment_artifact, or any \
+         other tool for this request — the change will only be applied after the user reviews and \
+         approves it."
+    );
+
+    Ok((agent, prompt))
+}
+
+pub async fn propose_design_change_stream(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, deployment_id)): Path<(String, String)>,
+    Json(body): Json<ProposeDesignChangeBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (agent, prompt) = prepare_design_change_proposal(&state, &user, &project_id, &deployment_id, &body).await?;
+
+    let (tx, rx) = mpsc::channel::<AgentEvent>(64);
+    tokio::spawn(async move {
+        let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
+        tokio::spawn(async move {
+            agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
+        });
+        while let Some(event) = agent_rx.recv().await {
+            let _ = tx.send(event).await;
+        }
+    });
+
+    let stream = ReceiverStream::new(rx).map(|event| {
+        let data = serde_json::to_string(&event).unwrap_or_default();
+        Ok::<Event, Infallible>(Event::default().data(data))
+    });
+
+    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    Ok(response)
 }
 
 pub async fn generate_provision(
