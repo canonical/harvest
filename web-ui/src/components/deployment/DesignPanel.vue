@@ -19,7 +19,7 @@
           </div>
           <p v-if="docMeta" class="p-text--small u-text--muted design-panel__doc-meta">{{ docMeta }}</p>
         </div>
-        <div class="design-panel__actions" v-if="!editing">
+        <div class="design-panel__actions" v-if="!editing && !proposalPhase">
           <a
             class="p-button--positive artifact-download-btn is-dense"
             :href="artifactDownloadUrl(deployment.design_doc.id)"
@@ -56,6 +56,30 @@
         />
 
         <div
+          v-else-if="proposalPhase === 'generating' && !proposedContent"
+          class="design-panel__preview doc-body design-panel__proposal-generating"
+          data-testid="design-proposal-generating"
+        >
+          <span class="loading-dots"><span>.</span><span>.</span><span>.</span></span>
+          <p class="u-text--muted">Generating a proposed change…</p>
+        </div>
+
+        <div
+          v-else-if="proposalPhase === 'generating'"
+          class="design-panel__preview doc-body"
+          data-testid="design-proposal-streaming"
+          v-html="renderedProposalStream"
+        />
+
+        <div
+          v-else-if="proposalPhase === 'reviewing'"
+          class="design-panel__preview doc-body"
+          data-testid="design-proposal-diff"
+        >
+          <DiffView :before="{ [designDocTitle]: designContent }" :after="{ [designDocTitle]: proposedContent }" />
+        </div>
+
+        <div
           v-else
           class="design-panel__preview doc-body"
           data-testid="design-preview"
@@ -68,6 +92,14 @@
         <button class="p-button--positive is-dense" type="button" data-testid="save-design-btn" :disabled="saving" @click="saveEdit">
           {{ saving ? 'Saving…' : 'Save' }}
         </button>
+      </div>
+
+      <div v-if="proposalPhase === 'reviewing'" class="design-panel__edit-bar" data-testid="design-proposal-bar">
+        <button class="p-button--positive is-dense" type="button" data-testid="apply-proposal-btn" :disabled="proposing" @click="applyProposal">
+          {{ proposing ? 'Applying…' : 'Apply' }}
+        </button>
+        <button class="p-button--base is-dense" type="button" data-testid="modify-proposal-btn" @click="modifyProposal">Modify</button>
+        <button class="p-button--negative is-dense" type="button" data-testid="discard-proposal-btn" @click="discardProposal">Discard</button>
       </div>
     </template>
 
@@ -146,10 +178,11 @@
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue';
 import { renderMarkdown } from '../../lib/markdown.js';
 import {
-  getArtifact, updateArtifact, proposeArtifactChange, artifactDownloadUrl,
+  getArtifact, updateArtifact, proposeDesignChangeStream, artifactDownloadUrl,
   listProjectArtifacts, linkContextArtifact,
 } from '../../lib/api.js';
 import BusyStatus from './BusyStatus.vue';
+import DiffView from './DiffView.vue';
 
 const props = defineProps({
   projectId:  { type: String, required: true },
@@ -168,6 +201,11 @@ const error         = ref(null);
 const artifacts           = ref([]);
 const artifactsLoading    = ref(false);
 const selectedArtifactIds = ref([]);
+
+const proposalPhase      = ref(null);
+const proposedContent    = ref('');
+const proposalExplanation = ref('');
+const proposalArtifactIds = ref([]);
 
 const usedArtifactIds = computed(() => new Set((props.deployment.context_artifacts ?? []).map(a => a.id)));
 
@@ -188,6 +226,8 @@ let originalContent      = '';
 
 const renderedDesign = computed(() => designContent.value ? renderMarkdown(designContent.value, {}, {}) : '');
 
+const renderedProposalStream = computed(() => proposedContent.value ? renderMarkdown(proposedContent.value, {}, {}) : '');
+
 const designDocTitle = computed(() => props.deployment.design_doc?.title ?? 'Design');
 
 const docMeta = computed(() => {
@@ -207,6 +247,13 @@ const busyLabel = computed(() => {
 
 function formatDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function stripMarkdownFence(text) {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('```')) return trimmed;
+  const withoutOpen = trimmed.replace(/^```[a-zA-Z]*\n?/, '');
+  return withoutOpen.replace(/```\s*$/, '').trim();
 }
 
 function kindLabel(kind) {
@@ -261,6 +308,7 @@ async function startEdit() {
 
 function openPropose() {
   proposeOpen.value = true;
+  promptText.value = '';
   selectedArtifactIds.value = [...usedArtifactIds.value];
   loadArtifacts();
 }
@@ -335,21 +383,77 @@ async function propose() {
     for (const artifactId of newArtifactIds) {
       await linkContextArtifact(props.projectId, props.deployment.id, { artifact_id: artifactId });
     }
-    await proposeArtifactChange(props.projectId, props.deployment.id, {
-      artifact_id: props.deployment.design_doc.id,
-      source: 'prompt',
-      explanation: promptText.value.trim(),
-      current_content: designContent.value,
-      proposed_content: promptText.value.trim(),
-    });
-    promptText.value = '';
+    proposalExplanation.value = promptText.value.trim();
+    proposalArtifactIds.value = [...selectedArtifactIds.value];
     proposeOpen.value = false;
-    emit('refresh');
+    proposalPhase.value = 'generating';
+    proposedContent.value = '';
+    let streamError = null;
+    let finalAnswer = '';
+    await proposeDesignChangeStream(props.projectId, props.deployment.id, {
+      explanation: proposalExplanation.value,
+      artifact_ids: proposalArtifactIds.value,
+    }, (event) => {
+      if (!event) return;
+      if (event.type === 'text_delta') {
+        proposedContent.value += event.text || '';
+      } else if (event.type === 'done') {
+        finalAnswer = event.answer || '';
+      } else if (event.type === 'error') {
+        streamError = event.message || 'Failed to propose change';
+      }
+    });
+    if (finalAnswer.trim()) {
+      proposedContent.value = stripMarkdownFence(finalAnswer.trim());
+    }
+    if (streamError || !proposedContent.value.trim()) {
+      error.value = streamError || 'Failed to propose change';
+      proposalPhase.value = null;
+    } else {
+      proposalPhase.value = 'reviewing';
+    }
   } catch (e) {
     error.value = e.message || 'Failed to propose change';
+    proposalPhase.value = null;
   } finally {
     proposing.value = false;
   }
+}
+
+async function applyProposal() {
+  proposing.value = true;
+  error.value = null;
+  try {
+    await updateArtifact(props.deployment.design_doc.id, {
+      title: props.deployment.design_doc.title ?? 'Design',
+      kind: 'markdown',
+      content: proposedContent.value,
+    });
+    designContent.value = proposedContent.value;
+    originalContent = proposedContent.value;
+    proposalPhase.value = null;
+    proposedContent.value = '';
+    emit('refresh');
+  } catch (e) {
+    error.value = e.message || 'Failed to apply change';
+  } finally {
+    proposing.value = false;
+  }
+}
+
+function discardProposal() {
+  proposalPhase.value = null;
+  proposedContent.value = '';
+  error.value = null;
+}
+
+function modifyProposal() {
+  proposalPhase.value = null;
+  proposedContent.value = '';
+  promptText.value = proposalExplanation.value;
+  selectedArtifactIds.value = [...proposalArtifactIds.value];
+  proposeOpen.value = true;
+  loadArtifacts();
 }
 
 onBeforeUnmount(() => {
