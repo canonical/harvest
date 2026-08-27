@@ -188,6 +188,18 @@ impl ProjectAgentBuilder {
         )
     }
 
+    /// Same grounding as `build_for_deployment` but with no tools at all, so the model can only
+    /// answer in text — used where a caller needs a draft to review before anything is written
+    /// (e.g. proposing a design change), and must not be able to write to the deployment directly
+    /// even if it ignores a "do not call tools" instruction in the prompt.
+    pub fn build_for_deployment_text_only(&self, ctx: &deployments::DeploymentContext) -> Arc<Agent> {
+        Arc::new(
+            Agent::new(Arc::clone(&self.llm), Vec::new(), self.max_iterations)
+                .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+                .with_system_prompt(prompt::deployment_system_prompt(ctx)),
+        )
+    }
+
     /// Tools available to the automatic post-failure triage agent (`build_for_issue_triage`) and
     /// the interactive per-issue chat agent (`build_for_issue_chat`): read-only diagnostics plus
     /// the ability to read the bundle and propose a fix, structurally excluding
@@ -435,6 +447,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .route("/projects/:pid/deployments/:did/design/generate/stream", post(deployment_handlers::generate_design_stream))
         .route("/projects/:pid/deployments/:did/design/decisions", post(deployment_handlers::generate_design_decisions))
         .route("/projects/:pid/deployments/:did/design/revise",    post(deployment_handlers::revise_design))
+        .route("/projects/:pid/deployments/:did/design/propose-change/stream", post(deployment_handlers::propose_design_change_stream))
         .route("/projects/:pid/deployments/:did/provision/generate", post(deployment_handlers::generate_provision))
         .route("/projects/:pid/deployments/:did/provision/generate/stream", post(deployment_handlers::generate_provision_stream))
         .route("/projects/:pid/deployments/:did/provision/propose-change", post(deployment_handlers::propose_provision_change))
