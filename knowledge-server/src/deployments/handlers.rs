@@ -879,13 +879,21 @@ async fn prepare_design_generation(
     let selected_artifacts = if body.artifact_ids.is_empty() {
         Vec::new()
     } else {
-        state.neo4j.query_read(
+        let artifacts = state.neo4j.query_read(
             "MATCH (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact)
              WHERE a.id IN $ids
              RETURN a.id AS id, a.title AS title, a.kind AS kind, a.content AS content
              ORDER BY a.title",
             json!({ "pid": project_id, "ids": body.artifact_ids }),
-        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
+        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        state.neo4j.query_read(
+            "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did}),
+                    (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact)
+             WHERE a.id IN $ids
+             MERGE (d)-[:HAS_CONTEXT_ARTIFACT]->(a)",
+            json!({ "pid": project_id, "did": deployment_id, "ids": body.artifact_ids }),
+        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        artifacts
     };
 
     let agent = build_deployment_agent(state, project_id, &group_id, deployment_id).await?;
