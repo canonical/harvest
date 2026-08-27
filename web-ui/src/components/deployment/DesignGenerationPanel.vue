@@ -1,9 +1,9 @@
 <template>
   <div class="design-gen" data-testid="design-generation">
     <div class="design-gen__header">
-      <p class="design-gen__eyebrow">Design</p>
-      <h2 class="design-gen__title">Generating design document</h2>
-      <p class="design-gen__subtitle">{{ deploymentName }}</p>
+      <p class="p-text--small-caps u-text--muted">Design</p>
+      <h2 class="p-heading--3">Generating design document</h2>
+      <p class="u-text--muted">{{ deploymentName }}</p>
     </div>
 
     <div v-if="error" class="design-gen__error" data-testid="design-gen-error">
@@ -44,7 +44,7 @@
     </div>
 
     <div v-if="streamText" class="design-gen__preview-wrapper">
-      <div class="design-gen__preview-label">Live preview</div>
+      <div class="p-text--small-caps u-text--muted">Live preview</div>
       <div class="design-gen__preview doc-body" data-testid="design-gen-preview" v-html="renderedStream"></div>
     </div>
   </div>

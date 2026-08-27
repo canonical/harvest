@@ -6,12 +6,10 @@
 
     <template v-else-if="deployment">
       <div v-if="generating || !deployment.design_doc" class="design-view-header">
-        <p class="design-view__eyebrow" data-testid="design-eyebrow">Design</p>
+        <p class="p-text--small-caps u-text--muted" data-testid="design-eyebrow">Design</p>
         <div class="design-view__title-row">
-          <h2 class="design-view__title">{{ deployment.name }}</h2>
-          <span v-if="deployment.template" class="design-view__template-chip" data-testid="design-template-chip">
-            {{ deployment.template.name }}
-          </span>
+          <h2 class="p-heading--3">{{ deployment.name }}</h2>
+          <span v-if="deployment.template" class="p-chip" data-testid="design-template-chip">{{ deployment.template.name }}</span>
         </div>
       </div>
       <DesignGenerationPanel
