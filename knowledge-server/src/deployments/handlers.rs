@@ -1047,6 +1047,53 @@ pub async fn generate_provision(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let (agent, prompt) = prepare_provision_generation(&state, &user, &project_id, &deployment_id).await?;
+
+    let progress_tx = spawn_progress_relay(&state, &project_id, &deployment_id);
+    agent.query_with_progress(&prompt, &[], &[], None, progress_tx).await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    Ok(Json(deployment))
+}
+
+pub async fn generate_provision_stream(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, deployment_id)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (agent, prompt) = prepare_provision_generation(&state, &user, &project_id, &deployment_id).await?;
+
+    let (tx, rx) = mpsc::channel::<AgentEvent>(64);
+    tokio::spawn(async move {
+        let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
+        tokio::spawn(async move {
+            agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
+        });
+        while let Some(event) = agent_rx.recv().await {
+            let _ = tx.send(event).await;
+        }
+    });
+
+    let stream = ReceiverStream::new(rx).map(|event| {
+        let data = serde_json::to_string(&event).unwrap_or_default();
+        Ok::<Event, Infallible>(Event::default().data(data))
+    });
+
+    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    Ok(response)
+}
+
+async fn prepare_provision_generation(
+    state:         &ProjectState,
+    user:          &Claims,
+    project_id:    &str,
+    deployment_id: &str,
+) -> Result<(Arc<Agent>, String), ApiError> {
     let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
     let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id).await?;
@@ -1080,12 +1127,7 @@ pub async fn generate_provision(
          deploy_deployment, redeploy_deployment, or destroy_deployment."
     );
 
-    let progress_tx = spawn_progress_relay(&state, &project_id, &deployment_id);
-    agent.query_with_progress(&prompt, &[], &[], None, progress_tx).await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
-    Ok(Json(deployment))
+    Ok((agent, prompt))
 }
 
 #[derive(serde::Deserialize)]
