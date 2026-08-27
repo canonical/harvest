@@ -26,7 +26,7 @@ use knowledge_server::{
             add_context_artifact, apply_provision_change, approve_proposal, create_deployment, create_template, delete_deployment, delete_template,
             deploy_deployment, destroy_deployment, discard_proposal,
             generate_design, generate_design_decisions, generate_design_stream,
-            generate_environment_questions, generate_provision, get_deployment, get_execution_plan, get_project_deployment, get_template,
+            generate_environment_questions, generate_provision, generate_provision_stream, get_deployment, get_execution_plan, get_project_deployment, get_template,
             link_context_artifact, list_deployment_runs, list_deployments, list_templates, list_proposals, propose_artifact_change, propose_provision_change,
             redeploy_deployment, remove_context_artifact, revise_design, run_dag, set_execution_plan, update_deployment, update_template,
         },
@@ -185,6 +185,7 @@ fn deployments_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn LlmProvider>) 
         .route("/projects/:pid/deployments/:did/design/decisions",      route_post(generate_design_decisions))
         .route("/projects/:pid/deployments/:did/design/revise",         route_post(revise_design))
         .route("/projects/:pid/deployments/:did/provision/generate",       route_post(generate_provision))
+        .route("/projects/:pid/deployments/:did/provision/generate/stream", route_post(generate_provision_stream))
         .route("/projects/:pid/deployments/:did/provision/propose-change", route_post(propose_provision_change))
         .route("/projects/:pid/deployments/:did/provision/apply-change",   route_post(apply_provision_change))
         .route("/projects/:pid/deployments/:did/context-artifacts",        route_post(add_context_artifact))
@@ -1511,6 +1512,75 @@ async fn generate_provision_creates_and_links_terraform_bundle() {
     assert_eq!(status, StatusCode::OK);
     assert!(body["terraform_bundle"]["id"].is_string());
     assert_eq!(body["terraform_bundle"]["kind"], "terraform");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn generate_provision_stream_requires_existing_design_doc() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "ps@x.com", "Pete", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let (status, _ct, _body) = send_sse(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/provision/generate/stream"), &tok, json!({})),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn generate_provision_stream_returns_event_stream_content_type() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "ps@x.com", "Pam", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), provision_generation_llm());
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    seed_design_doc(&neo4j, &pid, &did, "# Design\nSingle VM.").await;
+
+    let (status, ct, _body) = send_sse(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/provision/generate/stream"), &tok, json!({})),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(ct.contains("text/event-stream"), "content-type: {ct}");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn generate_provision_stream_emits_text_delta_tool_events_and_done() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "ps2@x.com", "Pria", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), provision_generation_llm());
+    let pid = seed_project(&app, &tok, &gid, "Customer S").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    seed_design_doc(&neo4j, &pid, &did, "# Design\nSingle VM.").await;
+
+    let (status, _ct, body) = send_sse(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/provision/generate/stream"), &tok, json!({})),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    let events = parse_sse_events(&body);
+
+    let tool_names: Vec<&str> = events.iter()
+        .filter_map(|e| (e["type"] == "tool_call").then(|| e["name"].as_str().unwrap_or("")))
+        .collect();
+    assert!(tool_names.contains(&"generate_artifact"), "tool calls: {tool_names:?}");
+    assert!(tool_names.contains(&"link_deployment_artifact"), "tool calls: {tool_names:?}");
+    assert!(events.iter().any(|e| e["type"] == "done"), "missing done event");
+
+    let (_, dep) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
+    assert!(dep["terraform_bundle"]["id"].is_string());
+    assert_eq!(dep["terraform_bundle"]["kind"], "terraform");
 }
 
 #[tokio::test]
