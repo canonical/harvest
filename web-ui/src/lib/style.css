@@ -2985,6 +2985,10 @@ a.source-chip:hover .source-chip__name {
   max-width: 780px;
 }
 
+.modal-content--xwide {
+  max-width: 960px;
+}
+
 .modal-content h3 {
   margin: 0;
   font-size: 1.1rem;
@@ -6819,6 +6823,8 @@ a.source-chip:hover .source-chip__name {
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
+  background: var(--bg-surface);
+  border-radius: 8px;
 }
 
 .design-panel__body {
@@ -6834,35 +6840,35 @@ a.source-chip:hover .source-chip__name {
   flex-direction: column;
   overflow: hidden;
   background: var(--bg-surface);
-  border: 1px solid var(--border-color);
   border-radius: 8px;
 }
 
-.design-panel__doc-header {
+.design-panel__header {
   flex-shrink: 0;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 1rem;
   padding: 1.25rem 2rem 1rem;
-  border-bottom: 1px solid var(--border-color);
 }
 
-.design-panel__doc-heading {
+.design-panel__heading {
   min-width: 0;
 }
 
-.design-panel__doc-title {
+.design-panel__title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.design-panel__doc-name {
   margin: 0;
-  font-size: 1.25rem;
-  font-weight: 600;
-  color: var(--text-primary);
 }
 
 .design-panel__doc-meta {
   margin: 0.25rem 0 0;
-  font-size: 0.8rem;
-  color: var(--text-muted);
 }
 
 .design-panel__actions {
@@ -6872,6 +6878,15 @@ a.source-chip:hover .source-chip__name {
   gap: 0.5rem;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.design-panel__content {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-surface);
+  border-radius: 0 0 8px 8px;
 }
 
 .design-panel__editor-container {
@@ -6889,6 +6904,9 @@ a.source-chip:hover .source-chip__name {
 .design-panel__preview.doc-body {
   max-width: 64rem;
   margin: 0 auto;
+  background: var(--bg-page);
+  border-radius: 8px;
+  padding: 2rem 2.5rem;
 }
 
 .design-panel__edit-bar {
@@ -6897,7 +6915,6 @@ a.source-chip:hover .source-chip__name {
   justify-content: flex-end;
   gap: 0.5rem;
   padding: 0.75rem 2rem;
-  border-top: 1px solid var(--border-color);
   background: var(--bg-surface);
   border-radius: 0 0 8px 8px;
 }
@@ -6908,7 +6925,6 @@ a.source-chip:hover .source-chip__name {
   flex-direction: column;
   gap: 0.5rem;
   background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-color);
   padding: 1rem 2rem;
 }
 
@@ -7223,18 +7239,13 @@ a.source-chip:hover .source-chip__name {
   padding: 1.5rem 2rem;
 }
 
+.design-view:has(> .design-panel) {
+  background: var(--bg-surface);
+}
+
 .design-view-header {
   flex-shrink: 0;
   margin-bottom: 1.5rem;
-}
-
-.design-view__eyebrow {
-  margin: 0 0 0.25rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
 }
 
 .design-view__title-row {
@@ -7242,25 +7253,6 @@ a.source-chip:hover .source-chip__name {
   align-items: center;
   gap: 0.75rem;
   flex-wrap: wrap;
-}
-
-.design-view__title {
-  margin: 0;
-  font-size: 1.5rem;
-  font-weight: 600;
-}
-
-.design-view__template-chip {
-  display: inline-flex;
-  align-items: center;
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-  background: var(--bg-surface-alt);
-  border: 1px solid var(--border-color);
-  border-radius: 1rem;
-  padding: 0.1875rem 0.625rem;
-  white-space: nowrap;
 }
 
 .design-view-error {
@@ -7278,27 +7270,6 @@ a.source-chip:hover .source-chip__name {
 
 .design-gen__header {
   flex-shrink: 0;
-}
-
-.design-gen__eyebrow {
-  margin: 0 0 0.25rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-}
-
-.design-gen__title {
-  margin: 0;
-  font-size: 1.5rem;
-  font-weight: 600;
-}
-
-.design-gen__subtitle {
-  margin: 0.25rem 0 0;
-  font-size: 0.875rem;
-  color: var(--text-secondary);
 }
 
 .design-gen__spinner {
@@ -7349,19 +7320,9 @@ a.source-chip:hover .source-chip__name {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  border: 1px solid var(--border-color);
   border-radius: 6px;
   padding: 1.25rem;
   background: var(--bg-surface);
-}
-
-.design-gen__preview-label {
-  font-size: 0.6875rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-  flex-shrink: 0;
 }
 
 .design-gen__preview {
@@ -7389,20 +7350,6 @@ a.source-chip:hover .source-chip__name {
   flex-direction: column;
   gap: 0.5rem;
   flex-shrink: 0;
-}
-
-.design-setup__title {
-  margin: 0;
-  font-size: 1.25rem;
-  font-weight: 600;
-}
-
-.design-setup__lede {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 0.9rem;
-  line-height: 1.5;
-  max-width: 48rem;
 }
 
 .design-setup__grid {
@@ -7433,21 +7380,6 @@ a.source-chip:hover .source-chip__name {
   gap: 0.5rem 0.625rem;
 }
 
-.design-setup__step-num {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.5rem;
-  height: 1.5rem;
-  flex-shrink: 0;
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: var(--text-secondary);
-  background: var(--bg-surface-alt);
-  border: 1px solid var(--border-color);
-  border-radius: 50%;
-}
-
 .design-setup__label {
   font-size: 0.875rem;
   font-weight: 600;
@@ -7459,58 +7391,16 @@ a.source-chip:hover .source-chip__name {
   flex-shrink: 0;
 }
 
-.design-setup__template-desc {
-  margin: 0;
-  font-size: 0.8rem;
-  color: var(--text-muted);
-}
-
-.design-setup__subtitle {
-  margin: 0;
-  font-size: 0.875rem;
-  font-weight: 600;
-}
-
-.design-setup__count {
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: var(--text-muted);
-  background: var(--bg-surface-alt);
-  border-radius: 1rem;
-  padding: 0.0625rem 0.5rem;
-}
-
 .design-setup__bulk {
   display: inline-flex;
   gap: 0.5rem;
   margin-left: auto;
 }
 
-.design-setup__bulk-btn {
-  background: none;
-  border: none;
-  padding: 0;
-  font-size: 0.75rem;
-  font-weight: 500;
-  color: var(--color-link, #06c);
-  cursor: pointer;
-}
-
-.design-setup__bulk-btn:disabled {
-  color: var(--text-muted);
-  cursor: default;
-}
-
-.design-setup__artifacts-link {
-  font-size: 0.8rem;
-  flex-shrink: 0;
-}
-
 .design-setup__loading {
   padding: 0.75rem 1rem;
   font-size: 0.85rem;
   color: var(--text-muted);
-  border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-surface);
 }
@@ -7522,72 +7412,65 @@ a.source-chip:hover .source-chip__name {
   gap: 0.625rem;
   padding: 2rem 1rem;
   text-align: center;
-  border: 1px dashed var(--border-color);
   border-radius: 8px;
   background: var(--bg-surface);
 }
 
-.design-setup__empty-text {
-  margin: 0;
-  font-size: 0.85rem;
-  color: var(--text-muted);
-}
-
-.design-setup__empty-link {
-  font-size: 0.85rem;
-  font-weight: 500;
-}
-
 .design-setup__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
   overflow-y: auto;
   min-height: 0;
   flex: 1;
 }
 
+.design-setup__list--modal {
+  max-height: 16rem;
+  flex: none;
+}
+
+.design-panel__propose-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+}
+
+.design-panel__propose-grid textarea {
+  height: 100%;
+  resize: none;
+}
+
 .design-setup__item {
-  border-bottom: 1px solid var(--border-color);
-}
-
-.design-setup__item:last-child {
-  border-bottom: none;
-}
-
-.design-setup__item-label {
   display: flex;
   align-items: center;
   gap: 0.625rem;
-  padding: 0.625rem 1rem;
-  cursor: pointer;
+  padding-left: 1rem;
+  padding-right: 1rem;
   transition: background 0.1s;
 }
 
-.design-setup__item-label:hover {
+.design-setup__item:hover {
   background: var(--bg-surface-hover);
 }
 
-.design-setup__item-label input[type="checkbox"] {
+.design-setup__item-checkbox {
   flex-shrink: 0;
+  margin: 0;
 }
 
 .design-setup__item-title {
   flex: 1;
   min-width: 0;
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--text-primary);
+  display: block;
+  width: auto;
+  max-width: none;
+  margin: 0;
+  cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .design-setup__item-date {
-  font-size: 0.7rem;
-  color: var(--text-muted);
+  flex-shrink: 0;
   white-space: nowrap;
 }
 
@@ -7598,13 +7481,6 @@ a.source-chip:hover .source-chip__name {
   gap: 1rem;
   flex-shrink: 0;
   padding-top: 1rem;
-  border-top: 1px solid var(--border-color);
-}
-
-.design-setup__summary {
-  margin: 0;
-  font-size: 0.8rem;
-  color: var(--text-muted);
 }
 
 .design-setup__actions {
@@ -7619,6 +7495,9 @@ a.source-chip:hover .source-chip__name {
   }
   .design-setup__list {
     max-height: 16rem;
+  }
+  .design-panel__propose-grid {
+    grid-template-columns: 1fr;
   }
 }
 

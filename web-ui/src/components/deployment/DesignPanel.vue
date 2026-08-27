@@ -12,12 +12,12 @@
           <div class="design-panel__title-row">
             <span
               v-if="deployment.template"
-              class="design-panel__template-chip"
+              class="p-chip"
               data-testid="design-template-chip"
             >{{ deployment.template.name }}</span>
-            <span class="design-panel__doc-name">{{ designDocTitle }}</span>
-            <span v-if="docMeta" class="design-panel__doc-meta">{{ docMeta }}</span>
+            <h3 class="p-heading--4 design-panel__doc-name">{{ designDocTitle }}</h3>
           </div>
+          <p v-if="docMeta" class="p-text--small u-text--muted design-panel__doc-meta">{{ docMeta }}</p>
         </div>
         <div class="design-panel__actions" v-if="!editing">
           <a
@@ -41,7 +41,7 @@
             data-testid="propose-toggle-btn"
             type="button"
             :disabled="proposing"
-            @click="proposeOpen = true"
+            @click="openPropose"
           >Propose a change</button>
           <BusyStatus v-if="busyLabel" :text="busyLabel" />
         </div>
@@ -72,20 +72,56 @@
     </template>
 
     <div v-if="proposeOpen" class="modal" @click.self="closePropose">
-      <div class="modal-content" data-testid="design-prompt-panel">
+      <div class="modal-content modal-content--xwide" data-testid="design-prompt-panel">
         <button class="modal-close" type="button" @click="closePropose">✕</button>
         <h3>Propose a change</h3>
         <p class="modal-lede">Describe the change you'd like to propose for this design document.</p>
-        <div class="form-group">
-          <label for="design-prompt">Change description</label>
-          <textarea
-            id="design-prompt"
-            v-model="promptText"
-            rows="6"
-            data-testid="design-prompt"
-            placeholder="Describe what you'd like to change"
-          />
+
+        <div class="design-panel__propose-grid">
+          <div class="form-group">
+            <label for="design-prompt">Change description</label>
+            <textarea
+              id="design-prompt"
+              v-model="promptText"
+              rows="10"
+              data-testid="design-prompt"
+              placeholder="Describe what you'd like to change"
+            />
+          </div>
+
+          <div class="form-group">
+            <label>Context artifacts</label>
+            <p class="p-text--small u-text--muted">
+              Artifacts already used to generate this design are pre-selected and locked.
+              Select additional artifacts to add as context for this change.
+            </p>
+            <div v-if="artifactsLoading" class="design-setup__loading">
+              <span class="loading-dots"><span>.</span><span>.</span><span>.</span></span>
+            </div>
+            <div v-else-if="!artifacts.length" class="design-setup__empty">
+              <p class="u-text--muted">This project has no artifacts yet.</p>
+            </div>
+            <ul v-else class="p-list--divided design-setup__list design-setup__list--modal">
+              <li v-for="a in artifacts" :key="a.id" class="p-list__item design-setup__item">
+                <div class="p-checkbox design-setup__item-checkbox">
+                  <input
+                    type="checkbox"
+                    class="p-checkbox__input"
+                    :id="`propose-artifact-checkbox-${a.id}`"
+                    :value="a.id"
+                    v-model="selectedArtifactIds"
+                    :data-testid="`propose-artifact-checkbox-${a.id}`"
+                    :disabled="usedArtifactIds.has(a.id)"
+                  />
+                  <label class="p-checkbox__label" :for="`propose-artifact-checkbox-${a.id}`"></label>
+                </div>
+                <label class="design-setup__item-title" :for="`propose-artifact-checkbox-${a.id}`">{{ a.title }}</label>
+                <span class="artifact-kind-badge" :class="kindBadgeClass(a.kind)">{{ kindLabel(a.kind) }}</span>
+              </li>
+            </ul>
+          </div>
         </div>
+
         <div v-if="error" class="p-notification--negative">
           <div class="p-notification__content">
             <p class="p-notification__message">{{ error }}</p>
@@ -109,7 +145,10 @@
 <script setup>
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue';
 import { renderMarkdown } from '../../lib/markdown.js';
-import { getArtifact, updateArtifact, proposeArtifactChange, artifactDownloadUrl } from '../../lib/api.js';
+import {
+  getArtifact, updateArtifact, proposeArtifactChange, artifactDownloadUrl,
+  listProjectArtifacts, linkContextArtifact,
+} from '../../lib/api.js';
 import BusyStatus from './BusyStatus.vue';
 
 const props = defineProps({
@@ -125,6 +164,12 @@ const proposing     = ref(false);
 const proposeOpen   = ref(false);
 const promptText    = ref('');
 const error         = ref(null);
+
+const artifacts           = ref([]);
+const artifactsLoading    = ref(false);
+const selectedArtifactIds = ref([]);
+
+const usedArtifactIds = computed(() => new Set((props.deployment.context_artifacts ?? []).map(a => a.id)));
 
 const editorContainerRef = ref(null);
 let editor               = null;
@@ -154,6 +199,31 @@ function formatDate(iso) {
   return new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+function kindLabel(kind) {
+  if (kind === 'pdf') return 'PDF';
+  if (kind === 'terraform') return 'Terraform';
+  if (kind === 'terragrunt') return 'Terragrunt';
+  if (kind === 'bash') return 'Bash';
+  return 'Markdown';
+}
+
+function kindBadgeClass(kind) {
+  if (kind === 'pdf') return 'artifact-kind-badge--pdf';
+  if (kind === 'terraform' || kind === 'terragrunt') return 'artifact-kind-badge--terraform';
+  if (kind === 'bash') return 'artifact-kind-badge--bash';
+  return 'artifact-kind-badge--markdown';
+}
+
+async function loadArtifacts() {
+  artifactsLoading.value = true;
+  try {
+    artifacts.value = await listProjectArtifacts(props.projectId);
+  } catch {
+    artifacts.value = [];
+  }
+  artifactsLoading.value = false;
+}
+
 async function loadDesignContent() {
   if (!props.deployment.design_doc) {
     designContent.value = '';
@@ -177,6 +247,12 @@ async function startEdit() {
   proposeOpen.value = false;
   await nextTick();
   await mountEditor();
+}
+
+function openPropose() {
+  proposeOpen.value = true;
+  selectedArtifactIds.value = [...usedArtifactIds.value];
+  loadArtifacts();
 }
 
 function closePropose() {
@@ -245,6 +321,10 @@ async function propose() {
   proposing.value = true;
   error.value = null;
   try {
+    const newArtifactIds = selectedArtifactIds.value.filter(id => !usedArtifactIds.value.has(id));
+    for (const artifactId of newArtifactIds) {
+      await linkContextArtifact(props.projectId, props.deployment.id, { artifact_id: artifactId });
+    }
     await proposeArtifactChange(props.projectId, props.deployment.id, {
       artifact_id: props.deployment.design_doc.id,
       source: 'prompt',
@@ -254,6 +334,7 @@ async function propose() {
     });
     promptText.value = '';
     proposeOpen.value = false;
+    emit('refresh');
   } catch (e) {
     error.value = e.message || 'Failed to propose change';
   } finally {
