@@ -1,9 +1,10 @@
 use axum::{
-    extract::{Extension, Path, State},
-    http::{HeaderName, HeaderValue, StatusCode},
+    body::Body,
+    extract::{Extension, Path, Query, State},
+    http::{header, HeaderName, HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse,
+        IntoResponse, Response,
     },
     Json,
 };
@@ -16,7 +17,7 @@ use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentEvent};
-use crate::artifacts::{bundle, handlers::{create_artifact, get_artifact_in_project, ArtifactKind}};
+use crate::artifacts::{bundle, handlers::{create_artifact, get_artifact_in_project, sanitize_filename, ArtifactKind}};
 use crate::auth::jwt::Claims;
 use crate::machines::{TerraformAction, TerraformFlavor};
 use crate::neo4j::Neo4jClient;
@@ -1158,6 +1159,52 @@ pub async fn propose_design_change_stream(
         HeaderValue::from_static("no"),
     );
     Ok(response)
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct DesignPdfQuery {
+    #[serde(default)]
+    pub download: bool,
+}
+
+pub async fn get_design_pdf(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, deployment_id)): Path<(String, String)>,
+    Query(query): Query<DesignPdfQuery>,
+) -> Result<Response, ApiError> {
+    let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    let design_doc_id = deployment["design_doc"]["id"].as_str()
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?;
+    let design = get_artifact_in_project(&state.neo4j, &project_id, design_doc_id)
+        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "design document not found"))?;
+    let content = design["content"].as_str().unwrap_or_default();
+
+    let info = super::design_pdf::TitlePageInfo {
+        company: project["name"].as_str().unwrap_or_default().to_string(),
+        product: deployment["template"]["name"].as_str().unwrap_or_default().to_string(),
+        deployment_name: deployment["name"].as_str().unwrap_or_default().to_string(),
+        generated_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
+    };
+    let bytes = super::design_pdf::build_design_pdf(content, &info)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+
+    let title = design["title"].as_str().unwrap_or("Design");
+    let slug = sanitize_filename(title);
+    let disposition = if query.download {
+        format!("attachment; filename=\"{slug}.pdf\"")
+    } else {
+        format!("inline; filename=\"{slug}.pdf\"")
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("application/pdf"))
+        .header(header::CONTENT_DISPOSITION, HeaderValue::from_str(&disposition).unwrap())
+        .body(Body::from(bytes))
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
 }
 
 pub async fn generate_provision(
