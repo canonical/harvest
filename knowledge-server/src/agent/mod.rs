@@ -507,14 +507,12 @@ impl Agent {
                 if let Some((question, choices, cleaned)) = extract_text_ask_user(&text_buf) {
                     let answer_text = if !cleaned.is_empty() {
                         cleaned
+                    } else if let Some(synth) = self.synthesize_partial_answer(&messages, selection).await {
+                        synth
                     } else if !accumulated_text.is_empty() {
                         accumulated_text.clone()
                     } else {
-                        // Fix 4: Synthesize a partial answer from gathered context.
-                        match self.synthesize_partial_answer(&messages, selection).await {
-                            Some(synth) => synth,
-                            None => question.clone(),
-                        }
+                        question.clone()
                     };
                     let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
                     return LoopOutcome::EndedWithoutCitations {
@@ -535,18 +533,14 @@ impl Agent {
                         .filter(|s| !is_catchall(s))
                         .collect())
                     .unwrap_or_default();
-                // Fix 3: Use accumulated_text when text_buf is empty so the user
-                // sees the findings from prior iterations alongside the question.
                 let answer_text = if !text_buf.is_empty() {
                     text_buf
+                } else if let Some(synth) = self.synthesize_partial_answer(&messages, selection).await {
+                    synth
                 } else if !accumulated_text.is_empty() {
                     accumulated_text.clone()
                 } else {
-                    // Fix 4: Synthesize a partial answer from gathered context.
-                    match self.synthesize_partial_answer(&messages, selection).await {
-                        Some(synth) => synth,
-                        None => question.clone(),
-                    }
+                    question.clone()
                 };
                 let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
                 return LoopOutcome::EndedWithoutCitations {
@@ -693,9 +687,11 @@ impl Agent {
             return None;
         }
         let prompt = format!(
-            "You have gathered information from the codebase and are about to ask the user \
-             a follow-up question. In 1–3 sentences, briefly summarize what you've found so far \
-             so the user has context for the question. Do not ask any questions yourself.\n\n\
+            "Using ONLY the tool results below, write 1–3 sentences stating the concrete facts \
+             you found in the codebase — specific files, functions, config keys, and behavior. \
+             Do not mention asking the user a question, presenting options, or any other future \
+             action. Do not use phrases like \"I will\" or \"Let me\". Write as plain findings, \
+             not as a plan.\n\n\
              Tool results so far:\n{tool_summary}"
         );
         let mut synth_messages = messages.to_vec();
