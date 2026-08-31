@@ -1,7 +1,7 @@
 <template>
   <div class="design-view">
     <div v-if="loading" data-testid="design-loading">
-      <span class="loading-dots"><span>.</span><span>.</span><span>.</span></span>
+      <LoadingSpinner text="Loading…" />
     </div>
 
     <template v-else-if="deployment">
@@ -44,6 +44,7 @@ import { ref, computed, watch } from 'vue';
 import DesignPanel from '../components/deployment/DesignPanel.vue';
 import DesignSetupPanel from '../components/deployment/DesignSetupPanel.vue';
 import DesignGenerationPanel from '../components/deployment/DesignGenerationPanel.vue';
+import LoadingSpinner from '../components/deployment/LoadingSpinner.vue';
 import { getProjectDeploymentSingle } from '../lib/api.js';
 import { useProjectStore } from '../stores/project.js';
 

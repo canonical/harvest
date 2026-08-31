@@ -6915,6 +6915,14 @@ a.source-chip:hover .source-chip__name {
   min-height: 0;
 }
 
+.design-panel__pdf-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: var(--bg-surface);
+}
+
 .design-panel__proposal-generating {
   display: flex;
   flex-direction: column;

@@ -394,7 +394,8 @@ export const listProjectArtifacts  = (projectId) => projectFetch(`${projectUrl(p
 export const createProjectArtifact = (projectId, body) => projectFetch(`${projectUrl(projectId)}/artifacts`, { method: 'POST', body: JSON.stringify(body) });
 export const getArtifact           = (id)         => projectFetch(artifactUrl(id));
 export const updateArtifact       = (id, body)   => projectFetch(artifactUrl(id), { method: 'PUT', body: JSON.stringify(body) });
-export const artifactDownloadUrl   = (id)         => `${artifactUrl(id)}/download`;
+export const artifactDownloadUrl   = (id, format) =>
+  format ? `${artifactUrl(id)}/download?format=${encodeURIComponent(format)}` : `${artifactUrl(id)}/download`;
 export async function deleteArtifact(id) {
   const res = await fetch(artifactUrl(id), { method: 'DELETE' });
   if (!res.ok) {
@@ -404,6 +405,9 @@ export async function deleteArtifact(id) {
 }
 
 const deploymentUrl = (projectId, id) => `${projectUrl(projectId)}/deployments/${encodeURIComponent(id)}`;
+
+export const designPdfUrl = (projectId, id, download) =>
+  `${deploymentUrl(projectId, id)}/design/pdf${download ? '?download=true' : ''}`;
 
 export const listProjectDeployments  = (projectId)       => projectFetch(`${projectUrl(projectId)}/deployments`);
 export const createProjectDeployment = (projectId, body) => projectFetch(`${projectUrl(projectId)}/deployments`, { method: 'POST', body: JSON.stringify(body) });
