@@ -28,7 +28,29 @@ pub struct GitConfig {
 pub struct RepoConfig {
     pub name: String,
     pub url: String,
+    pub browse_url: Option<String>,
     pub refs: Option<Vec<String>>,
+}
+
+impl RepoConfig {
+    pub fn resolved_browse_url(&self) -> String {
+        self.browse_url.clone().unwrap_or_else(|| {
+            let cleaned = strip_credentials(&self.url);
+            cleaned.strip_suffix(".git").map(str::to_string).unwrap_or(cleaned)
+        })
+    }
+}
+
+fn strip_credentials(url: &str) -> String {
+    if let Some(scheme_end) = url.find("://") {
+        let authority_start = scheme_end + 3;
+        let after_scheme = &url[authority_start..];
+        let authority_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+        if let Some(at) = after_scheme[..authority_end].rfind('@') {
+            return format!("{}{}", &url[..authority_start], &after_scheme[at + 1..]);
+        }
+    }
+    url.to_string()
 }
 
 #[derive(Deserialize, Clone)]
@@ -301,5 +323,88 @@ url  = "git@github.com:owner/repo.git"
     fn expand_tilde_leaves_absolute_path_unchanged() {
         let path = PathBuf::from("/absolute/path/key");
         assert_eq!(expand_tilde(path.clone()), path);
+    }
+
+    fn repo_toml(fields: &str) -> String {
+        format!(
+            r#"
+[neo4j]
+uri      = "bolt://localhost:7687"
+user     = "neo4j"
+password = "pass"
+
+[[repositories]]
+name = "my-repo"
+{fields}
+"#
+        )
+    }
+
+    #[test]
+    fn resolved_browse_url_strips_token_credentials() {
+        let config: Config = toml::from_str(&repo_toml(
+            r#"url = "https://ghp_abc123@github.com/owner/private-repo.git""#,
+        ))
+        .unwrap();
+        assert_eq!(
+            config.repositories[0].resolved_browse_url(),
+            "https://github.com/owner/private-repo"
+        );
+    }
+
+    #[test]
+    fn resolved_browse_url_strips_user_and_password_credentials() {
+        let config: Config = toml::from_str(&repo_toml(
+            r#"url = "https://user:secret@example.com/owner/repo.git""#,
+        ))
+        .unwrap();
+        assert_eq!(
+            config.repositories[0].resolved_browse_url(),
+            "https://example.com/owner/repo"
+        );
+    }
+
+    #[test]
+    fn resolved_browse_url_strips_git_suffix_when_no_credentials() {
+        let config: Config = toml::from_str(&base_toml("")).unwrap();
+        assert_eq!(
+            config.repositories[0].resolved_browse_url(),
+            "https://github.com/owner/repo"
+        );
+    }
+
+    #[test]
+    fn resolved_browse_url_leaves_non_git_suffixed_url_unchanged() {
+        let config: Config = toml::from_str(&repo_toml(
+            r#"url = "https://github.com/owner/repo""#,
+        ))
+        .unwrap();
+        assert_eq!(
+            config.repositories[0].resolved_browse_url(),
+            "https://github.com/owner/repo"
+        );
+    }
+
+    #[test]
+    fn resolved_browse_url_prefers_explicit_override() {
+        let config: Config = toml::from_str(&repo_toml(
+            r#"
+url        = "https://ghp_abc123@github.com/owner/private-repo.git"
+browse_url = "https://internal-mirror.example.com/owner/private-repo"
+"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            config.repositories[0].resolved_browse_url(),
+            "https://internal-mirror.example.com/owner/private-repo"
+        );
+    }
+
+    #[test]
+    fn strip_credentials_does_not_touch_at_sign_in_path() {
+        assert_eq!(
+            strip_credentials("https://example.com/owner/repo@2.0.git"),
+            "https://example.com/owner/repo@2.0.git"
+        );
     }
 }
