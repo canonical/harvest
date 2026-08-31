@@ -1904,6 +1904,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jsonwebtoken",
+ "lopdf",
  "markdown2pdf",
  "neo4j_testcontainers",
  "neo4rs",

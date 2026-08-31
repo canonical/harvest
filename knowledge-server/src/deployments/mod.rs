@@ -1,3 +1,4 @@
+pub mod design_pdf;
 pub mod handlers;
 pub mod harvest;
 

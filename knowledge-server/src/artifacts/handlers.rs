@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -81,7 +81,7 @@ fn validate_update(
     Ok(title.to_string())
 }
 
-fn sanitize_filename(title: &str) -> String {
+pub(crate) fn sanitize_filename(title: &str) -> String {
     let words: Vec<&str> = title
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
         .filter(|s| !s.is_empty())
@@ -218,10 +218,16 @@ pub async fn delete_artifact(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(serde::Deserialize, Default)]
+pub struct DownloadArtifactQuery {
+    pub format: Option<String>,
+}
+
 pub async fn download_artifact(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ArtifactState>>,
     Path(artifact_id): Path<String>,
+    Query(query): Query<DownloadArtifactQuery>,
 ) -> Response {
     let row = match require_artifact_access(&state.neo4j, &user.sub, &user.role, &artifact_id).await {
         Ok(row) => row,
@@ -231,8 +237,9 @@ pub async fn download_artifact(
     let kind    = row["kind"].as_str().unwrap_or("markdown");
     let content = row["content"].as_str().unwrap_or("").to_string();
     let slug    = sanitize_filename(title);
+    let as_pdf  = query.format.as_deref() == Some("pdf");
 
-    if kind == "pdf" {
+    if kind == "pdf" || (kind == "markdown" && as_pdf) {
         match markdown2pdf::parse_into_bytes(content, markdown2pdf::config::ConfigSource::Default, None) {
             Ok(bytes) => Response::builder()
                 .status(StatusCode::OK)
