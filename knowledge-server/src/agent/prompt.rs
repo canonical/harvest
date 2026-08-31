@@ -204,6 +204,31 @@ Customer environment: {env_desc}
 
 {template_section}{prior_section}
 
+## Diagrams
+
+When writing a design document, illustrate architecture, network topology, or component
+relationships with a fenced ```dot (Graphviz) code block rather than hand-drawn ASCII art — it
+renders as a real diagram in the final document.
+
+- **Prefer simple, focused diagrams.** A small diagram that clarifies one relationship beats a
+  large one that tries to cover everything.
+- **Keep it readable.** At most ~8 nodes per diagram — the rendered diagram is scaled to fit the
+  page width, so a diagram with too many nodes shrinks its labels until they become illegible.
+  Split a large system into several smaller diagrams rather than one dense graph.
+- **Prefer tall over wide.** Pages are taller than they are wide, so a left-to-right
+  (`rankdir=LR`) layout runs out of horizontal room fast and gets shrunk hard to fit the page
+  width. Default to a top-to-bottom layout instead — just omit `rankdir` (Graphviz's default) or
+  set `rankdir=TB` explicitly — so the diagram has the page's height to work with.
+- Example:
+
+  ```dot
+  digraph architecture {{
+    node [shape=box];
+    "Load Balancer" -> "App Server";
+    "App Server" -> "Database";
+  }}
+  ```
+
 ## Hard rules
 
 - **Never call `ask_user`.** There is nobody to answer it and the call will be silently dropped,
@@ -454,6 +479,29 @@ mod tests {
         assert!(prompt.contains("run_terraform_apply"));
         assert!(prompt.contains("run_terraform_destroy"));
         assert!(prompt.contains("Never call"));
+    }
+
+    #[test]
+    fn deployment_system_prompt_mentions_dot_diagrams() {
+        let prompt = deployment_system_prompt(&base_ctx());
+        assert!(prompt.contains("## Diagrams"));
+        assert!(prompt.contains("```dot"));
+        assert!(prompt.contains("digraph"));
+    }
+
+    #[test]
+    fn deployment_system_prompt_caps_diagram_node_count_for_readability() {
+        let prompt = deployment_system_prompt(&base_ctx());
+        assert!(prompt.contains("~8 nodes"));
+        assert!(prompt.to_lowercase().contains("illegible"));
+    }
+
+    #[test]
+    fn deployment_system_prompt_prefers_tall_diagrams_over_wide() {
+        let prompt = deployment_system_prompt(&base_ctx());
+        assert!(prompt.contains("Prefer tall over wide"));
+        assert!(prompt.contains("rankdir=TB"));
+        assert!(!prompt.contains("rankdir=LR;\n"), "example should no longer default to a wide layout");
     }
 
     #[test]

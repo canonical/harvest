@@ -45,8 +45,10 @@ FROM ubuntu:26.04
 
 # ca-certificates: TLS to LLM APIs / OIDC providers.
 # curl: used by the Docker healthcheck.
+# graphviz: renders design-document ```dot diagrams to PNG.
+# fonts-ubuntu: lets those diagrams render their labels in the Ubuntu font.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl \
+ && apt-get install -y --no-install-recommends ca-certificates curl graphviz fonts-ubuntu \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/knowledge-server /usr/local/bin/knowledge-server
