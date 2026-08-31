@@ -69,7 +69,7 @@ impl Pipeline {
     }
 
     async fn process_repo(&self, repo: &RepoConfig, force: bool) -> Result<()> {
-        self.writer.upsert_repository(&repo.name, &repo.url).await?;
+        self.writer.upsert_repository(&repo.name, &repo.resolved_browse_url()).await?;
         let repo_path = self.git.ensure_cloned(repo)?;
         let tags = match &repo.refs {
             Some(wanted) => self.git.resolve_refs(&repo_path, wanted)?,
