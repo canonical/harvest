@@ -50,7 +50,7 @@
         >Add or manage artifacts →</router-link>
 
         <div v-if="artifactsLoading" class="design-setup__loading">
-          <span class="loading-dots"><span>.</span><span>.</span><span>.</span></span>
+          <LoadingSpinner text="Loading artifacts…" />
         </div>
         <div v-else-if="!artifacts.length" class="design-setup__empty" data-testid="artifacts-empty">
           <p class="u-text--muted">This project has no artifacts yet.</p>
@@ -98,6 +98,7 @@
 import { ref, computed, watch } from 'vue';
 import { listProjectArtifacts, listTemplates } from '../../lib/api.js';
 import BusyStatus from './BusyStatus.vue';
+import LoadingSpinner from './LoadingSpinner.vue';
 
 const props = defineProps({
   projectId:    { type: String, required: true },

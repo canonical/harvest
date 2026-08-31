@@ -22,12 +22,21 @@
         <div class="design-panel__actions" v-if="!editing && !proposalPhase">
           <a
             class="p-button--positive artifact-download-btn is-dense"
-            :href="artifactDownloadUrl(deployment.design_doc.id)"
+            :href="designPdfUrl(projectId, deployment.id, true)"
             download
-            data-testid="download-design-btn"
+            data-testid="download-design-pdf-btn"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Download
+            Download as PDF
+          </a>
+          <a
+            class="p-button--positive artifact-download-btn is-dense"
+            :href="artifactDownloadUrl(deployment.design_doc.id)"
+            download
+            data-testid="download-design-markdown-btn"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download as Markdown
           </a>
           <button
             class="p-button--positive is-dense"
@@ -60,8 +69,7 @@
           class="design-panel__preview doc-body design-panel__proposal-generating"
           data-testid="design-proposal-generating"
         >
-          <span class="loading-dots"><span>.</span><span>.</span><span>.</span></span>
-          <p class="u-text--muted">Generating a proposed change…</p>
+          <LoadingSpinner text="Generating a proposed change…" />
         </div>
 
         <div
@@ -73,17 +81,16 @@
 
         <div
           v-else-if="proposalPhase === 'reviewing'"
-          class="design-panel__preview doc-body"
+          ref="diffEditorContainerRef"
+          class="design-panel__editor-container"
           data-testid="design-proposal-diff"
-        >
-          <DiffView :before="{ [designDocTitle]: designContent }" :after="{ [designDocTitle]: proposedContent }" />
-        </div>
+        />
 
-        <div
+        <iframe
           v-else
-          class="design-panel__preview doc-body"
+          class="design-panel__pdf-frame"
           data-testid="design-preview"
-          v-html="renderedDesign"
+          :src="pdfPreviewUrl"
         />
       </div>
 
@@ -128,7 +135,7 @@
               Select additional artifacts to add as context for this change.
             </p>
             <div v-if="artifactsLoading" class="design-setup__loading">
-              <span class="loading-dots"><span>.</span><span>.</span><span>.</span></span>
+              <LoadingSpinner text="Loading artifacts…" />
             </div>
             <div v-else-if="!userProvidedArtifacts.length" class="design-setup__empty">
               <p class="u-text--muted">This project has no user-provided artifacts yet.</p>
@@ -178,11 +185,11 @@
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue';
 import { renderMarkdown } from '../../lib/markdown.js';
 import {
-  getArtifact, updateArtifact, proposeDesignChangeStream, artifactDownloadUrl,
+  getArtifact, updateArtifact, proposeDesignChangeStream, artifactDownloadUrl, designPdfUrl,
   listProjectArtifacts, linkContextArtifact,
 } from '../../lib/api.js';
 import BusyStatus from './BusyStatus.vue';
-import DiffView from './DiffView.vue';
+import LoadingSpinner from './LoadingSpinner.vue';
 
 const props = defineProps({
   projectId:  { type: String, required: true },
@@ -219,14 +226,17 @@ const nonUserProvidedIds = computed(() => {
 
 const userProvidedArtifacts = computed(() => artifacts.value.filter(a => !nonUserProvidedIds.value.has(a.id)));
 
-const editorContainerRef = ref(null);
+const editorContainerRef     = ref(null);
+const diffEditorContainerRef = ref(null);
 let editor               = null;
+let diffEditor           = null;
 let monacoApi            = null;
 let originalContent      = '';
 
-const renderedDesign = computed(() => designContent.value ? renderMarkdown(designContent.value, {}, {}) : '');
-
 const renderedProposalStream = computed(() => proposedContent.value ? renderMarkdown(proposedContent.value, {}, {}) : '');
+
+const pdfCacheBust = ref(0);
+const pdfPreviewUrl = computed(() => `${designPdfUrl(props.projectId, props.deployment.id)}?v=${pdfCacheBust.value}`);
 
 const designDocTitle = computed(() => props.deployment.design_doc?.title ?? 'Design');
 
@@ -348,6 +358,37 @@ function cancelEdit() {
   }
 }
 
+async function mountDiffEditor() {
+  disposeDiffEditor();
+  if (!diffEditorContainerRef.value) return;
+  if (!monacoApi) {
+    monacoApi = await import('monaco-editor');
+  }
+  diffEditor = monacoApi.editor.createDiffEditor(diffEditorContainerRef.value, {
+    automaticLayout: true,
+    minimap: { enabled: false },
+    fontSize: 13,
+    lineNumbers: 'on',
+    wordWrap: 'on',
+    scrollBeyondLastLine: false,
+    renderSideBySide: true,
+    originalEditable: false,
+  });
+  diffEditor.setModel({
+    original: monacoApi.editor.createModel(designContent.value, 'markdown'),
+    modified: monacoApi.editor.createModel(proposedContent.value, 'markdown'),
+  });
+}
+
+function disposeDiffEditor() {
+  if (!diffEditor) return;
+  const model = diffEditor.getModel();
+  diffEditor.dispose();
+  model?.original?.dispose();
+  model?.modified?.dispose();
+  diffEditor = null;
+}
+
 async function saveEdit() {
   if (!editor || saving.value) return;
   const newContent = editor.getValue();
@@ -411,6 +452,8 @@ async function propose() {
       proposalPhase.value = null;
     } else {
       proposalPhase.value = 'reviewing';
+      await nextTick();
+      await mountDiffEditor();
     }
   } catch (e) {
     error.value = e.message || 'Failed to propose change';
@@ -421,18 +464,21 @@ async function propose() {
 }
 
 async function applyProposal() {
+  if (!diffEditor) return;
+  const newContent = diffEditor.getModifiedEditor().getValue();
   proposing.value = true;
   error.value = null;
   try {
     await updateArtifact(props.deployment.design_doc.id, {
       title: props.deployment.design_doc.title ?? 'Design',
       kind: 'markdown',
-      content: proposedContent.value,
+      content: newContent,
     });
-    designContent.value = proposedContent.value;
-    originalContent = proposedContent.value;
+    designContent.value = newContent;
+    originalContent = newContent;
     proposalPhase.value = null;
     proposedContent.value = '';
+    disposeDiffEditor();
     emit('refresh');
   } catch (e) {
     error.value = e.message || 'Failed to apply change';
@@ -445,11 +491,13 @@ function discardProposal() {
   proposalPhase.value = null;
   proposedContent.value = '';
   error.value = null;
+  disposeDiffEditor();
 }
 
 function modifyProposal() {
   proposalPhase.value = null;
   proposedContent.value = '';
+  disposeDiffEditor();
   promptText.value = proposalExplanation.value;
   selectedArtifactIds.value = [...proposalArtifactIds.value];
   proposeOpen.value = true;
@@ -461,7 +509,9 @@ onBeforeUnmount(() => {
     editor.dispose();
     editor = null;
   }
+  disposeDiffEditor();
 });
 
 watch(() => props.deployment.design_doc?.id, loadDesignContent, { immediate: true });
+watch(designContent, () => { pdfCacheBust.value += 1; });
 </script>

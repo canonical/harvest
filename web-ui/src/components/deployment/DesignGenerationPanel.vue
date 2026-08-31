@@ -15,7 +15,7 @@
     </div>
 
     <div v-if="!started && !error" class="design-gen__spinner" data-testid="design-gen-spinner">
-      <span class="loading-dots"><span>.</span><span>.</span><span>.</span></span>
+      <LoadingSpinner text="Starting…" />
     </div>
 
     <div v-if="intent || phase" class="design-gen__status-bar">
@@ -57,6 +57,7 @@ import { renderMarkdown } from '../../lib/markdown.js';
 import { describeToolCall } from '../../lib/tool-render.js';
 import ThinkingBlock from '../chat/ThinkingBlock.vue';
 import ToolCallStep from '../chat/ToolCallStep.vue';
+import LoadingSpinner from './LoadingSpinner.vue';
 
 const props = defineProps({
   projectId:    { type: String, required: true },
