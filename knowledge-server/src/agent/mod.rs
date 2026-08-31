@@ -842,7 +842,7 @@ fn history_to_messages(history: &[HistoryMessage]) -> Vec<Message> {
 }
 
 fn parse_citations(text: &str) -> Vec<Source> {
-    let re = Regex::new(r"\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+):(\d+)\]").unwrap();
+    let re = Regex::new(r"\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+):(\d+)(?:-\d+)?\]").unwrap();
     let mut seen = HashSet::new();
     let mut sources = Vec::new();
 
@@ -1484,6 +1484,13 @@ mod tests {
         let sources = parse_citations("[r:v1:f.rs:0]");
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].line, 0);
+    }
+
+    #[test]
+    fn citation_line_range_parsed() {
+        let sources = parse_citations("[r:v1:f.rs:328-335]");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].line, 328);
     }
 
     #[test]
