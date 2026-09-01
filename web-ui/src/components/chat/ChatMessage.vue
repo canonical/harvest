@@ -66,13 +66,13 @@
           />
           <ToolCallStep v-else-if="item.type === 'tool_call'" :step="item" />
 
-          <div v-else-if="item.type === 'confirm_action'" class="message__confirm">
+          <div v-else-if="item.type === 'confirm_action'" class="message__confirm" role="group" :aria-label="item.description">
             <p class="message__confirm-text">{{ item.description }}</p>
 
             <ProvisionSteps v-if="item.steps.length" :steps="item.steps" />
 
             <div v-if="isLast && item.status === 'pending'" class="confirm-actions">
-              <button class="p-button--negative is-dense" type="button" @click="$emit('confirm', item.id)">Confirm</button>
+              <button class="p-button--positive is-dense" type="button" @click="$emit('confirm', item.id)">Confirm</button>
               <button class="p-button--base is-dense" type="button" @click="$emit('deny', item.id)">Cancel</button>
             </div>
             <p v-else-if="item.status === 'running'" class="confirm-status confirm-status--running">
@@ -85,7 +85,7 @@
         </template>
 
         <div v-if="isLast && pendingConfirmCount > 1" class="confirm-actions confirm-actions--all">
-          <button class="p-button--negative is-dense" type="button" @click="$emit('confirmAll')">Approve all</button>
+          <button class="p-button--positive is-dense" type="button" @click="$emit('confirmAll')">Approve all</button>
         </div>
       </div>
 
