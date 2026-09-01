@@ -104,19 +104,19 @@
         No response was generated.
       </p>
 
-      <div v-if="msg.sources?.length" class="source-chips">
-        <a
-          v-for="(src, i) in msg.sources"
+      <div v-if="sourceLinks.length" class="source-chips">
+        <component
+          :is="link.href ? 'a' : 'span'"
+          v-for="(link, i) in sourceLinks"
           :key="i"
           class="source-chip"
-          :href="sourceHref(src)"
-          :title="`${src.file}:${src.line}`"
-          target="_blank"
-          rel="noopener"
+          :class="{ 'source-chip--inert': !link.href }"
+          v-bind="link.href ? { href: link.href, target: '_blank', rel: 'noopener' } : {}"
+          :title="link.title"
         >
           <span class="source-chip__num">{{ i + 1 }}</span>
-          <span class="source-chip__name">{{ src.file }}</span>
-        </a>
+          <span class="source-chip__name">{{ link.src.file }}</span>
+        </component>
       </div>
 
       <div v-if="msg.question" class="message__question">
@@ -161,7 +161,7 @@ import { computed, ref, watch, nextTick, onMounted } from 'vue';
 import ThinkingBlock from './ThinkingBlock.vue';
 import ToolCallStep  from './ToolCallStep.vue';
 import ProvisionSteps from '../agents/ProvisionSteps.vue';
-import { renderMarkdown, buildCitationIndex } from '../../lib/markdown.js';
+import { renderMarkdown, buildCitationIndex, buildFileUrl } from '../../lib/markdown.js';
 import { mountInlineGraphs } from '../../lib/inline-graph.js';
 import { avatarColor, initials, addCopyButtons } from '../../lib/utils.js';
 import { runningVerb } from '../../lib/tool-verbs.js';
@@ -243,7 +243,19 @@ function submitOther() {
 
 function sourceHref(src) {
   const base = props.repoUrlMap[src.repo];
-  if (!base) return '#';
-  return `${base.replace(/\/$/, '')}/blob/${src.version ?? 'main'}/${src.file}#L${src.line}`;
+  if (!base) return null;
+  return buildFileUrl(base, src.version ?? 'main', src.file, src.line, src.end_line ?? null);
 }
+
+function sourceTitle(src) {
+  if (!src.line) return `${src.repo} ${src.version ?? 'main'} · ${src.file}`;
+  const lineDisplay = src.end_line ? `${src.line}-${src.end_line}` : `${src.line}`;
+  return `${src.repo} ${src.version ?? 'main'} · ${src.file}:${lineDisplay}`;
+}
+
+const sourceLinks = computed(() => (props.msg.sources ?? []).map(src => ({
+  src,
+  href: sourceHref(src),
+  title: sourceTitle(src),
+})));
 </script>

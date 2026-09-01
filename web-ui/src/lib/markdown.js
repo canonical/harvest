@@ -3,7 +3,10 @@ import { markedHighlight } from 'marked-highlight';
 import hljs from 'highlight.js';
 import { escapeHtml as esc } from './utils.js';
 
-const CITATION_RE = /\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+):(\d+(?:[–\-]\d+)?)\]/g;
+// The line number (and range) is optional: a citation can point at a whole
+// file ([repo:version:file]) rather than one location, matching how the
+// backend's parse_citations treats a missing line as "no specific line".
+const CITATION_RE = /\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+)(?::(\d+(?:[–\-]\d+)?))?\]/g;
 
 marked.use(
   markedHighlight({
@@ -40,14 +43,24 @@ marked.use({
   },
 });
 
+const LINE_RANGE_RE = /^(\d+)(?:[–-](\d+))?$/;
+
 export function renderMarkdown(text, repoUrlMap = {}, citationIndex = {}) {
-  const withCitations = text.replace(CITATION_RE, (match, repo, version, file, line) => {
-    const key = `${repo}:${version}:${file}:${parseInt(line, 10)}`;
+  const withCitations = text.replace(CITATION_RE, (match, repo, version, file, lineRaw) => {
+    let startLine = 0, endLine = null;
+    if (lineRaw) {
+      const [, startStr, endStr] = lineRaw.match(LINE_RANGE_RE) ?? [null, lineRaw, null];
+      startLine = parseInt(startStr, 10);
+      endLine = endStr ? parseInt(endStr, 10) : null;
+    }
+    const key = `${repo}:${version}:${file}:${startLine}`;
     const n = citationIndex[key];
-    const label = n != null ? `${n}` : `${repo}:${version}:${file}:${line}`;
-    const title = `${repo} ${version} · ${file}:${line}`;
+    const rawLabel = lineRaw ? `${repo}:${version}:${file}:${lineRaw}` : `${repo}:${version}:${file}`;
+    const label = n != null ? `${n}` : rawLabel;
+    const lineDisplay = lineRaw ? (endLine ? `${startLine}-${endLine}` : `${startLine}`) : null;
+    const title = lineDisplay ? `${repo} ${version} · ${file}:${lineDisplay}` : `${repo} ${version} · ${file}`;
     const repoUrl = repoUrlMap[repo];
-    const fileUrl = repoUrl ? buildFileUrl(repoUrl, version, file, parseInt(line, 10)) : null;
+    const fileUrl = repoUrl ? buildFileUrl(repoUrl, version, file, startLine, endLine) : null;
     if (fileUrl) {
       return `<a href="${esc(fileUrl)}" class="citation" target="_blank" rel="noopener noreferrer" title="${esc(title)}">${esc(label)}</a>`;
     }
@@ -58,19 +71,22 @@ export function renderMarkdown(text, repoUrlMap = {}, citationIndex = {}) {
   return marked.parse(withCitations, { async: false });
 }
 
-export function buildFileUrl(repoUrl, version, file, line) {
+// `line` falsy (0/null/undefined) means "no specific line" — link to the bare
+// file with no anchor, rather than a nonsensical #L0.
+export function buildFileUrl(repoUrl, version, file, line = null, endLine = null) {
   const base = normalizeRepoUrl(repoUrl);
   if (!base) return null;
-  if (base.includes('github.com')) {
-    return `${base}/blob/${version}/${file}#L${line}`;
-  }
   if (base.includes('gitlab.com') || base.includes('gitlab.')) {
-    return `${base}/-/blob/${version}/${file}#L${line}`;
+    const anchor = line ? `#L${line}${endLine ? `-${endLine}` : ''}` : '';
+    return `${base}/-/blob/${version}/${file}${anchor}`;
   }
   if (base.includes('bitbucket.org')) {
-    return `${base}/src/${version}/${file}#lines-${line}`;
+    const anchor = line ? `#lines-${line}${endLine ? `:${endLine}` : ''}` : '';
+    return `${base}/src/${version}/${file}${anchor}`;
   }
-  return `${base}/blob/${version}/${file}#L${line}`;
+  // GitHub, and the default for any other/self-hosted git host.
+  const anchor = line ? `#L${line}${endLine ? `-L${endLine}` : ''}` : '';
+  return `${base}/blob/${version}/${file}${anchor}`;
 }
 
 function normalizeRepoUrl(url) {
