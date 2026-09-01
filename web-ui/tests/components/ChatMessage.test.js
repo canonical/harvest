@@ -253,7 +253,7 @@ describe('ChatMessage — confirm_action chain entries', () => {
 
   it('emits confirm with the action id when Confirm is clicked', async () => {
     const w = mount(ChatMessage, { props: { msg: assistantWithConfirmPending, isLast: true } });
-    await w.find('.confirm-actions .p-button--negative').trigger('click');
+    await w.find('.confirm-actions .p-button--positive').trigger('click');
     expect(w.emitted('confirm')).toEqual([['tc1']]);
   });
 

@@ -135,10 +135,17 @@
 
   <SourcePanel />
 
-  <div v-if="deletingConv" class="modal" @click.self="deletingConv = null">
+  <div
+    v-if="deletingConv"
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="delete-conv-title"
+    @click.self="deletingConv = null"
+  >
     <div class="modal-content">
-      <button class="modal-close" type="button" @click="deletingConv = null">✕</button>
-      <h3>Delete conversation</h3>
+      <button class="modal-close" type="button" aria-label="Close" @click="deletingConv = null">✕</button>
+      <h3 id="delete-conv-title">Delete conversation</h3>
       <p>Delete <strong>{{ deletingConv.title || 'this conversation' }}</strong>? This cannot be undone.</p>
       <div class="modal-actions">
         <button class="p-button--base is-dense" type="button" @click="deletingConv = null">Cancel</button>
@@ -348,6 +355,10 @@ async function loadConversation(id) {
 
 function confirmDeleteConversation(conv) {
   deletingConv.value = conv;
+}
+
+function onModalEscape(e) {
+  if (e.key === 'Escape' && deletingConv.value) deletingConv.value = null;
 }
 
 async function submitDeleteConversation() {
@@ -593,11 +604,13 @@ onMounted(async () => {
   } catch {}
 
   document.addEventListener('paste', onPaste);
+  document.addEventListener('keydown', onModalEscape);
 });
 
 onUnmounted(() => {
   closeEventStream();
   document.removeEventListener('paste', onPaste);
+  document.removeEventListener('keydown', onModalEscape);
 });
 
 watch(() => props.projectId, async (newId) => {
