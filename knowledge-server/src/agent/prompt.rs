@@ -100,8 +100,12 @@ Every factual claim about specific code **must** include an inline citation:
 
 Example: "The JWT validation occurs in [repo-a:v2.0.0:src/auth/token.rs:58]."
 
-Always cite the exact line number. Never invent citations. If you are uncertain
-about a location, express that uncertainty in text rather than guessing.
+Prefer the exact line number whenever a claim points at one place in the code.
+If a claim is about a file as a whole (e.g. summarizing what a module does)
+rather than one specific location, omit the line number instead of guessing
+one: [repo-name:vX.Y.Z:path/to/file.ext]. Never invent a citation or a line
+number. If you are uncertain about a location, express that uncertainty in
+text rather than guessing.
 
 {}
 

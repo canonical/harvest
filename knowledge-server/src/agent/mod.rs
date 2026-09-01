@@ -49,6 +49,8 @@ pub struct Source {
     pub version: String,
     pub file: String,
     pub line: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -838,7 +840,11 @@ fn history_to_messages(history: &[HistoryMessage]) -> Vec<Message> {
 }
 
 fn parse_citations(text: &str) -> Vec<Source> {
-    let re = Regex::new(r"\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+):(\d+)(?:-\d+)?\]").unwrap();
+    // The line number (and range) is optional: a model sometimes cites a whole
+    // file rather than a specific location (e.g. [repo:v1.0:src/lib.rs] to
+    // support a claim about the file's overall purpose). Line 0 doubles as the
+    // "no specific line" sentinel, matching how an explicit ":0" already parses.
+    let re = Regex::new(r"\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+)(?::(\d+)(?:-(\d+))?)?\]").unwrap();
     let mut seen = HashSet::new();
     let mut sources = Vec::new();
 
@@ -846,10 +852,11 @@ fn parse_citations(text: &str) -> Vec<Source> {
         let key = cap[0].to_string();
         if seen.insert(key) {
             sources.push(Source {
-                repo:    cap[1].to_string(),
-                version: cap[2].to_string(),
-                file:    cap[3].to_string(),
-                line:    cap[4].parse().unwrap_or(0),
+                repo:     cap[1].to_string(),
+                version:  cap[2].to_string(),
+                file:     cap[3].to_string(),
+                line:     cap.get(4).and_then(|m| m.as_str().parse().ok()).unwrap_or(0),
+                end_line: cap.get(5).and_then(|m| m.as_str().parse().ok()),
             });
         }
     }
@@ -1465,8 +1472,19 @@ mod tests {
 
     #[test]
     fn malformed_citation_ignored() {
-        let sources = parse_citations("bad [only:two:fields] here");
+        let sources = parse_citations("bad [only:two] here");
         assert!(sources.is_empty());
+    }
+
+    #[test]
+    fn citation_without_line_number_parsed_as_whole_file() {
+        let sources = parse_citations("see [myrepo:v1.0:src/lib.rs]");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].repo, "myrepo");
+        assert_eq!(sources[0].version, "v1.0");
+        assert_eq!(sources[0].file, "src/lib.rs");
+        assert_eq!(sources[0].line, 0);
+        assert_eq!(sources[0].end_line, None);
     }
 
     #[test]
@@ -1487,6 +1505,14 @@ mod tests {
         let sources = parse_citations("[r:v1:f.rs:328-335]");
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].line, 328);
+        assert_eq!(sources[0].end_line, Some(335));
+    }
+
+    #[test]
+    fn citation_single_line_has_no_end_line() {
+        let sources = parse_citations("[r:v1:f.rs:42]");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].end_line, None);
     }
 
     #[test]
