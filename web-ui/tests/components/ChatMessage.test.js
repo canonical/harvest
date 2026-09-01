@@ -95,6 +95,50 @@ describe('ChatMessage — sources', () => {
     const w = mount(ChatMessage, { props: { msg: assistantWithSources } });
     expect(w.find('.source-chip').exists()).toBe(true);
   });
+
+  it('renders a real link with a correct href when the repo URL is known', () => {
+    const w = mount(ChatMessage, {
+      props: { msg: assistantWithSources, repoUrlMap: { myrepo: 'https://github.com/acme/myrepo' } },
+    });
+    const chip = w.find('.source-chip');
+    expect(chip.element.tagName).toBe('A');
+    expect(chip.attributes('href')).toBe('https://github.com/acme/myrepo/blob/main/src/main.rs#L10');
+    expect(chip.classes()).not.toContain('source-chip--inert');
+  });
+
+  it('degrades to an inert, non-clickable chip when the repo URL is unknown', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithSources, repoUrlMap: {} } });
+    const chip = w.find('.source-chip');
+    expect(chip.element.tagName).toBe('SPAN');
+    expect(chip.attributes('href')).toBeUndefined();
+    expect(chip.classes()).toContain('source-chip--inert');
+  });
+
+  it('links to the bare file with a file-only title when the source has no line number', () => {
+    const wholeFile = {
+      ...assistantWithSources,
+      sources: [{ repo: 'myrepo', version: 'main', file: 'src/main.rs', line: 0 }],
+    };
+    const w = mount(ChatMessage, {
+      props: { msg: wholeFile, repoUrlMap: { myrepo: 'https://github.com/acme/myrepo' } },
+    });
+    const chip = w.find('.source-chip');
+    expect(chip.attributes('href')).toBe('https://github.com/acme/myrepo/blob/main/src/main.rs');
+    expect(chip.attributes('title')).toBe('myrepo main · src/main.rs');
+  });
+
+  it('builds a range URL and title when the source spans multiple lines', () => {
+    const withRange = {
+      ...assistantWithSources,
+      sources: [{ repo: 'myrepo', version: 'main', file: 'src/main.rs', line: 10, end_line: 20 }],
+    };
+    const w = mount(ChatMessage, {
+      props: { msg: withRange, repoUrlMap: { myrepo: 'https://github.com/acme/myrepo' } },
+    });
+    const chip = w.find('.source-chip');
+    expect(chip.attributes('href')).toBe('https://github.com/acme/myrepo/blob/main/src/main.rs#L10-L20');
+    expect(chip.attributes('title')).toBe('myrepo main · src/main.rs:10-20');
+  });
 });
 
 const assistantWithProvider = {
