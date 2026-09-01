@@ -695,7 +695,7 @@ html, body {
 .message__bubble {
   max-width: 80%;
   padding: 0.6rem 0.875rem;
-  border-radius: 0.75rem;
+  border-radius: 0;
   font-size: 0.875rem;
   line-height: 1.45;
 }
@@ -703,7 +703,6 @@ html, body {
 .message--user .message__bubble {
   background: var(--user-bubble-bg);
   color: var(--user-bubble-text);
-  border-bottom-right-radius: 0.25rem;
 }
 
 .message__answer {
@@ -726,7 +725,7 @@ html, body {
 .message__body pre {
   background: var(--bg-code);
   color: #f0f0f0;
-  border-radius: 0.5rem;
+  border-radius: 0;
   padding: 0.75rem 1rem;
   overflow-x: auto;
   font-size: 0.8rem;
@@ -1379,7 +1378,7 @@ a.source-chip:hover {
   font-weight: 500;
   color: var(--text-secondary);
   padding: 0.15rem 0.5rem;
-  border-radius: 0.375rem;
+  border-radius: 0;
   background: rgba(0, 102, 204, 0.08);
   border: 1px solid rgba(0, 102, 204, 0.15);
 }
@@ -1507,7 +1506,7 @@ a.source-chip:hover .source-chip__name {
   align-items: center;
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-radius: 999px;
+  border-radius: 0;
   color: var(--text-muted);
   cursor: pointer;
   display: inline-flex;
@@ -1535,7 +1534,7 @@ a.source-chip:hover .source-chip__name {
 .llm-picker__panel {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-radius: 0.5rem;
+  border-radius: 0;
   bottom: calc(100% + 0.3rem);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
   right: 0;
@@ -1548,7 +1547,7 @@ a.source-chip:hover .source-chip__name {
   background: var(--bg-input);
   border: 0;
   border-bottom: 1px solid var(--border-color);
-  border-radius: 0.5rem 0.5rem 0 0;
+  border-radius: 0;
   color: inherit;
   font-size: 0.8125rem;
   padding: 0.5rem 0.7rem;
@@ -1568,7 +1567,7 @@ a.source-chip:hover .source-chip__name {
 }
 
 .llm-picker__option {
-  border-radius: 0.375rem;
+  border-radius: 0;
   cursor: pointer;
   display: flex;
   font-size: 0.8125rem;
@@ -2747,7 +2746,7 @@ a.source-chip:hover .source-chip__name {
   gap: 0.375rem;
   flex: 1;
   padding: 0.4rem 0.625rem;
-  border-radius: 6px;
+  border-radius: 0;
   border: 1px solid var(--bg-surface);
   background: var(--bg-surface);
   color: var(--text-primary);
@@ -2769,7 +2768,7 @@ a.source-chip:hover .source-chip__name {
   background: none;
   border: none;
   padding: 0.3rem;
-  border-radius: 4px;
+  border-radius: 0;
   color: var(--text-secondary);
   cursor: pointer;
 }
@@ -2799,7 +2798,7 @@ a.source-chip:hover .source-chip__name {
   align-items: center;
   gap: 0.25rem;
   padding: 0.3rem 2.25rem 0.3rem 0.75rem;
-  border-radius: 6px;
+  border-radius: 0;
   border: 1px solid var(--border-subtle);
   margin: 2px 0.375rem;
   cursor: pointer;
@@ -2854,7 +2853,7 @@ a.source-chip:hover .source-chip__name {
   background: none;
   border: none;
   padding: 0.2rem;
-  border-radius: 4px;
+  border-radius: 0;
   color: var(--text-muted);
   cursor: pointer;
   transition: opacity 0.1s, color 0.1s, background 0.1s;
@@ -2973,7 +2972,7 @@ a.source-chip:hover .source-chip__name {
   max-height: calc(100dvh - 4rem);
   overflow-y: auto;
   background: var(--bg-surface);
-  border-radius: 6px;
+  border-radius: 0;
   box-shadow: 0 8px 40px rgba(0, 0, 0, 0.28);
   padding: 1.5rem;
   display: flex;
@@ -3005,7 +3004,7 @@ a.source-chip:hover .source-chip__name {
   color: var(--text-secondary);
   cursor: pointer;
   padding: 0.25rem 0.4rem;
-  border-radius: 4px;
+  border-radius: 0;
   line-height: 1;
 }
 
@@ -3799,7 +3798,7 @@ a.source-chip:hover .source-chip__name {
   gap: 0.3rem;
   background: var(--color-bg-alt);
   border: 1px solid var(--color-mid);
-  border-radius: 4px;
+  border-radius: 0;
   padding: 0.2rem 0.4rem;
   font-size: 0.8rem;
   max-width: 180px;
@@ -3809,7 +3808,7 @@ a.source-chip:hover .source-chip__name {
   width: 24px;
   height: 24px;
   object-fit: cover;
-  border-radius: 2px;
+  border-radius: 0;
   flex-shrink: 0;
 }
 
@@ -3844,7 +3843,7 @@ a.source-chip:hover .source-chip__name {
 .message__attachment-img {
   max-width: 280px;
   max-height: 200px;
-  border-radius: 6px;
+  border-radius: 0;
   object-fit: contain;
   border: 1px solid var(--color-mid);
 }
@@ -3855,7 +3854,7 @@ a.source-chip:hover .source-chip__name {
   gap: 0.3rem;
   background: var(--color-bg-alt);
   border: 1px solid var(--color-mid);
-  border-radius: 4px;
+  border-radius: 0;
   padding: 0.2rem 0.5rem;
   font-size: 0.8rem;
 }
@@ -3906,7 +3905,7 @@ a.source-chip:hover .source-chip__name {
   font-size: 1.25rem;
   width: 2rem;
   height: 2rem;
-  border-radius: 50%;
+  border-radius: 0;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -4618,7 +4617,7 @@ a.source-chip:hover .source-chip__name {
   height: 2rem;
   font-size: 0.875rem;
   border: 1px solid var(--border-color);
-  border-radius: 0.375rem;
+  border-radius: 0;
 }
 
 .question-other-input {
