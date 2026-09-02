@@ -70,14 +70,13 @@ describe('DesignView', () => {
     expect(w.text()).toContain('Generate a design');
   });
 
-  it('shows a template chip on the design doc when the deployment uses a template', async () => {
+  it('folds the template name into the design doc title instead of a capsule', async () => {
     seedSelectedProject();
     api.getProjectDeploymentSingle.mockResolvedValue(structuredClone(DEPLOYMENT_WITH_TEMPLATE));
     const w = mountView();
     await flushPromises();
-    const chip = w.find('[data-testid="design-template-chip"]');
-    expect(chip.exists()).toBe(true);
-    expect(chip.text()).toContain('Gateway');
+    expect(w.find('[data-testid="design-template-chip"]').exists()).toBe(false);
+    expect(w.text()).toContain('Gateway');
   });
 
   it('does not show a template chip when no template is linked', async () => {
@@ -140,7 +139,7 @@ describe('DesignView', () => {
     expect(w.findComponent({ name: 'DesignSetupPanel' }).exists()).toBe(false);
   });
 
-  it('passes the generate body, deployment id, and deployment name to the generation panel', async () => {
+  it('passes the generate body and deployment id to the generation panel', async () => {
     seedSelectedProject();
     api.getProjectDeploymentSingle.mockResolvedValue(structuredClone(DEPLOYMENT_NO_DESIGN));
     const w = mountView();
@@ -151,7 +150,6 @@ describe('DesignView', () => {
     const gen = w.findComponent({ name: 'DesignGenerationPanel' });
     expect(gen.props('body')).toEqual({ artifact_ids: ['a1'], product_template_id: 't1' });
     expect(gen.props('deploymentId')).toBe('d1');
-    expect(gen.props('deploymentName')).toBe('MyProject');
   });
 
   it('refetches deployment and shows DesignPanel when DesignGenerationPanel emits done', async () => {
@@ -185,6 +183,22 @@ describe('DesignView', () => {
     const gen = w.findComponent({ name: 'DesignGenerationPanel' });
     gen.vm.$emit('done');
     await flushPromises();
+    expect(w.findComponent({ name: 'DesignSetupPanel' }).exists()).toBe(true);
+    expect(w.findComponent({ name: 'DesignGenerationPanel' }).exists()).toBe(false);
+  });
+
+  it('shows DesignSetupPanel again when the generation panel emits cancel, without refetching', async () => {
+    seedSelectedProject();
+    api.getProjectDeploymentSingle.mockResolvedValue(structuredClone(DEPLOYMENT_NO_DESIGN));
+    const w = mountView();
+    await flushPromises();
+    const setup = w.findComponent({ name: 'DesignSetupPanel' });
+    setup.vm.$emit('generate', { artifact_ids: [], product_template_id: null });
+    await flushPromises();
+    const gen = w.findComponent({ name: 'DesignGenerationPanel' });
+    gen.vm.$emit('cancel');
+    await flushPromises();
+    expect(api.getProjectDeploymentSingle).toHaveBeenCalledTimes(1);
     expect(w.findComponent({ name: 'DesignSetupPanel' }).exists()).toBe(true);
     expect(w.findComponent({ name: 'DesignGenerationPanel' }).exists()).toBe(false);
   });
