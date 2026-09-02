@@ -209,7 +209,7 @@ html, body {
 
 
 .p-panel__logo-image {
-  height: 2rem;
+  height: 2.5rem;
   width: auto;
   display: block;
   flex-shrink: 0;
@@ -333,7 +333,14 @@ html, body {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--vf-color-text-muted);
-  padding: 0 0.75rem 0.25rem;
+  padding: 0 0.75rem 0.25rem 1rem;
+}
+
+@media (min-width: 620px) {
+  .project-selector__label {
+    /* Keep in sync with .project-selector__toggle's padding-left. */
+    padding-left: 1.5rem;
+  }
 }
 
 .project-selector__toggle {
@@ -349,9 +356,17 @@ html, body {
   gap: 0.75rem;
   justify-content: flex-start;
   margin: 0;
-  padding: 0.625rem 0.75rem;
+  padding: 0.625rem 0.75rem 0.625rem 1rem;
   text-align: left;
   width: 100%;
+}
+
+@media (min-width: 620px) {
+  .project-selector__toggle {
+    /* Match the icon inset used by the p-side-navigation icons below,
+       so the folder icon lines up with them when the nav is collapsed. */
+    padding-left: 1.5rem;
+  }
 }
 
 .project-selector__toggle:hover,
@@ -366,8 +381,8 @@ html, body {
 
 .project-selector__folder-icon {
   flex-shrink: 0;
-  height: 1.25rem;
-  width: 1.25rem;
+  height: 1rem;
+  width: 1rem;
 }
 
 .project-selector__name {

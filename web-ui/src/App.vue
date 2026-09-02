@@ -9,7 +9,7 @@
         <div class="p-panel is-dark nav-panel">
           <div class="p-panel__header">
             <a class="p-panel__logo nav-logo" href="#">
-              <img src="/canonical-logo.png" alt="Canonical" class="p-panel__logo-image" height="32" />
+              <img src="/canonical-logo.png" alt="Canonical" class="p-panel__logo-image" height="40" />
               <span class="p-heading--4">Harvest</span>
             </a>
             <div class="p-panel__controls">
@@ -37,8 +37,8 @@
 
             <div class="p-panel__header is-sticky">
               <a class="p-panel__logo nav-logo" href="#">
-                <img src="/canonical-logo.png" alt="Canonical" class="p-panel__logo-image" height="32" />
-                <span class="p-heading--4">Harvest</span>
+                <img src="/canonical-logo.png" alt="Canonical" class="p-panel__logo-image" height="40" />
+                <span class="p-heading--4 is-fading-when-collapsed">Harvest</span>
               </a>
               <div class="p-panel__controls u-hide--medium u-hide--large">
                 <button
@@ -54,7 +54,7 @@
 
             <div class="p-panel__content">
               <div class="project-selector-section">
-                <span class="project-selector__label">Project</span>
+                <span class="project-selector__label is-fading-when-collapsed">Project</span>
                 <button
                   class="project-selector__toggle"
                   type="button"
@@ -62,8 +62,8 @@
                   @click="toggleProjectDropdown"
                 >
                   <svg class="project-selector__folder-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                  <span class="project-selector__name">{{ project.selectedProject?.name ?? 'Select project' }}</span>
-                  <svg class="project-selector__chevron" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 6 8 10 12 6"/></svg>
+                  <span class="project-selector__name is-fading-when-collapsed">{{ project.selectedProject?.name ?? 'Select project' }}</span>
+                  <svg class="project-selector__chevron is-fading-when-collapsed" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 6 8 10 12 6"/></svg>
                 </button>
                 <div v-if="projectDropdownOpen" class="project-selector__dropdown">
                   <input
