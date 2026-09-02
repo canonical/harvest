@@ -61,24 +61,16 @@ describe('DesignView', () => {
     expect(api.getProjectDeploymentSingle).toHaveBeenCalledWith('proj-1');
   });
 
-  it('shows the deployment name in the header for the setup state', async () => {
+  it('does not show the eyebrow/name header for the setup state, using the panel title instead', async () => {
     seedSelectedProject();
     api.getProjectDeploymentSingle.mockResolvedValue(structuredClone(DEPLOYMENT_NO_DESIGN));
     const w = mountView();
     await flushPromises();
-    expect(w.text()).toContain('MyProject');
+    expect(w.find('[data-testid="design-eyebrow"]').exists()).toBe(false);
+    expect(w.text()).toContain('Generate a design');
   });
 
-  it('shows a Design eyebrow label in the header for the setup state', async () => {
-    seedSelectedProject();
-    api.getProjectDeploymentSingle.mockResolvedValue(structuredClone(DEPLOYMENT_NO_DESIGN));
-    const w = mountView();
-    await flushPromises();
-    expect(w.find('[data-testid="design-eyebrow"]').exists()).toBe(true);
-    expect(w.find('[data-testid="design-eyebrow"]').text()).toMatch(/design/i);
-  });
-
-  it('shows a template chip in the header when the deployment uses a template', async () => {
+  it('shows a template chip on the design doc when the deployment uses a template', async () => {
     seedSelectedProject();
     api.getProjectDeploymentSingle.mockResolvedValue(structuredClone(DEPLOYMENT_WITH_TEMPLATE));
     const w = mountView();
