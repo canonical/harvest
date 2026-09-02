@@ -364,6 +364,18 @@ fn artifact_ref(row: &Value, id_key: &str, title_key: &str, kind_key: Option<&st
     obj
 }
 
+fn design_doc_ref(row: &Value) -> Value {
+    let Some(id) = opt_str(row, "design_doc_id") else { return Value::Null };
+    json!({
+        "id":              id,
+        "title":           opt_str(row, "design_doc_title"),
+        "created_by":      opt_str(row, "design_doc_created_by"),
+        "created_by_name": opt_str(row, "design_doc_created_by_name"),
+        "created_at":      opt_str(row, "design_doc_created_at"),
+        "updated_at":      opt_str(row, "design_doc_updated_at"),
+    })
+}
+
 pub fn shape_context_artifacts(row: &Value) -> Value {
     let Some(list) = row.get("context_artifacts").and_then(|v| v.as_array()) else {
         return json!([]);
@@ -497,7 +509,7 @@ pub fn shape_deployment(row: &Value) -> Value {
         "created_at":               row["created_at"],
         "updated_at":               row["updated_at"],
         "template":                 template,
-        "design_doc":               artifact_ref(row, "design_doc_id", "design_doc_title", None),
+        "design_doc":               design_doc_ref(row),
         "terraform_bundle":         artifact_ref(row, "terraform_bundle_id", "terraform_bundle_title", Some("terraform_bundle_kind")),
         "guide":                    artifact_ref(row, "guide_id", "guide_title", None),
         "context_artifacts":        shape_context_artifacts(row),
@@ -622,6 +634,8 @@ mod tests {
             "created_by": "u1", "created_at": "t1", "updated_at": "t1",
             "template_id": Value::Null, "template_name": Value::Null,
             "design_doc_id": Value::Null, "design_doc_title": Value::Null,
+            "design_doc_created_by": Value::Null, "design_doc_created_at": Value::Null,
+            "design_doc_created_by_name": Value::Null, "design_doc_updated_at": Value::Null,
             "terraform_bundle_id": Value::Null, "terraform_bundle_title": Value::Null, "terraform_bundle_kind": Value::Null,
             "guide_id": Value::Null, "guide_title": Value::Null,
             "context_artifacts": [],
@@ -722,6 +736,43 @@ mod tests {
         let shaped = shape_deployment(&row);
         assert_eq!(shaped["design_doc"]["id"], "a2");
         assert!(shaped["design_doc"].get("kind").is_none());
+    }
+
+    #[test]
+    fn shape_deployment_includes_design_doc_creator_name_when_authored_by_a_user() {
+        let mut row = base_row();
+        row["design_doc_id"] = json!("a2");
+        row["design_doc_title"] = json!("Design");
+        row["design_doc_created_by"] = json!("u2");
+        row["design_doc_created_at"] = json!("t2");
+        row["design_doc_created_by_name"] = json!("Jane Doe");
+        let shaped = shape_deployment(&row);
+        assert_eq!(shaped["design_doc"]["created_by"], "u2");
+        assert_eq!(shaped["design_doc"]["created_by_name"], "Jane Doe");
+        assert_eq!(shaped["design_doc"]["created_at"], "t2");
+    }
+
+    #[test]
+    fn shape_deployment_includes_design_doc_updated_at() {
+        let mut row = base_row();
+        row["design_doc_id"] = json!("a2");
+        row["design_doc_title"] = json!("Design");
+        row["design_doc_updated_at"] = json!("t3");
+        let shaped = shape_deployment(&row);
+        assert_eq!(shaped["design_doc"]["updated_at"], "t3");
+    }
+
+    #[test]
+    fn shape_deployment_omits_design_doc_creator_name_when_generated_by_the_assistant() {
+        let mut row = base_row();
+        row["design_doc_id"] = json!("a2");
+        row["design_doc_title"] = json!("Design");
+        row["design_doc_created_by"] = json!("assistant");
+        // No User node matches created_by = "assistant", so the OPTIONAL MATCH yields null.
+        row["design_doc_created_by_name"] = Value::Null;
+        let shaped = shape_deployment(&row);
+        assert_eq!(shaped["design_doc"]["created_by"], "assistant");
+        assert_eq!(shaped["design_doc"]["created_by_name"], Value::Null);
     }
 
     #[test]
