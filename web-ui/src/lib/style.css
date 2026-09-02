@@ -6300,42 +6300,58 @@ a.source-chip:hover .source-chip__name {
   gap: 1.25rem;
 }
 
-.design-gen__header {
+.design-gen__status {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
   flex-shrink: 0;
 }
 
-.design-gen__spinner {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 2rem 0;
-  color: var(--text-muted);
-  font-size: 0.875rem;
-}
-
-.design-gen__status-bar {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  flex-wrap: wrap;
+.design-gen__status-icon {
+  width: 1.5rem;
+  height: 1.5rem;
   flex-shrink: 0;
 }
 
-.design-gen__phase {
-  font-size: 0.8125rem;
+.design-gen__status-icon--done {
+  color: var(--success-text, #1a7f37);
+}
+
+.design-gen__status-icon--error {
+  color: var(--error-text);
+}
+
+.design-gen__status-text {
+  font-size: 0.95rem;
   font-weight: 500;
-  color: var(--text-secondary);
+}
+
+.design-gen__elapsed {
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+.design-gen__error-actions {
+  display: flex;
+  gap: 0.625rem;
+  margin-top: 0.625rem;
 }
 
 .design-gen__activity {
-  flex-shrink: 0;
-  max-height: 45%;
+  flex: 1;
   min-height: 3rem;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
   padding-right: 0.25rem;
+}
+
+/* Once the live preview also needs room, cap the activity log instead of
+   letting it fill the whole panel, so the document preview stays dominant. */
+.design-gen__activity--bounded {
+  flex: none;
+  max-height: 45%;
 }
 
 .design-gen__thinking {

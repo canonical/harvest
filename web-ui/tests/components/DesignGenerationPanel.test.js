@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 
 vi.mock('../../src/lib/api.js', async (importOriginal) => {
@@ -18,10 +18,14 @@ function mountPanel({ projectId = 'proj-1', deploymentId = 'd1', body = {} } = {
   });
 }
 
+// The real endpoint stays open until the stream naturally ends; done/error are
+// conveyed as events, not by resolving the fetch promise. Mirror that here so
+// tests control completion purely through emitted events.
 function makeStreamController() {
   let onEvent;
-  api.generateDesignStream.mockImplementation(async (_p, _d, _b, cb) => {
+  api.generateDesignStream.mockImplementation((_p, _d, _b, cb) => {
     onEvent = cb;
+    return new Promise(() => {});
   });
   return { get onEvent() { return onEvent; } };
 }
@@ -29,14 +33,19 @@ function makeStreamController() {
 describe('DesignGenerationPanel', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    api.generateDesignStream.mockImplementation(async () => {});
+    api.generateDesignStream.mockImplementation(() => new Promise(() => {}));
   });
 
-  it('renders a generation status page with title', async () => {
-    const { w } = { w: mountPanel() };
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('renders a single status line, starting in a "Preparing…" state', async () => {
+    const w = mountPanel();
     await flushPromises();
     expect(w.find('[data-testid="design-generation"]').exists()).toBe(true);
-    expect(w.text()).toMatch(/generating.*design/i);
+    expect(w.find('[data-testid="design-gen-status-text"]').text()).toMatch(/preparing/i);
+    expect(w.find('.loading-orbit').exists()).toBe(true);
   });
 
   it('calls generateDesignStream on mount with projectId, deploymentId, and body', async () => {
@@ -47,22 +56,42 @@ describe('DesignGenerationPanel', () => {
     }, expect.any(Function));
   });
 
-  it('shows intent badge when intent event arrives', async () => {
-    const ctl = makeStreamController();
+  it('shows an increasing elapsed time while generation is running', async () => {
+    vi.useFakeTimers();
     const w = mountPanel();
-    await flushPromises();
-    ctl.onEvent({ type: 'intent', mode: 'action' });
-    await flushPromises();
-    expect(w.find('[data-testid="design-gen-intent"]').exists()).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(w.find('[data-testid="design-gen-elapsed"]').text()).toBe('0s');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(w.find('[data-testid="design-gen-elapsed"]').text()).toBe('3s');
   });
 
-  it('shows phase label when phase event arrives', async () => {
+  it('updates the status line to what the currently running tool is doing, in its own words', async () => {
     const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
-    ctl.onEvent({ type: 'phase', label: 'Drafting design' });
+    ctl.onEvent({ type: 'tool_call', name: 'list_repositories', input: {} });
     await flushPromises();
-    expect(w.find('[data-testid="design-gen-phase"]').text()).toContain('Drafting design');
+    expect(w.find('[data-testid="design-gen-status-text"]').text()).toContain('Discovering available repositories');
+  });
+
+  it('shows a "Thinking…" status while the model is reasoning with no tool running', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({ type: 'thinking_delta', text: 'Considering the options' });
+    await flushPromises();
+    expect(w.find('[data-testid="design-gen-status-text"]').text()).toMatch(/thinking/i);
+  });
+
+  it('switches the status line to "Writing…" once the document starts streaming', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: {} });
+    ctl.onEvent({ type: 'tool_result', name: 'generate_artifact', preview: '{}' });
+    ctl.onEvent({ type: 'text_delta', text: '# Design\n' });
+    await flushPromises();
+    expect(w.find('[data-testid="design-gen-status-text"]').text()).toMatch(/writing/i);
   });
 
   it('streams text deltas into a live markdown preview', async () => {
@@ -78,19 +107,23 @@ describe('DesignGenerationPanel', () => {
     expect(preview.text()).toContain('Single VM.');
   });
 
-  it('renders tool call steps as a vertical timeline', async () => {
+  it('shows no activity section until there is activity to show', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    expect(w.find('[data-testid="design-gen-activity"]').exists()).toBe(false);
+  });
+
+  it('shows the activity log, permanently, once there is something to show', async () => {
     const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
     ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: { title: 'Design' } });
-    ctl.onEvent({ type: 'tool_result', name: 'generate_artifact', preview: '{"id":"a1"}' });
     await flushPromises();
-    const timeline = w.find('[data-testid="design-gen-timeline"]');
-    expect(timeline.exists()).toBe(true);
-    expect(timeline.text()).toContain('Generating artifact');
+    expect(w.find('[data-testid="design-gen-activity"]').exists()).toBe(true);
+    expect(w.find('[data-testid="design-gen-timeline"]').text()).toContain('Generating artifact');
   });
 
-  it('renders thinking blocks when thinking events arrive', async () => {
+  it('reveals thinking blocks inside the details panel as soon as they arrive', async () => {
     const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
@@ -99,31 +132,13 @@ describe('DesignGenerationPanel', () => {
     expect(w.find('[data-testid="design-gen-thinking"]').exists()).toBe(true);
   });
 
-  it('groups thinking and tool timeline in a fixed activity region above the preview', async () => {
-    const ctl = makeStreamController();
-    const w = mountPanel();
-    await flushPromises();
-    const activity = w.find('[data-testid="design-gen-activity"]');
-    expect(activity.exists()).toBe(true);
-    ctl.onEvent({ type: 'thinking_delta', text: 'Considering options' });
-    await flushPromises();
-    expect(activity.find('[data-testid="design-gen-thinking"]').exists()).toBe(true);
-    ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: {} });
-    await flushPromises();
-    expect(activity.find('[data-testid="design-gen-timeline"]').exists()).toBe(true);
-    ctl.onEvent({ type: 'text_delta', text: '# Design' });
-    await flushPromises();
-    const root = w.find('.design-gen').element;
-    const activityEl = activity.element;
-    const previewWrapper = w.find('[data-testid="design-gen-preview"]').element.parentElement;
-    const rootChildren = Array.from(root.children);
-    expect(rootChildren.indexOf(activityEl)).toBeLessThan(rootChildren.indexOf(previewWrapper));
-  });
-
   it('auto-scrolls the activity region to the bottom when new tool calls arrive', async () => {
     const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
+    ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: {} });
+    await flushPromises();
+
     const activity = w.find('[data-testid="design-gen-activity"]').element;
     Object.defineProperty(activity, 'scrollHeight', { configurable: true, get: () => 500 });
     Object.defineProperty(activity, 'clientHeight', { configurable: true, get: () => 200 });
@@ -134,39 +149,102 @@ describe('DesignGenerationPanel', () => {
     expect(activity.scrollTop).toBe(500);
   });
 
-  it('emits done when done event arrives and shows completion state', async () => {
+  it('shows a ready state and emits done when the done event arrives', async () => {
     const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
     ctl.onEvent({ type: 'done', answer: '# Design' });
     await flushPromises();
     expect(w.emitted('done')).toBeTruthy();
+    expect(w.find('[data-testid="design-gen-status-text"]').text()).toMatch(/ready/i);
+    expect(w.find('.loading-orbit').exists()).toBe(false);
+    expect(w.find('[data-testid="design-gen-elapsed"]').exists()).toBe(false);
   });
 
-  it('shows error and emits done when error event arrives', async () => {
+  it('shows an error with recovery actions and does not auto-navigate away', async () => {
     const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
     ctl.onEvent({ type: 'error', message: 'LLM failed' });
     await flushPromises();
-    expect(w.find('[data-testid="design-gen-error"]').exists()).toBe(true);
     expect(w.find('[data-testid="design-gen-error"]').text()).toContain('LLM failed');
-    expect(w.emitted('done')).toBeTruthy();
+    expect(w.find('[data-testid="design-gen-status-text"]').text()).toMatch(/failed/i);
+    expect(w.find('[data-testid="design-gen-back"]').exists()).toBe(true);
+    expect(w.find('[data-testid="design-gen-retry"]').exists()).toBe(true);
+    expect(w.emitted('done')).toBeFalsy();
   });
 
-  it('shows error when the stream promise rejects', async () => {
+  it('shows an error when the stream promise rejects, without auto-navigating away', async () => {
     api.generateDesignStream.mockRejectedValue(new Error('Network down'));
     const w = mountPanel();
     await flushPromises();
-    expect(w.find('[data-testid="design-gen-error"]').exists()).toBe(true);
     expect(w.find('[data-testid="design-gen-error"]').text()).toContain('Network down');
-    expect(w.emitted('done')).toBeTruthy();
+    expect(w.emitted('done')).toBeFalsy();
   });
 
-  it('shows a spinner while waiting for the first event', async () => {
-    api.generateDesignStream.mockImplementation(() => new Promise(() => {}));
+  it('Back emits cancel so the caller can return to setup', async () => {
+    const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
-    expect(w.find('[data-testid="design-gen-spinner"]').exists()).toBe(true);
+    ctl.onEvent({ type: 'error', message: 'LLM failed' });
+    await flushPromises();
+    await w.find('[data-testid="design-gen-back"]').trigger('click');
+    expect(w.emitted('cancel')).toBeTruthy();
+  });
+
+  it('uses a custom streamFn instead of generateDesignStream when supplied', async () => {
+    const customStream = vi.fn(() => new Promise(() => {}));
+    mount(DesignGenerationPanel, {
+      props: { projectId: 'proj-1', deploymentId: 'd1', body: { explanation: 'Add a CDN' }, streamFn: customStream },
+    });
+    await flushPromises();
+    expect(customStream).toHaveBeenCalledWith('proj-1', 'd1', { explanation: 'Add a CDN' }, expect.any(Function));
+    expect(api.generateDesignStream).not.toHaveBeenCalled();
+  });
+
+  it('emits done with the final answer and accumulated text from the stream', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({ type: 'text_delta', text: '# Design\n' });
+    ctl.onEvent({ type: 'done', answer: '# Design (final)' });
+    await flushPromises();
+    expect(w.emitted('done')[0][0]).toEqual({ answer: '# Design (final)', text: '# Design\n' });
+  });
+
+  it('uses custom preparing/ready/failed labels when provided', async () => {
+    const ctl = makeStreamController();
+    const w = mount(DesignGenerationPanel, {
+      props: {
+        projectId: 'proj-1', deploymentId: 'd1', body: {},
+        preparingText: 'Preparing your proposed change…',
+        readyText: 'Proposed change ready',
+        failedText: 'Failed to propose change',
+      },
+    });
+    await flushPromises();
+    expect(w.find('[data-testid="design-gen-status-text"]').text()).toBe('Preparing your proposed change…');
+    ctl.onEvent({ type: 'done', answer: 'x' });
+    await flushPromises();
+    expect(w.find('[data-testid="design-gen-status-text"]').text()).toBe('Proposed change ready');
+  });
+
+  it('Try again retries generation and resets the running state', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({ type: 'error', message: 'LLM failed' });
+    await flushPromises();
+
+    await w.find('[data-testid="design-gen-retry"]').trigger('click');
+    await flushPromises();
+
+    expect(api.generateDesignStream).toHaveBeenCalledTimes(2);
+    expect(w.find('[data-testid="design-gen-error"]').exists()).toBe(false);
+    expect(w.find('.loading-orbit').exists()).toBe(true);
+
+    ctl.onEvent({ type: 'done', answer: '# Design' });
+    await flushPromises();
+    expect(w.find('[data-testid="design-gen-status-text"]').text()).toMatch(/ready/i);
   });
 });
