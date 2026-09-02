@@ -21,9 +21,10 @@
         </div>
         <div class="design-panel__actions" v-if="!editing && !proposalPhase">
           <a
+            v-if="pdfBlobUrl"
             class="p-button--positive artifact-download-btn is-dense"
-            :href="designPdfUrl(projectId, deployment.id, true)"
-            download
+            :href="pdfBlobUrl"
+            :download="pdfFilename"
             data-testid="download-design-pdf-btn"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -86,12 +87,36 @@
           data-testid="design-proposal-diff"
         />
 
-        <iframe
-          v-else
-          class="design-panel__pdf-frame"
-          data-testid="design-preview"
-          :src="pdfPreviewUrl"
-        />
+        <div
+          v-else-if="pdfStatus === 'loading' || pdfStatus === 'pending'"
+          class="design-panel__preview doc-body"
+          data-testid="design-pdf-pending"
+        >
+          <LoadingSpinner text="Preparing document preview…" />
+        </div>
+
+        <div
+          v-else-if="pdfStatus === 'error'"
+          class="p-notification--negative"
+          data-testid="design-pdf-error"
+        >
+          <div class="p-notification__content">
+            <p class="p-notification__message">Could not generate the document preview.</p>
+          </div>
+        </div>
+
+        <template v-else>
+          <p
+            v-if="pdfStatus === 'stale'"
+            class="p-text--small u-text--muted design-panel__pdf-stale-note"
+            data-testid="design-pdf-stale-note"
+          >Updating preview…</p>
+          <iframe
+            class="design-panel__pdf-frame"
+            data-testid="design-preview"
+            :src="pdfBlobUrl"
+          />
+        </template>
       </div>
 
       <div v-if="editing" class="design-panel__edit-bar" data-testid="design-edit-bar">
@@ -185,7 +210,7 @@
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue';
 import { renderMarkdown } from '../../lib/markdown.js';
 import {
-  getArtifact, updateArtifact, proposeDesignChangeStream, artifactDownloadUrl, designPdfUrl,
+  getArtifact, updateDesignContent, proposeDesignChangeStream, artifactDownloadUrl, designPdfUrl,
   listProjectArtifacts, linkContextArtifact,
 } from '../../lib/api.js';
 import BusyStatus from './BusyStatus.vue';
@@ -235,10 +260,55 @@ let originalContent      = '';
 
 const renderedProposalStream = computed(() => proposedContent.value ? renderMarkdown(proposedContent.value, {}, {}) : '');
 
-const pdfCacheBust = ref(0);
-const pdfPreviewUrl = computed(() => `${designPdfUrl(props.projectId, props.deployment.id)}?v=${pdfCacheBust.value}`);
+const pdfBlobUrl = ref(null);
+const pdfStatus  = ref('loading');
+let pdfObjectUrl  = null;
+let pdfPollHandle = null;
+
+function stopPdfPolling() {
+  if (pdfPollHandle) {
+    clearTimeout(pdfPollHandle);
+    pdfPollHandle = null;
+  }
+}
+
+async function loadPdfPreview() {
+  stopPdfPolling();
+  if (!props.deployment.design_doc) {
+    pdfStatus.value = 'none';
+    return;
+  }
+  pdfStatus.value = pdfBlobUrl.value ? pdfStatus.value : 'loading';
+  try {
+    const res = await fetch(designPdfUrl(props.projectId, props.deployment.id));
+    if (res.status === 503) {
+      pdfStatus.value = 'pending';
+      pdfPollHandle = setTimeout(loadPdfPreview, 2000);
+      return;
+    }
+    if (!res.ok) {
+      pdfStatus.value = 'error';
+      return;
+    }
+    const blob = await res.blob();
+    if (pdfObjectUrl) URL.revokeObjectURL(pdfObjectUrl);
+    pdfObjectUrl = URL.createObjectURL(blob);
+    pdfBlobUrl.value = pdfObjectUrl;
+    const isStale = res.headers.get('x-design-pdf-status') === 'stale';
+    pdfStatus.value = isStale ? 'stale' : 'ready';
+    if (isStale) {
+      pdfPollHandle = setTimeout(loadPdfPreview, 2000);
+    }
+  } catch {
+    pdfStatus.value = 'error';
+  }
+}
 
 const designDocTitle = computed(() => props.deployment.design_doc?.title ?? 'Design');
+const pdfFilename = computed(() => {
+  const words = designDocTitle.value.split(/[^a-zA-Z0-9-_]+/).filter(Boolean);
+  return `${words.length ? words.join('-') : 'artifact'}.pdf`;
+});
 
 const docMeta = computed(() => {
   const parts = [];
@@ -395,9 +465,8 @@ async function saveEdit() {
   saving.value = true;
   error.value = null;
   try {
-    await updateArtifact(props.deployment.design_doc.id, {
+    await updateDesignContent(props.projectId, props.deployment.id, {
       title: props.deployment.design_doc.title ?? 'Design',
-      kind: 'markdown',
       content: newContent,
     });
     designContent.value = newContent;
@@ -407,6 +476,7 @@ async function saveEdit() {
       editor = null;
     }
     editing.value = false;
+    loadPdfPreview();
     emit('refresh');
   } catch (e) {
     error.value = e.message || 'Failed to save';
@@ -469,9 +539,8 @@ async function applyProposal() {
   proposing.value = true;
   error.value = null;
   try {
-    await updateArtifact(props.deployment.design_doc.id, {
+    await updateDesignContent(props.projectId, props.deployment.id, {
       title: props.deployment.design_doc.title ?? 'Design',
-      kind: 'markdown',
       content: newContent,
     });
     designContent.value = newContent;
@@ -479,6 +548,7 @@ async function applyProposal() {
     proposalPhase.value = null;
     proposedContent.value = '';
     disposeDiffEditor();
+    loadPdfPreview();
     emit('refresh');
   } catch (e) {
     error.value = e.message || 'Failed to apply change';
@@ -510,8 +580,12 @@ onBeforeUnmount(() => {
     editor = null;
   }
   disposeDiffEditor();
+  stopPdfPolling();
+  if (pdfObjectUrl) URL.revokeObjectURL(pdfObjectUrl);
 });
 
-watch(() => props.deployment.design_doc?.id, loadDesignContent, { immediate: true });
-watch(designContent, () => { pdfCacheBust.value += 1; });
+watch(() => props.deployment.design_doc?.id, () => {
+  loadDesignContent();
+  loadPdfPreview();
+}, { immediate: true });
 </script>

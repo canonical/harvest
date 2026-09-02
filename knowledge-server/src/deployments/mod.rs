@@ -1,3 +1,4 @@
+pub mod design_cache;
 pub mod design_pdf;
 pub mod handlers;
 pub mod harvest;
@@ -115,10 +116,6 @@ pub fn needs_destroy_before_apply(state: InfraState) -> bool {
     matches!(state, InfraState::Broken | InfraState::DestroyFailed)
 }
 
-pub fn should_trigger_triage(action: TerraformAction, success: bool) -> bool {
-    matches!(action, TerraformAction::Apply | TerraformAction::Destroy) && !success
-}
-
 /// A deployment can end up `broken`/`destroy_failed` with no `last_applied_content` when its
 /// very first apply fails — there's nothing terraform ever actually created, so there's nothing
 /// to destroy either. Without this, the deployment would be permanently stuck: `broken` disables
@@ -232,36 +229,6 @@ pub async fn resolve_run_content(
         }
     }
     Ok(live_content.to_string())
-}
-
-#[derive(Debug, Clone)]
-pub struct FailedRun {
-    pub id:              String,
-    pub action:         String,
-    pub exit_code:       Option<i64>,
-    pub stdout_preview:  String,
-    pub stderr_preview:  String,
-}
-
-pub async fn latest_failed_run(
-    neo4j:         &Neo4jClient,
-    project_id:    &str,
-    deployment_id: &str,
-) -> anyhow::Result<Option<FailedRun>> {
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_RUN]->(r:DeploymentRun {status: 'failed'})
-         RETURN r.id AS id, r.action AS action, r.exit_code AS exit_code,
-                r.stdout_preview AS stdout_preview, r.stderr_preview AS stderr_preview
-         ORDER BY r.created_at DESC LIMIT 1",
-        json!({ "pid": project_id, "did": deployment_id }),
-    ).await?;
-    Ok(rows.into_iter().next().map(|r| FailedRun {
-        id:            r["id"].as_str().unwrap_or_default().to_string(),
-        action:        r["action"].as_str().unwrap_or_default().to_string(),
-        exit_code:     r["exit_code"].as_i64(),
-        stdout_preview: r["stdout_preview"].as_str().unwrap_or_default().to_string(),
-        stderr_preview: r["stderr_preview"].as_str().unwrap_or_default().to_string(),
-    }))
 }
 
 pub struct PriorDeploymentSummary {
@@ -625,32 +592,6 @@ mod tests {
     #[test]
     fn next_infra_state_failed_destroy_is_destroy_failed() {
         assert_eq!(next_infra_state(TerraformAction::Destroy, false), Some(InfraState::DestroyFailed));
-    }
-
-    #[test]
-    fn should_trigger_triage_true_for_failed_apply() {
-        assert!(should_trigger_triage(TerraformAction::Apply, false));
-    }
-
-    #[test]
-    fn should_trigger_triage_false_for_successful_apply() {
-        assert!(!should_trigger_triage(TerraformAction::Apply, true));
-    }
-
-    #[test]
-    fn should_trigger_triage_true_for_failed_destroy() {
-        assert!(should_trigger_triage(TerraformAction::Destroy, false));
-    }
-
-    #[test]
-    fn should_trigger_triage_false_for_successful_destroy() {
-        assert!(!should_trigger_triage(TerraformAction::Destroy, true));
-    }
-
-    #[test]
-    fn should_trigger_triage_false_for_plan_regardless_of_success() {
-        assert!(!should_trigger_triage(TerraformAction::Plan, true));
-        assert!(!should_trigger_triage(TerraformAction::Plan, false));
     }
 
     #[test]

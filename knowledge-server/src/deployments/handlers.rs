@@ -27,7 +27,7 @@ use super::{
     extract_json_block, load_deployment_context, needs_destroy_before_apply,
     record_run_and_update_state, reset_infra_state_to_none, shape_deployment,
     shape_execution_plan, shape_proposal, shape_proposals,
-    should_trigger_triage, topological_sort, InfraState, StepAction, StepNode,
+    topological_sort, InfraState, StepAction, StepNode,
 };
 
 const DEFAULT_RUN_TIMEOUT_SECS: u64 = 300;
@@ -556,33 +556,6 @@ fn spawn_progress_relay(
     tx
 }
 
-/// Fires unconditionally after any failed deploy/redeploy/destroy run, independent of whether
-/// anyone has the Deployment or Issues page open — matches or creates issues for the failure and
-/// proposes a fix for new/updated ones, replacing the old frontend-watcher-triggered diagnosis.
-fn spawn_issue_triage(state: &ProjectState, project_id: &str, deployment_id: &str) {
-    let progress_tx   = spawn_progress_relay(state, project_id, deployment_id);
-    let neo4j         = Arc::clone(&state.neo4j);
-    let agent_builder = Arc::clone(&state.agent_builder);
-    let project_id    = project_id.to_string();
-    let deployment_id = deployment_id.to_string();
-
-    tokio::spawn(async move {
-        let Ok(Some(run)) = super::latest_failed_run(&neo4j, &project_id, &deployment_id).await else { return };
-        let Ok(Some(group_id)) = crate::issues::group_id_for_project(&neo4j, &project_id).await else { return };
-        let Ok(Some(ctx)) = load_deployment_context(&neo4j, &project_id, &deployment_id).await else { return };
-
-        let agent = agent_builder.build_for_issue_triage(project_id.clone(), group_id, &ctx, &run);
-        let query = crate::agent::prompt::issue_triage_query(&run);
-
-        if let Err(e) = agent.query_with_progress(&query, &[], &[], None, progress_tx).await {
-            tracing::warn!(
-                error = %e, project_id = %project_id, deployment_id = %deployment_id,
-                "issue triage run failed",
-            );
-        }
-    });
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn execute_and_record(
     state:         &ProjectState,
@@ -616,10 +589,6 @@ async fn execute_and_record(
         &state.neo4j, project_id, artifact_id, action, exit_code, &stdout, &stderr,
         applied_content, "user", reasoning,
     ).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-
-    if should_trigger_triage(action, success) {
-        spawn_issue_triage(state, project_id, deployment_id);
-    }
 
     match result {
         Ok(r) => {
@@ -1173,38 +1142,70 @@ pub async fn get_design_pdf(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Query(query): Query<DesignPdfQuery>,
 ) -> Result<Response, ApiError> {
-    let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    let design_title = deployment["design_doc"]["title"].as_str().unwrap_or("Design").to_string();
+
+    let resolved = super::design_cache::resolve_for_serving(state.neo4j.clone(), project_id.clone(), deployment_id.clone())
+        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    match resolved {
+        super::design_cache::ResolvedPdf::NoDesignDoc => Err(err(StatusCode::BAD_REQUEST, "deployment has no design document yet")),
+        super::design_cache::ResolvedPdf::Failed(msg) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, &msg)),
+        super::design_cache::ResolvedPdf::Pending => {
+            Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .header(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))
+                .header(HeaderName::from_static("retry-after"), HeaderValue::from_static("2"))
+                .body(Body::from(json!({ "error": "design document preview is still being generated" }).to_string()))
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+        }
+        super::design_cache::ResolvedPdf::Bytes { data, stale } => {
+            let slug = sanitize_filename(&design_title);
+            let disposition = if query.download {
+                format!("attachment; filename=\"{slug}.pdf\"")
+            } else {
+                format!("inline; filename=\"{slug}.pdf\"")
+            };
+            let status_header = if stale { "stale" } else { "ready" };
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, HeaderValue::from_static("application/pdf"))
+                .header(header::CONTENT_DISPOSITION, HeaderValue::from_str(&disposition).unwrap())
+                .header(HeaderName::from_static("x-design-pdf-status"), HeaderValue::from_static(status_header))
+                .body(Body::from(data))
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdateDesignContentBody {
+    pub title:   String,
+    pub content: String,
+}
+
+pub async fn update_design_content(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, deployment_id)): Path<(String, String)>,
+    Json(body): Json<UpdateDesignContentBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
     let design_doc_id = deployment["design_doc"]["id"].as_str()
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?;
-    let design = get_artifact_in_project(&state.neo4j, &project_id, design_doc_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "design document not found"))?;
-    let content = design["content"].as_str().unwrap_or_default();
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?
+        .to_string();
 
-    let info = super::design_pdf::TitlePageInfo {
-        company: project["name"].as_str().unwrap_or_default().to_string(),
-        product: deployment["template"]["name"].as_str().unwrap_or_default().to_string(),
-        deployment_name: deployment["name"].as_str().unwrap_or_default().to_string(),
-        generated_date: chrono::Utc::now().format("%Y-%m-%d").to_string(),
-    };
-    let bytes = super::design_pdf::build_design_pdf(content, &info)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+    crate::artifacts::handlers::update_artifact(
+        &state.neo4j, &design_doc_id, ArtifactKind::Markdown, ArtifactKind::Markdown, &body.title, &body.content,
+    ).await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
 
-    let title = design["title"].as_str().unwrap_or("Design");
-    let slug = sanitize_filename(title);
-    let disposition = if query.download {
-        format!("attachment; filename=\"{slug}.pdf\"")
-    } else {
-        format!("inline; filename=\"{slug}.pdf\"")
-    };
+    super::design_cache::schedule_regeneration(state.neo4j.clone(), project_id.clone(), deployment_id.clone());
 
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, HeaderValue::from_static("application/pdf"))
-        .header(header::CONTENT_DISPOSITION, HeaderValue::from_str(&disposition).unwrap())
-        .body(Body::from(bytes))
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    Ok(Json(deployment))
 }
 
 pub async fn generate_provision(
@@ -1593,7 +1594,7 @@ pub(crate) async fn list_proposals_core(
 }
 
 pub(crate) async fn approve_proposal_core(
-    neo4j:         &Neo4jClient,
+    neo4j:         Arc<Neo4jClient>,
     project_id:    &str,
     deployment_id: &str,
     proposal_id:   &str,
@@ -1619,15 +1620,18 @@ pub(crate) async fn approve_proposal_core(
     let new_content = edited_content
         .map(str::to_string)
         .unwrap_or_else(|| row["proposed_content"].as_str().unwrap_or_default().to_string());
-    crate::artifacts::handlers::update_artifact(neo4j, &artifact_id, kind, kind, &artifact_title, &new_content)
+    crate::artifacts::handlers::update_artifact(&neo4j, &artifact_id, kind, kind, &artifact_title, &new_content)
         .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    if kind == ArtifactKind::Markdown {
+        let _ = super::design_cache::on_artifact_changed(neo4j.clone(), project_id.to_string(), artifact_id.clone()).await;
+    }
     let now = chrono::Utc::now().to_rfc3339();
     neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_PROPOSAL]->(p:Proposal {id: $propid})
          SET p.status = 'approved', p.proposed_content = $content",
         json!({ "pid": project_id, "did": deployment_id, "propid": proposal_id, "content": new_content, "now": now }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let deployment = fetch_deployment_detail(neo4j, project_id, deployment_id).await?;
+    let deployment = fetch_deployment_detail(&neo4j, project_id, deployment_id).await?;
     Ok(json!({ "proposal_id": proposal_id, "status": "approved", "deployment": deployment }))
 }
 
@@ -1703,7 +1707,7 @@ pub async fn approve_proposal(
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let result = approve_proposal_core(
-        &state.neo4j, &project_id, &deployment_id, &proposal_id,
+        state.neo4j.clone(), &project_id, &deployment_id, &proposal_id,
         body.edited_content.as_deref(),
     ).await?;
     Ok(Json(result))
@@ -2025,13 +2029,6 @@ async fn execute_dag_step(
         &state.neo4j, project_id, deployment_id, &step_id, &artifact_id,
         &action_str, exit_code, &stdout, &stderr,
     ).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-
-    if should_trigger_triage(
-        StepAction::parse(&action_str).and_then(|a| a.to_terraform_action()).unwrap_or(TerraformAction::Plan),
-        success,
-    ) {
-        spawn_issue_triage(state, project_id, deployment_id);
-    }
 
     let mut value = json!({
         "step_id": step_id,

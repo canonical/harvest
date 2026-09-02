@@ -383,7 +383,7 @@ The system prompt instructs the LLM to:
 - Never end a response with plain-text questions — use the `ask_user` tool instead.
 - Reuse conversation context before re-calling tools.
 
-Deployment- and issue-scoped agents use specialised system prompts (see `prompt.rs`) that forbid `ask_user` and mutating tools as appropriate.
+Deployment-scoped agents use specialised system prompts (see `prompt.rs`) that forbid `ask_user` and mutating tools as appropriate.
 
 ---
 
@@ -521,7 +521,7 @@ OIDC endpoints are discovered at startup from the configured `issuer_url` (via `
 
 ## Projects and Conversations
 
-Projects are workspaces that group conversations, agents, deployments, secrets, memories, tasks, skills, and artifacts. Access is controlled by group membership.
+Projects are workspaces that group conversations, agents, deployments, secrets, skills, and artifacts. Access is controlled by group membership.
 
 ### Endpoints
 
@@ -617,35 +617,6 @@ Generation steps are broadcast over a `broadcast::channel`. Multiple clients can
 
 ---
 
-## Memories
-
-Each project has a persistent memory store — short facts the agent reads and writes during queries to recall context across conversations.
-
-```
-GET    /projects/:pid/memories              list memories
-POST   /projects/:pid/memories              create a memory
-GET    /projects/:pid/memories/:mid         get a memory
-PUT    /projects/:pid/memories/:mid         update a memory
-DELETE /projects/:pid/memories/:mid         delete a memory
-```
-
----
-
-## Tasks
-
-Runnable project tasks — background agent jobs with captured logs, useful for recurring or one-off automation.
-
-```
-GET    /projects/:pid/tasks                 list tasks
-POST   /projects/:pid/tasks                 create a task
-PATCH  /projects/:pid/tasks/:tid            update task status
-DELETE /projects/:pid/tasks/:tid            delete a task
-POST   /projects/:pid/tasks/:tid/run        run a task (streams events over the project SSE channel)
-GET    /projects/:pid/tasks/:tid/logs       fetch captured task logs
-```
-
----
-
 ## Skills
 
 Skills are markdown playbooks (with YAML frontmatter) the agent loads on demand via the `list_skills` and `load_skill` tools. There are two scopes:
@@ -689,7 +660,7 @@ Terraform bundles are stored as a JSON map of `{path: content}`. The `artifact_t
 
 ## Deployments
 
-The deployment pipeline is the IaC arm of Harvest. Each project can hold many deployments; each deployment carries an environment description, a design doc, a terraform/terragrunt bundle, an optional guide, context artifacts, and a topologically-sorted execution plan. Deploys/redeploys/destroys run the bundle on a connected agent and record a `DeploymentRun` with captured stdout/stderr; failed apply/destroy runs trigger automatic issue triage (see [Issues](#issues--change-requests)).
+The deployment pipeline is the IaC arm of Harvest. Each project can hold many deployments; each deployment carries an environment description, a design doc, a terraform/terragrunt bundle, an optional guide, context artifacts, and a topologically-sorted execution plan. Deploys/redeploys/destroys run the bundle on a connected agent and record a `DeploymentRun` with captured stdout/stderr.
 
 ```
 GET    /projects/:pid/deployment                        get the project's current deployment
@@ -723,35 +694,11 @@ POST   /projects/:pid/deployments/:did/run-dag                 execute the plan'
 
 ### Infrastructure state
 
-Each deployment tracks an `infra_state`: `none` → `up` (successful apply) / `broken` (failed apply) → `destroyed` (successful destroy) / `destroy_failed` (failed destroy). A `broken` or `destroy_failed` deployment must be destroyed before it can be re-applied. `apply` and `destroy` runs that fail trigger the issue-triage agent automatically.
+Each deployment tracks an `infra_state`: `none` → `up` (successful apply) / `broken` (failed apply) → `destroyed` (successful destroy) / `destroy_failed` (failed destroy). A `broken` or `destroy_failed` deployment must be destroyed before it can be re-applied.
 
 ### Execution plan
 
 The execution plan is a list of steps (`{id, action, phase, label, artifact, depends_on}`) where `action` is `run`/`plan`/`apply`/`destroy` and `phase` is `deploy`/`destroy`. `POST /run-dag` topologically sorts the steps (`deployments::topological_sort`) and executes them in order against a chosen agent, streaming each run's output.
-
----
-
-## Issues & Change Requests
-
-Failed apply/destroy runs automatically spawn an issue-triage agent (`build_for_issue_triage`) that lists existing issues, matches or creates one per distinct failure (deduplicated by `fingerprint`, reopening regressions if a fixed/rejected issue resurfaces), and proposes a corrected bundle via `propose_issue_solution`. Issues and pending proposals are surfaced together as change requests.
-
-```
-GET    /projects/:pid/issues                         list deployment issues
-GET    /projects/:pid/issues/:iid                    get issue detail (with proposed fix + chat history)
-PATCH  /projects/:pid/issues/:iid/status             transition issue status (untriaged → in_progress → fixed/rejected)
-POST   /projects/:pid/issues/:iid/comments           add a comment
-POST   /projects/:pid/issues/:iid/apply-solution     apply the proposed fix and trigger a redeploy
-POST   /projects/:pid/issues/:iid/redeploy           redeploy from an issue
-POST   /projects/:pid/issues/:iid/chat               chat with the agent about an issue (build_for_issue_chat)
-
-GET    /projects/:pid/change-requests               list issues + proposals as change requests
-GET    /projects/:pid/change-requests/:cid          get a change request
-POST   /projects/:pid/change-requests/:cid/apply    apply a proposal change request
-POST   /projects/:pid/change-requests/:cid/discard  discard a change request
-POST   /projects/:pid/change-requests/:cid/comments comment on a change request
-```
-
-Issue status transitions are validated: `untriaged → in_progress`, `in_progress → fixed`, `in_progress → rejected`. The issue-chat agent is read-only (it can run diagnostic commands and propose a fix, but cannot apply or deploy).
 
 ---
 
@@ -841,7 +788,7 @@ Deleting an LXD-managed agent (`DELETE /projects/:pid/agents/:aid`) additionally
 1. The LLM (or a deployment run) calls `run_terraform_plan`/`apply`/`destroy` with an `agent_id`, `artifact_id` (the bundle), and the action.
 2. The server resolves the bundle's file map and pushes a `RunTerraform` SSE event with the flavor (`terraform`/`terragrunt`), action, and files.
 3. The agent writes the files to a temp dir, runs the action, and streams each stdout/stderr line to `/agent/output` (forwarded to any live SSE subscribers) before posting the final result to `/agent/results`.
-4. The server records a `DeploymentRun` (with stdout/stderr previews) and updates the deployment's `infra_state`; on a failed apply/destroy it triggers the issue-triage agent.
+4. The server records a `DeploymentRun` (with stdout/stderr previews) and updates the deployment's `infra_state`.
 
 **Interactive console:**
 

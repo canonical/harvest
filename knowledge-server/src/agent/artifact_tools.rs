@@ -102,6 +102,11 @@ impl Tool for GenerateArtifactTool {
             ).await?
         };
         let id = created["id"].as_str().unwrap_or_default();
+        if kind == ArtifactKind::Markdown {
+            let _ = crate::deployments::design_cache::on_artifact_changed(
+                self.neo4j.clone(), self.project_id.clone(), id.to_string(),
+            ).await;
+        }
         Ok(serde_json::to_string(&json!({
             "id":    id,
             "title": title,

@@ -390,7 +390,7 @@ describe('ChatMessage — confirm_action chain entries', () => {
       ],
     };
     const w = mount(ChatMessage, { props: { msg, isLast: true } });
-    const kinds = [...w.find('.tc-chain').element.children].map(el =>
+    const kinds = [...w.find('.tc-chain__viewport').element.children].map(el =>
       el.classList.contains('tc-step') ? 'tool_call' : 'confirm_action'
     );
     expect(kinds).toEqual(['tool_call', 'confirm_action', 'tool_call']);
