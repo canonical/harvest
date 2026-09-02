@@ -28,11 +28,7 @@ export function describeToolCall(name, input, { hostname } = {}) {
         ? `Comparing ${sym} ${input.version_a} → ${input.version_b}`
         : `Comparing ${sym} across versions`;
     }
-    case 'run_cypher': {
-      const q = typeof input.query === 'string' ? input.query.trim() : '';
-      const snippet = q.length > 38 ? q.slice(0, 38).trimEnd() + '…' : q;
-      return snippet ? `Graph query: ${snippet}` : 'Running graph query';
-    }
+    case 'run_cypher': return 'Querying the code graph';
     case 'run_command': {
       const cmd = typeof input.command === 'string'
         ? (input.command.length > 28 ? input.command.slice(0, 28).trimEnd() + '…' : input.command)
@@ -53,14 +49,8 @@ export function describeToolCall(name, input, { hostname } = {}) {
       return `Deleting port forward ${input.id ?? ''}`.trim();
     case 'generate_artifact':
       return `Generating artifact ${input.name ?? ''}`.trim();
-    case 'list_deployment_issues':
-      return 'Listing deployment issues';
     case 'read_provision_bundle':
       return 'Reading provision bundle';
-    case 'propose_issue_solution':
-      return 'Proposing issue solution';
-    case 'create_or_link_issue':
-      return 'Matching or creating issue';
     case 'set_execution_plan':
       return 'Setting execution plan';
     case 'update_product_template':

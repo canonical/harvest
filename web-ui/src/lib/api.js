@@ -372,21 +372,6 @@ export async function resumeConfirmAction(projectId, convId, results) {
   return response.json();
 }
 
-const memoryUrl = (projectId, memoryId) =>
-  `${projectUrl(projectId)}/memories/${encodeURIComponent(memoryId)}`;
-
-export const listProjectMemories   = (projectId)            => projectFetch(`${projectUrl(projectId)}/memories`);
-export const createProjectMemory   = (projectId, body)      => projectFetch(`${projectUrl(projectId)}/memories`, { method: 'POST', body: JSON.stringify(body) });
-export const getProjectMemory      = (projectId, memoryId)  => projectFetch(memoryUrl(projectId, memoryId));
-export const updateProjectMemory   = (projectId, memoryId, body) => projectFetch(memoryUrl(projectId, memoryId), { method: 'PUT', body: JSON.stringify(body) });
-export async function deleteProjectMemory(projectId, memoryId) {
-  const res = await fetch(memoryUrl(projectId, memoryId), { method: 'DELETE' });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Request failed (${res.status})`);
-  }
-}
-
 const ARTIFACTS_URL = '/artifacts';
 const artifactUrl = (id) => `${ARTIFACTS_URL}/${encodeURIComponent(id)}`;
 
@@ -408,6 +393,8 @@ const deploymentUrl = (projectId, id) => `${projectUrl(projectId)}/deployments/$
 
 export const designPdfUrl = (projectId, id, download) =>
   `${deploymentUrl(projectId, id)}/design/pdf${download ? '?download=true' : ''}`;
+export const updateDesignContent = (projectId, id, body) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/design/content`, { method: 'PUT', body: JSON.stringify(body) });
 
 export const listProjectDeployments  = (projectId)       => projectFetch(`${projectUrl(projectId)}/deployments`);
 export const createProjectDeployment = (projectId, body) => projectFetch(`${projectUrl(projectId)}/deployments`, { method: 'POST', body: JSON.stringify(body) });
@@ -512,42 +499,6 @@ export const setExecutionPlan = (projectId, id, body) =>
 export const runDag = (projectId, id, body) =>
   projectFetch(`${deploymentUrl(projectId, id)}/run-dag`, { method: 'POST', body: JSON.stringify(body) });
 
-const issuesUrl = (projectId) => `${projectUrl(projectId)}/issues`;
-const issueUrl  = (projectId, id) => `${issuesUrl(projectId)}/${encodeURIComponent(id)}`;
-
-const changeRequestsUrl = (projectId) => `${projectUrl(projectId)}/change-requests`;
-const changeRequestUrl   = (projectId, id) => `${changeRequestsUrl(projectId)}/${encodeURIComponent(id)}`;
-
-export function listChangeRequests(projectId, { status, deploymentId } = {}) {
-  const params = new URLSearchParams();
-  if (status) params.set('status', status);
-  if (deploymentId) params.set('deployment', deploymentId);
-  const qs = params.toString();
-  return projectFetch(`${changeRequestsUrl(projectId)}${qs ? `?${qs}` : ''}`);
-}
-export const getChangeRequest       = (projectId, id) => projectFetch(changeRequestUrl(projectId, id));
-export const applyChangeRequest     = (projectId, id, body) => projectFetch(`${changeRequestUrl(projectId, id)}/apply`, { method: 'POST', body: JSON.stringify(body) });
-export const discardChangeRequest   = (projectId, id) => projectFetch(`${changeRequestUrl(projectId, id)}/discard`, { method: 'POST', body: JSON.stringify({}) });
-export const createChangeRequestComment = (projectId, id, body) => projectFetch(`${changeRequestUrl(projectId, id)}/comments`, { method: 'POST', body: JSON.stringify({ body }) });
-
-export function listProjectIssues(projectId, { status, deploymentId } = {}) {
-  const params = new URLSearchParams();
-  if (status) params.set('status', status);
-  if (deploymentId) params.set('deployment', deploymentId);
-  const qs = params.toString();
-  return projectFetch(`${issuesUrl(projectId)}${qs ? `?${qs}` : ''}`);
-}
-export const getProjectIssue    = (projectId, id) => projectFetch(issueUrl(projectId, id));
-export const updateIssueStatus  = (projectId, id, status) =>
-  projectFetch(`${issueUrl(projectId, id)}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
-export const createIssueComment = (projectId, id, body) =>
-  projectFetch(`${issueUrl(projectId, id)}/comments`, { method: 'POST', body: JSON.stringify({ body }) });
-export const applyIssueSolution = (projectId, id, body) =>
-  projectFetch(`${issueUrl(projectId, id)}/apply-solution`, { method: 'POST', body: JSON.stringify(body) });
-export const redeployFromIssue  = (projectId, id, body) =>
-  projectFetch(`${issueUrl(projectId, id)}/redeploy`, { method: 'POST', body: JSON.stringify(body) });
-export const sendIssueChatMessage = (projectId, id, message) =>
-  projectFetch(`${issueUrl(projectId, id)}/chat`, { method: 'POST', body: JSON.stringify({ message }) });
 
 const TEMPLATES_URL = '/templates';
 const templateDetailUrl = (id) => `${TEMPLATES_URL}/${encodeURIComponent(id)}`;
@@ -593,31 +544,6 @@ export async function deleteProjectSkill(projectId, skillId) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `Request failed (${res.status})`);
   }
-}
-
-const taskUrl = (projectId, taskId) =>
-  `${projectUrl(projectId)}/tasks/${encodeURIComponent(taskId)}`;
-
-export const listProjectTasks   = (projectId)              => projectFetch(`${projectUrl(projectId)}/tasks`);
-export const createProjectTask  = (projectId, body)        => projectFetch(`${projectUrl(projectId)}/tasks`, { method: 'POST',  body: JSON.stringify(body) });
-export const updateProjectTask  = (projectId, taskId, body) => projectFetch(`${taskUrl(projectId, taskId)}`,  { method: 'PATCH', body: JSON.stringify(body) });
-export const getProjectTaskLogs = (projectId, taskId)      => projectFetch(`${taskUrl(projectId, taskId)}/logs`);
-
-export async function deleteProjectTask(projectId, taskId) {
-  const res = await fetch(taskUrl(projectId, taskId), { method: 'DELETE' });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Request failed (${res.status})`);
-  }
-}
-
-export async function runProjectTaskStream(projectId, taskId, onEvent) {
-  const response = await fetch(`${taskUrl(projectId, taskId)}/run`, { method: 'POST' });
-  if (!response.ok) {
-    handleUnauthorized(response.status);
-    throw new Error(`Server error: ${response.status}`);
-  }
-  await consumeSseStream(response, onEvent);
 }
 
 async function adminFetch(url, options = {}) {

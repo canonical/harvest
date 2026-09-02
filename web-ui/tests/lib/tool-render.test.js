@@ -30,9 +30,10 @@ describe('describeToolCall', () => {
     expect(label).toContain('build-box');
   });
 
-  it('describes run_cypher with query snippet', () => {
+  it('describes run_cypher without leaking the raw query', () => {
     const label = describeToolCall('run_cypher', { query: 'MATCH (n:Function) RETURN n LIMIT 5' });
-    expect(label).toContain('MATCH (n:Function)');
+    expect(label).not.toContain('MATCH');
+    expect(label.toLowerCase()).toContain('graph');
   });
 
   it('describes create_lxd_agent', () => {
@@ -70,19 +71,9 @@ describe('describeToolCall', () => {
     expect(label).toContain('config.yml');
   });
 
-  it('describes list_deployment_issues', () => {
-    const label = describeToolCall('list_deployment_issues', {});
-    expect(label.toLowerCase()).toContain('issue');
-  });
-
   it('describes read_provision_bundle', () => {
     const label = describeToolCall('read_provision_bundle', {});
     expect(label.toLowerCase()).toContain('bundle');
-  });
-
-  it('describes propose_issue_solution', () => {
-    const label = describeToolCall('propose_issue_solution', {});
-    expect(label.toLowerCase()).toContain('propos');
   });
 
   it('describes run_terraform_plan', () => {

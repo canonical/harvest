@@ -36,8 +36,7 @@
         >
           <div class="p-notification__content">
             <p class="p-notification__message">
-              This deployment is broken —
-              <router-link to="/change-requests?status=open" data-testid="view-change-requests-link">View change requests</router-link>
+              This deployment is broken.
             </p>
           </div>
         </div>

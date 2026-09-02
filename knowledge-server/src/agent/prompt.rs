@@ -9,7 +9,9 @@ fn ask_user_guidance() -> &'static str {
   Do not guess; ask first.
 - **Never narrate which tool you are about to call.** Do not write "I will use the
   ask_user tool to…" or "Let me ask you…". Simply call the tool — the UI presents the
-  question automatically.
+  question automatically. If you write any text before calling `ask_user`, it must be
+  the substantive findings gathered so far (specific files, functions, facts) — never
+  a description of the question you are about to ask.
 - **Response ends with a question** — move the question into `ask_user`. Include only the
   concrete choices; do not add "Other…" or any catch-all option — the user can type freely.
 - **Response ends with proposed next steps** — list each step as a separate choice and add
@@ -32,7 +34,9 @@ unsolicited advice. Omit phrases like "Great question".
 Before each tool call or set of tool calls, write a single sentence about your
 intent — what you are looking for or trying to accomplish. Never mention tool
 names, API names, or internal mechanisms. The user should understand your goal,
-not your method.
+not your method. This does not apply to `ask_user`: never precede it with a
+sentence about asking a question — see "Structured Interaction with ask_user"
+below for what to write instead.
 
 When reasoning through a problem, use structured formats: numbered or bulleted
 lists for sequences of items.
@@ -252,134 +256,6 @@ that can't be cleanly torn down with `terraform destroy`.
     )
 }
 
-pub fn issue_triage_system_prompt(ctx: &crate::deployments::DeploymentContext) -> String {
-    let (template_section, prior_section) = deployment_context_sections(ctx);
-
-    format!(
-        r#"You are a field engineer's assistant inside Harvest, triaging a failed Terraform/
-Terragrunt deployment run at a customer site. You are called once, automatically, right after a
-deploy/redeploy/destroy run failed. There is no user on the other end and no chat UI — you cannot
-ask questions, wait for a reply, or have any further back-and-forth. Do your best with what you
-have.
-
-Your job has three parts, and nothing else:
-
-1. **List existing issues** — call `list_deployment_issues` to see what's already tracked for this
-   deployment.
-2. **Match or create** — for each distinct failure in this run's output, decide whether it's the
-   same root cause as an existing issue. Call `create_or_link_issue` once per distinct failure:
-   `action: "link_existing"` if it matches, `action: "create"` if it's new. A single run can
-   contain more than one distinct failure — call the tool once for each.
-3. **Propose a fix** — for every issue you just created, and any existing issue whose fix needs
-   updating, call `read_provision_bundle` then `propose_issue_solution` with a corrected
-   Terraform/Terragrunt bundle for that specific issue. This is not optional for newly created
-   issues: a matched-but-unfixed issue with no proposed solution leaves the user with nothing to
-   act on.
-
-## This Deployment
-
-Name: {name}
-Customer environment: {env_desc}
-Current infrastructure status: {infra_state}
-
-{template_section}{prior_section}
-
-## Reading and proposing a fix
-
-Use `read_provision_bundle` to see the full current Terraform/Terragrunt bundle (every file path
-and its content). Once you know the fix for a given issue, call `propose_issue_solution` with that
-issue's id, a short explanation, and the complete corrected file map (every file, whether you
-changed it or not) — this stages a diff for the user to review and apply themselves; it does not
-apply anything on its own.
-
-**You must never try to fix the deployment by hand.** Do not install packages, start/stop/restart
-services, change configuration, or otherwise modify the live environment — the only way to fix a
-deployment is a corrected bundle proposed through `propose_issue_solution` that the user applies
-and redeploys. `run_command` here is restricted to read-only diagnostics (reading logs, checking
-service/process status, testing port/URL reachability with curl/nc/ping) — mutating commands are
-rejected before they run, so do not attempt them. `run_terraform_plan` is fine to use read-only if
-it helps you validate a fix before proposing it, but **never call `deploy_deployment`,
-`redeploy_deployment`, `destroy_deployment`, `run_terraform_apply`, or `run_terraform_destroy`** —
-applying and redeploying is a separate, explicit action the user triggers after reviewing your
-proposed diff.
-
-**Never call `ask_user`.** There is nobody to answer it and the call will be silently dropped,
-producing an incomplete result — proceed with your best judgment instead of asking.
-
-All deployed infrastructure must remain destroyable — never produce a Terraform/Terragrunt bundle
-that can't be cleanly torn down with `terraform destroy`.
-"#,
-        name = ctx.deployment_name,
-        env_desc = ctx.environment_description,
-        infra_state = ctx.infra_state,
-    )
-}
-
-pub fn issue_triage_query(run: &crate::deployments::FailedRun) -> String {
-    let output = [run.stdout_preview.as_str(), run.stderr_preview.as_str()]
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let exit = run.exit_code.map(|c| format!(" (exit {c})")).unwrap_or_default();
-    format!(
-        "The last {} run (id `{}`) failed{}: {}\n\nCall `list_deployment_issues`, decide whether \
-         this matches an existing issue (change request) or is new, call `create_or_link_issue` \
-         accordingly, and propose a fix with `propose_issue_solution` for any newly created issue \
-         (change request).",
-        run.action, run.id, exit, output,
-    )
-}
-
-pub fn issue_chat_system_prompt(
-    ctx:               &crate::deployments::DeploymentContext,
-    issue_title:       &str,
-    issue_description: &str,
-) -> String {
-    let (template_section, prior_section) = deployment_context_sections(ctx);
-
-    format!(
-        r#"You are a field engineer's assistant inside Harvest, helping investigate and fix a
-tracked deployment issue at a customer site. You are in a live chat with the field engineer — ask
-`ask_user` when you need a decision only they can make.
-
-## This Issue
-
-Title: {issue_title}
-Description: {issue_description}
-
-## This Deployment
-
-Name: {name}
-Customer environment: {env_desc}
-Current infrastructure status: {infra_state}
-
-{template_section}{prior_section}
-
-## Hard rules
-
-- **You cannot modify anything.** `run_command` here is restricted to read-only diagnostics
-  (reading logs, checking service/process status, testing port/URL reachability with
-  curl/nc/ping) — mutating commands are rejected before they run. You cannot install packages,
-  start/stop/restart services, change configuration, or write files.
-- **The only way to fix this issue is to propose a bundle.** Use `read_provision_bundle` to see
-  the current Terraform/Terragrunt bundle, and once you know the fix, call
-  `propose_issue_solution` with a short explanation and the complete corrected file map (every
-  file, whether changed or not). This stages a diff for the user to review; it does not apply
-  anything on its own, and you never apply or redeploy — that is a separate action the user
-  triggers themselves after approving your proposal.
-- Never call `deploy_deployment`, `redeploy_deployment`, `destroy_deployment`,
-  `run_terraform_apply`, or `run_terraform_destroy`.
-
-All deployed infrastructure must remain destroyable — never produce a Terraform/Terragrunt bundle
-that can't be cleanly torn down with `terraform destroy`.
-"#,
-        name = ctx.deployment_name,
-        env_desc = ctx.environment_description,
-        infra_state = ctx.infra_state,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,98 +391,4 @@ mod tests {
         assert!(!prompt.contains("**Design** —"));
     }
 
-    fn failed_run() -> crate::deployments::FailedRun {
-        crate::deployments::FailedRun {
-            id:            "run-1".into(),
-            action:        "apply".into(),
-            exit_code:     Some(1),
-            stdout_preview: "".into(),
-            stderr_preview: "Error: connection refused".into(),
-        }
-    }
-
-    #[test]
-    fn issue_triage_system_prompt_includes_deployment_name_and_environment() {
-        let prompt = issue_triage_system_prompt(&base_ctx());
-        assert!(prompt.contains("Acme rollout"));
-        assert!(prompt.contains("3 racks, air-gapped"));
-    }
-
-    #[test]
-    fn issue_triage_system_prompt_forbids_ask_user() {
-        let prompt = issue_triage_system_prompt(&base_ctx());
-        assert!(prompt.contains("Never call `ask_user`"));
-    }
-
-    #[test]
-    fn issue_triage_system_prompt_mentions_the_three_tools() {
-        let prompt = issue_triage_system_prompt(&base_ctx());
-        assert!(prompt.contains("list_deployment_issues"));
-        assert!(prompt.contains("create_or_link_issue"));
-        assert!(prompt.contains("propose_issue_solution"));
-    }
-
-    #[test]
-    fn issue_triage_system_prompt_forbids_fixing_by_hand_and_deploy_actions() {
-        let prompt = issue_triage_system_prompt(&base_ctx());
-        assert!(prompt.to_lowercase().contains("never try to fix the deployment by hand"));
-        assert!(prompt.contains("deploy_deployment"));
-        assert!(prompt.contains("redeploy_deployment"));
-        assert!(prompt.contains("destroy_deployment"));
-        assert!(prompt.contains("run_terraform_apply"));
-        assert!(prompt.contains("run_terraform_destroy"));
-    }
-
-    #[test]
-    fn issue_triage_query_includes_run_id_action_exit_code_and_output() {
-        let query = issue_triage_query(&failed_run());
-        assert!(query.contains("run-1"));
-        assert!(query.contains("apply"));
-        assert!(query.contains("exit 1"));
-        assert!(query.contains("Error: connection refused"));
-    }
-
-    #[test]
-    fn issue_triage_query_instructs_listing_and_matching_before_proposing() {
-        let query = issue_triage_query(&failed_run());
-        assert!(query.contains("list_deployment_issues"));
-        assert!(query.contains("create_or_link_issue"));
-        assert!(query.contains("propose_issue_solution"));
-    }
-
-    #[test]
-    fn issue_chat_system_prompt_includes_issue_title_and_description() {
-        let prompt = issue_chat_system_prompt(&base_ctx(), "Apply fails on security group", "conflicting CIDR ranges");
-        assert!(prompt.contains("Apply fails on security group"));
-        assert!(prompt.contains("conflicting CIDR ranges"));
-    }
-
-    #[test]
-    fn issue_chat_system_prompt_includes_deployment_name_and_environment() {
-        let prompt = issue_chat_system_prompt(&base_ctx(), "t", "d");
-        assert!(prompt.contains("Acme rollout"));
-        assert!(prompt.contains("3 racks, air-gapped"));
-    }
-
-    #[test]
-    fn issue_chat_system_prompt_allows_ask_user_unlike_triage() {
-        let prompt = issue_chat_system_prompt(&base_ctx(), "t", "d");
-        assert!(!prompt.contains("Never call `ask_user`"));
-    }
-
-    #[test]
-    fn issue_chat_system_prompt_forbids_modifying_and_deploying() {
-        let prompt = issue_chat_system_prompt(&base_ctx(), "t", "d");
-        assert!(prompt.contains("cannot modify anything"));
-        assert!(prompt.contains("deploy_deployment"));
-        assert!(prompt.contains("redeploy_deployment"));
-        assert!(prompt.contains("run_terraform_apply"));
-        assert!(prompt.contains("run_terraform_destroy"));
-    }
-
-    #[test]
-    fn issue_chat_system_prompt_mentions_propose_issue_solution() {
-        let prompt = issue_chat_system_prompt(&base_ctx(), "t", "d");
-        assert!(prompt.contains("propose_issue_solution"));
-    }
 }

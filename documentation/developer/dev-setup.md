@@ -217,7 +217,7 @@ Open http://localhost:5173 and use the sidebar to switch between views. The main
 - **Explore** — select a repo and version to see the interactive symbol graph; click a node to open the source panel; use the search box to find symbols
 - **Document** — select a repo and version to read the AI-generated documentation (requires Step 4)
 
-The sidebar also exposes Deploy, Design, Issues, Change Requests, Artifacts, Skills, Memories, Tasks, Agents, Overview, and Admin views — most need a project with connected agents or deployments to be useful.
+The sidebar also exposes Deploy, Design, Artifacts, Skills, Agents, Overview, and Admin views — most need a project with connected agents or deployments to be useful.
 
 ---
 
