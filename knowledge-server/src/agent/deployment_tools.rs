@@ -221,6 +221,12 @@ impl Tool for LinkDeploymentArtifactTool {
             json!({ "pid": self.project_id, "did": self.deployment_id, "aid": artifact_id }),
         ).await?;
 
+        if role == "design" {
+            crate::deployments::design_cache::schedule_regeneration(
+                self.neo4j.clone(), self.project_id.clone(), self.deployment_id.clone(),
+            );
+        }
+
         Ok(serde_json::to_string(&json!({ "linked": true, "artifact_id": artifact_id, "role": role }))?)
     }
 }

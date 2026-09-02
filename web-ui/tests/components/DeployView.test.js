@@ -66,7 +66,6 @@ function makeRouter() {
     history: createMemoryHistory(),
     routes: [
       { path: '/design', component: { template: '<div />' } },
-      { path: '/change-requests', component: { template: '<div />' } },
     ],
   });
 }

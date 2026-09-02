@@ -2,7 +2,6 @@ pub mod artifact_tools;
 pub mod chain;
 pub mod deployment_tools;
 pub mod graph_tools;
-pub mod issue_tools;
 pub mod lxd_tools;
 pub mod machine_tools;
 pub mod port_forward_tools;
@@ -109,7 +108,7 @@ pub enum AgentEvent {
 
 enum LoopOutcome {
     Finished { text: String, iterations: usize, provider_used: Option<UsedProvider> },
-    EndedWithoutCitations { text: String, iterations: usize, provider_used: Option<UsedProvider> },
+    EndedWithQuestion { text: String, iterations: usize, provider_used: Option<UsedProvider> },
     Paused {
         messages: Vec<Message>,
         iterations: usize,
@@ -394,11 +393,12 @@ impl Agent {
                 }).await;
                 None
             }
-            LoopOutcome::EndedWithoutCitations { text, iterations, provider_used } => {
+            LoopOutcome::EndedWithQuestion { text, iterations, provider_used } => {
                 let answer = if text.is_empty() { question_fallback() } else { text };
+                let sources = parse_citations(&answer);
                 let _ = event_sender.send(AgentEvent::Done {
                     answer,
-                    sources: vec![],
+                    sources,
                     tool_calls_made: iterations,
                     provider_used,
                 }).await;
@@ -507,17 +507,11 @@ impl Agent {
                 // they know about the tool from the system prompt but did not receive
                 // it as a declared function — or simply got confused.
                 if let Some((question, choices, cleaned)) = extract_text_ask_user(&text_buf) {
-                    let answer_text = if !cleaned.is_empty() {
-                        cleaned
-                    } else if let Some(synth) = self.synthesize_partial_answer(&messages, selection).await {
-                        synth
-                    } else if !accumulated_text.is_empty() {
-                        accumulated_text.clone()
-                    } else {
-                        question.clone()
-                    };
+                    let answer_text = self.resolve_ask_user_answer_text(
+                        cleaned, &messages, selection, &accumulated_text, &question,
+                    ).await;
                     let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
-                    return LoopOutcome::EndedWithoutCitations {
+                    return LoopOutcome::EndedWithQuestion {
                         text: answer_text, iterations, provider_used: last_provider_used,
                     };
                 }
@@ -535,17 +529,11 @@ impl Agent {
                         .filter(|s| !is_catchall(s))
                         .collect())
                     .unwrap_or_default();
-                let answer_text = if !text_buf.is_empty() {
-                    text_buf
-                } else if let Some(synth) = self.synthesize_partial_answer(&messages, selection).await {
-                    synth
-                } else if !accumulated_text.is_empty() {
-                    accumulated_text.clone()
-                } else {
-                    question.clone()
-                };
+                let answer_text = self.resolve_ask_user_answer_text(
+                    text_buf, &messages, selection, &accumulated_text, &question,
+                ).await;
                 let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
-                return LoopOutcome::EndedWithoutCitations {
+                return LoopOutcome::EndedWithQuestion {
                     text: answer_text, iterations, provider_used: last_provider_used,
                 };
             }
@@ -691,6 +679,8 @@ impl Agent {
         let prompt = format!(
             "Using ONLY the tool results below, write 1–3 sentences stating the concrete facts \
              you found in the codebase — specific files, functions, config keys, and behavior. \
+             Cite each claim with an inline [repo:version:file:line] citation as described in \
+             the Citation Rules above. \
              Do not mention asking the user a question, presenting options, or any other future \
              action. Do not use phrases like \"I will\" or \"Let me\". Write as plain findings, \
              not as a plan.\n\n\
@@ -703,6 +693,28 @@ impl Agent {
             Ok((LlmResponse::ToolCalls { preamble, .. }, _)) if !preamble.is_empty() => Some(preamble),
             _ => None,
         }
+    }
+
+    /// Picks the answer text for a turn ending on `ask_user`, falling back to
+    /// synthesis when `candidate` is empty or just narrates the question.
+    async fn resolve_ask_user_answer_text(
+        &self,
+        candidate: String,
+        messages: &[Message],
+        selection: Option<&ProviderSelection>,
+        accumulated_text: &str,
+        question: &str,
+    ) -> String {
+        if !candidate.is_empty() && !is_ask_user_narration(&candidate) {
+            return candidate;
+        }
+        if let Some(synth) = self.synthesize_partial_answer(messages, selection).await {
+            return synth;
+        }
+        if !accumulated_text.is_empty() {
+            return accumulated_text.to_string();
+        }
+        question.to_string()
     }
 
     fn last_assistant_text(&self, messages: &[Message]) -> String {
@@ -743,6 +755,24 @@ fn collect_tool_result_summary(messages: &[Message]) -> String {
     } else {
         summaries.join("\n")
     }
+}
+
+/// True when `text` narrates asking the user a question rather than stating
+/// findings, e.g. "I will now ask the user which approach they prefer."
+fn is_ask_user_narration(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    let announces_asking = lower.contains("ask the user")
+        || lower.contains("ask you a")
+        || lower.contains("ask a follow")
+        || lower.contains("ask for clarification")
+        || lower.contains("ask which")
+        || lower.contains("ask what")
+        || lower.contains("ask whether");
+    let future_tense = {
+        let t = lower.trim_start();
+        t.starts_with("i will") || t.starts_with("i'll") || t.starts_with("let me")
+    };
+    announces_asking || (future_tense && lower.contains("question"))
 }
 
 fn last_resort_fallback() -> String {

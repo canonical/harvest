@@ -58,31 +58,72 @@
         class="tc-chain"
         :class="{ 'tc-chain--running': msg.status === 'loading' }"
       >
-        <template v-for="item in msg.chain" :key="item.id ?? item.type + item.text">
-          <ThinkingBlock
-            v-if="item.type === 'thinking'"
-            :text="item.text"
-            :streaming="item.streaming ?? false"
-          />
-          <ToolCallStep v-else-if="item.type === 'tool_call'" :step="item" />
+        <button
+          v-if="showChainToggle"
+          type="button"
+          class="tc-chain__toggle"
+          :aria-expanded="String(chainExpanded)"
+          @click="chainExpanded = !chainExpanded"
+        >
+          <svg
+            class="tc-chain__toggle-chevron"
+            viewBox="0 0 10 10"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            xmlns="http://www.w3.org/2000/svg"
+            aria-hidden="true"
+            :style="chainExpanded ? 'transform: rotate(180deg)' : ''"
+          >
+            <polyline points="2,3 5,7 8,3"/>
+          </svg>
+          {{ chainExpanded ? 'Hide steps' : `${collapsibleCount} earlier steps` }}
+        </button>
 
-          <div v-else-if="item.type === 'confirm_action'" class="message__confirm" role="group" :aria-label="item.description">
-            <p class="message__confirm-text">{{ item.description }}</p>
+        <div
+          ref="chainViewportRef"
+          class="tc-chain__viewport"
+          :class="{ 'tc-chain__viewport--fixed': !chainExpanded }"
+          @scroll="onChainViewportScroll"
+        >
+          <template v-for="(item, idx) in groupedChain" :key="item.id ?? item.type + item.text">
+            <ThinkingBlock
+              v-if="item.type === 'thinking'"
+              v-show="!isCollapsible(idx) || chainExpanded"
+              :text="item.text"
+              :streaming="item.streaming ?? false"
+            />
+            <ToolCallStep
+              v-else-if="item.type === 'tool_call'"
+              v-show="!isCollapsible(idx) || chainExpanded"
+              :step="item"
+            />
+            <ToolCallGroup
+              v-else-if="item.type === 'tool_group'"
+              v-show="!isCollapsible(idx) || chainExpanded"
+              :items="item.items"
+            />
 
-            <ProvisionSteps v-if="item.steps.length" :steps="item.steps" />
+            <div v-else-if="item.type === 'confirm_action'" class="message__confirm" role="group" :aria-label="item.description">
+              <p class="message__confirm-text">{{ item.description }}</p>
 
-            <div v-if="isLast && item.status === 'pending'" class="confirm-actions">
-              <button class="p-button--positive is-dense" type="button" @click="$emit('confirm', item.id)">Confirm</button>
-              <button class="p-button--base is-dense" type="button" @click="$emit('deny', item.id)">Cancel</button>
+              <ProvisionSteps v-if="item.steps.length" :steps="item.steps" />
+
+              <div v-if="isLast && item.status === 'pending'" class="confirm-actions">
+                <button class="p-button--positive is-dense" type="button" @click="$emit('confirm', item.id)">Confirm</button>
+                <button class="p-button--base is-dense" type="button" @click="$emit('deny', item.id)">Cancel</button>
+              </div>
+              <p v-else-if="item.status === 'running'" class="confirm-status confirm-status--running">
+                {{ runningVerb(item.name) }}
+              </p>
+              <p v-else-if="item.status === 'denied'" class="confirm-status confirm-status--denied">Cancelled</p>
+              <p v-else-if="item.status === 'done'" class="confirm-status confirm-status--done">{{ item.resultText }}</p>
+              <p v-else-if="item.status === 'error'" class="confirm-status confirm-status--error">{{ item.resultText }}</p>
             </div>
-            <p v-else-if="item.status === 'running'" class="confirm-status confirm-status--running">
-              {{ runningVerb(item.name) }}
-            </p>
-            <p v-else-if="item.status === 'denied'" class="confirm-status confirm-status--denied">Cancelled</p>
-            <p v-else-if="item.status === 'done'" class="confirm-status confirm-status--done">{{ item.resultText }}</p>
-            <p v-else-if="item.status === 'error'" class="confirm-status confirm-status--error">{{ item.resultText }}</p>
-          </div>
-        </template>
+          </template>
+        </div>
 
         <div v-if="isLast && pendingConfirmCount > 1" class="confirm-actions confirm-actions--all">
           <button class="p-button--positive is-dense" type="button" @click="$emit('confirmAll')">Approve all</button>
@@ -158,17 +199,21 @@
 
 <script setup>
 import { computed, ref, watch, nextTick, onMounted } from 'vue';
-import ThinkingBlock from './ThinkingBlock.vue';
-import ToolCallStep  from './ToolCallStep.vue';
+import ThinkingBlock  from './ThinkingBlock.vue';
+import ToolCallStep   from './ToolCallStep.vue';
+import ToolCallGroup  from './ToolCallGroup.vue';
 import ProvisionSteps from '../agents/ProvisionSteps.vue';
 import { renderMarkdown, buildCitationIndex, buildFileUrl } from '../../lib/markdown.js';
 import { mountInlineGraphs } from '../../lib/inline-graph.js';
 import { avatarColor, initials, addCopyButtons } from '../../lib/utils.js';
 import { runningVerb } from '../../lib/tool-verbs.js';
 
-const answerBodyRef = ref(null);
-const otherText     = ref('');
-const lightboxSrc   = ref(null);
+const answerBodyRef    = ref(null);
+const otherText        = ref('');
+const lightboxSrc      = ref(null);
+const chainExpanded    = ref(false);
+const chainViewportRef = ref(null);
+const chainStuck       = ref(true);
 
 const imageAttachments = computed(() => (props.msg.attachments ?? []).filter(a => a.preview_url));
 const fileAttachments  = computed(() => (props.msg.attachments ?? []).filter(a => !a.preview_url));
@@ -191,6 +236,82 @@ const senderColor    = computed(() => avatarColor(props.msg.username ?? 'You'));
 const pendingConfirmCount = computed(() =>
   (props.msg.chain ?? []).filter(i => i.type === 'confirm_action' && i.status === 'pending').length
 );
+
+const GROUPABLE_MIN_RUN = 3;
+
+const groupedChain = computed(() => {
+  const chain = props.msg.chain ?? [];
+  const rows = [];
+  let i = 0;
+  while (i < chain.length) {
+    const item = chain[i];
+    if (item.type !== 'tool_call') {
+      rows.push(item);
+      i++;
+      continue;
+    }
+    let j = i + 1;
+    while (j < chain.length && chain[j].type === 'tool_call' && chain[j].name === item.name) j++;
+    const run = chain.slice(i, j);
+    if (run.length >= GROUPABLE_MIN_RUN) {
+      rows.push({ type: 'tool_group', id: `group-${item.id ?? i}`, items: run });
+    } else {
+      rows.push(...run);
+    }
+    i = j;
+  }
+  return rows;
+});
+
+const TAIL_SIZE = 5;
+
+const tailStartIndex = computed(() => Math.max(0, groupedChain.value.length - TAIL_SIZE));
+
+const collapsibleIndexes = computed(() => {
+  const rows = groupedChain.value;
+  const indexes = [];
+  rows.forEach((item, idx) => {
+    if (idx < tailStartIndex.value && item.type !== 'confirm_action') indexes.push(idx);
+  });
+  return indexes;
+});
+
+const collapsibleCount = computed(() => collapsibleIndexes.value.length);
+const showChainToggle  = computed(() => collapsibleCount.value > 0);
+
+function isCollapsible(idx) {
+  return showChainToggle.value && collapsibleIndexes.value.includes(idx);
+}
+
+const chainSignature = computed(() => {
+  const chain = props.msg.chain ?? [];
+  const last = chain.at(-1);
+  return `${chain.length}:${last?.text?.length ?? 0}:${last?.status ?? ''}:${last?.preview ?? ''}`;
+});
+
+function scrollChainViewportToBottom() {
+  nextTick(() => {
+    const el = chainViewportRef.value;
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+}
+
+function onChainViewportScroll() {
+  const el = chainViewportRef.value;
+  if (!el) return;
+  chainStuck.value = el.scrollHeight - el.scrollTop - el.clientHeight <= 24;
+}
+
+watch(chainSignature, () => {
+  if (!chainExpanded.value && chainStuck.value) scrollChainViewportToBottom();
+});
+
+watch(chainExpanded, (expanded) => {
+  if (!expanded) {
+    chainStuck.value = true;
+    scrollChainViewportToBottom();
+  }
+});
 
 const intentLabel = computed(() => {
   switch (props.msg.intent) {
@@ -222,6 +343,7 @@ onMounted(() => {
     });
     addCopyButtons(answerBodyRef.value);
   }
+  scrollChainViewportToBottom();
 });
 
 watch([renderedAnswer, renderedPendingAnswer], () => nextTick(() => {

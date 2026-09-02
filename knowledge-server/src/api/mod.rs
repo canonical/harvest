@@ -8,7 +8,7 @@ pub mod tool_description;
 use axum::{
     extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
-    routing::{delete, get, patch, post, put},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::agent::{
-    artifact_tools, deployment_tools, graph_tools, issue_tools, lxd_tools, machine_tools,
+    artifact_tools, deployment_tools, graph_tools, lxd_tools, machine_tools,
     port_forward_tools, prompt, skill_tools, terraform_tools, tool, Agent,
 };
 use crate::artifacts::handlers::{self as artifact_handlers, ArtifactState};
@@ -25,8 +25,7 @@ use crate::auth::{self, handlers as auth_handlers, AuthState};
 use crate::config::UiConfig;
 use crate::config::AuthConfig;
 use crate::conversations::handlers::{self as conv_handlers, ConvState};
-use crate::deployments::{self, handlers as deployment_handlers, FailedRun};
-use crate::issues::handlers as issue_handlers;
+use crate::deployments::{self, handlers as deployment_handlers};
 use crate::llm::LlmProvider;
 use crate::lxd::LxdClient;
 use crate::machines::{
@@ -200,105 +199,6 @@ impl ProjectAgentBuilder {
         )
     }
 
-    /// Tools available to the automatic post-failure triage agent (`build_for_issue_triage`) and
-    /// the interactive per-issue chat agent (`build_for_issue_chat`): read-only diagnostics plus
-    /// the ability to read the bundle and propose a fix, structurally excluding
-    /// `RunCommandTool`/apply/destroy/deploy tools the same way `provision_diagnosis_tools` does.
-    fn issue_tools_base(&self, project_id: String) -> Vec<Box<dyn tool::Tool>> {
-        let mut tools = graph_tools::all_tools(Arc::clone(&self.neo4j));
-        tools.push(Box::new(machine_tools::ListAgentsTool {
-            registry:   Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(machine_tools::RunReadOnlyCommandTool {
-            registry:   Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(skill_tools::ListSkillsTool {
-            store:      Arc::clone(&self.skills),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(skill_tools::LoadSkillTool {
-            store:      Arc::clone(&self.skills),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(port_forward_tools::ListPortForwardsTool {
-            neo4j:      Arc::clone(&self.neo4j),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(terraform_tools::RunTerraformPlanTool {
-            neo4j:      Arc::clone(&self.neo4j),
-            registry:   Arc::clone(&self.registry),
-            project_id,
-        }));
-        tools
-    }
-
-    /// One-shot autonomous run triggered automatically after any failed deploy/redeploy/destroy,
-    /// unconditionally (not gated on the user having the page open). Matches or creates issues for
-    /// each distinct failure and proposes a fix for new/updated ones.
-    pub fn build_for_issue_triage(
-        &self,
-        project_id: String,
-        _group_id:  String,
-        ctx:        &deployments::DeploymentContext,
-        run:        &FailedRun,
-    ) -> Arc<Agent> {
-        let mut tools = self.issue_tools_base(project_id.clone());
-        tools.push(Box::new(deployment_tools::ReadProvisionBundleTool {
-            neo4j:         Arc::clone(&self.neo4j),
-            project_id:    project_id.clone(),
-            deployment_id: ctx.deployment_id.clone(),
-        }));
-        tools.push(Box::new(issue_tools::ListDeploymentIssuesTool {
-            neo4j:         Arc::clone(&self.neo4j),
-            project_id:    project_id.clone(),
-            deployment_id: ctx.deployment_id.clone(),
-        }));
-        tools.push(Box::new(issue_tools::CreateOrLinkIssueTool {
-            neo4j:         Arc::clone(&self.neo4j),
-            project_id:    project_id.clone(),
-            deployment_id: ctx.deployment_id.clone(),
-            run:           run.clone(),
-            created_by:    "harvest".to_string(),
-        }));
-        Arc::new(
-            Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
-                .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
-                .with_system_prompt(prompt::issue_triage_system_prompt(ctx)),
-        )
-    }
-
-    /// Interactive per-issue investigation chat: read-only diagnostics plus the ability to propose
-    /// (never apply) a fix. `ask_user` stays enabled here, unlike triage — this is a live chat with
-    /// a user on the other end, not a one-shot background job.
-    pub fn build_for_issue_chat(
-        &self,
-        project_id: String,
-        _group_id:  String,
-        ctx:        &deployments::DeploymentContext,
-        issue_id:   &str,
-        issue_title: &str,
-        issue_description: &str,
-    ) -> Arc<Agent> {
-        let mut tools = self.issue_tools_base(project_id.clone());
-        tools.push(Box::new(deployment_tools::ReadProvisionBundleTool {
-            neo4j:         Arc::clone(&self.neo4j),
-            project_id:    project_id.clone(),
-            deployment_id: ctx.deployment_id.clone(),
-        }));
-        tools.push(Box::new(issue_tools::ProposeIssueSolutionTool {
-            neo4j:         Arc::clone(&self.neo4j),
-            project_id:    project_id.clone(),
-            deployment_id: ctx.deployment_id.clone(),
-            issue_id:      issue_id.to_string(),
-        }));
-        Arc::new(
-            Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
-                .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
-                .with_system_prompt(prompt::issue_chat_system_prompt(ctx, issue_title, issue_description)),
-        )
-    }
 }
 
 pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Router {
@@ -407,12 +307,6 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .route("/projects/:pid/events",        get(proj_handlers::project_events))
         .route("/projects/:pid/query",         post(proj_handlers::project_query))
         .route("/projects/:pid/query/stream",  post(proj_handlers::project_query_stream))
-        .route("/projects/:pid/memories",
-               get(proj_handlers::list_memories).post(proj_handlers::create_memory))
-        .route("/projects/:pid/memories/:mid",
-               get(proj_handlers::get_memory)
-               .put(proj_handlers::update_memory)
-               .delete(proj_handlers::delete_memory))
         .route("/projects/:pid/artifacts",
                get(proj_handlers::list_artifacts).post(proj_handlers::create_artifact_route))
         .route("/projects/:pid/skills",
@@ -421,14 +315,6 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                get(proj_handlers::get_project_skill)
                .put(proj_handlers::update_project_skill)
                .delete(proj_handlers::delete_project_skill))
-        .route("/projects/:pid/tasks",
-               get(proj_handlers::list_tasks).post(proj_handlers::create_task))
-        .route("/projects/:pid/tasks/:tid",
-               patch(proj_handlers::update_task).delete(proj_handlers::delete_task))
-        .route("/projects/:pid/tasks/:tid/run",
-               post(proj_handlers::run_task))
-        .route("/projects/:pid/tasks/:tid/logs",
-               get(proj_handlers::get_task_logs))
         .route("/projects/:pid/deployment",
                get(deployment_handlers::get_project_deployment))
         .route("/projects/:pid/deployments",
@@ -449,6 +335,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .route("/projects/:pid/deployments/:did/design/revise",    post(deployment_handlers::revise_design))
         .route("/projects/:pid/deployments/:did/design/propose-change/stream", post(deployment_handlers::propose_design_change_stream))
         .route("/projects/:pid/deployments/:did/design/pdf", get(deployment_handlers::get_design_pdf))
+        .route("/projects/:pid/deployments/:did/design/content", put(deployment_handlers::update_design_content))
         .route("/projects/:pid/deployments/:did/provision/generate", post(deployment_handlers::generate_provision))
         .route("/projects/:pid/deployments/:did/provision/generate/stream", post(deployment_handlers::generate_provision_stream))
         .route("/projects/:pid/deployments/:did/provision/propose-change", post(deployment_handlers::propose_provision_change))
@@ -469,18 +356,6 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                get(deployment_handlers::get_execution_plan).post(deployment_handlers::set_execution_plan))
         .route("/projects/:pid/deployments/:did/run-dag",
                post(deployment_handlers::run_dag))
-        .route("/projects/:pid/issues", get(issue_handlers::list_issues))
-        .route("/projects/:pid/issues/:iid", get(issue_handlers::get_issue))
-        .route("/projects/:pid/issues/:iid/status", patch(issue_handlers::update_issue_status_route))
-        .route("/projects/:pid/issues/:iid/comments", post(issue_handlers::create_issue_comment))
-        .route("/projects/:pid/issues/:iid/apply-solution", post(issue_handlers::apply_issue_solution))
-        .route("/projects/:pid/issues/:iid/redeploy", post(issue_handlers::redeploy_from_issue))
-        .route("/projects/:pid/issues/:iid/chat", post(issue_handlers::issue_chat))
-        .route("/projects/:pid/change-requests", get(issue_handlers::list_change_requests))
-        .route("/projects/:pid/change-requests/:cid", get(issue_handlers::get_change_request))
-        .route("/projects/:pid/change-requests/:cid/apply", post(issue_handlers::apply_change_request))
-        .route("/projects/:pid/change-requests/:cid/discard", post(issue_handlers::discard_change_request))
-        .route("/projects/:pid/change-requests/:cid/comments", post(issue_handlers::create_change_request_comment))
         .route("/templates",
                get(deployment_handlers::list_templates).post(deployment_handlers::create_template))
         .route("/templates/upload", post(deployment_handlers::upload_template))

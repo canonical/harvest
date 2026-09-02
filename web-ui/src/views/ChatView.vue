@@ -320,11 +320,14 @@ function handleProjectEvent(event) {
     case 'intent':
     case 'phase':
     case 'done':
-    case 'error':
+    case 'error': {
       if (event.conv_id !== activeConvId.value) break;
+      const stick = isNearBottom();
       handleChatEvent(event);
-      if (event.type === 'done') { scrollToLastMessage(); return; }
-      break;
+      if (event.type === 'done') { if (stick) scrollToLastMessage(); return; }
+      if (stick) scrollToBottom();
+      return;
+    }
   }
   scrollToBottom();
 }
@@ -444,9 +447,10 @@ async function sendQuery() {
       }
     }
     await queryStream(text, activeConvId.value, attachments, (event) => {
+      const stick = isNearBottom();
       handleStreamEvent(event);
-      if (event.type === 'done') scrollToLastMessage();
-      else scrollToBottom();
+      if (event.type === 'done') { if (stick) scrollToLastMessage(); }
+      else if (stick) scrollToBottom();
     }, llm.selection);
   } catch (err) {
     chat.setError(err.message);
@@ -554,6 +558,12 @@ async function addFile(file) {
 function onFileSelect(e) {
   [...(e.target.files ?? [])].forEach(addFile);
   e.target.value = '';
+}
+
+function isNearBottom(threshold = 80) {
+  const el = messagesEl.value;
+  if (!el) return true;
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
 }
 
 function scrollToBottom() {
