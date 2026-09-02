@@ -247,16 +247,20 @@ fn deployment_detail_cypher() -> &'static str {
     "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
      OPTIONAL MATCH (d)-[:USES_TEMPLATE]->(t:ProductTemplate)
      OPTIONAL MATCH (d)-[:HAS_DESIGN_DOC]->(design:Artifact)
+     OPTIONAL MATCH (creator:User {id: design.created_by})
      OPTIONAL MATCH (d)-[:HAS_TERRAFORM_BUNDLE]->(tf:Artifact)
      OPTIONAL MATCH (d)-[:HAS_GUIDE]->(guide:Artifact)
      OPTIONAL MATCH (d)-[:HAS_CONTEXT_ARTIFACT]->(ca:Artifact)
-     WITH d, t, design, tf, guide, collect({id: ca.id, title: ca.title, kind: ca.kind}) AS context_artifacts
+     WITH d, t, design, creator, tf, guide, collect({id: ca.id, title: ca.title, kind: ca.kind}) AS context_artifacts
      RETURN d.id AS id, d.name AS name, d.environment_description AS environment_description,
             d.infra_state AS infra_state, d.last_applied_artifact_id AS last_applied_artifact_id,
             d.last_applied_at AS last_applied_at, d.created_by AS created_by,
             d.created_at AS created_at, d.updated_at AS updated_at,
             t.id AS template_id, t.name AS template_name,
             design.id AS design_doc_id, design.title AS design_doc_title,
+            design.created_by AS design_doc_created_by, design.created_at AS design_doc_created_at,
+            design.updated_at AS design_doc_updated_at,
+            creator.name AS design_doc_created_by_name,
             tf.id AS terraform_bundle_id, tf.title AS terraform_bundle_title, tf.kind AS terraform_bundle_kind,
             guide.id AS guide_id, guide.title AS guide_title,
             context_artifacts"
@@ -297,16 +301,20 @@ pub async fn get_project_deployment(
          WITH d ORDER BY d.created_at ASC LIMIT 1
          OPTIONAL MATCH (d)-[:USES_TEMPLATE]->(t:ProductTemplate)
          OPTIONAL MATCH (d)-[:HAS_DESIGN_DOC]->(design:Artifact)
+         OPTIONAL MATCH (creator:User {id: design.created_by})
          OPTIONAL MATCH (d)-[:HAS_TERRAFORM_BUNDLE]->(tf:Artifact)
          OPTIONAL MATCH (d)-[:HAS_GUIDE]->(guide:Artifact)
          OPTIONAL MATCH (d)-[:HAS_CONTEXT_ARTIFACT]->(ca:Artifact)
-         WITH d, t, design, tf, guide, collect({id: ca.id, title: ca.title, kind: ca.kind}) AS context_artifacts
+         WITH d, t, design, creator, tf, guide, collect({id: ca.id, title: ca.title, kind: ca.kind}) AS context_artifacts
          RETURN d.id AS id, d.name AS name, d.environment_description AS environment_description,
                 d.infra_state AS infra_state, d.last_applied_artifact_id AS last_applied_artifact_id,
                 d.last_applied_at AS last_applied_at, d.created_by AS created_by,
                 d.created_at AS created_at, d.updated_at AS updated_at,
                 t.id AS template_id, t.name AS template_name,
                 design.id AS design_doc_id, design.title AS design_doc_title,
+                design.created_by AS design_doc_created_by, design.created_at AS design_doc_created_at,
+                design.updated_at AS design_doc_updated_at,
+                creator.name AS design_doc_created_by_name,
                 tf.id AS terraform_bundle_id, tf.title AS terraform_bundle_title, tf.kind AS terraform_bundle_kind,
                 guide.id AS guide_id, guide.title AS guide_title,
                 context_artifacts",
