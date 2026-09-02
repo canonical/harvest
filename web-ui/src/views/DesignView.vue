@@ -16,9 +16,9 @@
         v-if="generating"
         :project-id="projectId"
         :deployment-id="deployment.id"
-        :deployment-name="deployment.name"
         :body="generateBody"
         @done="onGenerationDone"
+        @cancel="onGenerationCancel"
       />
       <DesignSetupPanel
         v-else-if="!deployment.design_doc"
@@ -81,6 +81,11 @@ async function onGenerationDone() {
   generating.value = false;
   generateBody.value = {};
   await load();
+}
+
+function onGenerationCancel() {
+  generating.value = false;
+  generateBody.value = {};
 }
 
 watch(() => props.projectId, () => load(), { immediate: true });
