@@ -6418,11 +6418,6 @@ a.source-chip:hover .source-chip__name {
   margin: 0;
 }
 
-.design-setup__select {
-  width: 100%;
-  flex-shrink: 0;
-}
-
 .design-setup__bulk {
   display: inline-flex;
   gap: 0.5rem;

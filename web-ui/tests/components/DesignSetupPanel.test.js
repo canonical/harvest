@@ -18,8 +18,9 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
-    listProjectArtifacts: vi.fn(),
-    listTemplates:        vi.fn(),
+    listProjectArtifacts:  vi.fn(),
+    listTemplates:         vi.fn(),
+    createProjectArtifact: vi.fn(),
   };
 });
 
@@ -74,14 +75,25 @@ describe('DesignSetupPanel', () => {
     expect(w.find('[data-testid="step-artifacts"]').text()).toMatch(/2/);
   });
 
-  it('renders a product template selector populated with group templates', async () => {
+  it('renders a product template selector populated with group templates, with none selected by default', async () => {
     const { w } = await mountPanel();
-    const select = w.find('[data-testid="template-select"]');
-    expect(select.exists()).toBe(true);
-    const options = select.findAll('option');
-    expect(options.length).toBe(TEMPLATES.length + 1);
-    expect(select.text()).toContain('Acme Gateway v3');
-    expect(select.text()).toContain('Edge Cache');
+    const list = w.find('[data-testid="template-list"]');
+    expect(list.exists()).toBe(true);
+    expect(w.find('[data-testid="template-radio-t1"]').exists()).toBe(true);
+    expect(w.find('[data-testid="template-radio-t2"]').exists()).toBe(true);
+    expect(list.text()).toContain('Acme Gateway v3');
+    expect(list.text()).toContain('Edge Cache');
+    expect(w.find('[data-testid="template-radio-t1"]').element.checked).toBe(false);
+    expect(w.find('[data-testid="template-radio-t2"]').element.checked).toBe(false);
+  });
+
+  it('selects a single product template at a time via radio buttons', async () => {
+    const { w } = await mountPanel();
+    await w.find('[data-testid="template-radio-t1"]').setValue(true);
+    expect(w.find('[data-testid="template-radio-t1"]').element.checked).toBe(true);
+    await w.find('[data-testid="template-radio-t2"]').setValue(true);
+    expect(w.find('[data-testid="template-radio-t1"]').element.checked).toBe(false);
+    expect(w.find('[data-testid="template-radio-t2"]').element.checked).toBe(true);
   });
 
   it('renders the project artifacts as selectable rows', async () => {
@@ -123,23 +135,52 @@ describe('DesignSetupPanel', () => {
     expect(w.find('[data-testid="selection-count"]').text()).toMatch(/0 selected/i);
   });
 
-  it('shows a link to the artifacts page for adding new artifacts', async () => {
+  it('shows Create and Add buttons for managing artifacts without leaving the page', async () => {
     const { w } = await mountPanel();
-    const links = w.findAll('[data-testid="artifacts-link"]');
-    expect(links.length).toBeGreaterThan(0);
-    expect(links[0].attributes('href')).toBe('/artifacts');
+    expect(w.find('[data-testid="create-artifact-btn"]').exists()).toBe(true);
+    expect(w.find('[data-testid="add-artifact-btn"]').exists()).toBe(true);
   });
 
-  it('shows an inviting empty state with a link when there are no artifacts', async () => {
+  it('opens the create-artifact modal, submits it, and selects the new artifact', async () => {
+    const created = { id: 'new-1', title: 'New doc', kind: 'markdown', created_by: 'alice', created_at: new Date().toISOString() };
+    api.createProjectArtifact.mockResolvedValue(created);
+    api.listProjectArtifacts.mockResolvedValueOnce(ARTIFACTS).mockResolvedValue([...ARTIFACTS, created]);
+    const { w } = await mountPanel();
+    await w.find('[data-testid="create-artifact-btn"]').trigger('click');
+    expect(w.find('[data-testid="create-artifact-modal"]').exists()).toBe(true);
+    await w.find('[data-testid="create-artifact-title"]').setValue('New doc');
+    await w.find('[data-testid="create-artifact-content"]').setValue('Some content');
+    await w.find('[data-testid="submit-create-artifact"]').trigger('click');
+    await flushPromises();
+    expect(api.createProjectArtifact).toHaveBeenCalledWith('proj-1', {
+      title: 'New doc',
+      kind: 'markdown',
+      content: 'Some content',
+    });
+    expect(w.find('[data-testid="create-artifact-modal"]').exists()).toBe(false);
+    expect(w.find('[data-testid="artifact-checkbox-new-1"]').element.checked).toBe(true);
+  });
+
+  it('opens the add-artifact (upload) modal from the toolbar', async () => {
+    const { w } = await mountPanel();
+    await w.find('[data-testid="add-artifact-btn"]').trigger('click');
+    expect(w.find('[data-testid="upload-artifact-modal"]').exists()).toBe(true);
+  });
+
+  it('shows an inviting empty state with an Add action when there are no artifacts', async () => {
     api.listProjectArtifacts.mockResolvedValue([]);
     const { w } = await mountPanel();
     expect(w.find('[data-testid="artifacts-empty"]').exists()).toBe(true);
-    expect(w.find('[data-testid="artifacts-link"]').exists()).toBe(true);
+    const emptyAddBtn = w.find('[data-testid="add-artifact-btn-empty"]');
+    expect(emptyAddBtn.exists()).toBe(true);
+    expect(emptyAddBtn.classes()).toContain('p-button--positive');
+    await emptyAddBtn.trigger('click');
+    expect(w.find('[data-testid="upload-artifact-modal"]').exists()).toBe(true);
   });
 
   it('shows a generation summary line reflecting the current selection', async () => {
     const { w } = await mountPanel();
-    await w.find('[data-testid="template-select"]').setValue('t1');
+    await w.find('[data-testid="template-radio-t1"]').setValue(true);
     await w.find('[data-testid="artifact-checkbox-a1"]').setValue(true);
     await w.find('[data-testid="artifact-checkbox-a2"]').setValue(true);
     const summary = w.find('[data-testid="generation-summary"]');
@@ -148,9 +189,54 @@ describe('DesignSetupPanel', () => {
     expect(summary.text()).toMatch(/2 artifacts/i);
   });
 
+  it('prompts to select a template and an artifact when nothing is selected yet', async () => {
+    const { w } = await mountPanel();
+    const summary = w.find('[data-testid="generation-summary"]');
+    expect(summary.text()).toMatch(/select a product template and at least one context artifact/i);
+  });
+
+  it('prompts to select an artifact when only a template is selected', async () => {
+    const { w } = await mountPanel();
+    await w.find('[data-testid="template-radio-t1"]').setValue(true);
+    const summary = w.find('[data-testid="generation-summary"]');
+    expect(summary.text()).toMatch(/select a product template and at least one context artifact/i);
+  });
+
+  it('prompts to select a template when only an artifact is selected', async () => {
+    const { w } = await mountPanel();
+    await w.find('[data-testid="artifact-checkbox-a1"]').setValue(true);
+    const summary = w.find('[data-testid="generation-summary"]');
+    expect(summary.text()).toMatch(/select a product template and at least one context artifact/i);
+  });
+
+  it('disables generate when neither a template nor an artifact is selected', async () => {
+    const { w } = await mountPanel();
+    expect(w.find('[data-testid="generate-design-btn"]').attributes('disabled')).toBeDefined();
+  });
+
+  it('disables generate when only a template is selected, with no artifacts', async () => {
+    const { w } = await mountPanel();
+    await w.find('[data-testid="template-radio-t1"]').setValue(true);
+    expect(w.find('[data-testid="generate-design-btn"]').attributes('disabled')).toBeDefined();
+  });
+
+  it('disables generate when only an artifact is selected, with no template', async () => {
+    const { w } = await mountPanel();
+    await w.find('[data-testid="artifact-checkbox-a1"]').setValue(true);
+    expect(w.find('[data-testid="generate-design-btn"]').attributes('disabled')).toBeDefined();
+  });
+
+  it('enables generate once both a template and an artifact are selected', async () => {
+    const { w } = await mountPanel();
+    await w.find('[data-testid="template-radio-t1"]').setValue(true);
+    expect(w.find('[data-testid="generate-design-btn"]').attributes('disabled')).toBeDefined();
+    await w.find('[data-testid="artifact-checkbox-a1"]').setValue(true);
+    expect(w.find('[data-testid="generate-design-btn"]').attributes('disabled')).toBeUndefined();
+  });
+
   it('generate emits the selected artifact ids and template id', async () => {
     const { w } = await mountPanel();
-    await w.find('[data-testid="template-select"]').setValue('t1');
+    await w.find('[data-testid="template-radio-t1"]').setValue(true);
     await w.find('[data-testid="artifact-checkbox-a1"]').setValue(true);
     await w.find('[data-testid="artifact-checkbox-a3"]').setValue(true);
     await w.find('[data-testid="generate-design-btn"]').trigger('click');
@@ -162,14 +248,11 @@ describe('DesignSetupPanel', () => {
     });
   });
 
-  it('generate works without a template (sends null)', async () => {
+  it('does not emit generate while only an artifact is selected and no template', async () => {
     const { w } = await mountPanel();
     await w.find('[data-testid="artifact-checkbox-a2"]').setValue(true);
     await w.find('[data-testid="generate-design-btn"]').trigger('click');
     await flushPromises();
-    expect(w.emitted('generate')[0][0]).toEqual({
-      artifact_ids: ['a2'],
-      product_template_id: null,
-    });
+    expect(w.emitted('generate')).toBeFalsy();
   });
 });
