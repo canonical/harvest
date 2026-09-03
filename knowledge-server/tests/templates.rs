@@ -137,8 +137,11 @@ fn build_harvest_zip() -> Vec<u8> {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
         let opts = zip::write::SimpleFileOptions::default();
 
-        zip.start_file("index.json", opts).unwrap();
-        write!(zip, r#"{{"skills":[{{"file":"skills/juju.md"}}],"artifacts":[{{"name":"main","file":"artifacts/main.tf"}}]}}"#).unwrap();
+        zip.start_file("metadata.yaml", opts).unwrap();
+        write!(zip, "name: Charmed Juju\ndescription: Deploy Juju-based products").unwrap();
+
+        zip.start_file("design.md", opts).unwrap();
+        write!(zip, "# 1. Introduction\n${{CUSTOMER}}").unwrap();
 
         zip.start_file("skills/juju.md", opts).unwrap();
         write!(zip, "---\nname: juju\ndescription: Deploy with Juju\n---\n# Juju\nJuju is an operator framework.").unwrap();
@@ -151,11 +154,27 @@ fn build_harvest_zip() -> Vec<u8> {
     buf
 }
 
-fn build_harvest_zip_no_index() -> Vec<u8> {
+fn build_harvest_zip_no_metadata() -> Vec<u8> {
     let mut buf = Vec::new();
     {
         let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
         let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("design.md", opts).unwrap();
+        write!(zip, "# Introduction").unwrap();
+        zip.start_file("skills/juju.md", opts).unwrap();
+        write!(zip, "---\nname: juju\ndescription: test\n---\nbody").unwrap();
+        zip.finish().unwrap();
+    }
+    buf
+}
+
+fn build_harvest_zip_no_design() -> Vec<u8> {
+    let mut buf = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+        let opts = zip::write::SimpleFileOptions::default();
+        zip.start_file("metadata.yaml", opts).unwrap();
+        write!(zip, "name: Charmed Juju\ndescription: test").unwrap();
         zip.start_file("skills/juju.md", opts).unwrap();
         write!(zip, "---\nname: juju\ndescription: test\n---\nbody").unwrap();
         zip.finish().unwrap();
@@ -206,11 +225,14 @@ async fn upload_harvest_creates_template_with_skills_and_artifacts() {
     let (status, body) = send(app.clone(), req_post_multipart("/templates/upload", &tok, boundary, body)).await;
     assert_eq!(status, StatusCode::CREATED);
     assert!(body["id"].is_string());
+    assert_eq!(body["name"], "Charmed Juju");
 
     let template_id = body["id"].as_str().unwrap().to_string();
     let (status, detail) = send(app, req_get(&format!("/templates/{template_id}"), &tok)).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["description"], "Deploy Juju-based products");
     let content: Value = serde_json::from_str(detail["content"].as_str().unwrap()).unwrap();
+    assert_eq!(content["design_template"], "# 1. Introduction\n${CUSTOMER}");
     assert!(content["skills"].is_array());
     assert_eq!(content["skills"][0]["name"], "juju");
     assert_eq!(content["skills"][0]["description"], "Deploy with Juju");
@@ -221,12 +243,27 @@ async fn upload_harvest_creates_template_with_skills_and_artifacts() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn upload_harvest_rejects_missing_index_json() {
+async fn upload_harvest_rejects_missing_metadata_yaml() {
     neo4j!(c, neo4j);
     let (_, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
     let app = templates_app(Arc::clone(&neo4j));
 
-    let zip_bytes = build_harvest_zip_no_index();
+    let zip_bytes = build_harvest_zip_no_metadata();
+    let boundary = "----testboundary";
+    let body = multipart_body(boundary, "bad.harvest", &zip_bytes);
+
+    let (status, _) = send(app, req_post_multipart("/templates/upload", &tok, boundary, body)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn upload_harvest_rejects_missing_design_md() {
+    neo4j!(c, neo4j);
+    let (_, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let app = templates_app(Arc::clone(&neo4j));
+
+    let zip_bytes = build_harvest_zip_no_design();
     let boundary = "----testboundary";
     let body = multipart_body(boundary, "bad.harvest", &zip_bytes);
 

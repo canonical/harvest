@@ -244,7 +244,15 @@ pub struct DeploymentContext {
     pub infra_state:              String,
     pub product_template_name:    Option<String>,
     pub product_template_content: Option<String>,
+    pub product_template_design:  Option<String>,
     pub prior_deployments:        Vec<PriorDeploymentSummary>,
+}
+
+fn extract_design_template(template_content: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(template_content).ok()?;
+    parsed["design_template"].as_str()
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string)
 }
 
 const MAX_PRIOR_DEPLOYMENTS: i64 = 5;
@@ -283,13 +291,18 @@ pub async fn load_deployment_context(
         None => Vec::new(),
     };
 
+    let product_template_content = opt_str(&row, "template_content");
+    let product_template_design = product_template_content.as_deref()
+        .and_then(extract_design_template);
+
     Ok(Some(DeploymentContext {
         deployment_id:            deployment_id.to_string(),
         deployment_name:          row["name"].as_str().unwrap_or_default().to_string(),
         environment_description: row["environment_description"].as_str().unwrap_or_default().to_string(),
         infra_state:              row["infra_state"].as_str().unwrap_or("none").to_string(),
         product_template_name:    opt_str(&row, "template_name"),
-        product_template_content: opt_str(&row, "template_content"),
+        product_template_content,
+        product_template_design,
         prior_deployments,
     }))
 }
@@ -519,6 +532,29 @@ pub fn shape_deployment(row: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extract_design_template_reads_design_template_field() {
+        let content = r##"{"design_template": "# Intro\n${CUSTOMER}", "skills": [], "artifacts": []}"##;
+        assert_eq!(extract_design_template(content), Some("# Intro\n${CUSTOMER}".to_string()));
+    }
+
+    #[test]
+    fn extract_design_template_returns_none_for_blank_field() {
+        let content = r#"{"design_template": "   ", "skills": [], "artifacts": []}"#;
+        assert_eq!(extract_design_template(content), None);
+    }
+
+    #[test]
+    fn extract_design_template_returns_none_when_field_missing() {
+        let content = r#"{"skills": [], "artifacts": []}"#;
+        assert_eq!(extract_design_template(content), None);
+    }
+
+    #[test]
+    fn extract_design_template_returns_none_for_invalid_json() {
+        assert_eq!(extract_design_template("not json"), None);
+    }
 
     #[test]
     fn extract_json_block_parses_fenced_json_object() {

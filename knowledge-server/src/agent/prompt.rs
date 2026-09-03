@@ -168,7 +168,7 @@ Recent conversation context: {history_snippet}
     Intent:"#)
 }
 
-fn deployment_context_sections(ctx: &crate::deployments::DeploymentContext) -> (String, String) {
+fn deployment_context_sections(ctx: &crate::deployments::DeploymentContext) -> (String, String, String) {
     let template_section = match (&ctx.product_template_name, &ctx.product_template_content) {
         (Some(name), Some(content)) if !content.trim().is_empty() => format!(
             "## Product Template: {name}\n\nThis deployment is based on the following reusable \
@@ -181,6 +181,25 @@ fn deployment_context_sections(ctx: &crate::deployments::DeploymentContext) -> (
             .to_string(),
     };
 
+    let design_template_section = match &ctx.product_template_design {
+        Some(design) => format!(
+            "## Design Document Template\n\nWhen asked to write or revise the design document, use \
+             the following template as its exact structure and section order — do not invent a \
+             different structure.\n\n\
+             - Replace every `${{PLACEHOLDER}}` with a concrete value drawn from the customer's \
+               environment description and any context artifacts you were given. If a value isn't \
+               known, make a reasonable, clearly-labeled assumption rather than leaving the \
+               placeholder in place.\n\
+             - Expand every `$(For each X in Y) {{ ... }}` block into one repeated row or block per \
+               item; omit the block entirely if there is nothing to iterate over.\n\
+             - Turn every ```` ```Diagram ```` fenced block into an actual ```` ```dot ```` Graphviz \
+               diagram per the diagram guidance below — the text inside a `Diagram` block describes \
+               what to draw, it is not literal syntax to reproduce.\n\n\
+             ---\n\n{design}\n\n---"
+        ),
+        None => String::new(),
+    };
+
     let prior_section = if ctx.prior_deployments.is_empty() {
         String::new()
     } else {
@@ -191,11 +210,11 @@ fn deployment_context_sections(ctx: &crate::deployments::DeploymentContext) -> (
         format!("\n\n## Prior Deployments of This Product\n\n{bullets}")
     };
 
-    (template_section, prior_section)
+    (template_section, design_template_section, prior_section)
 }
 
 pub fn deployment_system_prompt(ctx: &crate::deployments::DeploymentContext) -> String {
-    let (template_section, prior_section) = deployment_context_sections(ctx);
+    let (template_section, design_template_section, prior_section) = deployment_context_sections(ctx);
 
     format!(
         r#"You are a field engineer's assistant inside Harvest, helping deploy stable, versioned
@@ -237,6 +256,8 @@ renders as a real diagram in the final document.
   }}
   ```
 
+{design_template_section}
+
 ## Hard rules
 
 - **Never call `ask_user`.** There is nobody to answer it and the call will be silently dropped,
@@ -269,6 +290,7 @@ mod tests {
             infra_state: "none".into(),
             product_template_name: None,
             product_template_content: None,
+            product_template_design: None,
             prior_deployments: vec![],
         }
     }
@@ -325,6 +347,21 @@ mod tests {
         let prompt = deployment_system_prompt(&ctx);
         assert!(prompt.contains("Acme Gateway v3"));
         assert!(prompt.contains("Standard playbook body"));
+    }
+
+    #[test]
+    fn deployment_system_prompt_includes_design_template_when_present() {
+        let mut ctx = base_ctx();
+        ctx.product_template_design = Some("# 1. Introduction\n${CUSTOMER}".into());
+        let prompt = deployment_system_prompt(&ctx);
+        assert!(prompt.contains("## Design Document Template"));
+        assert!(prompt.contains("${CUSTOMER}"));
+    }
+
+    #[test]
+    fn deployment_system_prompt_omits_design_template_section_when_absent() {
+        let prompt = deployment_system_prompt(&base_ctx());
+        assert!(!prompt.contains("## Design Document Template"));
     }
 
     #[test]

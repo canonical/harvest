@@ -706,6 +706,16 @@ The execution plan is a list of steps (`{id, action, phase, label, artifact, dep
 
 Product templates are group-scoped reusable designs/bundles that pre-seed a new deployment. `update_product_template` (a deployment tool) saves the current design and bundle as a template; future deployments based on that template get the template content injected into their agent context.
 
+A template can also be uploaded as a `.harvest` archive via `POST /templates/upload` — a zip
+containing `metadata.yaml` (`name`/`description`), `design.md`, a `skills/` directory of `.md`
+files with YAML frontmatter, and an `artifacts/` directory of example Terraform/Terragrunt/Bash
+files. Skills and artifacts are discovered by directory listing (every `.md` under `skills/`,
+every file under `artifacts/`), not by an explicit manifest. `design.md` becomes the template's
+`design_template`: when a deployment uses that template, `deployment_system_prompt` injects it
+verbatim as a `## Design Document Template` section, with instructions for the agent to follow its
+structure exactly, fill `${PLACEHOLDER}` values, expand `$(For each X in Y) { ... }` blocks, and
+turn its ` ```Diagram ` fenced blocks into real ` ```dot ` diagrams.
+
 ```
 GET    /groups/:gid/templates        list templates in a group
 POST   /groups/:gid/templates        create a template

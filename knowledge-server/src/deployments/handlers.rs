@@ -182,15 +182,11 @@ pub async fn upload_template(
     mut multipart: axum::extract::Multipart,
 ) -> Result<impl IntoResponse, ApiError> {
     let mut file_bytes: Option<Vec<u8>> = None;
-    let mut filename = "upload.harvest".to_string();
 
     while let Some(field) = multipart.next_field().await
         .map_err(|e| err(StatusCode::BAD_REQUEST, &format!("multipart error: {e}")))?
     {
         if field.name() == Some("file") {
-            if let Some(fname) = field.file_name() {
-                filename = fname.to_string();
-            }
             let bytes = field.bytes().await
                 .map_err(|e| err(StatusCode::BAD_REQUEST, &format!("failed to read file: {e}")))?;
             file_bytes = Some(bytes.to_vec());
@@ -203,7 +199,8 @@ pub async fn upload_template(
     let parsed = super::harvest::parse_harvest_archive(&bytes)
         .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
 
-    let name = super::harvest::derive_template_name(&parsed);
+    let name = parsed.name.clone();
+    let description = parsed.description.clone();
     let content = serde_json::to_string(&super::harvest::harvest_to_json(&parsed))
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "failed to serialize template content"))?;
 
@@ -215,7 +212,7 @@ pub async fn upload_template(
               created_by: $uid, created_at: $now, updated_at: $now
           }) RETURN t.id AS id",
         json!({
-            "id": id, "name": name, "description": format!("Uploaded from {filename}"),
+            "id": id, "name": name, "description": description,
             "content": content, "uid": user.sub, "now": now,
         }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
@@ -885,13 +882,19 @@ async fn prepare_design_generation(
         artifacts
     };
 
+    let ctx = load_deployment_context(&state.neo4j, project_id, deployment_id)
+        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let agent = build_deployment_agent(state, project_id, &group_id, deployment_id).await?;
 
-    let mut prompt = String::from(
-        "Write a deployment design document in Markdown, based on the product template \
-         and customer environment you were given. Cover the architecture, key \
-         configuration choices, and how it fits the customer's environment."
-    );
+    let mut prompt = String::from(match &ctx.product_template_design {
+        Some(_) => "Write the deployment design document in Markdown, following the Design \
+                    Document Template in your context exactly, based on the product template \
+                    and customer environment you were given.",
+        None => "Write a deployment design document in Markdown, based on the product template \
+                 and customer environment you were given. Cover the architecture, key \
+                 configuration choices, and how it fits the customer's environment.",
+    });
     if !selected_artifacts.is_empty() {
         prompt.push_str("\n\n## Selected context artifacts\n\nThe field engineer selected the \
                          following project artifacts as relevant context. Read and use them to \
