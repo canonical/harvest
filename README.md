@@ -420,7 +420,12 @@ POST   /projects/:pid/deployments/:did/run-dag                — execute the pl
 
 ### Templates
 
-Reusable product templates (group-scoped) that pre-seed a deployment's design and bundle.
+Reusable product templates (group-scoped) that pre-seed a deployment's design and bundle. A
+template can also be uploaded as a `.harvest` archive — a zip with a `metadata.yaml` (template
+`name`/`description`), a `design.md` (the design document structure to follow when generating this
+product's design doc, including placeholder and diagram conventions), a `skills/` directory of
+`.md` files with YAML frontmatter, and an `artifacts/` directory of example Terraform/Terragrunt/
+Bash files.
 
 ```
 GET    /groups/:gid/templates        — list templates in a group

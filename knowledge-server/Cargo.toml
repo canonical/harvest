@@ -66,6 +66,7 @@ lopdf = { version = "0.39", default-features = false }
 
 # Archive extraction
 zip = "2"
+serde_yaml = "0.9.34"
 
 [dev-dependencies]
 http-body-util       = "0.1.3"
