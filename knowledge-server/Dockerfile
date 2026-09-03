@@ -34,6 +34,7 @@ RUN rm -f knowledge-server/src/lib.rs knowledge-server/src/main.rs \
           agent/src/main.rs
 COPY knowledge-server/src    knowledge-server/src
 COPY knowledge-server/skills knowledge-server/skills
+COPY knowledge-server/assets knowledge-server/assets
 COPY agent/src               agent/src
 RUN touch knowledge-server/src/lib.rs knowledge-server/src/main.rs \
           agent/src/main.rs \
