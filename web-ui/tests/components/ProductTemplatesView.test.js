@@ -11,6 +11,7 @@ const TEMPLATES = [
 const TEMPLATE_DETAIL = {
   id: 't1', name: 'Gateway v3', description: 'standard rollout',
   content: JSON.stringify({
+    design_template: '# 1. Introduction\n${CUSTOMER}',
     skills: [
       { name: 'juju', description: 'Deploy with Juju', content: '# Juju\nJuju is an operator framework.' },
     ],
@@ -90,6 +91,7 @@ describe('ProductTemplatesView', () => {
     expect(w.text()).toContain('Deploy with Juju');
     expect(w.text()).toContain('main');
     expect(w.text()).toContain('Terraform');
+    expect(w.text()).toContain('Design template');
   });
 
   it('opens the upload modal with a dropzone', async () => {

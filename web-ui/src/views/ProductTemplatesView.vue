@@ -79,6 +79,21 @@
               </div>
             </section>
 
+            <section v-if="parsedContent.designTemplate" class="templates-section">
+              <h4 class="templates-section__title">Design template</h4>
+              <div
+                class="templates-skill-card"
+                :class="{ 'templates-skill-card--active': designTemplateOpen }"
+                @click="designTemplateOpen = !designTemplateOpen"
+              >
+                <div class="templates-skill-card__header">
+                  <span class="templates-skill-card__name">design.md</span>
+                </div>
+                <p class="templates-skill-card__desc">Structure used when generating this deployment's design document.</p>
+                <div v-if="designTemplateOpen" class="templates-skill-card__body doc-body" v-html="renderSkillContent(parsedContent.designTemplate)" />
+              </div>
+            </section>
+
             <section v-if="parsedContent.artifacts.length" class="templates-section">
               <h4 class="templates-section__title">Artifacts</h4>
               <div class="templates-artifacts">
@@ -95,7 +110,7 @@
               </div>
             </section>
 
-            <div v-if="!parsedContent.skills.length && !parsedContent.artifacts.length" class="templates-section-empty">
+            <div v-if="!parsedContent.skills.length && !parsedContent.artifacts.length && !parsedContent.designTemplate" class="templates-section-empty">
               This template has no skills or artifacts.
             </div>
           </div>
@@ -108,7 +123,7 @@
       <div class="modal-content" data-testid="upload-template-modal">
         <button class="modal-close" type="button" @click="closeUploadModal">✕</button>
         <h3>Upload product template</h3>
-        <p class="modal-lede">Upload a <code>.harvest</code> file — a zip archive containing a <code>skills/</code> directory with <code>.md</code> files (with YAML frontmatter), an <code>artifacts/</code> directory with example Terraform/Terragrunt/Bash files, and an <code>index.json</code> manifest listing them.</p>
+        <p class="modal-lede">Upload a <code>.harvest</code> file — a zip archive containing a <code>metadata.yaml</code> file (template name and description), a <code>design.md</code> design document template, a <code>skills/</code> directory with <code>.md</code> files (with YAML frontmatter), and an <code>artifacts/</code> directory with example Terraform/Terragrunt/Bash files.</p>
         <label
           class="upload-dropzone"
           :class="{ 'upload-dropzone--active': dragActive }"
@@ -177,17 +192,20 @@ const deleteModalOpen  = ref(false);
 const deleting         = ref(false);
 
 const parsedContent = computed(() => {
-  if (!selectedDetail.value?.content) return { skills: [], artifacts: [] };
+  if (!selectedDetail.value?.content) return { skills: [], artifacts: [], designTemplate: '' };
   try {
     const parsed = JSON.parse(selectedDetail.value.content);
     return {
       skills: parsed.skills ?? [],
       artifacts: parsed.artifacts ?? [],
+      designTemplate: parsed.design_template ?? '',
     };
   } catch {
-    return { skills: [], artifacts: [] };
+    return { skills: [], artifacts: [], designTemplate: '' };
   }
 });
+
+const designTemplateOpen = ref(false);
 
 function kindLabel(kind) {
   if (kind === 'pdf') return 'PDF';
@@ -229,6 +247,7 @@ async function loadDetail(id) {
   selectedId.value = id;
   selectedDetail.value = null;
   selectedSkillName.value = null;
+  designTemplateOpen.value = false;
   detailLoading.value = true;
   try {
     selectedDetail.value = await getTemplate(id);
