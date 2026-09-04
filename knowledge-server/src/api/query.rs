@@ -54,7 +54,7 @@ pub async fn handle_query(
                     neo4j, &user.sub, cid,
                     &req.query, &user.name, &att_meta, raw_messages,
                     &response.answer, &response.sources, response.tool_calls_made,
-                    vec![], None, None, response.provider_used.as_ref(),
+                    vec![], None, None, response.provider_used.as_ref(), response.duration_ms,
                 ).await;
 
                 let msg_count = compacted.len() + 2;
@@ -86,12 +86,11 @@ pub async fn handle_query_stream(
 ) -> impl IntoResponse {
     let selection = selection_from(&req);
     let attachments = req.attachments.unwrap_or_default();
-    let (raw_messages, history) = load_context_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
-    let compacted = qs.agent.compact_history(&history).await;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
     let llm      = Arc::clone(qs.agent.llm());
     let agent    = Arc::clone(&qs.agent);
+    let qs_ctx   = Arc::clone(&qs);
     let neo4j    = qs.neo4j.clone();
     let user_id  = user.sub.clone();
     let username = user.name.clone();
@@ -102,12 +101,17 @@ pub async fn handle_query_stream(
         .collect();
 
     tokio::spawn(async move {
+        let (raw_messages, history) =
+            load_context_if_needed(&qs_ctx, &user_id, conv_id.as_deref()).await;
+        let compacted = agent.compact_history(&history).await;
+
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         let query_for_agent     = query.clone();
         let compacted_for_agent = compacted.clone();
         let selection_for_agent = selection.clone();
+        let agent_for_query     = Arc::clone(&agent);
         tokio::spawn(async move {
-            agent.query_streaming(&query_for_agent, &compacted_for_agent, &attachments, selection_for_agent.as_ref(), agent_tx).await;
+            agent_for_query.query_streaming(&query_for_agent, &compacted_for_agent, &attachments, selection_for_agent.as_ref(), agent_tx).await;
         });
 
         let mut chain_builder = ChainBuilder::new();
@@ -133,8 +137,8 @@ pub async fn handle_query_stream(
                 _ => {}
             }
 
-            let new_title = if let (
-                AgentEvent::Done { answer, sources, tool_calls_made, provider_used },
+            if let (
+                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms },
                 Some(cid),
                 Some(neo4j),
             ) = (&event, &conv_id, &neo4j) {
@@ -144,18 +148,27 @@ pub async fn handle_query_stream(
                     &query, &username, &att_meta, raw_messages.clone(),
                     answer, sources, *tool_calls_made,
                     chain, pending_question.clone(), pending_confirm_action.clone(),
-                    provider_used.as_ref(),
+                    provider_used.as_ref(), *duration_ms,
                 ).await;
+
                 let msg_count = compacted.len() + 2;
-                maybe_regenerate_title(neo4j, &*llm, cid, &compacted, &query, answer, msg_count).await
-            } else {
-                None
-            };
+                let neo4j_t  = Arc::clone(neo4j);
+                let llm_t    = Arc::clone(&llm);
+                let cid_t    = cid.clone();
+                let prior_t  = compacted.clone();
+                let query_t  = query.clone();
+                let answer_t = answer.clone();
+                let tx_t     = tx.clone();
+                tokio::spawn(async move {
+                    if let Some(title) = maybe_regenerate_title(
+                        &neo4j_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, msg_count,
+                    ).await {
+                        let _ = tx_t.send(AgentEvent::TitleUpdated { title }).await;
+                    }
+                });
+            }
 
             let _ = tx.send(event).await;
-            if let Some(title) = new_title {
-                let _ = tx.send(AgentEvent::TitleUpdated { title }).await;
-            }
         }
     });
 
