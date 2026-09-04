@@ -90,6 +90,70 @@ describe('ChatMessage — thinking + tool calls', () => {
   });
 });
 
+describe('ChatMessage — parallel research chain entries', () => {
+  const assistantWithParallelResearch = {
+    role: 'assistant', status: 'done',
+    chain: [
+      {
+        type: 'parallel_research', id: 1, merging: true, totalDurationMs: 34000,
+        leads: [
+          { label: 'how OIDC is implemented', status: 'done', iterations: 8, preview: 'OIDC uses pyoidc...', durationMs: 12000 },
+          { label: 'how LDAP is implemented', status: 'running', iterations: null, preview: null, durationMs: null },
+        ],
+      },
+      { type: 'tool_call', id: 2, name: 'search_symbols', input: {}, status: 'done', preview: 'ok', description: 'Searching…', gapFill: true },
+    ],
+    tool_calls: [],
+    answer: 'Comparison answer.', sources: [], tool_calls_made: 1,
+  };
+
+  it('renders one lane per lead with its question as the label', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithParallelResearch } });
+    const lanes = w.findAll('.pr-lane__label');
+    expect(lanes).toHaveLength(2);
+    expect(lanes[0].text()).toBe('how OIDC is implemented');
+    expect(lanes[1].text()).toBe('how LDAP is implemented');
+  });
+
+  it('shows duration and round count for a finished lead but not for a running one', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithParallelResearch } });
+    const stats = w.findAll('.pr-lane__stats');
+    expect(stats).toHaveLength(1);
+    expect(stats[0].text()).toContain('8 rounds');
+  });
+
+  it('shows the merge header once merging has started', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithParallelResearch } });
+    expect(w.find('.pr-block__title').text()).toBe('Investigated 2 leads in parallel · 34s');
+    expect(w.find('.pr-block__merge').exists()).toBe(true);
+  });
+
+  it('shows the in-progress header while a fan-out has not finished merging yet', () => {
+    const stillRunning = {
+      ...assistantWithParallelResearch,
+      chain: [{ ...assistantWithParallelResearch.chain[0], merging: false, totalDurationMs: null }],
+    };
+    const w = mount(ChatMessage, { props: { msg: stillRunning } });
+    expect(w.find('.pr-block__title').text()).toBe('Investigating 2 leads in parallel');
+    expect(w.find('.pr-block__merge').exists()).toBe(false);
+  });
+
+  it('expands a lane to show its finding preview on click, only for leads that have one', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithParallelResearch } });
+    const rows = w.findAll('.pr-lane__row');
+    expect(w.find('.pr-lane__detail').exists()).toBe(false);
+    rows[0].trigger('click');
+    return flushPromises().then(() => {
+      expect(w.find('.pr-lane__detail').text()).toBe('OIDC uses pyoidc...');
+    });
+  });
+
+  it('tags a tool call made during the merge step as gap-fill', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithParallelResearch } });
+    expect(w.find('.tc-step__gap-badge').exists()).toBe(true);
+  });
+});
+
 describe('ChatMessage — sources', () => {
   it('renders source chips', () => {
     const w = mount(ChatMessage, { props: { msg: assistantWithSources } });

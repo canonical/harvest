@@ -63,6 +63,7 @@ fn build_assistant_message(
     question: Option<Value>,
     confirm_action: Option<Value>,
     provider_used: Option<&UsedProvider>,
+    duration_ms: u64,
 ) -> Value {
     let mut assistant_message = json!({
         "role": "assistant",
@@ -70,6 +71,7 @@ fn build_assistant_message(
         "sources": sources,
         "chain": chain,
         "tool_calls_made": tool_calls_made,
+        "duration_ms": duration_ms,
     });
     if let Some(question) = question {
         assistant_message["question"] = question;
@@ -103,6 +105,7 @@ pub async fn append_user_turn(
     question: Option<Value>,
     confirm_action: Option<Value>,
     provider_used: Option<&UsedProvider>,
+    duration_ms: u64,
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     let title = if user_text.len() > CONVERSATION_TITLE_MAX_CHARS {
@@ -119,7 +122,7 @@ pub async fn append_user_turn(
         "attachments": attachments_meta,
     }));
     messages.push(build_assistant_message(
-        assistant_text, sources, tool_calls_made, chain, question, confirm_action, provider_used,
+        assistant_text, sources, tool_calls_made, chain, question, confirm_action, provider_used, duration_ms,
     ));
 
     let messages_json = serde_json::to_string(&messages)?;
@@ -280,7 +283,7 @@ mod tests {
     #[test]
     fn build_assistant_message_includes_provider_when_present() {
         let used = used_provider();
-        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, Some(&used));
+        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, Some(&used), 1234);
         assert_eq!(msg["provider"]["provider_id"], "anthropic-main");
         assert_eq!(msg["provider"]["kind"], "anthropic");
         assert_eq!(msg["provider"]["model"], "claude-sonnet-5");
@@ -288,14 +291,20 @@ mod tests {
 
     #[test]
     fn build_assistant_message_omits_provider_key_when_none() {
-        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, None);
+        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, None, 0);
         assert!(msg.as_object().unwrap().get("provider").is_none());
+    }
+
+    #[test]
+    fn build_assistant_message_includes_duration_ms() {
+        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, None, 4200);
+        assert_eq!(msg["duration_ms"], 4200);
     }
 
     #[test]
     fn build_assistant_message_provider_round_trips_through_json_string() {
         let used = used_provider();
-        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, Some(&used));
+        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, Some(&used), 1234);
         let serialized = serde_json::to_string(&vec![msg]).unwrap();
         let parsed: Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed[0]["provider"]["model"], "claude-sonnet-5");

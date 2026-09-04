@@ -87,6 +87,56 @@ describe('assistant message lifecycle', () => {
   });
 });
 
+describe('duration tracking', () => {
+  it('startAssistantMessage records a start time and a null duration', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    expect(last(s).startedAt).toBeTypeOf('number');
+    expect(last(s).durationMs).toBeNull();
+  });
+
+  it('finalizeAssistantMessage stores the server-reported duration', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.finalizeAssistantMessage({ answer: 'done', sources: [], tool_calls_made: 0, duration_ms: 4200 });
+    expect(last(s).durationMs).toBe(4200);
+  });
+
+  it('finalizeAssistantMessage falls back to a client-measured duration when the server omits one', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.finalizeAssistantMessage({ answer: 'done', sources: [], tool_calls_made: 0 });
+    expect(last(s).durationMs).toBeTypeOf('number');
+  });
+
+  it('duration is persisted in saveableMessages', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.finalizeAssistantMessage({ answer: 'done', sources: [], tool_calls_made: 0, duration_ms: 4200 });
+    const assistantSaved = s.saveableMessages.find(m => m.role === 'assistant');
+    expect(assistantSaved.duration_ms).toBe(4200);
+  });
+
+  it('duration is loaded from history', () => {
+    const s = useChatStore();
+    s.loadFromHistory([
+      { role: 'user', text: 'hi' },
+      { role: 'assistant', text: 'answer', duration_ms: 8100, sources: [], chain: [], tool_calls: [], tool_calls_made: 0 },
+    ]);
+    expect(last(s).durationMs).toBe(8100);
+  });
+
+  it('resumeAssistantMessage carries the accumulated duration forward into a new start time', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.finalizeAssistantMessage({ answer: 'partial', sources: [], tool_calls_made: 0, duration_ms: 3000 });
+    const before = Date.now();
+    s.resumeAssistantMessage();
+    expect(last(s).status).toBe('loading');
+    expect(before - last(s).startedAt).toBeCloseTo(3000, -2);
+  });
+});
+
 describe('setIntent', () => {
   it('sets intent on the last assistant message', () => {
     const s = useChatStore();
@@ -325,6 +375,112 @@ describe('tool calls', () => {
     s.addToolCall('search', {}, null);
     expect(last(s).chain[0].streaming).toBe(false);
     expect(last(s).chain[1].type).toBe('tool_call');
+  });
+});
+
+describe('parallel research', () => {
+  it('addParallelResearchStarted appends a durable chain block with one running lead per name', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addParallelResearchStarted(['how auth retries', 'how billing retries']);
+    expect(last(s).chain).toHaveLength(1);
+    const block = last(s).chain[0];
+    expect(block.type).toBe('parallel_research');
+    expect(block.merging).toBe(false);
+    expect(block.leads).toEqual([
+      { label: 'how auth retries', status: 'running', iterations: null, preview: null, durationMs: null },
+      { label: 'how billing retries', status: 'running', iterations: null, preview: null, durationMs: null },
+    ]);
+  });
+
+  it('addParallelResearchStarted promotes pending streamed text to a thinking block first', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addTextDelta('deciding how to split this...');
+    s.addParallelResearchStarted(['lead a', 'lead b']);
+    expect(last(s).chain).toHaveLength(2);
+    expect(last(s).chain[0].type).toBe('thinking');
+    expect(last(s).chain[1].type).toBe('parallel_research');
+  });
+
+  it('updateParallelResearchLead fills in one lead as it finishes, leaving the other running', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addParallelResearchStarted(['lead a', 'lead b']);
+    s.updateParallelResearchLead(1, { iterations: 3, preview: 'billing finding', durationMs: 4200 });
+    const block = last(s).chain[0];
+    expect(block.leads[0].status).toBe('running');
+    expect(block.leads[1]).toEqual({
+      label: 'lead b', status: 'done', iterations: 3, preview: 'billing finding', durationMs: 4200,
+    });
+  });
+
+  it('updateParallelResearchLead on an out-of-range index is a no-op', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addParallelResearchStarted(['lead a']);
+    expect(() => s.updateParallelResearchLead(5, { iterations: 1, preview: 'x', durationMs: 1 })).not.toThrow();
+    expect(last(s).chain[0].leads).toHaveLength(1);
+  });
+
+  it('markParallelResearchMerging sets merging and total duration on the block', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addParallelResearchStarted(['lead a', 'lead b']);
+    s.markParallelResearchMerging(5400);
+    const block = last(s).chain[0];
+    expect(block.merging).toBe(true);
+    expect(block.totalDurationMs).toBe(5400);
+  });
+
+  it('tool calls made after markParallelResearchMerging are tagged gapFill', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addParallelResearchStarted(['lead a', 'lead b']);
+    s.addToolCall('search_symbols', {}, null); // pre-merge — should not happen in practice, but must not be tagged
+    s.markParallelResearchMerging(5400);
+    s.addToolCall('search_symbols', {}, null);
+    const toolCalls = last(s).chain.filter(c => c.type === 'tool_call');
+    expect(toolCalls[0].gapFill).toBeUndefined();
+    expect(toolCalls[1].gapFill).toBe(true);
+  });
+
+  it('a fresh assistant message does not inherit the previous message gap-fill tag', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addParallelResearchStarted(['lead a', 'lead b']);
+    s.markParallelResearchMerging(1000);
+    s.finalizeAssistantMessage({ answer: 'merged answer', sources: [], tool_calls_made: 2 });
+    s.startAssistantMessage();
+    s.addToolCall('search_symbols', {}, null);
+    expect(last(s).chain[0].gapFill).toBeUndefined();
+  });
+
+  it('parallel_research block and gap-fill tag survive saveableMessages and loadFromHistory round-trip', () => {
+    const s = useChatStore();
+    s.startAssistantMessage();
+    s.addParallelResearchStarted(['lead a', 'lead b']);
+    s.updateParallelResearchLead(0, { iterations: 2, preview: 'finding a', durationMs: 3000 });
+    s.updateParallelResearchLead(1, { iterations: 4, preview: 'finding b', durationMs: 5000 });
+    s.markParallelResearchMerging(5000);
+    s.addToolCall('search_symbols', {}, null);
+    s.completeToolCall('search_symbols', 'ok');
+    s.finalizeAssistantMessage({ answer: 'merged answer', sources: [], tool_calls_made: 3 });
+
+    const saved = s.saveableMessages.find(m => m.role === 'assistant');
+    expect(saved.chain[0].type).toBe('parallel_research');
+    expect(saved.chain[0].leads[0].status).toBe('done');
+    expect(saved.chain[1].gapFill).toBe(true);
+
+    const s2 = useChatStore();
+    s2.loadFromHistory([
+      { role: 'user', text: 'compare a and b' },
+      { role: 'assistant', text: 'merged answer', sources: [], chain: saved.chain, tool_calls: [], tool_calls_made: 3 },
+    ]);
+    const loaded = last(s2).chain;
+    expect(loaded[0].type).toBe('parallel_research');
+    expect(loaded[0].leads[1].preview).toBe('finding b');
+    expect(loaded[1].gapFill).toBe(true);
   });
 });
 

@@ -23,11 +23,12 @@ export function createConversationThreadState() {
       chain: [], tool_calls: [], answer: null, pendingAnswer: '',
       sources: [], tool_calls_made: 0, provider_used: null,
       intent: null, phase: null,
+      startedAt: Date.now(), durationMs: null,
     });
     loading.value = true;
   }
 
-  function finalizeAssistantMessage({ answer, sources, tool_calls_made, provider_used }) {
+  function finalizeAssistantMessage({ answer, sources, tool_calls_made, provider_used, duration_ms }) {
     const msg = lastAssistant();
     if (!msg) return;
     msg.status = 'done';
@@ -39,6 +40,7 @@ export function createConversationThreadState() {
     msg.sources = sources ?? [];
     msg.tool_calls_made = tool_calls_made ?? 0;
     msg.provider_used = provider_used ?? null;
+    msg.durationMs = duration_ms ?? (msg.startedAt ? Date.now() - msg.startedAt : null);
     loading.value = false;
   }
 
@@ -87,8 +89,64 @@ export function createConversationThreadState() {
     const last = msg.chain.at(-1);
     if (last?.type === 'thinking' && last.streaming) last.streaming = false;
     const tc = { type: 'tool_call', id: _nextId++, name, input, status: 'running', preview: null, description };
+    if (msg._gapFillContext) tc.gapFill = true;
     msg.chain.push(tc);
     msg.tool_calls.push(tc);
+  }
+
+  // ── Parallel research (propose_parallel_research fan-out) ────────────────
+  //
+  // Durable chain block, not a transient status label: it survives to the
+  // finished message and to conversation reload, so "did this fire, with
+  // which leads, how long did each take" is answerable from history instead
+  // of only inferable from live-streaming thinking text.
+
+  function findParallelResearchBlock(msg) {
+    for (let i = msg.chain.length - 1; i >= 0; i--) {
+      if (msg.chain[i].type === 'parallel_research') return msg.chain[i];
+    }
+    return null;
+  }
+
+  function addParallelResearchStarted(leads) {
+    const msg = lastAssistant();
+    if (!msg) return;
+    if (msg.pendingAnswer) {
+      msg.chain.push({ type: 'thinking', text: msg.pendingAnswer, streaming: false });
+      msg.pendingAnswer = '';
+    }
+    const last = msg.chain.at(-1);
+    if (last?.type === 'thinking' && last.streaming) last.streaming = false;
+    msg.chain.push({
+      type: 'parallel_research',
+      id: _nextId++,
+      leads: (leads ?? []).map(label => ({
+        label, status: 'running', iterations: null, preview: null, durationMs: null,
+      })),
+      merging: false,
+      totalDurationMs: null,
+    });
+  }
+
+  function updateParallelResearchLead(index, patch) {
+    const msg = lastAssistant();
+    const block = msg && findParallelResearchBlock(msg);
+    const lead = block?.leads?.[index];
+    if (!lead) return;
+    Object.assign(lead, { status: 'done', ...patch });
+  }
+
+  function markParallelResearchMerging(totalDurationMs) {
+    const msg = lastAssistant();
+    if (!msg) return;
+    const block = findParallelResearchBlock(msg);
+    if (block) {
+      block.merging = true;
+      block.totalDurationMs = totalDurationMs;
+    }
+    // Every tool call from here until this message finishes is, by
+    // construction, the merge step's own gap-filling — badge it as such.
+    msg._gapFillContext = true;
   }
 
   function completeToolCall(name, preview) {
@@ -152,6 +210,7 @@ export function createConversationThreadState() {
     const msg = lastAssistant();
     if (!msg) return;
     msg.status = 'loading';
+    msg.startedAt = Date.now() - (msg.durationMs ?? 0);
     loading.value = true;
   }
 
@@ -184,6 +243,7 @@ export function createConversationThreadState() {
           chain,
           tool_calls: chain.filter(c => c.type === 'tool_call'),
           tool_calls_made: m.tool_calls_made ?? 0,
+          duration_ms: m.durationMs ?? 0,
         };
         if (m.provider_used) saved.provider = m.provider_used;
         if (m.intent) saved.intent = m.intent;
@@ -237,6 +297,7 @@ export function createConversationThreadState() {
           provider_used: m.provider ?? null,
           intent: m.intent ?? null,
           phase: m.phase ?? null,
+          durationMs: m.duration_ms ?? null,
         };
         if (m.question) msg.question = m.question;
         messages.value.push(msg);
@@ -258,6 +319,7 @@ export function createConversationThreadState() {
     completeToolCall, updateToolCallDescription,
     setQuestion, addConfirmAction, updateConfirmActionItem, resumeAssistantMessage,
     setIntent, setPhase,
+    addParallelResearchStarted, updateParallelResearchLead, markParallelResearchMerging,
     addPendingAttachment, removePendingAttachment, clearPendingAttachments,
     saveableMessages, loadFromHistory, reset,
   };

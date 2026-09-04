@@ -16,6 +16,14 @@ export function initials(name) {
     : (parts[0]?.[0] ?? '?').toUpperCase();
 }
 
+export function formatDuration(ms) {
+  const totalSeconds = Math.max(0, ms ?? 0) / 1000;
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(totalSeconds < 10 ? 1 : 0)}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = Math.round(totalSeconds % 60);
+  return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+}
+
 export function escapeHtml(str) {
   return String(str ?? '')
     .replace(/&/g, '&amp;')
