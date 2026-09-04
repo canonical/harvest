@@ -16,6 +16,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::llm::{
@@ -58,6 +59,7 @@ pub struct QueryResponse {
     pub sources: Vec<Source>,
     pub tool_calls_made: usize,
     pub provider_used: Option<UsedProvider>,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,11 +101,29 @@ pub enum AgentEvent {
         sources: Vec<Source>,
         tool_calls_made: usize,
         provider_used: Option<UsedProvider>,
+        duration_ms: u64,
     },
     Error { message: String },
     Question { question: String, choices: Vec<String> },
     ConfirmAction { id: String, name: String, input: serde_json::Value, description: String },
     TitleUpdated { title: String },
+    /// A durable marker that the agent split the question into independent
+    /// leads and is investigating them concurrently. Unlike `Phase`, this is
+    /// persisted into the visible chain instead of being a transient status
+    /// label, so it survives to `Done` and to conversation reload.
+    ParallelResearchStarted { leads: Vec<String> },
+    /// Sent by each lead as it finishes (leads finish at different times).
+    ParallelResearchLeadDone {
+        index:       usize,
+        iterations:  usize,
+        preview:     String,
+        duration_ms: u64,
+    },
+    /// Sent once all leads have completed and the merge step is about to
+    /// resume on the visible loop. `duration_ms` is the wall-clock time of
+    /// the fan-out (from ParallelResearchStarted to now) — the number to
+    /// compare against a sequential-equivalent estimate.
+    ParallelResearchMergeStarted { duration_ms: u64 },
 }
 
 enum LoopOutcome {
@@ -128,6 +148,7 @@ pub struct PausedTurn {
     pub messages:   Vec<Message>,
     pub iterations: usize,
     pub pending:    Vec<PendingConfirmCall>,
+    pub elapsed_ms: u64,
 }
 
 pub struct ToolResumeResult {
@@ -180,11 +201,17 @@ impl Agent {
         self
     }
 
+    /// Cheap, free (no LLM call) classification used only to pick the first
+    /// turn's tool set and give the UI an immediate "Intent" label. Anything
+    /// this heuristic can't resolve defaults to `Research` with the full tool
+    /// set attached — the model's own first response (a direct answer, a
+    /// normal tool call, or a `propose_parallel_research` call) is what
+    /// actually decides how the turn proceeds; see `run_loop`.
     pub async fn classify_intent(
         &self,
         user_query: &str,
         history: &[HistoryMessage],
-        selection: Option<&ProviderSelection>,
+        _selection: Option<&ProviderSelection>,
     ) -> IntentMode {
         if self.tools.is_empty() {
             return IntentMode::Conversational;
@@ -203,19 +230,7 @@ impl Agent {
                 return IntentMode::Action;
             }
         }
-        let snippet = history.iter()
-            .rev()
-            .take(3)
-            .rev()
-            .map(|m| format!("[{}]: {}", m.role, m.text.chars().take(200).collect::<String>()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let prompt = prompt::intent_classifier_prompt(user_query, &snippet);
-        let messages = vec![Message::user(prompt)];
-        match self.llm.chat_routed(selection, &messages, &[]).await {
-            Ok((LlmResponse::Message { text }, _)) => IntentMode::from_str(&text),
-            _ => IntentMode::default(),
-        }
+        IntentMode::default()
     }
 
     pub async fn compact_history(&self, history: &[HistoryMessage]) -> Vec<HistoryMessage> {
@@ -272,8 +287,8 @@ impl Agent {
         let mut error = None;
         while let Some(event) = receiver.recv().await {
             match event {
-                AgentEvent::Done { answer, sources, tool_calls_made, provider_used } => {
-                    response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used });
+                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms } => {
+                    response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms });
                 }
                 AgentEvent::Error { message } => {
                     error = Some(anyhow::anyhow!(message));
@@ -301,8 +316,8 @@ impl Agent {
         while let Some(event) = receiver.recv().await {
             let _ = progress.send(event.clone()).await;
             match event {
-                AgentEvent::Done { answer, sources, tool_calls_made, provider_used } => {
-                    response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used });
+                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms } => {
+                    response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms });
                 }
                 AgentEvent::Error { message } => {
                     error = Some(anyhow::anyhow!(message));
@@ -318,6 +333,7 @@ impl Agent {
         let mut tool_defs: Vec<ToolDefinition> =
             self.tools.iter().map(|t| t.definition()).collect();
         tool_defs.push(ask_user_tool_def());
+        tool_defs.push(propose_parallel_research_tool_def());
         tool_defs
     }
 
@@ -333,7 +349,11 @@ impl Agent {
         selection: Option<&ProviderSelection>,
         event_sender: mpsc::Sender<AgentEvent>,
     ) -> Option<PausedTurn> {
-        let mode = self.classify_intent(user_query, history, selection).await;
+        let start = Instant::now();
+        let (mode, compacted) = tokio::join!(
+            self.classify_intent(user_query, history, selection),
+            self.compact_history(history),
+        );
         let _ = event_sender.send(AgentEvent::Intent { mode }).await;
 
         let (tool_defs, tool_map) = match mode {
@@ -341,13 +361,12 @@ impl Agent {
             _ => (self.build_tool_defs(), self.build_tool_map()),
         };
 
-        let compacted = self.compact_history(history).await;
         let mut messages = vec![Message::system(self.effective_system_prompt())];
         messages.extend(history_to_messages(&compacted));
         messages.push(build_user_message(user_query, attachments));
 
-        let outcome = self.run_loop(messages, 0, &tool_defs, &tool_map, selection, &event_sender).await;
-        self.finish_outcome(outcome, &event_sender).await
+        let outcome = self.run_loop(messages, 0, &tool_defs, &tool_map, selection, &event_sender, self.max_iterations, 0).await;
+        self.finish_outcome(outcome, &event_sender, start, 0).await
     }
 
     pub async fn resume_after_confirm(
@@ -357,7 +376,9 @@ impl Agent {
         results: Vec<ToolResumeResult>,
         selection: Option<&ProviderSelection>,
         event_sender: mpsc::Sender<AgentEvent>,
+        elapsed_before_ms: u64,
     ) -> Option<PausedTurn> {
+        let start = Instant::now();
         for r in results {
             messages.push(Message {
                 role: crate::llm::types::Role::User,
@@ -372,15 +393,18 @@ impl Agent {
         let tool_defs = self.build_tool_defs();
         let tool_map  = self.build_tool_map();
 
-        let outcome = self.run_loop(messages, iterations, &tool_defs, &tool_map, selection, &event_sender).await;
-        self.finish_outcome(outcome, &event_sender).await
+        let outcome = self.run_loop(messages, iterations, &tool_defs, &tool_map, selection, &event_sender, self.max_iterations, 0).await;
+        self.finish_outcome(outcome, &event_sender, start, elapsed_before_ms).await
     }
 
     async fn finish_outcome(
         &self,
         outcome: LoopOutcome,
         event_sender: &mpsc::Sender<AgentEvent>,
+        start: Instant,
+        elapsed_before_ms: u64,
     ) -> Option<PausedTurn> {
+        let duration_ms = elapsed_before_ms + start.elapsed().as_millis() as u64;
         match outcome {
             LoopOutcome::Finished { text, iterations, provider_used } => {
                 let answer = if text.is_empty() { last_resort_fallback() } else { text };
@@ -390,6 +414,7 @@ impl Agent {
                     sources,
                     tool_calls_made: iterations,
                     provider_used,
+                    duration_ms,
                 }).await;
                 None
             }
@@ -401,6 +426,7 @@ impl Agent {
                     sources,
                     tool_calls_made: iterations,
                     provider_used,
+                    duration_ms,
                 }).await;
                 None
             }
@@ -411,8 +437,9 @@ impl Agent {
                     sources: vec![],
                     tool_calls_made: iterations,
                     provider_used,
+                    duration_ms,
                 }).await;
-                Some(PausedTurn { messages, iterations, pending })
+                Some(PausedTurn { messages, iterations, pending, elapsed_ms: duration_ms })
             }
         }
     }
@@ -425,12 +452,14 @@ impl Agent {
         tool_map: &HashMap<String, &dyn Tool>,
         selection: Option<&ProviderSelection>,
         event_sender: &mpsc::Sender<AgentEvent>,
+        max_iterations: usize,
+        depth: usize,
     ) -> LoopOutcome {
         let mut last_provider_used: Option<UsedProvider> = None;
         let mut accumulated_text = String::new();
         loop {
-            if iterations >= self.max_iterations {
-                tracing::warn!("agent hit max_iterations={} — requesting synthesis", self.max_iterations);
+            if iterations >= max_iterations {
+                tracing::warn!(max_iterations, "agent hit max_iterations — requesting synthesis");
                 let _ = event_sender.send(AgentEvent::Phase { label: "Synthesizing answer".to_string() }).await;
                 let tool_summary = collect_tool_result_summary(&messages);
                 let synthesis_prompt = format!(
@@ -519,6 +548,20 @@ impl Agent {
             }
 
             iterations += 1;
+
+            if let Some(propose) = tool_calls.iter().find(|c| c.name == "propose_parallel_research") {
+                let leads: Vec<String> = propose.input["leads"].as_array()
+                    .map(|a| a.iter()
+                        .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from))
+                        .take(MAX_PARALLEL_LEADS)
+                        .collect())
+                    .unwrap_or_default();
+                if leads.len() >= 2 {
+                    return Box::pin(self.run_parallel_research(
+                        messages, leads, tool_defs, tool_map, selection, event_sender, depth + 1,
+                    )).await;
+                }
+            }
 
             if let Some(ask) = tool_calls.iter().find(|c| c.name == "ask_user") {
                 let question = ask.input["question"].as_str().unwrap_or("").to_string();
@@ -643,6 +686,118 @@ impl Agent {
                 });
             }
         }
+    }
+
+    async fn run_parallel_research(
+        &self,
+        base_messages: Vec<Message>,
+        subtasks: Vec<String>,
+        tool_defs: &[ToolDefinition],
+        tool_map: &HashMap<String, &dyn Tool>,
+        selection: Option<&ProviderSelection>,
+        event_sender: &mpsc::Sender<AgentEvent>,
+        depth: usize,
+    ) -> LoopOutcome {
+        let fan_out_start = Instant::now();
+        let _ = event_sender.send(AgentEvent::ParallelResearchStarted { leads: subtasks.clone() }).await;
+
+        let sub_tool_map: HashMap<String, &dyn Tool> = tool_map.iter()
+            .filter(|(_, t)| !t.requires_confirmation())
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        let mut sub_tool_defs: Vec<ToolDefinition> = tool_defs.iter()
+            .filter(|t| sub_tool_map.contains_key(&t.name))
+            .cloned()
+            .collect();
+        if depth < MAX_PARALLEL_RESEARCH_DEPTH {
+            sub_tool_defs.push(propose_parallel_research_tool_def());
+        }
+        let sub_max_iterations = (self.max_iterations / 2).clamp(3, 8);
+
+        let leads = join_all(subtasks.iter().enumerate().map(|(index, subtask)| {
+            let mut sub_messages = base_messages.clone();
+            sub_messages.push(Message::user(format!(
+                "Investigate ONLY the following specific question using the available tools, \
+                 then report your findings with citations. Since your findings will be compared \
+                 side by side with other independent leads, cover the same kind of ground they \
+                 likely will: how it's configured or triggered, the end-to-end flow (describe \
+                 the steps in order if it's a process), and notable edge cases such as \
+                 first-time/new-record handling or error handling. Do not ask the user \
+                 anything — if information is missing or ambiguous, give your best answer from \
+                 what the graph contains.\n\nQuestion: {subtask}"
+            )));
+            self.run_research_subtask(
+                index, sub_messages, &sub_tool_defs, &sub_tool_map, sub_max_iterations, selection, depth,
+                event_sender,
+            )
+        })).await;
+
+        let total_iterations: usize = leads.iter().map(|(_, iters)| iters).sum();
+        let findings = subtasks.iter().zip(leads.iter())
+            .map(|(subtask, (text, _))| format!("### Lead: {subtask}\n{text}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let fan_out_ms = fan_out_start.elapsed().as_millis() as u64;
+        tracing::info!(
+            leads = subtasks.len(),
+            total_lead_iterations = total_iterations,
+            wall_ms = fan_out_ms,
+            "parallel research fan-out complete"
+        );
+        let _ = event_sender.send(AgentEvent::ParallelResearchMergeStarted { duration_ms: fan_out_ms }).await;
+
+        let mut messages = base_messages;
+        messages.push(Message::user(format!(
+            "You split the user's question into {} independent leads and investigated each — \
+             their findings are below. Using ONLY these findings (call more tools only if \
+             something essential is still missing), write ONE final answer to the user's \
+             original question.\n\n\
+             Before writing, check whether the leads cover comparable ground — if one lead's \
+             findings address a dimension (configuration, end-to-end flow, edge cases like \
+             new-record or error handling) that another lead's findings do not, and it matters \
+             for a fair comparison, call a tool now to fill that specific gap rather than \
+             leaving the comparison lopsided. You may make at most 2 such gap-filling calls; do \
+             not re-investigate everything from scratch. If a flow was described step by step in \
+             the findings, prefer a sequence diagram over a single relationship graph to show \
+             it.\n\n\
+             Preserve inline citations from the findings verbatim, reconcile any \
+             inconsistencies between leads, and do not repeat the same fact twice.\n\n{findings}",
+            subtasks.len(),
+        )));
+
+        let start_at = total_iterations.min(self.max_iterations.saturating_sub(1));
+        self.run_loop(messages, start_at, tool_defs, tool_map, selection, event_sender, self.max_iterations, depth).await
+    }
+
+    async fn run_research_subtask(
+        &self,
+        index: usize,
+        messages: Vec<Message>,
+        tool_defs: &[ToolDefinition],
+        tool_map: &HashMap<String, &dyn Tool>,
+        max_iterations: usize,
+        selection: Option<&ProviderSelection>,
+        depth: usize,
+        event_sender: &mpsc::Sender<AgentEvent>,
+    ) -> (String, usize) {
+        let lead_start = Instant::now();
+        let (silent_tx, silent_rx) = mpsc::channel::<AgentEvent>(1);
+        drop(silent_rx);
+        let outcome = self.run_loop(messages, 0, tool_defs, tool_map, selection, &silent_tx, max_iterations, depth).await;
+        let (text, iterations) = match outcome {
+            LoopOutcome::Finished { text, iterations, .. } => (text, iterations),
+            LoopOutcome::EndedWithQuestion { text, iterations, .. } => (text, iterations),
+            LoopOutcome::Paused { text_buf, iterations, .. } => (text_buf, iterations),
+        };
+        let preview: String = text.chars().take(280).collect();
+        let _ = event_sender.send(AgentEvent::ParallelResearchLeadDone {
+            index,
+            iterations,
+            preview,
+            duration_ms: lead_start.elapsed().as_millis() as u64,
+        }).await;
+        (text, iterations)
     }
 
     async fn execute_tool_call(
@@ -822,6 +977,35 @@ pub(crate) fn build_user_message(text: &str, attachments: &[Attachment]) -> Mess
         }
     }
     Message { role: crate::llm::types::Role::User, content: MessageContent::Parts(parts) }
+}
+
+const MAX_PARALLEL_LEADS: usize = 6;
+const MAX_PARALLEL_RESEARCH_DEPTH: usize = 2;
+
+fn propose_parallel_research_tool_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "propose_parallel_research".to_string(),
+        description: "Call this INSTEAD of investigating directly, as your very first action, \
+                      when the user's question splits into 2-6 independent leads that could be \
+                      researched in any order without needing each other's findings. Each lead \
+                      is investigated separately and the findings are merged into one answer. \
+                      Do not call this after you have already started investigating, and do not \
+                      call it for a single continuous chain of reasoning."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "leads": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "2–6 independent, self-contained questions to investigate in parallel.",
+                    "minItems": 2,
+                    "maxItems": 6
+                }
+            },
+            "required": ["leads"]
+        }),
+    }
 }
 
 fn ask_user_tool_def() -> ToolDefinition {
@@ -1024,6 +1208,18 @@ mod tests {
         }
     }
 
+    fn propose_call(leads: Vec<&str>) -> LlmResponse {
+        LlmResponse::ToolCalls {
+            calls: vec![ToolCall {
+                id: "tc_propose".into(),
+                name: "propose_parallel_research".into(),
+                input: serde_json::json!({ "leads": leads }),
+                thought_signature: None,
+            }],
+            preamble: String::new(),
+        }
+    }
+
     fn text(s: &str) -> LlmResponse {
         LlmResponse::Message { text: s.into() }
     }
@@ -1117,7 +1313,6 @@ mod tests {
     #[tokio::test]
     async fn one_tool_call_then_text_counts_one_iteration() {
         let llm = MockLlm::new(vec![
-            text("research"),
             tool_call("my_tool"),
             text("result arrived"),
         ]);
@@ -1130,7 +1325,6 @@ mod tests {
     #[tokio::test]
     async fn query_with_progress_returns_the_same_response_as_query() {
         let llm = MockLlm::new(vec![
-            text("research"),
             tool_call("my_tool"),
             text("result arrived"),
         ]);
@@ -1144,7 +1338,6 @@ mod tests {
     #[tokio::test]
     async fn query_with_progress_forwards_tool_call_and_done_events() {
         let llm = MockLlm::new(vec![
-            text("research"),
             tool_call("my_tool"),
             text("result arrived"),
         ]);
@@ -1163,7 +1356,6 @@ mod tests {
     #[tokio::test]
     async fn two_tool_call_turns_count_two_iterations() {
         let llm = MockLlm::new(vec![
-            text("research"),
             tool_call("my_tool"),
             tool_call("my_tool"),
             text("done after two rounds"),
@@ -1176,7 +1368,6 @@ mod tests {
     #[tokio::test]
     async fn unknown_tool_name_produces_error_string_not_panic() {
         let llm = MockLlm::new(vec![
-            text("research"),
             tool_call("nonexistent_tool"),
             text("handled gracefully"),
         ]);
@@ -1238,7 +1429,7 @@ mod tests {
 
     #[tokio::test]
     async fn classify_intent_returns_research_for_how_question() {
-        let llm = MockLlm::new(vec![text("research")]);
+        let llm = MockLlm::new(vec![]);
         let agent = agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5);
         let mode = agent.classify_intent("how does the retry logic work?", &[], None).await;
         assert_eq!(mode, IntentMode::Research);
@@ -1337,7 +1528,6 @@ mod tests {
     #[tokio::test]
     async fn query_streaming_emits_phase_event_before_tool_execution() {
         let llm = MockLlm::new(vec![
-            text("research"),
             tool_call("search_symbols"),
             text("final answer"),
         ]);
@@ -1358,7 +1548,6 @@ mod tests {
     #[tokio::test]
     async fn query_streaming_emits_updated_phase_when_tools_change() {
         let llm = MockLlm::new(vec![
-            text("research"),
             tool_call("search_symbols"),
             tool_call("get_symbol_source"),
             text("final answer"),
@@ -1382,7 +1571,6 @@ mod tests {
     #[tokio::test]
     async fn query_streaming_emits_synthesizing_phase_on_max_iterations() {
         let llm = MockLlm::new(vec![
-            text("research"),
             tool_call("search_symbols"),
         ]);
         let agent = Arc::new(agent_with(
@@ -1397,21 +1585,233 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn classify_intent_returns_conversational_from_llm() {
-        let llm = MockLlm::new(vec![text("conversational")]);
+    async fn classify_intent_defaults_to_research_for_ambiguous_followup_without_an_llm_call() {
+        let llm = MockLlm::new(vec![]);
         let agent = agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5);
         let history = vec![
             HistoryMessage { role: "user".into(), text: "how does retry work?".into(), attachments: None },
             HistoryMessage { role: "assistant".into(), text: "The retry logic lives in retry.rs…".into(), attachments: None },
         ];
         let mode = agent.classify_intent("what does that mean?", &history, None).await;
-        assert_eq!(mode, IntentMode::Conversational);
+        assert_eq!(mode, IntentMode::Research);
+    }
+
+    #[tokio::test]
+    async fn research_mode_with_two_subtasks_runs_parallel_and_merges() {
+        let llm = MockLlm::new(vec![
+            propose_call(vec!["how auth retries", "how billing retries"]),
+            text("finding from a lead"),
+            text("finding from a lead"),
+            text("merged answer"),
+        ]);
+        let agent = Arc::new(agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5));
+        let events = collect_agent_events(agent, "compare how auth and billing handle retries").await;
+
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::ParallelResearchStarted { leads } if leads.len() == 2)),
+            "expected a ParallelResearchStarted event naming both leads"
+        );
+        assert_eq!(
+            events.iter().filter(|e| matches!(e, AgentEvent::ParallelResearchLeadDone { .. })).count(),
+            2,
+            "expected one ParallelResearchLeadDone per lead"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::ParallelResearchMergeStarted { .. })),
+            "expected a ParallelResearchMergeStarted event once leads finished"
+        );
+
+        // The durable events must arrive in fan-out order, and before the merge's own
+        // visible activity — this is what lets the UI render lanes that fill in as
+        // leads finish, then converge into the merge step.
+        let started_pos = events.iter().position(|e| matches!(e, AgentEvent::ParallelResearchStarted { .. })).unwrap();
+        let last_lead_done_pos = events.iter().rposition(|e| matches!(e, AgentEvent::ParallelResearchLeadDone { .. })).unwrap();
+        let merge_started_pos = events.iter().position(|e| matches!(e, AgentEvent::ParallelResearchMergeStarted { .. })).unwrap();
+        assert!(started_pos < last_lead_done_pos, "leads must complete after the fan-out starts");
+        assert!(last_lead_done_pos < merge_started_pos, "merge must start only after every lead is done");
+
+        let answer = events.iter().find_map(|e| match e {
+            AgentEvent::Done { answer, .. } => Some(answer.clone()),
+            _ => None,
+        });
+        assert_eq!(answer.as_deref(), Some("merged answer"));
+    }
+
+    #[tokio::test]
+    async fn parallel_research_merge_prompt_caps_gap_filling_calls() {
+        let llm = CapturingLlm::new(vec![
+            propose_call(vec!["how auth retries", "how billing retries"]),
+            text("finding from a lead"),
+            text("finding from a lead"),
+            text("merged answer"),
+        ]);
+        let agent = Arc::new(Agent::new(
+            Arc::clone(&llm) as Arc<dyn LlmProvider>,
+            vec![MockTool::new("search_symbols", "ok")],
+            5,
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        agent.query_streaming("compare how auth and billing handle retries", &[], &[], None, tx).await;
+        while rx.try_recv().is_ok() {}
+
+        let captured = llm.captured_last_user_texts.lock().unwrap();
+        assert!(
+            captured.iter().any(|t| t.contains("at most 2 such gap-filling calls")),
+            "expected the merge prompt to cap gap-filling calls to a concrete number, got: {captured:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_research_prompts_ask_leads_and_merge_to_check_coverage_symmetry() {
+        let llm = CapturingLlm::new(vec![
+            propose_call(vec!["how auth retries", "how billing retries"]),
+            text("finding from a lead"),
+            text("finding from a lead"),
+            text("merged answer"),
+        ]);
+        let agent = Arc::new(Agent::new(
+            Arc::clone(&llm) as Arc<dyn LlmProvider>,
+            vec![MockTool::new("search_symbols", "ok")],
+            5,
+        ));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
+        agent.query_streaming("compare how auth and billing handle retries", &[], &[], None, tx).await;
+        while rx.try_recv().is_ok() {}
+
+        let captured = llm.captured_last_user_texts.lock().unwrap();
+        assert!(
+            captured.iter().any(|t| t.contains("cover the same kind of ground")),
+            "expected the per-lead prompt to ask for comparable coverage, got: {captured:?}"
+        );
+        assert!(
+            captured.iter().any(|t| t.contains("check whether the leads cover comparable ground")),
+            "expected the merge prompt to ask for a symmetry check, got: {captured:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_with_fewer_than_two_leads_falls_through_to_normal_handling() {
+        let llm = MockLlm::new(vec![
+            propose_call(vec!["only one lead"]),
+            text("direct answer"),
+        ]);
+        let agent = Arc::new(agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5));
+        let events = collect_agent_events(agent, "how does X work?").await;
+
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::ParallelResearchStarted { .. })));
+        let answer = events.iter().find_map(|e| match e {
+            AgentEvent::Done { answer, .. } => Some(answer.clone()),
+            _ => None,
+        });
+        assert_eq!(answer.as_deref(), Some("direct answer"));
+    }
+
+    #[tokio::test]
+    async fn propose_after_a_quick_discovery_step_still_triggers_parallel_research() {
+        let llm = MockLlm::new(vec![
+            tool_call("list_repositories"),
+            propose_call(vec!["how auth retries", "how billing retries"]),
+            text("finding from a lead"),
+            text("finding from a lead"),
+            text("merged answer"),
+        ]);
+        let agent = Arc::new(agent_with(
+            llm,
+            vec![MockTool::new("list_repositories", "landscape-server"), MockTool::new("search_symbols", "ok")],
+            10,
+        ));
+        let events = collect_agent_events(agent, "compare how auth and billing handle retries").await;
+
+        assert!(
+            events.iter().any(|e| matches!(e, AgentEvent::ParallelResearchStarted { leads } if leads.len() == 2)),
+            "a discovery step first should not block a subsequent propose call"
+        );
+        let answer = events.iter().find_map(|e| match e {
+            AgentEvent::Done { answer, .. } => Some(answer.clone()),
+            _ => None,
+        });
+        assert_eq!(answer.as_deref(), Some("merged answer"));
+    }
+
+    #[tokio::test]
+    async fn propose_after_several_discovery_steps_still_triggers_parallel_research() {
+        // The model isn't required to decide upfront — recognizing a split
+        // partway through investigating should still fork the remaining work.
+        let llm = MockLlm::new(vec![
+            tool_call("my_tool"),
+            tool_call("my_tool"),
+            tool_call("my_tool"),
+            propose_call(vec!["lead one", "lead two"]),
+            text("finding from a lead"),
+            text("finding from a lead"),
+            text("merged answer"),
+        ]);
+        let agent = Arc::new(agent_with(llm, vec![MockTool::new("my_tool", "ok")], 10));
+        let events = collect_agent_events(agent, "hi").await;
+
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::ParallelResearchStarted { leads } if leads.len() == 2)),
+            "a propose call arriving after some discovery steps should still fork");
+        let answer = events.iter().find_map(|e| match e {
+            AgentEvent::Done { answer, .. } => Some(answer.clone()),
+            _ => None,
+        });
+        assert_eq!(answer.as_deref(), Some("merged answer"));
+    }
+
+    #[tokio::test]
+    async fn parallel_research_never_offers_confirmable_tools_to_leads() {
+        let llm = MockLlm::new(vec![
+            propose_call(vec!["lead one", "lead two"]),
+            text("finding from a lead"),
+            text("finding from a lead"),
+            text("merged answer"),
+        ]);
+        let agent = Arc::new(agent_with(
+            llm,
+            vec![MockTool::new_confirmable("dangerous_tool", "should never run silently")],
+            5,
+        ));
+        let events = collect_agent_events(agent, "compare two independent leads").await;
+
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::ConfirmAction { .. })));
+        let answer = events.iter().find_map(|e| match e {
+            AgentEvent::Done { answer, .. } => Some(answer.clone()),
+            _ => None,
+        });
+        assert_eq!(answer.as_deref(), Some("merged answer"));
+    }
+
+    #[tokio::test]
+    async fn a_lead_can_itself_fan_out_one_nested_level() {
+        let llm = MockLlm::new(vec![
+            propose_call(vec!["lead A", "lead B"]),
+            propose_call(vec!["lead A1", "lead A2"]),
+            text("finding A1"),
+            text("finding A2"),
+            text("merged A"),
+            text("finding B"),
+            text("final merged answer"),
+        ]);
+        let agent = Arc::new(agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 20));
+        let events = collect_agent_events(agent, "compare two independent leads, one of which is itself broad").await;
+
+        let started_leads_counts: Vec<usize> = events.iter().filter_map(|e| match e {
+            AgentEvent::ParallelResearchStarted { leads } => Some(leads.len()),
+            _ => None,
+        }).collect();
+        assert!(started_leads_counts.iter().any(|&n| n == 2),
+            "expected at least the top-level fan-out event, got: {started_leads_counts:?}");
+
+        let answer = events.iter().find_map(|e| match e {
+            AgentEvent::Done { answer, .. } => Some(answer.clone()),
+            _ => None,
+        });
+        assert_eq!(answer.as_deref(), Some("final merged answer"));
     }
 
     #[tokio::test]
     async fn query_streaming_emits_intent_event_first() {
         let llm = MockLlm::new(vec![
-            text("research"),
             text("answer"),
         ]);
         let agent = Arc::new(agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5));
@@ -1420,9 +1820,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversational_mode_skips_tools_entirely() {
+    async fn direct_text_answer_makes_no_tool_calls_even_with_tools_available() {
         let llm = MockLlm::new(vec![
-            text("conversational"),
             text("direct answer"),
         ]);
         let agent = Arc::new(agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5));
@@ -1435,7 +1834,7 @@ mod tests {
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() { events.push(e); }
         let has_tool = events.iter().any(|e| matches!(e, AgentEvent::ToolCall { .. }));
-        assert!(!has_tool, "conversational mode must not call any tools");
+        assert!(!has_tool, "the model chose not to call any tool, so none should fire");
         let answer = events.iter().find_map(|e| match e {
             AgentEvent::Done { answer, .. } => Some(answer.clone()),
             _ => None,
@@ -1446,7 +1845,6 @@ mod tests {
     #[tokio::test]
     async fn multiple_tool_calls_in_one_turn_all_executed() {
         let llm = MockLlm::new(vec![
-            text("research"),
             two_tool_calls("tool_a", "tool_b"),
             text("got both results"),
         ]);
@@ -1463,7 +1861,6 @@ mod tests {
     #[tokio::test]
     async fn multi_turn_query_reports_provider_used_from_final_call() {
         let llm = MockLlm::with_id("mock-llm", vec![
-            text("research"),
             tool_call("my_tool"),
             text("final answer"),
         ]);
@@ -1675,6 +2072,7 @@ mod tests {
     struct CapturingLlm {
         response: Mutex<VecDeque<LlmResponse>>,
         captured_system: Mutex<Option<String>>,
+        captured_last_user_texts: Mutex<Vec<String>>,
     }
 
     impl CapturingLlm {
@@ -1682,6 +2080,7 @@ mod tests {
             Arc::new(Self {
                 response: Mutex::new(responses.into()),
                 captured_system: Mutex::new(None),
+                captured_last_user_texts: Mutex::new(Vec::new()),
             })
         }
     }
@@ -1700,6 +2099,9 @@ mod tests {
                         *self.captured_system.lock().unwrap() = Some(t.clone());
                     }
                 }
+            }
+            if let Some(MessageContent::Text(t)) = messages.last().map(|m| &m.content) {
+                self.captured_last_user_texts.lock().unwrap().push(t.clone());
             }
             self.response.lock().unwrap().pop_front()
                 .ok_or_else(|| anyhow::anyhow!("CapturingLlm: no more responses"))
@@ -1757,7 +2159,6 @@ mod tests {
     #[tokio::test]
     async fn tool_call_preamble_streams_live_as_text_delta() {
         let llm = MockLlm::new(vec![
-            text("research"),
             LlmResponse::ToolCalls {
                 calls: vec![ToolCall { id: "t".into(), name: "my_tool".into(), input: serde_json::json!({}), thought_signature: None }],
                 preamble: "Let me check that".into(),
@@ -1780,7 +2181,6 @@ mod tests {
     #[tokio::test]
     async fn no_preamble_emits_no_thinking_event_before_tool_call() {
         let llm = MockLlm::new(vec![
-            text("research"),
             tool_call("my_tool"),
             text("done"),
         ]);
@@ -1880,7 +2280,6 @@ mod tests {
     #[tokio::test]
     async fn multiple_confirmable_calls_in_one_round_all_pause_and_none_execute() {
         let llm = MockLlm::new(vec![
-            text("research"),
             two_tool_calls("create_lxd_agent", "delete_agent"),
         ]);
         let agent = Arc::new(agent_with(
@@ -1908,7 +2307,6 @@ mod tests {
     #[tokio::test]
     async fn mixed_confirmable_and_automatic_calls_executes_automatic_and_pauses_confirmable() {
         let llm = MockLlm::new(vec![
-            text("research"),
             two_tool_calls("my_tool", "delete_agent"),
         ]);
         let agent = Arc::new(agent_with(
@@ -1956,6 +2354,7 @@ mod tests {
             }],
             None,
             tx2,
+            paused.elapsed_ms,
         ).await;
         assert!(outcome.is_none(), "expected the turn to finish, not pause again");
 
@@ -1966,12 +2365,17 @@ mod tests {
             _ => None,
         });
         assert_eq!(answer.as_deref(), Some("Done, agent deleted."));
+
+        let duration_ms = events.iter().find_map(|e| match e {
+            AgentEvent::Done { duration_ms, .. } => Some(*duration_ms),
+            _ => None,
+        });
+        assert!(duration_ms.unwrap() >= paused.elapsed_ms, "resumed duration should include time spent before the pause");
     }
 
     #[tokio::test]
     async fn resume_after_confirm_can_pause_again_on_a_second_confirmable_call() {
         let llm = MockLlm::new(vec![
-            text("research"),
             tool_call("create_lxd_agent"),
             tool_call("delete_agent"),
         ]);
@@ -1999,6 +2403,7 @@ mod tests {
             }],
             None,
             tx2,
+            first.elapsed_ms,
         ).await.expect("expected the resumed turn to pause again");
 
         assert_eq!(second.pending, vec![PendingConfirmCall { id: "tc_1:0".into(), tool_use_id: "tc_1".into() }]);
@@ -2007,7 +2412,6 @@ mod tests {
     #[tokio::test]
     async fn non_confirmable_tool_calls_execute_normally_alongside_confirmable_ones_absent() {
         let llm = MockLlm::new(vec![
-            text("research"),
             tool_call("my_tool"),
             text("done"),
         ]);
@@ -2041,7 +2445,6 @@ mod tests {
     #[tokio::test]
     async fn conversational_mode_ask_user_emits_question_event() {
         let llm = MockLlm::new(vec![
-            text("conversational"),
             LlmResponse::ToolCalls {
                 calls: vec![ToolCall {
                     id: "ask_1".into(),
@@ -2120,8 +2523,6 @@ mod tests {
     #[tokio::test]
     async fn ask_user_with_empty_text_buf_uses_accumulated_text() {
         let llm = MockLlm::new(vec![
-            // Consumed by classify_intent
-            text("research"),
             // Iteration 1: tool call WITH preamble text
             LlmResponse::ToolCalls {
                 calls: vec![ToolCall {
@@ -2158,8 +2559,6 @@ mod tests {
     #[tokio::test]
     async fn ask_user_with_no_text_anywhere_synthesizes_answer() {
         let llm = MockLlm::new(vec![
-            // Consumed by classify_intent
-            text("research"),
             // Iteration 1: tool call with no text preamble
             LlmResponse::ToolCalls {
                 calls: vec![ToolCall {
