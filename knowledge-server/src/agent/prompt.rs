@@ -69,6 +69,26 @@ discussed, or a follow-up that can be answered from prior tool results in this
 conversation, answer directly from context. Tool calls are for discovering new
 information, not repeating work you already did.
 
+## Parallel Research
+
+Call `propose_parallel_research` instead of continuing to investigate directly
+as soon as you recognize that the remaining work splits into 2-6 leads that are
+genuinely INDEPENDENT — each answerable on its own, in any order, without
+needing another lead's findings. This can be your very first action, or it can
+come after a few tool calls once the split becomes clear — do not keep
+investigating one side to completion before switching; propose as soon as you
+see the split, and hand over whatever you have not yet looked into.
+
+Concrete signals that a question is this shape:
+- It compares or contrasts named things: "compare X and Y", "X vs Y", "how does
+  X differ from Y" -> one lead per thing being compared.
+- It lists 2-6 named things to look at: "check A, B, and C", "review the auth,
+  billing, and notifications modules" -> one lead per named thing.
+
+Do not call it for anything that is one continuous chain of reasoning (tracing a
+single call path, debugging one specific function, a narrow factual lookup) —
+splitting those produces a worse answer. When unsure, investigate normally
+instead.
 
 ## Knowledge Graph Schema
 
@@ -146,26 +166,6 @@ Format (JSON inside the fence):
 Valid `kind` values: function, method, class, struct, trait, interface, enum, module, impl, type.
 Valid `relation` values: calls, uses, inherits, implements, contains, embeds.
 "#, ask_user_guidance())
-}
-
-pub fn intent_classifier_prompt(latest_query: &str, history_snippet: &str) -> String {
-    format!(r#"Classify the user's latest message into one of these intents.
-Reply with a single word only.
-
-- conversational: a follow-up, clarification, or greeting that can be answered
-  from conversation context without new tool calls (e.g. "what does that mean?",
-  "thanks", "summarize that").
-- research: a question about code or architecture that requires searching the
-  knowledge graph (e.g. "how does retry work?", "find all callers of X").
-- action: a request to execute or change something on a machine (e.g.
-  "restart nginx on build-box", "deploy the service", "create an agent").
-- hybrid: a request that requires both research and action (e.g. "find the
-  config file and update the timeout on the agent").
-
-Latest user message: {latest_query}
-Recent conversation context: {history_snippet}
-
-    Intent:"#)
 }
 
 fn deployment_context_sections(ctx: &crate::deployments::DeploymentContext) -> (String, String, String) {
@@ -303,6 +303,13 @@ mod tests {
     }
 
     #[test]
+    fn system_prompt_contains_parallel_research_guidance() {
+        let prompt = system_prompt();
+        assert!(prompt.contains("propose_parallel_research"));
+        assert!(prompt.contains("INDEPENDENT"));
+    }
+
+    #[test]
     fn system_prompt_contains_anti_narration_rule() {
         let prompt = system_prompt();
         assert!(prompt.contains("Never mention tool"));
@@ -314,16 +321,6 @@ mod tests {
         let prompt = system_prompt();
         assert!(prompt.contains("what you are looking for or trying to accomplish"));
         assert!(!prompt.contains("explaining what you are looking for and why"));
-    }
-
-    #[test]
-    fn intent_classifier_prompt_contains_query_and_options() {
-        let prompt = intent_classifier_prompt("how does retry work?", "[user]: how?\n[assistant]: ...");
-        assert!(prompt.contains("how does retry work?"));
-        assert!(prompt.contains("conversational"));
-        assert!(prompt.contains("research"));
-        assert!(prompt.contains("action"));
-        assert!(prompt.contains("hybrid"));
     }
 
     #[test]

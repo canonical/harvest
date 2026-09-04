@@ -86,30 +86,7 @@ impl LlmProvider for AnthropicProvider {
     }
 
     async fn chat_with(&self, model: Option<&str>, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
-        let system_text = messages
-            .iter()
-            .find(|m| matches!(m.role, Role::System))
-            .and_then(|m| match &m.content {
-                MessageContent::Text(t) => Some(t.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-
-        let api_messages: Vec<Value> = messages
-            .iter()
-            .filter(|m| !matches!(m.role, Role::System))
-            .map(to_anthropic_message)
-            .collect();
-
-        let api_tools: Vec<Value> = tools.iter().map(to_anthropic_tool).collect();
-
-        let body = json!({
-            "model":      model.unwrap_or(&self.model),
-            "system":     system_text,
-            "messages":   api_messages,
-            "tools":      api_tools,
-            "max_tokens": MAX_TOKENS,
-        });
+        let body = build_body(model.unwrap_or(&self.model), messages, tools, false);
 
         let response = retry::send_with_retry(
             self.max_retries,
@@ -145,6 +122,51 @@ impl LlmProvider for AnthropicProvider {
     ) -> Result<()> {
         self.stream(model, messages, tools, tx).await
     }
+}
+
+fn build_body(model: &str, messages: &[Message], tools: &[ToolDefinition], stream: bool) -> Value {
+    let system_text = messages
+        .iter()
+        .find(|m| matches!(m.role, Role::System))
+        .and_then(|m| match &m.content {
+            MessageContent::Text(t) => Some(t.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let mut api_messages: Vec<Value> = messages
+        .iter()
+        .filter(|m| !matches!(m.role, Role::System))
+        .map(to_anthropic_message)
+        .collect();
+    add_cache_breakpoint_to_last_message(&mut api_messages);
+
+    let api_tools: Vec<Value> = tools.iter().map(to_anthropic_tool).collect();
+
+    let mut body = json!({
+        "model":      model,
+        "system":     [{ "type": "text", "text": system_text, "cache_control": { "type": "ephemeral" } }],
+        "messages":   api_messages,
+        "tools":      api_tools,
+        "max_tokens": MAX_TOKENS,
+    });
+    if stream {
+        body["stream"] = json!(true);
+    }
+    body
+}
+
+fn add_cache_breakpoint_to_last_message(api_messages: &mut [Value]) {
+    let Some(last) = api_messages.last_mut() else { return };
+    let mut blocks = match last["content"].take() {
+        Value::String(s) => vec![json!({ "type": "text", "text": s })],
+        Value::Array(blocks) => blocks,
+        other => vec![other],
+    };
+    if let Some(block) = blocks.last_mut().and_then(Value::as_object_mut) {
+        block.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
+    }
+    last["content"] = Value::Array(blocks);
 }
 
 fn to_anthropic_message(msg: &Message) -> Value {
@@ -310,31 +332,7 @@ impl AnthropicProvider {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
-        let system_text = messages
-            .iter()
-            .find(|m| matches!(m.role, Role::System))
-            .and_then(|m| match &m.content {
-                MessageContent::Text(t) => Some(t.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-
-        let api_messages: Vec<Value> = messages
-            .iter()
-            .filter(|m| !matches!(m.role, Role::System))
-            .map(to_anthropic_message)
-            .collect();
-
-        let api_tools: Vec<Value> = tools.iter().map(to_anthropic_tool).collect();
-
-        let body = json!({
-            "model":      model.unwrap_or(&self.model),
-            "system":     system_text,
-            "messages":   api_messages,
-            "tools":      api_tools,
-            "max_tokens": MAX_TOKENS,
-            "stream":     true,
-        });
+        let body = build_body(model.unwrap_or(&self.model), messages, tools, true);
 
         let response = retry::send_with_retry(
             self.max_retries,
@@ -721,7 +719,7 @@ mod tests {
         let mock = server.mock(|when, then| {
             when.method("POST")
                 .path("/v1/messages")
-                .body_includes(r#""system":"be helpful""#);
+                .body_includes(r#""text":"be helpful""#);
             then.status(200).json_body(text_response_body());
         });
 
@@ -736,6 +734,40 @@ mod tests {
             LlmResponse::Message { .. } => {}
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn build_body_puts_a_cache_breakpoint_on_the_system_block() {
+        let body = build_body("m", &[Message::system("be helpful"), Message::user("hi")], &[], false);
+        assert_eq!(body["system"][0]["text"], "be helpful");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn build_body_puts_a_cache_breakpoint_on_the_last_message_block() {
+        let body = build_body("m", &[Message::user("first"), Message::assistant_text("ok"), Message::user("second")], &[], false);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        let last_content = messages.last().unwrap()["content"].as_array().unwrap();
+        assert_eq!(last_content.last().unwrap()["cache_control"]["type"], "ephemeral");
+        assert!(messages[0]["content"].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn build_body_cache_breakpoint_survives_multi_part_message_content() {
+        let att = crate::agent::Attachment { name: "a.png".into(), mime_type: "image/png".into(), data: "abc".into() };
+        let msg = crate::agent::build_user_message("look at this", &[att]);
+        let body = build_body("m", &[msg], &[], false);
+        let parts = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].get("cache_control").is_none(), "breakpoint belongs on the last block, not the first");
+        assert_eq!(parts[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn build_body_is_a_noop_on_empty_messages() {
+        let body = build_body("m", &[], &[], false);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 0);
     }
 
     fn sse_body(events: &[Value]) -> String {
