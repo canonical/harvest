@@ -319,6 +319,9 @@ function handleProjectEvent(event) {
     case 'confirm_action':
     case 'intent':
     case 'phase':
+    case 'parallel_research_started':
+    case 'parallel_research_lead_done':
+    case 'parallel_research_merge_started':
     case 'done':
     case 'error': {
       if (event.conv_id !== activeConvId.value) break;
@@ -522,10 +525,15 @@ function handleChatEvent(event) {
     case 'confirm_action': chat.addConfirmAction(event.id, event.name, event.input, event.description); break;
     case 'intent':         chat.setIntent(event.mode); break;
     case 'phase':           chat.setPhase(event.label); break;
+    case 'parallel_research_started':      chat.addParallelResearchStarted(event.leads); break;
+    case 'parallel_research_lead_done':    chat.updateParallelResearchLead(event.index, {
+      iterations: event.iterations, preview: event.preview, durationMs: event.duration_ms,
+    }); break;
+    case 'parallel_research_merge_started': chat.markParallelResearchMerging(event.duration_ms); break;
     case 'done':
       chat.finalizeAssistantMessage({
         answer: event.answer, sources: event.sources, tool_calls_made: event.tool_calls_made,
-        provider_used: event.provider_used,
+        provider_used: event.provider_used, duration_ms: event.duration_ms,
       });
       updateConvTitle();
       break;

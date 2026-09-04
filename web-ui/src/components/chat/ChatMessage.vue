@@ -36,11 +36,20 @@
         <span class="loading-orbit__label">Thinking…</span>
       </span>
 
-      <div v-if="msg.provider_used" class="provider-badge" :title="msg.provider_used.provider_id">
-        <svg class="provider-badge__icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
-          <path d="M.81 7.36a1.92 1.92 0 1 1 3.799.572A1.92 1.92 0 0 1 .81 7.36M8.826 3.033a1.92 1.92 0 1 1 3.755.806 1.92 1.92 0 0 1-3.755-.806M7.04 12.585a4.68 4.68 0 0 1-3.19-2.432 2.76 2.76 0 0 1-1.64.202 6.25 6.25 0 0 0 4.498 3.77c.45.098.908.144 1.364.141a2.74 2.74 0 0 1-.562-1.605 5 5 0 0 1-.47-.076M8.394 12.193a1.92 1.92 0 0 1 3.754.805 1.92 1.92 0 1 1-3.754-.805M12.943 11.89a6.3 6.3 0 0 0 1.22-2.587 6.3 6.3 0 0 0-.905-4.782 2.77 2.77 0 0 1-1.08 1.265 4.7 4.7 0 0 1-.154 4.674c.45.37.77.87.919 1.43M2.56 4.892a2.75 2.75 0 0 1 1.603.41 4.68 4.68 0 0 1 3.77-2.015q.012-.218.057-.433c.088-.411.268-.795.525-1.124A6.31 6.31 0 0 0 2.56 4.892"/>
-        </svg>
-        {{ msg.provider_used.model }} · {{ msg.provider_used.kind }}
+      <div v-if="msg.provider_used || durationLabel" class="message__meta-row">
+        <div v-if="msg.provider_used" class="provider-badge" :title="msg.provider_used.provider_id">
+          <svg class="provider-badge__icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+            <path d="M.81 7.36a1.92 1.92 0 1 1 3.799.572A1.92 1.92 0 0 1 .81 7.36M8.826 3.033a1.92 1.92 0 1 1 3.755.806 1.92 1.92 0 0 1-3.755-.806M7.04 12.585a4.68 4.68 0 0 1-3.19-2.432 2.76 2.76 0 0 1-1.64.202 6.25 6.25 0 0 0 4.498 3.77c.45.098.908.144 1.364.141a2.74 2.74 0 0 1-.562-1.605 5 5 0 0 1-.47-.076M8.394 12.193a1.92 1.92 0 0 1 3.754.805 1.92 1.92 0 1 1-3.754-.805M12.943 11.89a6.3 6.3 0 0 0 1.22-2.587 6.3 6.3 0 0 0-.905-4.782 2.77 2.77 0 0 1-1.08 1.265 4.7 4.7 0 0 1-.154 4.674c.45.37.77.87.919 1.43M2.56 4.892a2.75 2.75 0 0 1 1.603.41 4.68 4.68 0 0 1 3.77-2.015q.012-.218.057-.433c.088-.411.268-.795.525-1.124A6.31 6.31 0 0 0 2.56 4.892"/>
+          </svg>
+          {{ msg.provider_used.model }} · {{ msg.provider_used.kind }}
+        </div>
+        <div v-if="durationLabel" class="duration-badge" :class="{ 'duration-badge--live': msg.status === 'loading' }" title="Response generation time">
+          <svg class="duration-badge__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="8" cy="8" r="6.3"/>
+            <path d="M8 4.8V8.2l2.3 1.3" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          {{ durationLabel }}
+        </div>
       </div>
 
       <div v-if="msg.intent || (msg.phase && msg.status === 'loading')" class="message__status-bar" :class="{ 'message__status-bar--sticky': msg.status === 'loading' }">
@@ -104,6 +113,11 @@
               v-else-if="item.type === 'tool_group'"
               v-show="!isCollapsible(idx) || chainExpanded"
               :items="item.items"
+            />
+            <ParallelResearchBlock
+              v-else-if="item.type === 'parallel_research'"
+              v-show="!isCollapsible(idx) || chainExpanded"
+              :block="item"
             />
 
             <div v-else-if="item.type === 'confirm_action'" class="message__confirm" role="group" :aria-label="item.description">
@@ -198,14 +212,15 @@
 </template>
 
 <script setup>
-import { computed, ref, watch, nextTick, onMounted } from 'vue';
+import { computed, ref, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import ThinkingBlock  from './ThinkingBlock.vue';
 import ToolCallStep   from './ToolCallStep.vue';
 import ToolCallGroup  from './ToolCallGroup.vue';
+import ParallelResearchBlock from './ParallelResearchBlock.vue';
 import ProvisionSteps from '../agents/ProvisionSteps.vue';
 import { renderMarkdown, buildCitationIndex, buildFileUrl } from '../../lib/markdown.js';
 import { mountInlineGraphs } from '../../lib/inline-graph.js';
-import { avatarColor, initials, addCopyButtons } from '../../lib/utils.js';
+import { avatarColor, initials, addCopyButtons, formatDuration } from '../../lib/utils.js';
 import { runningVerb } from '../../lib/tool-verbs.js';
 
 const answerBodyRef    = ref(null);
@@ -236,6 +251,28 @@ const senderColor    = computed(() => avatarColor(props.msg.username ?? 'You'));
 const pendingConfirmCount = computed(() =>
   (props.msg.chain ?? []).filter(i => i.type === 'confirm_action' && i.status === 'pending').length
 );
+
+const tickNow = ref(Date.now());
+let tickTimer = null;
+
+watch(() => props.msg.status, (status) => {
+  if (status === 'loading' && props.msg.role === 'assistant') {
+    if (!tickTimer) tickTimer = setInterval(() => { tickNow.value = Date.now(); }, 200);
+  } else if (tickTimer) {
+    clearInterval(tickTimer);
+    tickTimer = null;
+  }
+}, { immediate: true });
+
+onUnmounted(() => { if (tickTimer) clearInterval(tickTimer); });
+
+const durationLabel = computed(() => {
+  if (props.msg.role !== 'assistant') return null;
+  if (props.msg.status === 'loading') {
+    return props.msg.startedAt ? formatDuration(tickNow.value - props.msg.startedAt) : null;
+  }
+  return props.msg.durationMs != null ? formatDuration(props.msg.durationMs) : null;
+});
 
 const GROUPABLE_MIN_RUN = 3;
 
