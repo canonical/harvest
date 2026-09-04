@@ -32,6 +32,7 @@
       </svg>
 
       <span class="tc-step__label">{{ label }}</span>
+      <span v-if="step.gapFill" class="tc-step__gap-badge" title="Made during the merge step to fill a coverage gap between leads">gap-fill</span>
 
       <svg
         v-if="hasDetail"

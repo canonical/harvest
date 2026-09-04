@@ -119,6 +119,7 @@ struct PausedConfirm {
     pending:    Vec<PendingConfirmCall>,
     resolved:   HashMap<String, ResolvedConfirmItem>,
     selection:  Option<ProviderSelection>,
+    elapsed_ms: u64,
 }
 
 fn selection_from_parts(provider_id: &Option<String>, model: &Option<String>) -> Option<ProviderSelection> {
@@ -398,6 +399,7 @@ async fn save_project_turn(
     chain: Vec<Value>,
     question: Option<Value>,
     provider_used: Option<&UsedProvider>,
+    duration_ms: u64,
 ) {
     let mut messages = prior_messages;
     messages.push(json!({
@@ -412,6 +414,7 @@ async fn save_project_turn(
         "sources": sources,
         "chain": chain,
         "tool_calls_made": tool_calls_made,
+        "duration_ms": duration_ms,
     });
     if let Some(question) = question {
         assistant_message["question"] = question;
@@ -455,6 +458,7 @@ async fn update_last_assistant_turn(
     new_chain: Vec<Value>,
     question: Option<Value>,
     provider_used: Option<&UsedProvider>,
+    duration_ms: u64,
 ) {
     let mut messages = load_project_messages_raw(neo4j, project_id, conv_id).await;
     let Some(last) = messages.last_mut() else { return; };
@@ -466,6 +470,7 @@ async fn update_last_assistant_turn(
     last["sources"] = json!(sources);
     last["chain"] = json!(chain);
     last["tool_calls_made"] = json!(tool_calls_made);
+    last["duration_ms"] = json!(duration_ms);
     match question {
         Some(question) => last["question"] = question,
         None => { if let Some(obj) = last.as_object_mut() { obj.remove("question"); } }
@@ -615,7 +620,7 @@ async fn drive_turn(
             }
         }
 
-        if let AgentEvent::Done { answer, sources, tool_calls_made, provider_used } = &event {
+        if let AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms } = &event {
             let save_now = chrono::Utc::now().to_rfc3339();
             let chain = std::mem::take(&mut chain_builder).finish();
             match &persist {
@@ -625,14 +630,14 @@ async fn drive_turn(
                         &query, &username, attachment_meta.clone(),
                         prior_messages.clone(),
                         answer, sources, *tool_calls_made,
-                        chain, pending_question.clone(), provider_used.as_ref(),
+                        chain, pending_question.clone(), provider_used.as_ref(), *duration_ms,
                     ).await;
                 }
                 TurnPersist::Continuation => {
                     update_last_assistant_turn(
                         &neo4j, &project_id, &conv_id, &save_now,
                         answer, sources, *tool_calls_made,
-                        chain, pending_question.clone(), provider_used.as_ref(),
+                        chain, pending_question.clone(), provider_used.as_ref(), *duration_ms,
                     ).await;
                 }
             }
@@ -703,6 +708,7 @@ async fn drive_turn(
                 pending:    paused_turn.pending,
                 resolved:   HashMap::new(),
                 selection,
+                elapsed_ms: paused_turn.elapsed_ms,
             },
         );
     }
@@ -1231,6 +1237,7 @@ pub async fn resume_confirm_action(
         tokio::spawn(async move {
             let out = agent_clone.resume_after_confirm(
                 paused.messages, paused.iterations, results, selection_for_agent.as_ref(), agent_event_sender,
+                paused.elapsed_ms,
             ).await;
             let _ = paused_tx.send(out);
         });
