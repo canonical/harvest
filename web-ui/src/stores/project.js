@@ -4,12 +4,26 @@ import { fetchProjects as apiFetchProjects, createProject as apiCreateProject, f
 
 const LS_KEY = 'harvest_selected_project_id';
 
+let _readyResolve;
+const _readyPromise = new Promise(resolve => { _readyResolve = resolve; });
+let _ready = false;
+
 export const useProjectStore = defineStore('project', () => {
   const projects        = ref([]);
   const selectedProject = ref(null);
   let   _pendingId      = null;
 
   const selectedProjectId = computed(() => selectedProject.value?.id ?? null);
+
+  function markReady() {
+    if (_ready) return;
+    _ready = true;
+    _readyResolve();
+  }
+
+  function whenReady() {
+    return _readyPromise;
+  }
 
   async function fetchProjects() {
     try {
@@ -66,6 +80,6 @@ export const useProjectStore = defineStore('project', () => {
   return {
     projects, selectedProject, selectedProjectId,
     fetchProjects, selectProject, clearProject, selectProjectById, _flushPending,
-    createProject, fetchGroups,
+    createProject, fetchGroups, markReady, whenReady,
   };
 });

@@ -195,7 +195,7 @@
       <div v-if="!navCollapsed" class="nav-overlay" @click="closeNav" />
 
       <main class="l-main">
-        <router-view v-slot="{ Component }" :key="project.selectedProjectId ?? 'no-project'">
+        <router-view v-slot="{ Component }" :key="routeViewKey">
           <component :is="Component" :project-id="project.selectedProjectId ?? null" />
         </router-view>
       </main>
@@ -262,6 +262,10 @@ const availableGroups      = ref([]);
 
 const isAuthRoute = computed(() =>
   route.path === '/login' || route.path === '/register'
+);
+
+const routeViewKey = computed(() =>
+  route.meta.stableAcrossProjects ? route.path : (project.selectedProjectId ?? 'no-project')
 );
 
 const filteredProjects = computed(() => {
@@ -333,17 +337,21 @@ async function submitCreateProject() {
 }
 
 onMounted(async () => {
-  auth.fetchConfig();
-  if (!auth.isLoggedIn) {
-    const user = await auth.fetchMe();
-    if (!user && !isAuthRoute.value) {
-      router.push('/login');
-      return;
+  try {
+    auth.fetchConfig();
+    if (!auth.isLoggedIn) {
+      const user = await auth.fetchMe();
+      if (!user && !isAuthRoute.value) {
+        router.push('/login');
+        return;
+      }
     }
-  }
-  if (auth.isLoggedIn) {
-    if (auth.user?.last_project_id) project.selectProjectById(auth.user.last_project_id);
-    await project.fetchProjects();
+    if (auth.isLoggedIn) {
+      if (auth.user?.last_project_id) project.selectProjectById(auth.user.last_project_id);
+      await project.fetchProjects();
+    }
+  } finally {
+    project.markReady();
   }
 });
 

@@ -2,8 +2,17 @@ const MERMAID_CDN = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.mi
 
 let mermaidInstance = null;
 let loadingPromise = null;
+let initializedTheme = null;
+const mountedDiagrams = new Set();
 
-export async function loadMermaid() {
+function isDarkTheme() {
+  const attr = document.documentElement.getAttribute('data-theme');
+  if (attr === 'dark') return true;
+  if (attr === 'light') return false;
+  return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+async function loadMermaidModule() {
   if (mermaidInstance) return mermaidInstance;
   if (loadingPromise) {
     await loadingPromise;
@@ -11,17 +20,32 @@ export async function loadMermaid() {
   }
   loadingPromise = (async () => {
     const mod = await import(/* @vite-ignore */ MERMAID_CDN);
-    const mermaid = mod.default;
-    mermaid.initialize({
-      startOnLoad: false,
-      theme: 'default',
-      securityLevel: 'strict',
-      fontFamily: 'Ubuntu, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-    });
-    mermaidInstance = mermaid;
+    mermaidInstance = mod.default;
   })();
   await loadingPromise;
   return mermaidInstance;
+}
+
+export async function loadMermaid() {
+  const mermaid = await loadMermaidModule();
+  const theme = isDarkTheme() ? 'dark' : 'default';
+  if (theme !== initializedTheme) {
+    mermaid.initialize({
+      startOnLoad: false,
+      theme,
+      securityLevel: 'strict',
+      fontFamily: 'Ubuntu, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    });
+    initializedTheme = theme;
+  }
+  return mermaid;
+}
+
+async function renderInto(wrapperEl, source) {
+  const mermaid = await loadMermaid();
+  const id = `mermaid-${Math.random().toString(36).slice(2, 10)}`;
+  const { svg } = await mermaid.render(id, source);
+  wrapperEl.innerHTML = svg;
 }
 
 export async function mountMermaidDiagrams(containerEl) {
@@ -31,17 +55,27 @@ export async function mountMermaidDiagrams(containerEl) {
     codeEl.classList.add('mermaid-mounted');
     const preEl = codeEl.parentElement;
     const source = codeEl.textContent;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'mermaid-diagram';
 
     try {
-      const mermaid = await loadMermaid();
-      const id = `mermaid-${Math.random().toString(36).slice(2, 10)}`;
-      const { svg } = await mermaid.render(id, source);
-      const wrapper = document.createElement('div');
-      wrapper.className = 'mermaid-diagram';
-      wrapper.innerHTML = svg;
+      await renderInto(wrapper, source);
       preEl.replaceWith(wrapper);
+      mountedDiagrams.add({ wrapper, source });
     } catch {
       codeEl.classList.remove('mermaid-mounted');
     }
+  }
+}
+
+export async function rethemeMermaidDiagrams() {
+  for (const entry of mountedDiagrams) {
+    if (!entry.wrapper.isConnected) {
+      mountedDiagrams.delete(entry);
+      continue;
+    }
+    try {
+      await renderInto(entry.wrapper, entry.source);
+    } catch {}
   }
 }
