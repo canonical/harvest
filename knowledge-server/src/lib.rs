@@ -4,6 +4,7 @@ pub mod skills;
 pub mod agent;
 pub mod api;
 pub mod auth;
+pub mod chat_layouts;
 pub mod config;
 pub mod conversations;
 pub mod deployments;
