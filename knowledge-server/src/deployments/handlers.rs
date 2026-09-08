@@ -922,12 +922,36 @@ pub async fn generate_design_stream(
     let (agent, prompt) = prepare_design_generation(&state, &user, &project_id, &deployment_id, &body).await?;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
+    let neo4j          = Arc::clone(&state.neo4j);
+    let project_id_bg  = project_id.clone();
+    let deployment_id_bg = deployment_id.clone();
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         tokio::spawn(async move {
             agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
         });
+        // Accumulated independently of the agent's own Done.answer, which
+        // only carries the *last* tool-calling round's text — if the model
+        // writes part of the document, makes a tool call partway through
+        // (e.g. an attempted generate_artifact), then keeps writing with no
+        // further tool calls, Done.answer silently drops everything before
+        // that call. Collecting every TextDelta ourselves survives that.
+        let mut streamed_text = String::new();
         while let Some(event) = agent_rx.recv().await {
+            if let AgentEvent::TextDelta { text } = &event {
+                streamed_text.push_str(text);
+            }
+            if let AgentEvent::Done { answer, .. } = &event {
+                // The model is instructed to save the document itself via
+                // generate_artifact + link_deployment_artifact, but that
+                // depends entirely on it following a trailing tool-call
+                // instruction after already satisfying the visible "write
+                // the doc" ask — which it does not always do. Persist the
+                // streamed text as a fallback so a generation that produced
+                // a real document never silently vanishes.
+                let text = if streamed_text.is_empty() { answer.as_str() } else { streamed_text.as_str() };
+                ensure_design_doc_persisted(&neo4j, &project_id_bg, &deployment_id_bg, text).await;
+            }
             let _ = tx.send(event).await;
         }
     });
@@ -943,6 +967,59 @@ pub async fn generate_design_stream(
         HeaderValue::from_static("no"),
     );
     Ok(response)
+}
+
+/// Backstop for `generate_design_stream`: if the agent's turn ended without
+/// the model linking a design_doc (it wrote the document as plain text
+/// instead of calling generate_artifact + link_deployment_artifact), save
+/// the final answer as the design artifact so the generation isn't lost.
+async fn ensure_design_doc_persisted(
+    neo4j:         &Arc<Neo4jClient>,
+    project_id:    &str,
+    deployment_id: &str,
+    answer:        &str,
+) {
+    let deployment = match fetch_deployment_detail(neo4j, project_id, deployment_id).await {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    if !deployment["design_doc"].is_null() {
+        return;
+    }
+    let content = answer.trim();
+    if content.is_empty() {
+        return;
+    }
+    tracing::warn!(
+        project_id, deployment_id,
+        "design generation finished without a linked design_doc; persisting the streamed answer as a fallback"
+    );
+
+    let title = format!("{} Design", deployment["name"].as_str().unwrap_or("Deployment"));
+    let created = match create_artifact(neo4j, project_id, ArtifactKind::Markdown, &title, content, "assistant").await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "fallback design artifact creation failed");
+            return;
+        }
+    };
+    let Some(artifact_id) = created["id"].as_str() else { return };
+
+    if let Err(e) = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
+         OPTIONAL MATCH (d)-[old:HAS_DESIGN_DOC]->(:Artifact)
+         DELETE old
+         WITH d
+         MATCH (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact {id: $aid})
+         CREATE (d)-[:HAS_DESIGN_DOC]->(a)",
+        json!({ "pid": project_id, "did": deployment_id, "aid": artifact_id }),
+    ).await {
+        tracing::warn!(error = %e, "fallback design_doc link failed");
+        return;
+    }
+    crate::deployments::design_cache::schedule_regeneration(
+        Arc::clone(neo4j), project_id.to_string(), deployment_id.to_string(),
+    );
 }
 
 #[derive(serde::Deserialize, Default)]
