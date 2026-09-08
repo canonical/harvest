@@ -58,7 +58,8 @@ async fn main() -> Result<()> {
     let global_tools = graph_tools::all_tools(Arc::clone(&neo4j));
     let agent = Arc::new(
         Agent::new(Arc::clone(&llm_provider), global_tools, max_iterations)
-            .with_compaction(compaction_threshold_chars, compaction_keep_last),
+            .with_compaction(compaction_threshold_chars, compaction_keep_last)
+            .with_parallel_research(true),
     );
 
     let machine_registry = MachineRegistry::new();
