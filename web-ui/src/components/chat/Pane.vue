@@ -85,17 +85,45 @@
       <div v-else class="pane__empty">No tabs open</div>
 
       <template v-if="isDragActive">
-        <div class="pane__drop-overlay pane__drop-overlay--top"    @dragover.prevent @drop="onEdgeDrop('top', $event)" />
-        <div class="pane__drop-overlay pane__drop-overlay--bottom" @dragover.prevent @drop="onEdgeDrop('bottom', $event)" />
-        <div class="pane__drop-overlay pane__drop-overlay--left"   @dragover.prevent @drop="onEdgeDrop('left', $event)" />
-        <div class="pane__drop-overlay pane__drop-overlay--right"  @dragover.prevent @drop="onEdgeDrop('right', $event)" />
+        <div
+          class="pane__drop-overlay pane__drop-overlay--top"
+          :class="{ 'pane__drop-overlay--active': hoveredEdge === 'top' }"
+          @dragenter.prevent="hoveredEdge = 'top'"
+          @dragover.prevent
+          @dragleave="onEdgeDragLeave('top')"
+          @drop="onEdgeDrop('top', $event)"
+        />
+        <div
+          class="pane__drop-overlay pane__drop-overlay--bottom"
+          :class="{ 'pane__drop-overlay--active': hoveredEdge === 'bottom' }"
+          @dragenter.prevent="hoveredEdge = 'bottom'"
+          @dragover.prevent
+          @dragleave="onEdgeDragLeave('bottom')"
+          @drop="onEdgeDrop('bottom', $event)"
+        />
+        <div
+          class="pane__drop-overlay pane__drop-overlay--left"
+          :class="{ 'pane__drop-overlay--active': hoveredEdge === 'left' }"
+          @dragenter.prevent="hoveredEdge = 'left'"
+          @dragover.prevent
+          @dragleave="onEdgeDragLeave('left')"
+          @drop="onEdgeDrop('left', $event)"
+        />
+        <div
+          class="pane__drop-overlay pane__drop-overlay--right"
+          :class="{ 'pane__drop-overlay--active': hoveredEdge === 'right' }"
+          @dragenter.prevent="hoveredEdge = 'right'"
+          @dragover.prevent
+          @dragleave="onEdgeDragLeave('right')"
+          @drop="onEdgeDrop('right', $event)"
+        />
       </template>
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
 import ChatPaneContent from './ChatPaneContent.vue';
 import { useChatWorkspaceStore } from '../../stores/chatWorkspace.js';
 import { useProjectStore } from '../../stores/project.js';
@@ -113,6 +141,13 @@ const EDGES = ['right', 'bottom'];
 
 const activeTab = computed(() => props.node.tabs.find(t => t.tabId === props.node.activeTabId) ?? null);
 const isDragActive = computed(() => dragState.value.draggingTabId !== null);
+const hoveredEdge = ref(null);
+
+watch(isDragActive, (active) => { if (!active) hoveredEdge.value = null; });
+
+function onEdgeDragLeave(edge) {
+  if (hoveredEdge.value === edge) hoveredEdge.value = null;
+}
 
 function activate(tabId) {
   workspace.setActiveTab(props.node.id, tabId);
@@ -157,6 +192,7 @@ function onTabstripDrop() {
 function onEdgeDrop(edge) {
   const { draggingTabId, sourcePaneId } = dragState.value;
   if (draggingTabId) workspace.moveTabToNewSplit(sourcePaneId, draggingTabId, props.node.id, edge);
+  hoveredEdge.value = null;
   endTabDrag();
 }
 
