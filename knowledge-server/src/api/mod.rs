@@ -22,6 +22,7 @@ use crate::agent::{
 use crate::artifacts::handlers::{self as artifact_handlers, ArtifactState};
 use crate::skills::{handlers as skill_handlers, SkillStore};
 use crate::auth::{self, handlers as auth_handlers, AuthState};
+use crate::chat_layouts::handlers::{self as chat_layout_handlers, ChatLayoutState};
 use crate::config::UiConfig;
 use crate::config::AuthConfig;
 use crate::conversations::handlers::{self as conv_handlers, ConvState};
@@ -239,6 +240,10 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         neo4j: Arc::clone(&state.neo4j),
     });
 
+    let chat_layout_state = Arc::new(ChatLayoutState {
+        neo4j: Arc::clone(&state.neo4j),
+    });
+
     let public_router = Router::new()
         .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
         .route("/auth/config",            get(auth_handlers::config))
@@ -282,6 +287,16 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                                      .put(conv_handlers::update)
                                      .delete(conv_handlers::delete))
         .with_state(Arc::clone(&conv_state));
+
+    let chat_layout_router = Router::new()
+        .route("/chat-layouts/current", get(chat_layout_handlers::get_current)
+                                       .put(chat_layout_handlers::put_current))
+        .route("/chat-layouts",         get(chat_layout_handlers::list_named)
+                                       .post(chat_layout_handlers::create_named))
+        .route("/chat-layouts/:id",     get(chat_layout_handlers::get_named)
+                                       .put(chat_layout_handlers::update_named)
+                                       .delete(chat_layout_handlers::delete_named))
+        .with_state(Arc::clone(&chat_layout_state));
 
     let project_state = Arc::new(ProjectState::new(
         Arc::clone(&state.neo4j),
@@ -394,6 +409,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let mut protected_router = Router::new()
         .merge(me_router)
         .merge(conv_router)
+        .merge(chat_layout_router)
         .merge(agent_router)
         .merge(graph_router)
         .merge(llm_router)
