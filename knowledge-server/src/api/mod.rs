@@ -154,7 +154,8 @@ impl ProjectAgentBuilder {
         let tools = self.base_tools(project_id);
         Arc::new(
             Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
-                .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last),
+                .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+                .with_parallel_research(true),
         )
     }
 
