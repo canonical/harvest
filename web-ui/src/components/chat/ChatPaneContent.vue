@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-page">
+  <div class="chat-page" @paste="onPaste">
     <div class="chat-with-history">
       <div class="chat-content">
         <div v-if="remoteLocked" class="project-lock-banner">
@@ -133,8 +133,6 @@
     <div v-if="projectId && historyOpen" class="chat-history-backdrop" @click="historyOpen = false" />
   </div>
 
-  <SourcePanel />
-
   <div
     v-if="deletingConv"
     class="modal"
@@ -157,13 +155,12 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
-import { useAuthStore }    from '../stores/auth.js';
-import { useChatStore }    from '../stores/chat.js';
-import { useLlmStore }     from '../stores/llm.js';
-import ChatMessage         from '../components/chat/ChatMessage.vue';
-import LlmModelPicker      from '../components/chat/LlmModelPicker.vue';
-import SourcePanel         from '../components/SourcePanel.vue';
-import { describeToolCall } from '../lib/tool-render.js';
+import { useAuthStore }    from '../../stores/auth.js';
+import { useLlmStore }     from '../../stores/llm.js';
+import { useChatInstance } from '../../composables/useChatInstance.js';
+import ChatMessage         from './ChatMessage.vue';
+import LlmModelPicker      from './LlmModelPicker.vue';
+import { describeToolCall } from '../../lib/tool-render.js';
 import {
   queryStream,
   openProjectEvents,
@@ -178,21 +175,25 @@ import {
   deleteConversation as apiDeleteConversation,
   fetchRepositories,
   resumeConfirmAction,
-} from '../lib/api.js';
-import { runConfirmableAction as runConfirmableActionShared } from '../lib/confirmable-actions.js';
+} from '../../lib/api.js';
+import { runConfirmableAction as runConfirmableActionShared } from '../../lib/confirmable-actions.js';
 
 const props = defineProps({
-  projectId: { type: String, default: null },
+  tabId:          { type: String, required: true },
+  conversationId: { type: String, default: null },
+  projectId:      { type: String, default: null },
 });
 
+const emit = defineEmits(['update:conversationId', 'title-updated']);
+
 const auth  = useAuthStore();
-const chat  = useChatStore();
+const chat  = useChatInstance(props.tabId);
 const llm   = useLlmStore();
 
 const query          = ref('');
 const historyOpen    = ref(false);
 const conversations  = ref([]);
-const activeConvId   = ref(null);
+const activeConvId   = ref(props.conversationId ?? null);
 const deletingConv   = ref(null);
 const repoUrlMap     = ref({});
 const fileInput      = ref(null);
@@ -216,6 +217,11 @@ const presenceOthers = computed(() => {
     u.user_id !== me?.id && u.conv_id === activeConvId.value
   );
 });
+
+function setActiveConvId(id) {
+  activeConvId.value = id;
+  emit('update:conversationId', id);
+}
 
 function dayStart(d) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
@@ -307,6 +313,7 @@ function handleProjectEvent(event) {
     case 'title_updated': {
       const idx = conversations.value.findIndex(c => c.id === event.conv_id);
       if (idx !== -1) conversations.value[idx] = { ...conversations.value[idx], title: event.title };
+      if (event.conv_id === activeConvId.value) emit('title-updated', event.title);
       break;
     }
     case 'user_message':
@@ -350,7 +357,7 @@ async function loadConversation(id) {
     const conv = props.projectId
       ? await getProjectConversation(props.projectId, id)
       : await getConversation(id);
-    activeConvId.value = id;
+    setActiveConvId(id);
     chat.loadFromHistory(Array.isArray(conv.messages) ? conv.messages : []);
     historyOpen.value = false;
     openEventStream();
@@ -383,7 +390,7 @@ async function submitDeleteConversation() {
 }
 
 function newChat() {
-  activeConvId.value = null;
+  setActiveConvId(null);
   chat.reset();
   openEventStream();
   loadConversationList();
@@ -419,7 +426,8 @@ async function sendQuery() {
       if (!activeConvId.value) {
         const title = text.length > 60 ? text.slice(0, 57) + '…' : text;
         const conv = await createProjectConversation(props.projectId, { title });
-        activeConvId.value = conv.id;
+        setActiveConvId(conv.id);
+        emit('title-updated', title);
         if (!conversations.value.some(c => c.id === conv.id)) {
           conversations.value = [conv, ...conversations.value];
         }
@@ -444,7 +452,8 @@ async function sendQuery() {
     if (!activeConvId.value) {
       const title = text.length > 60 ? text.slice(0, 57) + '…' : text;
       const conv = await createConversation(title);
-      activeConvId.value = conv.id;
+      setActiveConvId(conv.id);
+      emit('title-updated', title);
       if (!conversations.value.some(c => c.id === conv.id)) {
         conversations.value = [conv, ...conversations.value];
       }
@@ -541,6 +550,7 @@ function handleChatEvent(event) {
     case 'title_updated': {
       const idx = conversations.value.findIndex(c => c.id === activeConvId.value);
       if (idx !== -1) conversations.value[idx] = { ...conversations.value[idx], title: event.title };
+      emit('title-updated', event.title);
       break;
     }
   }
@@ -605,13 +615,14 @@ function autoResizeInput() {
 watch(query, () => nextTick(autoResizeInput));
 
 onMounted(async () => {
-  chat.reset();
-  if (props.projectId) {
+  if (props.conversationId && chat.messages.length) {
+    if (props.projectId) openEventStream();
+  } else if (props.conversationId) {
+    await loadConversation(props.conversationId);
+  } else if (props.projectId) {
     openEventStream();
-    await loadConversationList();
-  } else {
-    await loadConversationList();
   }
+  await loadConversationList();
   llm.loadFromProfile();
   llm.load();
   try {
@@ -621,26 +632,12 @@ onMounted(async () => {
     );
   } catch {}
 
-  document.addEventListener('paste', onPaste);
   document.addEventListener('keydown', onModalEscape);
 });
 
 onUnmounted(() => {
   closeEventStream();
-  document.removeEventListener('paste', onPaste);
   document.removeEventListener('keydown', onModalEscape);
-});
-
-watch(() => props.projectId, async (newId) => {
-  chat.reset();
-  activeConvId.value = null;
-  closeEventStream();
-  if (newId) {
-    openEventStream();
-    await loadConversationList();
-  } else {
-    conversations.value = [];
-  }
 });
 
 function onPaste(e) {

@@ -5,6 +5,16 @@ const CYCLE = ['auto', 'light', 'dark'];
 const ICONS  = { auto: '☀', light: '☀', dark: '☾' };
 const LABELS = { auto: 'Auto', light: 'Light', dark: 'Dark' };
 
+function rethemeMermaid() {
+  import('../lib/mermaid.js').then(({ rethemeMermaidDiagrams }) => rethemeMermaidDiagrams());
+}
+
+if (typeof window.matchMedia === 'function') {
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (!document.documentElement.hasAttribute('data-theme')) rethemeMermaid();
+  });
+}
+
 export const useThemeStore = defineStore('theme', () => {
   const theme = ref('auto');
 
@@ -17,6 +27,7 @@ export const useThemeStore = defineStore('theme', () => {
       localStorage.setItem('theme', t);
       document.documentElement.setAttribute('data-theme', t);
     }
+    rethemeMermaid();
   }
 
   function nextTheme() {
