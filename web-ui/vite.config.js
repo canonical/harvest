@@ -18,6 +18,7 @@ export default defineConfig({
       '/machines':         'http://localhost:8080',
       '/health':           'http://localhost:8080',
       '/conversations':    'http://localhost:8080',
+      '/chat-layouts':     'http://localhost:8080',
       '/groups':           'http://localhost:8080',
       '/templates':        'http://localhost:8080',
       '/skills':           'http://localhost:8080',

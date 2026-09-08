@@ -23,6 +23,20 @@ export const getConversation     = (id)          => convFetch(`${CONVERSATIONS_U
 export const updateConversation  = (id, payload) => convFetch(`${CONVERSATIONS_URL}/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
 export const deleteConversation  = (id)          => convFetch(`${CONVERSATIONS_URL}/${id}`, { method: 'DELETE' });
 
+export const CHAT_LAYOUTS_URL = '/chat-layouts';
+
+function projectQuery(projectId) {
+  return projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+}
+
+export const getCurrentChatLayout  = (projectId)           => convFetch(`${CHAT_LAYOUTS_URL}/current${projectQuery(projectId)}`);
+export const saveCurrentChatLayout = (tree, projectId)     => convFetch(`${CHAT_LAYOUTS_URL}/current${projectQuery(projectId)}`, { method: 'PUT', body: JSON.stringify({ tree }) });
+export const listChatLayouts       = (projectId)           => convFetch(`${CHAT_LAYOUTS_URL}${projectQuery(projectId)}`);
+export const createChatLayout      = (name, tree, projectId) => convFetch(CHAT_LAYOUTS_URL, { method: 'POST', body: JSON.stringify({ name, tree, project_id: projectId ?? null }) });
+export const getChatLayout         = (id)         => convFetch(`${CHAT_LAYOUTS_URL}/${id}`);
+export const updateChatLayout      = (id, body)   => convFetch(`${CHAT_LAYOUTS_URL}/${id}`, { method: 'PUT', body: JSON.stringify(body) });
+export const deleteChatLayout      = (id)         => convFetch(`${CHAT_LAYOUTS_URL}/${id}`, { method: 'DELETE' });
+
 let _onUnauthorized = null;
 export function setUnauthorizedHandler(fn) { _onUnauthorized = fn; }
 
