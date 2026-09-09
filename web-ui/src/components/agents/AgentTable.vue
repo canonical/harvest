@@ -5,7 +5,7 @@
         <th>Status</th>
         <th>Hostname</th>
         <th>Last seen</th>
-        <th v-if="showActions">Actions</th>
+        <th v-if="showActions">Delete</th>
       </tr>
     </thead>
     <tbody>
@@ -30,6 +30,7 @@
         <td v-if="showActions">
           <div class="agent-row-actions">
             <router-link
+              v-if="showConsole"
               :to="`/agents/${agent.id}/console`"
               class="console-icon-btn"
               title="Open console"
@@ -55,8 +56,9 @@
 
 <script setup>
 defineProps({
-  agents:     { type: Array, default: () => [] },
+  agents:      { type: Array, default: () => [] },
   showActions: { type: Boolean, default: true },
+  showConsole: { type: Boolean, default: true },
 });
 defineEmits(['delete']);
 

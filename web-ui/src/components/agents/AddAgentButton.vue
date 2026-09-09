@@ -121,7 +121,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import {
   rotateInstallToken, getAgentFlavors, provisionLxdAgent,
 } from '../../lib/api.js';
@@ -139,7 +139,7 @@ const props = defineProps({
   agents:    { type: Array, default: () => [] },
   reload:    { type: Function, default: async () => {} },
 });
-const emit = defineEmits(['added']);
+const emit = defineEmits(['added', 'modal-state-change']);
 
 const auth = useAuthStore();
 
@@ -161,6 +161,9 @@ const managedError        = ref('');
 const provisionSteps      = ref([]);
 const provisionDone       = ref(false);
 let provisionWaitToken    = 0;
+
+const anyModalOpen = computed(() => showChoiceModal.value || showModal.value || showManagedModal.value);
+watch(anyModalOpen, (v) => emit('modal-state-change', v));
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
