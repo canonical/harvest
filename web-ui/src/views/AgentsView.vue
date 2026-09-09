@@ -2,7 +2,7 @@
   <div class="agents-view">
     <div class="page-header">
       <h2>Agents</h2>
-      <AddAgentButton :project-id="projectId" :agents="agents" :reload="load" @added="load" />
+      <AddAgentButton :project-id="projectId" :agents="agents" :reload="load" @added="load" @modal-state-change="onModalStateChange" />
     </div>
 
     <template v-if="agents.length > 0">
@@ -41,12 +41,23 @@ const props = defineProps({ projectId: { type: String, required: true } });
 const agents        = ref([]);
 const deletingAgent = ref(null);
 const deleting      = ref(false);
+const AGENT_POLL_INTERVAL_MS    = 15_000;
+const AGENT_POLL_FAST_MS       = 1_000;
 let refreshTimer = null;
 
 async function load() {
   try {
     agents.value = await listProjectAgents(props.projectId);
   } catch {}
+}
+
+function restartPolling(ms) {
+  clearInterval(refreshTimer);
+  refreshTimer = setInterval(load, ms);
+}
+
+function onModalStateChange(open) {
+  restartPolling(open ? AGENT_POLL_FAST_MS : AGENT_POLL_INTERVAL_MS);
 }
 
 function handleDelete(agent) {
@@ -69,7 +80,7 @@ async function confirmDelete() {
 
 onMounted(() => {
   load();
-  refreshTimer = setInterval(load, 15_000);
+  refreshTimer = setInterval(load, AGENT_POLL_INTERVAL_MS);
 });
 
 onUnmounted(() => {
