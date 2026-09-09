@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, watch } from 'vue';
+import { ref, watch, computed } from 'vue';
 import {
   createTree, createTab, findPane, findTab, allTabIds,
   splitPane as splitPaneTree, removeTabFromPane as removeTabFromPaneTree,
@@ -21,8 +21,29 @@ export const useChatWorkspaceStore = defineStore('chatWorkspace', () => {
   const tree = ref(createTree());
   const namedLayouts = ref([]);
   const currentNamedLayoutId = ref(null);
+  const savedTreeSnapshot = ref(null);
 
   let autosaveTimer = null;
+
+  function _snapshotTree() {
+    savedTreeSnapshot.value = JSON.parse(JSON.stringify(tree.value));
+  }
+
+  function _treeMatchesSnapshot() {
+    if (!savedTreeSnapshot.value) return false;
+    return JSON.stringify(tree.value) === JSON.stringify(savedTreeSnapshot.value);
+  }
+
+  const isDefaultLayout = computed(() => {
+    const root = tree.value.root;
+    return root.type === 'leaf' && root.tabs.length === 1 && !root.tabs[0].conversationId;
+  });
+
+  const isLayoutSaved = computed(() => {
+    if (isDefaultLayout.value) return true;
+    return currentNamedLayoutId.value !== null && _treeMatchesSnapshot();
+  });
+
   function _scheduleAutosave() {
     if (autosaveTimer) clearTimeout(autosaveTimer);
     autosaveTimer = setTimeout(() => {
@@ -151,6 +172,7 @@ export const useChatWorkspaceStore = defineStore('chatWorkspace', () => {
       const created = await createChatLayout(name, tree.value, project.selectedProjectId);
       currentNamedLayoutId.value = created.id;
     }
+    _snapshotTree();
     await listNamedLayouts();
   }
 
@@ -160,8 +182,17 @@ export const useChatWorkspaceStore = defineStore('chatWorkspace', () => {
       disposeAllInstances();
       tree.value = data.tree;
       currentNamedLayoutId.value = id;
+      _snapshotTree();
       _scheduleAutosave();
     }
+  }
+
+  function newLayout() {
+    disposeAllInstances();
+    tree.value = createTree({ projectId: project.selectedProjectId });
+    currentNamedLayoutId.value = null;
+    _snapshotTree();
+    _scheduleAutosave();
   }
 
   async function deleteNamedLayout(id) {
@@ -171,10 +202,10 @@ export const useChatWorkspaceStore = defineStore('chatWorkspace', () => {
   }
 
   return {
-    tree, namedLayouts, currentNamedLayoutId,
+    tree, namedLayouts, currentNamedLayoutId, isLayoutSaved,
     initFromServer, flushAutosaveNow,
     splitPaneWithTab, moveTab, moveTabToNewSplit, closeTab, closePane, setActiveTab, resizeSplit,
     openTabInPane, updateTab,
-    listNamedLayouts, saveNamedLayout, loadNamedLayout, deleteNamedLayout,
+    listNamedLayouts, saveNamedLayout, loadNamedLayout, deleteNamedLayout, newLayout,
   };
 });
