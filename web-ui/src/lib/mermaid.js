@@ -1,16 +1,11 @@
+import { isDarkTheme } from './theme.js';
+
 const MERMAID_CDN = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
 
 let mermaidInstance = null;
 let loadingPromise = null;
 let initializedTheme = null;
 const mountedDiagrams = new Set();
-
-function isDarkTheme() {
-  const attr = document.documentElement.getAttribute('data-theme');
-  if (attr === 'dark') return true;
-  if (attr === 'light') return false;
-  return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-color-scheme: dark)').matches;
-}
 
 async function loadMermaidModule() {
   if (mermaidInstance) return mermaidInstance;
