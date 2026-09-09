@@ -8,7 +8,7 @@ vi.mock('../../src/components/agents/AddAgentButton.vue', () => ({
     name: 'AddAgentButton',
     template: '<button data-testid="add-agent-btn" @click="$emit(\'added\')" />',
     props: ['projectId', 'agents', 'reload'],
-    emits: ['added'],
+    emits: ['added', 'modal-state-change'],
   },
 }));
 vi.mock('../../src/components/agents/AgentTable.vue', () => ({
@@ -94,8 +94,8 @@ describe('DeployAgentsPanel', () => {
     expect(w.emitted('next')).toBeTruthy();
   });
 
-  it('renders the AgentTable without row actions (read-only)', async () => {
+  it('renders the AgentTable with row actions enabled', async () => {
     const w = await mountPanel();
-    expect(w.findComponent({ name: 'AgentTable' }).props('showActions')).toBe(false);
+    expect(w.findComponent({ name: 'AgentTable' }).props('showActions')).toBe(true);
   });
 });
