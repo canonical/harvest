@@ -477,6 +477,19 @@ export async function generateProvisionStream(projectId, id, onEvent) {
 }
 export const proposeProvisionChange = (projectId, id, body) =>
   projectFetch(`${deploymentUrl(projectId, id)}/provision/propose-change`, { method: 'POST', body: JSON.stringify(body) });
+export async function proposeProvisionChangeStream(projectId, id, body, onEvent) {
+  const response = await fetch(`${deploymentUrl(projectId, id)}/provision/propose-change/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    handleUnauthorized(response.status);
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Server error: ${response.status}`);
+  }
+  await consumeSseStream(response, onEvent);
+}
 export const applyProvisionChange = (projectId, id, body) =>
   projectFetch(`${deploymentUrl(projectId, id)}/provision/apply-change`, { method: 'POST', body: JSON.stringify(body) });
 
