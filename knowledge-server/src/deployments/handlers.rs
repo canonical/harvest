@@ -826,8 +826,11 @@ pub async fn generate_design(
 ) -> Result<impl IntoResponse, ApiError> {
     let (agent, prompt) = prepare_design_generation(&state, &user, &project_id, &deployment_id, &body).await?;
 
-    agent.query(&prompt, &[], &[], None).await
+    let response = agent.query(&prompt, &[], &[], None).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    save_design_doc(&state.neo4j, &project_id, &deployment_id, &response.answer).await
+        .map_err(|message| err(StatusCode::INTERNAL_SERVER_ERROR, &message))?;
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
@@ -840,8 +843,7 @@ async fn prepare_design_generation(
     deployment_id: &str,
     body:          &GenerateDesignBody,
 ) -> Result<(Arc<Agent>, String), ApiError> {
-    let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let group_id = project["group_id"].as_str().unwrap_or_default().to_string();
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
 
     if let Some(template_id) = &body.product_template_id {
         let exists = state.neo4j.query_read(
@@ -885,7 +887,7 @@ async fn prepare_design_generation(
     let ctx = load_deployment_context(&state.neo4j, project_id, deployment_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
-    let agent = build_deployment_agent(state, project_id, &group_id, deployment_id).await?;
+    let agent = build_deployment_agent_text_only(state, project_id, deployment_id).await?;
 
     let mut prompt = String::from(match &ctx.product_template_design {
         Some(_) => "Write the deployment design document in Markdown, following the Design \
@@ -906,9 +908,9 @@ async fn prepare_design_generation(
             prompt.push_str(&format!("### {title} ({kind})\n\n{content}\n\n"));
         }
     }
-    prompt.push_str("Then call generate_artifact with kind \"markdown\" to save it, and \
-                     immediately call link_deployment_artifact with role \"design\" using the \
-                     returned artifact id. Do not call any other tools.");
+    prompt.push_str("Respond with the complete design document itself, in Markdown, and \
+                     nothing else — no preamble, no meta-commentary, no questions back to the \
+                     user. Your entire response is saved verbatim as the design document.");
 
     Ok((agent, prompt))
 }
@@ -930,27 +932,16 @@ pub async fn generate_design_stream(
         tokio::spawn(async move {
             agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
         });
-        // Accumulated independently of the agent's own Done.answer, which
-        // only carries the *last* tool-calling round's text — if the model
-        // writes part of the document, makes a tool call partway through
-        // (e.g. an attempted generate_artifact), then keeps writing with no
-        // further tool calls, Done.answer silently drops everything before
-        // that call. Collecting every TextDelta ourselves survives that.
-        let mut streamed_text = String::new();
         while let Some(event) = agent_rx.recv().await {
-            if let AgentEvent::TextDelta { text } = &event {
-                streamed_text.push_str(text);
-            }
             if let AgentEvent::Done { answer, .. } = &event {
-                // The model is instructed to save the document itself via
-                // generate_artifact + link_deployment_artifact, but that
-                // depends entirely on it following a trailing tool-call
-                // instruction after already satisfying the visible "write
-                // the doc" ask — which it does not always do. Persist the
-                // streamed text as a fallback so a generation that produced
-                // a real document never silently vanishes.
-                let text = if streamed_text.is_empty() { answer.as_str() } else { streamed_text.as_str() };
-                ensure_design_doc_persisted(&neo4j, &project_id_bg, &deployment_id_bg, text).await;
+                if let Err(message) = save_design_doc(&neo4j, &project_id_bg, &deployment_id_bg, answer).await {
+                    tracing::warn!(
+                        project_id = %project_id_bg, deployment_id = %deployment_id_bg, %message,
+                        "design generation failed to save",
+                    );
+                    let _ = tx.send(AgentEvent::Error { message }).await;
+                    continue;
+                }
             }
             let _ = tx.send(event).await;
         }
@@ -969,43 +960,34 @@ pub async fn generate_design_stream(
     Ok(response)
 }
 
-/// Backstop for `generate_design_stream`: if the agent's turn ended without
-/// the model linking a design_doc (it wrote the document as plain text
-/// instead of calling generate_artifact + link_deployment_artifact), save
-/// the final answer as the design artifact so the generation isn't lost.
-async fn ensure_design_doc_persisted(
+/// Saves the model's response as the deployment's design document. Called
+/// deterministically after every design generation turn — the model is no
+/// longer asked to save the document itself via tool calls, so this is the
+/// only path that ever creates or relinks a design_doc.
+async fn save_design_doc(
     neo4j:         &Arc<Neo4jClient>,
     project_id:    &str,
     deployment_id: &str,
     answer:        &str,
-) {
-    let deployment = match fetch_deployment_detail(neo4j, project_id, deployment_id).await {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    if !deployment["design_doc"].is_null() {
-        return;
-    }
+) -> Result<(), String> {
     let content = answer.trim();
-    if content.is_empty() {
-        return;
+    if content.is_empty()
+        || content == crate::agent::last_resort_fallback()
+        || content == crate::agent::question_fallback()
+    {
+        return Err("the model did not produce a usable design document".to_string());
     }
-    tracing::warn!(
-        project_id, deployment_id,
-        "design generation finished without a linked design_doc; persisting the streamed answer as a fallback"
-    );
 
+    let deployment = fetch_deployment_detail(neo4j, project_id, deployment_id).await
+        .map_err(|_| "could not load the deployment".to_string())?;
     let title = format!("{} Design", deployment["name"].as_str().unwrap_or("Deployment"));
-    let created = match create_artifact(neo4j, project_id, ArtifactKind::Markdown, &title, content, "assistant").await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "fallback design artifact creation failed");
-            return;
-        }
-    };
-    let Some(artifact_id) = created["id"].as_str() else { return };
 
-    if let Err(e) = neo4j.query_read(
+    let created = create_artifact(neo4j, project_id, ArtifactKind::Markdown, &title, content, "assistant").await
+        .map_err(|e| format!("failed to save the design document: {e}"))?;
+    let artifact_id = created["id"].as_str()
+        .ok_or_else(|| "artifact creation returned no id".to_string())?;
+
+    neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
          OPTIONAL MATCH (d)-[old:HAS_DESIGN_DOC]->(:Artifact)
          DELETE old
@@ -1013,13 +995,12 @@ async fn ensure_design_doc_persisted(
          MATCH (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact {id: $aid})
          CREATE (d)-[:HAS_DESIGN_DOC]->(a)",
         json!({ "pid": project_id, "did": deployment_id, "aid": artifact_id }),
-    ).await {
-        tracing::warn!(error = %e, "fallback design_doc link failed");
-        return;
-    }
+    ).await.map_err(|e| format!("failed to link the design document: {e}"))?;
+
     crate::deployments::design_cache::schedule_regeneration(
         Arc::clone(neo4j), project_id.to_string(), deployment_id.to_string(),
     );
+    Ok(())
 }
 
 #[derive(serde::Deserialize, Default)]

@@ -321,13 +321,6 @@ fn parse_sse_events(body: &str) -> Vec<Value> {
         .collect()
 }
 
-fn tool_call_response_with_preamble(preamble: &str, name: &str, input: Value) -> LlmResponse {
-    LlmResponse::ToolCalls {
-        calls: vec![ToolCall { id: Uuid::new_v4().to_string(), name: name.to_string(), input, thought_signature: None }],
-        preamble: preamble.to_string(),
-    }
-}
-
 async fn count_nodes(neo4j: &Neo4jClient, label: &str) -> usize {
     let rows = neo4j.query_read(&format!("MATCH (n:{label}) RETURN count(n) AS n"), json!({})).await.unwrap();
     rows.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) as usize
@@ -1125,24 +1118,12 @@ async fn generate_environment_questions_returns_422_when_unparseable() {
 // ---- design generation / revision ----
 
 fn design_generation_llm() -> Arc<ClosureLlm> {
-    ClosureLlm::new(|messages| {
-        match tool_result_contents(messages).len() {
-            0 => tool_call_response("generate_artifact", json!({
-                "title": "Design", "kind": "markdown", "content": "# Design\nUse a single VM."
-            })),
-            1 => {
-                let result: Value = serde_json::from_str(tool_result_contents(messages)[0]).unwrap();
-                let id = result["id"].as_str().unwrap();
-                tool_call_response("link_deployment_artifact", json!({ "artifact_id": id, "role": "design" }))
-            }
-            _ => text_response("Design document created."),
-        }
-    })
+    ClosureLlm::new(|_messages| text_response("# Design\nUse a single VM."))
 }
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn generate_design_calls_tools_and_links_artifact() {
+async fn generate_design_saves_the_document_deterministically() {
     neo4j!(c, neo4j);
     let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
     let gid = make_group(&neo4j, "eng").await;
@@ -1154,7 +1135,7 @@ async fn generate_design_calls_tools_and_links_artifact() {
     let (status, body) = send(app, req_post(&format!("/projects/{pid}/deployments/{did}/design/generate"), &tok, json!({}))).await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["design_doc"]["id"].is_string());
-    assert_eq!(body["design_doc"]["title"], "Design");
+    assert_eq!(body["design_doc"]["title"], "Rollout Design");
 }
 
 #[tokio::test]
@@ -1178,25 +1159,13 @@ async fn generate_design_stream_returns_event_stream_content_type() {
 
 #[tokio::test]
 #[ignore = "requires Docker"]
-async fn generate_design_stream_emits_text_delta_tool_events_and_done() {
+async fn generate_design_stream_emits_text_delta_and_done_and_saves_document() {
     neo4j!(c, neo4j);
     let (uid, tok) = make_user(&neo4j, "s@x.com", "Sue", "regular").await;
     let gid = make_group(&neo4j, "eng").await;
     join_group(&neo4j, &uid, &gid).await;
     let design_doc = "# Design\nUse a single VM.";
-    let llm = ClosureLlm::new(move |messages| {
-        match tool_result_contents(messages).len() {
-            0 => tool_call_response_with_preamble(design_doc, "generate_artifact", json!({
-                "title": "Design", "kind": "markdown", "content": design_doc
-            })),
-            1 => {
-                let result: Value = serde_json::from_str(tool_result_contents(messages)[0]).unwrap();
-                let id = result["id"].as_str().unwrap();
-                tool_call_response("link_deployment_artifact", json!({ "artifact_id": id, "role": "design" }))
-            }
-            _ => text_response("Design document created."),
-        }
-    });
+    let llm = ClosureLlm::new(move |_messages| text_response(design_doc));
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
     let pid = seed_project(&app, &tok, &gid, "Customer S").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
@@ -1211,19 +1180,101 @@ async fn generate_design_stream_emits_text_delta_tool_events_and_done() {
     let text: String = events.iter()
         .filter_map(|e| (e["type"] == "text_delta").then(|| e["text"].as_str().unwrap_or("").to_string()))
         .collect();
-    assert!(text.contains("# Design\nUse a single VM."), "text deltas: {text}");
-
-    let tool_names: Vec<&str> = events.iter()
-        .filter_map(|e| (e["type"] == "tool_call").then(|| e["name"].as_str().unwrap_or("")))
-        .collect();
-    assert!(tool_names.contains(&"generate_artifact"), "tool calls: {tool_names:?}");
-    assert!(tool_names.contains(&"link_deployment_artifact"), "tool calls: {tool_names:?}");
+    assert!(text.contains(design_doc), "text deltas: {text}");
 
     assert!(events.iter().any(|e| e["type"] == "done"), "missing done event");
+    assert!(!events.iter().any(|e| e["type"] == "error"), "unexpected error event: {events:?}");
 
     let (_, dep) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
     assert!(dep["design_doc"]["id"].is_string());
-    assert_eq!(dep["design_doc"]["title"], "Design");
+    assert_eq!(dep["design_doc"]["title"], "Rollout Design");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn generate_design_stream_persists_synthesis_not_narration_when_max_iterations_hit() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "m@x.com", "Max", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let synthesis_doc = "# Design\nFinal clean synthesis.";
+    let llm = ClosureLlm::new(move |messages| {
+        let rounds = tool_result_contents(messages).len();
+        if rounds < 5 {
+            LlmResponse::ToolCalls {
+                calls: vec![ToolCall {
+                    id: Uuid::new_v4().to_string(),
+                    name: "some_unused_tool".into(),
+                    input: json!({}),
+                    thought_signature: None,
+                }],
+                preamble: format!("Wait, let's write out the full diagram {}:", rounds + 1),
+            }
+        } else {
+            text_response(synthesis_doc)
+        }
+    });
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+    let pid = seed_project(&app, &tok, &gid, "Customer M").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let (status, _ct, body) = send_sse(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/design/generate/stream"), &tok, json!({})),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    let events = parse_sse_events(&body);
+    assert!(events.iter().any(|e| e["type"] == "done"), "missing done event");
+
+    let (_, dep) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
+    let aid = dep["design_doc"]["id"].as_str()
+        .expect("design_doc should be persisted as a fallback artifact")
+        .to_string();
+
+    let artifact = get_artifact_in_project(&neo4j, &pid, &aid).await.unwrap().unwrap();
+    let content = artifact["content"].as_str().unwrap();
+    assert_eq!(content, synthesis_doc);
+    assert!(
+        !content.contains("Wait, let's write out"),
+        "persisted doc should not contain pre-synthesis narration: {content}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn generate_design_stream_does_not_persist_generic_fallback_as_design_doc() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "z@x.com", "Zoe", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let llm = ClosureLlm::new(move |_messages| {
+        LlmResponse::ToolCalls {
+            calls: vec![ToolCall {
+                id: Uuid::new_v4().to_string(),
+                name: "some_unused_tool".into(),
+                input: json!({}),
+                thought_signature: None,
+            }],
+            preamble: String::new(),
+        }
+    });
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+    let pid = seed_project(&app, &tok, &gid, "Customer Z").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let (status, _ct, body) = send_sse(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/design/generate/stream"), &tok, json!({})),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    let events = parse_sse_events(&body);
+    assert!(events.iter().any(|e| e["type"] == "done"), "missing done event");
+
+    let (_, dep) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
+    assert!(
+        dep["design_doc"].is_null(),
+        "a generic tool-call-limit message should never be persisted as a design document: {dep}"
+    );
 }
 
 #[tokio::test]
@@ -1255,21 +1306,8 @@ async fn generate_design_includes_selected_artifacts_and_links_template() {
     let captured = Arc::new(std::sync::Mutex::new(None::<(String, String)>));
     let captured_for_llm = Arc::clone(&captured);
     let llm = ClosureLlm::new(move |messages| {
-        let count = tool_result_contents(messages).len();
-        if count == 0 {
-            captured_for_llm.lock().unwrap().replace(captured_prompt_for_design(messages));
-        }
-        match count {
-            0 => tool_call_response("generate_artifact", json!({
-                "title": "Design", "kind": "markdown", "content": "# Design\nUse a single VM."
-            })),
-            1 => {
-                let result: Value = serde_json::from_str(tool_result_contents(messages)[0]).unwrap();
-                let id = result["id"].as_str().unwrap();
-                tool_call_response("link_deployment_artifact", json!({ "artifact_id": id, "role": "design" }))
-            }
-            _ => text_response("Design document created."),
-        }
+        captured_for_llm.lock().unwrap().replace(captured_prompt_for_design(messages));
+        text_response("# Design\nUse a single VM.")
     });
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
 
@@ -1312,21 +1350,8 @@ async fn generate_design_ignores_artifacts_belonging_to_other_projects() {
     let captured = Arc::new(std::sync::Mutex::new(None::<String>));
     let captured_for_llm = Arc::clone(&captured);
     let llm = ClosureLlm::new(move |messages| {
-        let count = tool_result_contents(messages).len();
-        if count == 0 {
-            captured_for_llm.lock().unwrap().replace(captured_prompt_for_design(messages).1);
-        }
-        match count {
-            0 => tool_call_response("generate_artifact", json!({
-                "title": "Design", "kind": "markdown", "content": "# Design\n"
-            })),
-            1 => {
-                let result: Value = serde_json::from_str(tool_result_contents(messages)[0]).unwrap();
-                let id = result["id"].as_str().unwrap();
-                tool_call_response("link_deployment_artifact", json!({ "artifact_id": id, "role": "design" }))
-            }
-            _ => text_response("done"),
-        }
+        captured_for_llm.lock().unwrap().replace(captured_prompt_for_design(messages).1);
+        text_response("# Design\n")
     });
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
 
