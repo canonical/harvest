@@ -17,15 +17,16 @@
             <div
               v-for="layout in workspace.namedLayouts"
               :key="layout.id"
-              class="conv-item"
-              :class="{ 'conv-item--active': layout.id === workspace.currentNamedLayoutId }"
+              class="layout-item"
+              :class="{ 'layout-item--active': layout.id === workspace.currentNamedLayoutId }"
               role="button"
               tabindex="0"
               @click="applyNamedLayout(layout.id)"
               @keydown.enter.prevent="applyNamedLayout(layout.id)"
             >
-              <span class="conv-item__title">{{ layout.name }}</span>
-              <button class="conv-item__delete" title="Delete" @click.stop="removeNamedLayout(layout.id)">✕</button>
+              <LayoutShapeIcon class="layout-item__shape" :tree="layout.tree" />
+              <span class="layout-item__title">{{ layout.name }}</span>
+              <button class="layout-item__delete" title="Delete" @click.stop="removeNamedLayout(layout.id)">✕</button>
             </div>
             <p v-if="!workspace.namedLayouts.length" class="conv-empty">No saved layouts yet.</p>
           </div>
@@ -37,7 +38,7 @@
               @keydown.enter.prevent="submitSaveLayout"
             />
             <button
-              class="p-button--positive is-dense u-no-margin"
+              class="p-button--positive is-dense u-no-margin chat-workspace__layouts-save-btn"
               type="button"
               :disabled="!newLayoutName.trim()"
               @click="submitSaveLayout"
@@ -58,6 +59,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue';
 import PaneSplit from '../components/chat/PaneSplit.vue';
+import LayoutShapeIcon from '../components/chat/LayoutShapeIcon.vue';
 import SourcePanel from '../components/SourcePanel.vue';
 import { useChatWorkspaceStore } from '../stores/chatWorkspace.js';
 
