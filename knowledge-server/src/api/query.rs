@@ -138,7 +138,7 @@ pub async fn handle_query_stream(
             }
 
             if let (
-                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms },
+                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. },
                 Some(cid),
                 Some(neo4j),
             ) = (&event, &conv_id, &neo4j) {

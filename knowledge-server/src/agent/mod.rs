@@ -102,6 +102,7 @@ pub enum AgentEvent {
         tool_calls_made: usize,
         provider_used: Option<UsedProvider>,
         duration_ms: u64,
+        hit_max_iterations: bool,
     },
     Error { message: String },
     Question { question: String, choices: Vec<String> },
@@ -127,7 +128,7 @@ pub enum AgentEvent {
 }
 
 enum LoopOutcome {
-    Finished { text: String, iterations: usize, provider_used: Option<UsedProvider> },
+    Finished { text: String, iterations: usize, provider_used: Option<UsedProvider>, hit_max_iterations: bool },
     EndedWithQuestion { text: String, iterations: usize, provider_used: Option<UsedProvider> },
     Paused {
         messages: Vec<Message>,
@@ -304,7 +305,7 @@ impl Agent {
         let mut error = None;
         while let Some(event) = receiver.recv().await {
             match event {
-                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms } => {
+                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. } => {
                     response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms });
                 }
                 AgentEvent::Error { message } => {
@@ -333,7 +334,7 @@ impl Agent {
         while let Some(event) = receiver.recv().await {
             let _ = progress.send(event.clone()).await;
             match event {
-                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms } => {
+                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. } => {
                     response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms });
                 }
                 AgentEvent::Error { message } => {
@@ -425,7 +426,7 @@ impl Agent {
     ) -> Option<PausedTurn> {
         let duration_ms = elapsed_before_ms + start.elapsed().as_millis() as u64;
         match outcome {
-            LoopOutcome::Finished { text, iterations, provider_used } => {
+            LoopOutcome::Finished { text, iterations, provider_used, hit_max_iterations } => {
                 let answer = if text.is_empty() { last_resort_fallback() } else { text };
                 let sources = parse_citations(&answer);
                 let _ = event_sender.send(AgentEvent::Done {
@@ -434,6 +435,7 @@ impl Agent {
                     tool_calls_made: iterations,
                     provider_used,
                     duration_ms,
+                    hit_max_iterations,
                 }).await;
                 None
             }
@@ -446,6 +448,7 @@ impl Agent {
                     tool_calls_made: iterations,
                     provider_used,
                     duration_ms,
+                    hit_max_iterations: false,
                 }).await;
                 None
             }
@@ -457,6 +460,7 @@ impl Agent {
                     tool_calls_made: iterations,
                     provider_used,
                     duration_ms,
+                    hit_max_iterations: false,
                 }).await;
                 Some(PausedTurn { messages, iterations, pending, elapsed_ms: duration_ms })
             }
@@ -502,7 +506,7 @@ impl Agent {
                         if !accumulated_text.is_empty() { accumulated_text } else { last_resort_fallback() }
                     }
                 };
-                return LoopOutcome::Finished { text, iterations, provider_used: last_provider_used };
+                return LoopOutcome::Finished { text, iterations, provider_used: last_provider_used, hit_max_iterations: true };
             }
 
             let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(64);
@@ -563,7 +567,7 @@ impl Agent {
                         text: answer_text, iterations, provider_used: last_provider_used,
                     };
                 }
-                return LoopOutcome::Finished { text: text_buf, iterations, provider_used: last_provider_used };
+                return LoopOutcome::Finished { text: text_buf, iterations, provider_used: last_provider_used, hit_max_iterations: false };
             }
 
             iterations += 1;
@@ -1612,6 +1616,37 @@ mod tests {
 
         let has_synthesizing = events.iter().any(|e| matches!(e, AgentEvent::Phase { label } if label == "Synthesizing answer"));
         assert!(has_synthesizing, "should emit 'Synthesizing answer' phase when max_iterations is hit");
+    }
+
+    #[tokio::test]
+    async fn done_event_marks_hit_max_iterations_when_synthesis_fallback_taken() {
+        let llm = MockLlm::new(vec![
+            tool_call("search_symbols"),
+        ]);
+        let agent = Arc::new(agent_with(
+            llm,
+            vec![MockTool::new("search_symbols", "ok")],
+            1,
+        ));
+        let events = collect_agent_events(agent, "how does X work?").await;
+
+        let hit_max_iterations = events.iter().find_map(|e| match e {
+            AgentEvent::Done { hit_max_iterations, .. } => Some(*hit_max_iterations),
+            _ => None,
+        });
+        assert_eq!(hit_max_iterations, Some(true));
+    }
+
+    #[tokio::test]
+    async fn done_event_does_not_mark_hit_max_iterations_on_normal_completion() {
+        let agent = Arc::new(agent_with(MockLlm::new(vec![text("hello world")]), vec![], 5));
+        let events = collect_agent_events(agent, "hi").await;
+
+        let hit_max_iterations = events.iter().find_map(|e| match e {
+            AgentEvent::Done { hit_max_iterations, .. } => Some(*hit_max_iterations),
+            _ => None,
+        });
+        assert_eq!(hit_max_iterations, Some(false));
     }
 
     #[tokio::test]
