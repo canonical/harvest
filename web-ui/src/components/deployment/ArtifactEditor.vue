@@ -40,6 +40,7 @@
 <script setup>
 import { ref, watch, onMounted, onBeforeUnmount, nextTick, shallowRef } from 'vue';
 import { getArtifact, proposeArtifactChange } from '../../lib/api.js';
+import { isDarkTheme, onThemeChange } from '../../lib/theme.js';
 
 const props = defineProps({
   projectId:    { type: String, required: true },
@@ -115,6 +116,7 @@ async function mountEditor() {
   editor = monacoApi.editor.create(containerRef.value, {
     value: originalContent,
     language: languageForKind(artifact.value.kind),
+    theme: isDarkTheme() ? 'vs-dark' : 'vs',
     automaticLayout: true,
     minimap: { enabled: false },
     fontSize: 13,
@@ -160,6 +162,10 @@ function handleKeydown(e) {
 
 watch(() => props.artifactId, () => loadArtifact());
 
+const unsubscribeTheme = onThemeChange(() => {
+  monacoApi?.editor.setTheme(isDarkTheme() ? 'vs-dark' : 'vs');
+});
+
 onMounted(() => {
   loadArtifact();
   window.addEventListener('keydown', handleKeydown);
@@ -171,6 +177,7 @@ onBeforeUnmount(() => {
     editor.dispose();
     editor = null;
   }
+  unsubscribeTheme();
 });
 
 defineExpose({ handleKeydown });
