@@ -72,4 +72,23 @@ describe('renderMarkdown citations', () => {
     expect(html).not.toContain('<a ');
     expect(html).toContain('title="acme/repo main · src/lib.rs"');
   });
+
+  it('links a multi-range citation to the first range and keeps every range in the title', () => {
+    const multiRangeIndex = buildCitationIndex([{ repo: 'acme/repo', version: 'main', file: 'src/lib.rs', line: 32 }]);
+    const html = renderMarkdown('See [acme/repo:main:src/lib.rs:32-48,77-86]', { 'acme/repo': 'https://github.com/acme/repo' }, multiRangeIndex);
+    expect(html).toContain('href="https://github.com/acme/repo/blob/main/src/lib.rs#L32-L48"');
+    expect(html).toContain('title="acme/repo main · src/lib.rs:32-48,77-86"');
+  });
+
+  it('degrades a multi-range citation to an inert span with the full range in the title when the repo URL is unknown', () => {
+    const multiRangeIndex = buildCitationIndex([{ repo: 'acme/repo', version: 'main', file: 'src/lib.rs', line: 32 }]);
+    const html = renderMarkdown('See [acme/repo:main:src/lib.rs:32-48,77-86]', {}, multiRangeIndex);
+    expect(html).not.toContain('<a ');
+    expect(html).toContain('title="acme/repo main · src/lib.rs:32-48,77-86"');
+  });
+
+  it('accepts an en-dash range separator', () => {
+    const html = renderMarkdown('See [acme/repo:main:src/lib.rs:42–50]', { 'acme/repo': 'https://github.com/acme/repo' }, citationIndex);
+    expect(html).toContain('href="https://github.com/acme/repo/blob/main/src/lib.rs#L42-L50"');
+  });
 });

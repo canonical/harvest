@@ -6,7 +6,7 @@ import { escapeHtml as esc } from './utils.js';
 // The line number (and range) is optional: a citation can point at a whole
 // file ([repo:version:file]) rather than one location, matching how the
 // backend's parse_citations treats a missing line as "no specific line".
-const CITATION_RE = /\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+)(?::(\d+(?:[–\-]\d+)?))?\]/g;
+const CITATION_RE = /\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+)(?::(\d+(?:[–-]\d+)?(?:,\d+(?:[–-]\d+)?)*))?\]/g;
 
 marked.use(
   markedHighlight({
@@ -43,13 +43,13 @@ marked.use({
   },
 });
 
-const LINE_RANGE_RE = /^(\d+)(?:[–-](\d+))?$/;
+const LINE_RANGE_RE = /^(\d+)(?:[–-](\d+))?/;
 
 export function renderMarkdown(text, repoUrlMap = {}, citationIndex = {}) {
   const withCitations = text.replace(CITATION_RE, (match, repo, version, file, lineRaw) => {
     let startLine = 0, endLine = null;
     if (lineRaw) {
-      const [, startStr, endStr] = lineRaw.match(LINE_RANGE_RE) ?? [null, lineRaw, null];
+      const [, startStr, endStr] = lineRaw.match(LINE_RANGE_RE);
       startLine = parseInt(startStr, 10);
       endLine = endStr ? parseInt(endStr, 10) : null;
     }
@@ -57,8 +57,7 @@ export function renderMarkdown(text, repoUrlMap = {}, citationIndex = {}) {
     const n = citationIndex[key];
     const rawLabel = lineRaw ? `${repo}:${version}:${file}:${lineRaw}` : `${repo}:${version}:${file}`;
     const label = n != null ? `${n}` : rawLabel;
-    const lineDisplay = lineRaw ? (endLine ? `${startLine}-${endLine}` : `${startLine}`) : null;
-    const title = lineDisplay ? `${repo} ${version} · ${file}:${lineDisplay}` : `${repo} ${version} · ${file}`;
+    const title = lineRaw ? `${repo} ${version} · ${file}:${lineRaw}` : `${repo} ${version} · ${file}`;
     const repoUrl = repoUrlMap[repo];
     const fileUrl = repoUrl ? buildFileUrl(repoUrl, version, file, startLine, endLine) : null;
     if (fileUrl) {
