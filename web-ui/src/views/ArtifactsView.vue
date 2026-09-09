@@ -267,6 +267,7 @@ import {
   listProjectAgents,
   runTerraformArtifact,
   getProjectDeploymentSingle,
+  getExecutionPlan,
   createProjectArtifact,
 } from '../lib/api.js';
 
@@ -436,6 +437,12 @@ async function loadList() {
       if (dep.guide)           roles[dep.guide.id] = 'guide';
       if (dep.terraform_bundle) roles[dep.terraform_bundle.id] = 'bundle';
       for (const ca of (dep.context_artifacts ?? [])) roles[ca.id] = 'context';
+      try {
+        const plan = await getExecutionPlan(props.projectId, dep.id);
+        for (const step of [...(plan.deploy_steps ?? []), ...(plan.destroy_steps ?? [])]) {
+          if (step.artifact?.id) roles[step.artifact.id] = 'bundle';
+        }
+      } catch {}
       deploymentRoles.value = roles;
     } else {
       deploymentRoles.value = {};
