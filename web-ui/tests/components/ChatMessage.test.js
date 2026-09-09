@@ -155,27 +155,27 @@ describe('ChatMessage — parallel research chain entries', () => {
 });
 
 describe('ChatMessage — sources', () => {
-  it('renders source chips', () => {
+  it('renders one source location', () => {
     const w = mount(ChatMessage, { props: { msg: assistantWithSources } });
-    expect(w.find('.source-chip').exists()).toBe(true);
+    expect(w.find('.source-loc').exists()).toBe(true);
   });
 
   it('renders a real link with a correct href when the repo URL is known', () => {
     const w = mount(ChatMessage, {
       props: { msg: assistantWithSources, repoUrlMap: { myrepo: 'https://github.com/acme/myrepo' } },
     });
-    const chip = w.find('.source-chip');
-    expect(chip.element.tagName).toBe('A');
-    expect(chip.attributes('href')).toBe('https://github.com/acme/myrepo/blob/main/src/main.rs#L10');
-    expect(chip.classes()).not.toContain('source-chip--inert');
+    const loc = w.find('.source-loc');
+    expect(loc.element.tagName).toBe('A');
+    expect(loc.attributes('href')).toBe('https://github.com/acme/myrepo/blob/main/src/main.rs#L10');
+    expect(loc.classes()).not.toContain('source-loc--inert');
   });
 
-  it('degrades to an inert, non-clickable chip when the repo URL is unknown', () => {
+  it('degrades to an inert, non-clickable location when the repo URL is unknown', () => {
     const w = mount(ChatMessage, { props: { msg: assistantWithSources, repoUrlMap: {} } });
-    const chip = w.find('.source-chip');
-    expect(chip.element.tagName).toBe('SPAN');
-    expect(chip.attributes('href')).toBeUndefined();
-    expect(chip.classes()).toContain('source-chip--inert');
+    const loc = w.find('.source-loc');
+    expect(loc.element.tagName).toBe('SPAN');
+    expect(loc.attributes('href')).toBeUndefined();
+    expect(loc.classes()).toContain('source-loc--inert');
   });
 
   it('links to the bare file with a file-only title when the source has no line number', () => {
@@ -186,9 +186,10 @@ describe('ChatMessage — sources', () => {
     const w = mount(ChatMessage, {
       props: { msg: wholeFile, repoUrlMap: { myrepo: 'https://github.com/acme/myrepo' } },
     });
-    const chip = w.find('.source-chip');
-    expect(chip.attributes('href')).toBe('https://github.com/acme/myrepo/blob/main/src/main.rs');
-    expect(chip.attributes('title')).toBe('myrepo main · src/main.rs');
+    const loc = w.find('.source-loc');
+    expect(loc.attributes('href')).toBe('https://github.com/acme/myrepo/blob/main/src/main.rs');
+    expect(loc.attributes('title')).toBe('myrepo main · src/main.rs');
+    expect(loc.find('.source-loc__line').text()).toBe('file');
   });
 
   it('builds a range URL and title when the source spans multiple lines', () => {
@@ -199,9 +200,66 @@ describe('ChatMessage — sources', () => {
     const w = mount(ChatMessage, {
       props: { msg: withRange, repoUrlMap: { myrepo: 'https://github.com/acme/myrepo' } },
     });
-    const chip = w.find('.source-chip');
-    expect(chip.attributes('href')).toBe('https://github.com/acme/myrepo/blob/main/src/main.rs#L10-L20');
-    expect(chip.attributes('title')).toBe('myrepo main · src/main.rs:10-20');
+    const loc = w.find('.source-loc');
+    expect(loc.attributes('href')).toBe('https://github.com/acme/myrepo/blob/main/src/main.rs#L10-L20');
+    expect(loc.attributes('title')).toBe('myrepo main · src/main.rs:10-20');
+    expect(loc.find('.source-loc__line').text()).toBe('10-20');
+  });
+
+  it('groups multiple citations to the same file under one file row', () => {
+    const sameFile = {
+      ...assistantWithSources,
+      sources: [
+        { repo: 'myrepo', version: 'main', file: 'src/main.rs', line: 10 },
+        { repo: 'myrepo', version: 'main', file: 'src/main.rs', line: 40 },
+        { repo: 'myrepo', version: 'main', file: 'src/other.rs', line: 5 },
+      ],
+    };
+    const w = mount(ChatMessage, { props: { msg: sameFile } });
+    expect(w.findAll('.source-group')).toHaveLength(2);
+    expect(w.findAll('.source-loc')).toHaveLength(3);
+  });
+
+  it('numbers locations across the whole answer, not per file group', () => {
+    const sameFile = {
+      ...assistantWithSources,
+      sources: [
+        { repo: 'myrepo', version: 'main', file: 'src/main.rs', line: 10 },
+        { repo: 'myrepo', version: 'main', file: 'src/other.rs', line: 5 },
+        { repo: 'myrepo', version: 'main', file: 'src/main.rs', line: 40 },
+      ],
+    };
+    const w = mount(ChatMessage, { props: { msg: sameFile } });
+    const nums = w.findAll('.source-loc__num').map(n => n.text());
+    expect(nums).toEqual(['1', '3', '2']);
+  });
+
+  it('shows the sources section expanded by default when there are few sources', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantWithSources } });
+    expect(w.find('.sources-toggle').attributes('aria-expanded')).toBe('true');
+    expect(w.find('.source-groups').isVisible()).toBe(true);
+  });
+
+  it('shows the sources section collapsed by default when there are many sources', () => {
+    const many = {
+      ...assistantWithSources,
+      sources: Array.from({ length: 8 }, (_, i) => ({ repo: 'myrepo', version: 'main', file: `src/f${i}.rs`, line: 1 })),
+    };
+    const w = mount(ChatMessage, { props: { msg: many } });
+    expect(w.find('.sources-toggle').attributes('aria-expanded')).toBe('false');
+    expect(w.find('.source-groups').isVisible()).toBe(false);
+    expect(w.find('.sources-toggle__count').text()).toBe('8');
+  });
+
+  it('toggles the sources section open on click', async () => {
+    const many = {
+      ...assistantWithSources,
+      sources: Array.from({ length: 8 }, (_, i) => ({ repo: 'myrepo', version: 'main', file: `src/f${i}.rs`, line: 1 })),
+    };
+    const w = mount(ChatMessage, { props: { msg: many } });
+    await w.find('.sources-toggle').trigger('click');
+    expect(w.find('.sources-toggle').attributes('aria-expanded')).toBe('true');
+    expect(w.find('.source-groups').isVisible()).toBe(true);
   });
 });
 
@@ -311,9 +369,9 @@ describe('ChatMessage — structure', () => {
     expect(w.find('.message--assistant .message__bubble').exists()).toBe(false);
   });
 
-  it('sources use .source-chips container', () => {
+  it('sources use .sources-block container', () => {
     const w = mount(ChatMessage, { props: { msg: assistantWithSources } });
-    expect(w.find('.source-chips').exists()).toBe(true);
+    expect(w.find('.sources-block').exists()).toBe(true);
   });
 });
 
