@@ -1377,6 +1377,65 @@ pub async fn propose_provision_change(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<ProposeProvisionChangeBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let (agent, prompt) = prepare_provision_proposal(&state, &user, &project_id, &deployment_id, &body).await?;
+
+    let response = agent.query(&prompt, &[], &[], None).await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let proposed_files = extract_json_block(&response.answer)
+        .ok_or_else(|| generation_failed(&response.answer))?;
+
+    let explanation = match response.answer.find("```json") {
+        Some(pos) => response.answer[..pos].trim().to_string(),
+        None => response.answer.trim().to_string(),
+    };
+
+    Ok(Json(json!({
+        "explanation":     explanation,
+        "current_files":   json!({}),
+        "proposed_files":  proposed_files,
+    })))
+}
+
+pub async fn propose_provision_change_stream(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, deployment_id)): Path<(String, String)>,
+    Json(body): Json<ProposeProvisionChangeBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (agent, prompt) = prepare_provision_proposal(&state, &user, &project_id, &deployment_id, &body).await?;
+
+    let (tx, rx) = mpsc::channel::<AgentEvent>(64);
+    tokio::spawn(async move {
+        let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
+        tokio::spawn(async move {
+            agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
+        });
+        while let Some(event) = agent_rx.recv().await {
+            let _ = tx.send(event).await;
+        }
+    });
+
+    let stream = ReceiverStream::new(rx).map(|event| {
+        let data = serde_json::to_string(&event).unwrap_or_default();
+        Ok::<Event, Infallible>(Event::default().data(data))
+    });
+
+    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    response.headers_mut().insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    Ok(response)
+}
+
+async fn prepare_provision_proposal(
+    state: &Arc<ProjectState>,
+    user: &Claims,
+    project_id: &str,
+    deployment_id: &str,
+    body: &ProposeProvisionChangeBody,
+) -> Result<(Arc<Agent>, String), ApiError> {
     let instructions  = body.instructions.as_deref().unwrap_or("").trim().to_string();
     let error_context = body.error_context.as_deref().unwrap_or("").trim().to_string();
     if instructions.is_empty() && error_context.is_empty() {
@@ -1395,7 +1454,6 @@ pub async fn propose_provision_change(
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "terraform bundle not found"))?;
     let current_content = artifact["content"].as_str().unwrap_or_default().to_string();
-    let current_files: Value = serde_json::from_str(&current_content).unwrap_or_else(|_| json!({}));
 
     let error_section = if error_context.is_empty() {
         String::new()
@@ -1419,22 +1477,7 @@ pub async fn propose_provision_change(
          tools (e.g. run_command) to investigate first if that helps."
     );
 
-    let response = agent.query(&prompt, &[], &[], None).await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-
-    let proposed_files = extract_json_block(&response.answer)
-        .ok_or_else(|| generation_failed(&response.answer))?;
-
-    let explanation = match response.answer.find("```json") {
-        Some(pos) => response.answer[..pos].trim().to_string(),
-        None => response.answer.trim().to_string(),
-    };
-
-    Ok(Json(json!({
-        "explanation":     explanation,
-        "current_files":   current_files,
-        "proposed_files":  proposed_files,
-    })))
+    Ok((agent, prompt))
 }
 
 #[derive(serde::Deserialize)]
