@@ -42,7 +42,7 @@
             <input
               v-model="newLayoutName"
               type="text"
-              placeholder="Save current arrangement as…"
+              placeholder="Layout name"
               @keydown.enter.prevent="submitSaveLayout"
             />
             <button
