@@ -1,6 +1,14 @@
 <template>
   <div class="chat-workspace">
     <div class="chat-workspace__toolbar">
+      <div class="chat-workspace__toolbar-actions">
+        <button
+          class="p-button--base is-dense u-no-margin"
+          type="button"
+          data-testid="new-layout-btn"
+          @click="onNewLayout"
+        >New layout</button>
+      </div>
       <div class="chat-workspace__layouts">
         <button
           class="p-button--base is-dense u-no-margin chat-workspace__layouts-toggle"
@@ -54,10 +62,45 @@
   </div>
 
   <SourcePanel />
+
+  <div
+    v-if="newLayoutConfirm"
+    class="modal"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="new-layout-confirm-title"
+    @click.self="newLayoutConfirm = false"
+  >
+    <div class="modal-content" data-testid="new-layout-confirm">
+      <button class="modal-close" type="button" aria-label="Close" @click="newLayoutConfirm = false">✕</button>
+      <h3 id="new-layout-confirm-title">Save current layout?</h3>
+      <p>The current layout has unsaved changes. Do you want to save it before creating a new one?</p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="newLayoutConfirm = false">Cancel</button>
+        <button class="p-button--base is-dense" type="button" data-testid="new-layout-dont-save-btn" @click="confirmNewLayoutWithoutSave">Don't save</button>
+        <button
+          class="p-button--positive is-dense"
+          type="button"
+          data-testid="new-layout-save-btn"
+          :disabled="!newLayoutSaveName.trim()"
+          @click="confirmNewLayoutWithSave"
+        >Save and continue</button>
+      </div>
+      <div class="form-group" style="margin-top: 0.75rem;">
+        <input
+          v-model="newLayoutSaveName"
+          type="text"
+          class="new-layout-save-name-input"
+          :placeholder="currentLayoutNamePlaceholder"
+          @keydown.enter.prevent="confirmNewLayoutWithSave"
+        />
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import PaneSplit from '../components/chat/PaneSplit.vue';
 import LayoutShapeIcon from '../components/chat/LayoutShapeIcon.vue';
 import SourcePanel from '../components/SourcePanel.vue';
@@ -69,6 +112,17 @@ const workspace = useChatWorkspaceStore();
 
 const layoutsOpen   = ref(false);
 const newLayoutName = ref('');
+const newLayoutConfirm   = ref(false);
+const newLayoutSaveName  = ref('');
+
+const currentLayoutNamePlaceholder = computed(() => {
+  const id = workspace.currentNamedLayoutId;
+  if (id) {
+    const found = workspace.namedLayouts.find(l => l.id === id);
+    if (found) return found.name;
+  }
+  return 'Layout name…';
+});
 
 async function toggleLayouts() {
   layoutsOpen.value = !layoutsOpen.value;
@@ -90,6 +144,32 @@ async function submitSaveLayout() {
   workspace.currentNamedLayoutId = null;
   await workspace.saveNamedLayout(name);
   newLayoutName.value = '';
+}
+
+function onNewLayout() {
+  if (workspace.isLayoutSaved) {
+    workspace.newLayout();
+    layoutsOpen.value = false;
+  } else {
+    newLayoutSaveName.value = currentLayoutNamePlaceholder.value === 'Layout name…' ? '' : currentLayoutNamePlaceholder.value;
+    newLayoutConfirm.value = true;
+  }
+}
+
+async function confirmNewLayoutWithSave() {
+  const name = newLayoutSaveName.value.trim();
+  if (!name) return;
+  await workspace.saveNamedLayout(name);
+  workspace.newLayout();
+  newLayoutConfirm.value = false;
+  newLayoutSaveName.value = '';
+  layoutsOpen.value = false;
+}
+
+function confirmNewLayoutWithoutSave() {
+  workspace.newLayout();
+  newLayoutConfirm.value = false;
+  layoutsOpen.value = false;
 }
 
 function handleUnload() {
