@@ -209,6 +209,7 @@ import {
   listProjectArtifacts, linkContextArtifact,
 } from '../../lib/api.js';
 import { useProjectStore } from '../../stores/project.js';
+import { isDarkTheme, onThemeChange } from '../../lib/theme.js';
 import BusyStatus from './BusyStatus.vue';
 import LoadingSpinner from './LoadingSpinner.vue';
 import DesignGenerationPanel from './DesignGenerationPanel.vue';
@@ -402,6 +403,14 @@ function closePropose() {
   error.value = null;
 }
 
+function monacoThemeName() {
+  return isDarkTheme() ? 'vs-dark' : 'vs';
+}
+
+function applyMonacoTheme() {
+  monacoApi?.editor.setTheme(monacoThemeName());
+}
+
 async function mountEditor() {
   if (editor) {
     editor.dispose();
@@ -414,6 +423,7 @@ async function mountEditor() {
   editor = monacoApi.editor.create(editorContainerRef.value, {
     value: originalContent,
     language: 'markdown',
+    theme: monacoThemeName(),
     automaticLayout: true,
     minimap: { enabled: false },
     fontSize: 13,
@@ -438,6 +448,7 @@ async function mountDiffEditor() {
     monacoApi = await import('monaco-editor');
   }
   diffEditor = monacoApi.editor.createDiffEditor(diffEditorContainerRef.value, {
+    theme: monacoThemeName(),
     automaticLayout: true,
     minimap: { enabled: false },
     fontSize: 13,
@@ -569,6 +580,8 @@ function modifyProposal() {
   loadArtifacts();
 }
 
+const unsubscribeTheme = onThemeChange(applyMonacoTheme);
+
 onBeforeUnmount(() => {
   if (editor) {
     editor.dispose();
@@ -577,6 +590,7 @@ onBeforeUnmount(() => {
   disposeDiffEditor();
   stopPdfPolling();
   if (pdfObjectUrl) URL.revokeObjectURL(pdfObjectUrl);
+  unsubscribeTheme();
 });
 
 watch(() => props.deployment.design_doc?.id, () => {
