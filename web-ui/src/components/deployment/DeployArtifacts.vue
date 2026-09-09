@@ -1,37 +1,42 @@
 <template>
   <div class="deploy-artifacts" data-testid="deploy-artifacts">
-    <div class="deploy-artifacts__toolbar">
-      <span class="infra-state-badge" :class="infraStateClass(deployment.infra_state)">
+    <div class="deploy-artifacts__status-row">
+      <span class="infra-state-badge" :class="infraStateClass(deployment.infra_state)" data-testid="infra-state-badge">
         {{ infraStateLabel(deployment.infra_state) }}
       </span>
-      <div v-if="agents.length > 0" class="deploy-artifacts__agent">
-        <label for="deploy-agent-select" class="deploy-artifacts__agent-label">Agent</label>
-        <select id="deploy-agent-select" v-model="selectedAgentId" data-testid="agent-select">
-          <option value="" disabled>Select an agent</option>
-          <option v-for="a in agents" :key="a.id" :value="a.id">{{ a.hostname }}</option>
-        </select>
-      </div>
-      <button
-        class="p-button--positive is-dense"
-        type="button"
-        data-testid="run-all-btn"
-        :disabled="!selectedAgentId || running"
-        @click="runAll"
-      >Run all</button>
     </div>
 
     <div class="deploy-artifacts__body">
-      <div class="deploy-artifacts__dag">
-        <DagView
-          :plan="plan"
-          :step-files="stepFiles"
-          :step-status="stepStatus"
-          @select-artifact="selectArtifact"
-          @run-all="runAll"
-          @run-node="runNode"
-          @plan-preview="planPreview"
-        />
-      </div>
+      <aside class="deploy-artifacts__sidebar" data-testid="deploy-artifacts-sidebar">
+        <div class="deploy-artifacts__sidebar-header">
+          <h3>Artifacts</h3>
+          <button
+            class="p-button--positive is-dense"
+            type="button"
+            data-testid="add-artifact-btn"
+            @click="addArtifactOpen = true"
+          >Add artifact</button>
+        </div>
+        <ul class="deploy-artifacts__list">
+          <li
+            v-for="item in uniqueArtifacts"
+            :key="item.artifactId"
+            class="deploy-artifacts__item"
+            :class="{ 'deploy-artifacts__item--active': selectedArtifactId === item.artifactId }"
+            :data-testid="`artifact-item-${item.artifactId}`"
+            @click="selectArtifact(item.artifactId)"
+          >
+            <span class="artifact-kind-badge" :class="kindBadgeClass(item.kind)">{{ kindLabel(item.kind) }}</span>
+            <div class="deploy-artifacts__item-text">
+              <span class="deploy-artifacts__item-title">{{ item.title }}</span>
+              <span class="deploy-artifacts__item-meta">{{ item.action }}</span>
+            </div>
+          </li>
+        </ul>
+        <div v-if="uniqueArtifacts.length === 0" class="deploy-artifacts__sidebar-empty">
+          <p>No artifacts in the execution plan.</p>
+        </div>
+      </aside>
 
       <div class="deploy-artifacts__editor">
         <ArtifactEditor
@@ -42,15 +47,23 @@
         />
       </div>
     </div>
+
+    <AddArtifactModal
+      :open="addArtifactOpen"
+      :project-id="projectId"
+      :deployment-id="deployment.id"
+      @close="addArtifactOpen = false"
+      @added="onArtifactAdded"
+    />
   </div>
 </template>
 
 <script setup>
-import { ref, watch, onMounted, onUnmounted } from 'vue';
-import DagView from './DagView.vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import ArtifactEditor from './ArtifactEditor.vue';
+import AddArtifactModal from './AddArtifactModal.vue';
 import {
-  getExecutionPlan, getArtifact, runDag, openProjectEvents,
+  getExecutionPlan, setExecutionPlan, openProjectEvents,
 } from '../../lib/api.js';
 
 const props = defineProps({
@@ -60,17 +73,11 @@ const props = defineProps({
 });
 const emit = defineEmits(['refresh']);
 
-const plan             = ref({ deploy_steps: [], destroy_steps: [] });
-const stepFiles        = ref({});
-const stepStatus       = ref({});
-const selectedArtifactId = ref(null);
-const selectedAgentId  = ref('');
-const running          = ref(false);
-let eventSource        = null;
+const plan                 = ref({ deploy_steps: [], destroy_steps: [] });
+const selectedArtifactId   = ref(null);
+const addArtifactOpen       = ref(false);
 
-watch(() => props.agents, (list) => {
-  if (!selectedAgentId.value && list.length === 1) selectedAgentId.value = list[0].id;
-}, { immediate: true });
+let eventSource = null;
 
 const INFRA_STATE_LABELS = {
   none: 'Not deployed', up: 'Up', broken: 'Broken', destroyed: 'Destroyed', destroy_failed: 'Destroy failed',
@@ -84,25 +91,43 @@ function infraStateClass(state) {
   return 'infra-state-badge--none';
 }
 
+function kindLabel(kind) {
+  if (kind === 'pdf') return 'PDF';
+  if (kind === 'terraform') return 'Terraform';
+  if (kind === 'terragrunt') return 'Terragrunt';
+  if (kind === 'bash') return 'Bash';
+  return 'Markdown';
+}
+
+function kindBadgeClass(kind) {
+  if (kind === 'pdf') return 'artifact-kind-badge--pdf';
+  if (kind === 'terraform' || kind === 'terragrunt') return 'artifact-kind-badge--terraform';
+  if (kind === 'bash') return 'artifact-kind-badge--bash';
+  return 'artifact-kind-badge--markdown';
+}
+
+const uniqueArtifacts = computed(() => {
+  const seen = new Set();
+  const items = [];
+  for (const step of [...plan.value.deploy_steps, ...plan.value.destroy_steps]) {
+    if (!step.artifact) continue;
+    if (seen.has(step.artifact.id)) continue;
+    seen.add(step.artifact.id);
+    items.push({
+      artifactId: step.artifact.id,
+      kind:       step.artifact.kind,
+      title:      step.artifact.title,
+      action:     step.action,
+    });
+  }
+  return items;
+});
+
 async function loadPlan() {
   try {
     plan.value = await getExecutionPlan(props.projectId, props.deployment.id);
-    for (const step of [...plan.value.deploy_steps, ...plan.value.destroy_steps]) {
-      if (step.artifact?.kind === 'terraform' || step.artifact?.kind === 'terragrunt') {
-        loadStepFiles(step);
-      }
-    }
   } catch {
     plan.value = { deploy_steps: [], destroy_steps: [] };
-  }
-}
-
-async function loadStepFiles(step) {
-  try {
-    const artifact = await getArtifact(step.artifact.id);
-    stepFiles.value[step.id] = JSON.parse(artifact.content || '{}');
-  } catch {
-    stepFiles.value[step.id] = {};
   }
 }
 
@@ -110,41 +135,39 @@ function selectArtifact(artifactId) {
   selectedArtifactId.value = artifactId;
 }
 
-async function runAll() {
-  if (!selectedAgentId.value || running.value) return;
-  running.value = true;
-  try {
-    await runDag(props.projectId, props.deployment.id, { agent_id: selectedAgentId.value, timeout_secs: 300 });
-    emit('refresh');
-  } catch {
-  } finally {
-    running.value = false;
-  }
-}
-
-async function runNode(stepId) {
-  if (!selectedAgentId.value || running.value) return;
-  running.value = true;
-  try {
-    await runDag(props.projectId, props.deployment.id, { agent_id: selectedAgentId.value, timeout_secs: 300 });
-    emit('refresh');
-  } catch {
-  } finally {
-    running.value = false;
-  }
-}
-
-function planPreview(stepId) {}
-
 function onSaved() {
-  emit('refresh');
+}
+
+async function onArtifactAdded(newArtifact) {
+  addArtifactOpen.value = false;
+  const action = newArtifact.kind === 'terraform' || newArtifact.kind === 'terragrunt' ? 'apply' : 'run';
+  const deploySteps = plan.value.deploy_steps.map(s => ({
+    artifact_id: s.artifact.id,
+    action:      s.action,
+    label:       s.label,
+    depends_on:  (s.depends_on ?? []).map(depId => {
+      const idx = plan.value.deploy_steps.findIndex(ds => ds.id === depId);
+      return idx >= 0 ? idx : 0;
+    }),
+  }));
+  deploySteps.push({
+    artifact_id: newArtifact.id,
+    action,
+    label: newArtifact.id,
+    depends_on: deploySteps.length > 0 ? [deploySteps.length - 1] : [],
+  });
+  try {
+    await setExecutionPlan(props.projectId, props.deployment.id, {
+      deploy_steps: deploySteps,
+      destroy_steps: [],
+    });
+  } catch {}
+  await loadPlan();
+  selectedArtifactId.value = newArtifact.id;
 }
 
 function handleProjectEvent(e) {
   if (!props.deployment || e.deployment_id !== props.deployment.id) return;
-  if (e.type === 'deployment_run_log') {
-    if (e.step_id) stepStatus.value[e.step_id] = e.status;
-  }
   if (e.type === 'done') {
     emit('refresh');
   }
