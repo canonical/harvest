@@ -159,19 +159,57 @@
         No response was generated.
       </p>
 
-      <div v-if="sourceLinks.length" class="source-chips">
-        <component
-          :is="link.href ? 'a' : 'span'"
-          v-for="(link, i) in sourceLinks"
-          :key="i"
-          class="source-chip"
-          :class="{ 'source-chip--inert': !link.href }"
-          v-bind="link.href ? { href: link.href, target: '_blank', rel: 'noopener' } : {}"
-          :title="link.title"
+      <div v-if="sourceGroups.length" class="sources-block">
+        <button
+          type="button"
+          class="sources-toggle"
+          :aria-expanded="String(sourcesExpanded)"
+          @click="sourcesExpanded = !sourcesExpanded"
         >
-          <span class="source-chip__num">{{ i + 1 }}</span>
-          <span class="source-chip__name">{{ link.src.file }}</span>
-        </component>
+          <svg
+            class="sources-toggle__chevron"
+            viewBox="0 0 10 10"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            xmlns="http://www.w3.org/2000/svg"
+            aria-hidden="true"
+            :style="sourcesExpanded ? 'transform: rotate(180deg)' : ''"
+          >
+            <polyline points="2,3 5,7 8,3"/>
+          </svg>
+          Sources
+          <span class="sources-toggle__count">{{ sourceLinks.length }}</span>
+        </button>
+
+        <div v-show="sourcesExpanded" class="source-groups">
+          <div
+            v-for="group in sourceGroups"
+            :key="`${group.repo}:${group.version}:${group.file}`"
+            class="source-group"
+          >
+            <div class="source-group__file" :title="`${group.repo} ${group.version}`">
+              <span class="source-group__file-name">{{ group.file }}</span>
+              <span class="source-group__file-meta">{{ group.repo }}</span>
+            </div>
+            <div class="source-group__locations">
+              <component
+                :is="loc.href ? 'a' : 'span'"
+                v-for="loc in group.locations"
+                :key="loc.num"
+                class="source-loc"
+                :class="{ 'source-loc--inert': !loc.href }"
+                v-bind="loc.href ? { href: loc.href, target: '_blank', rel: 'noopener' } : {}"
+                :title="loc.title"
+              >
+                <span class="source-loc__num">{{ loc.num }}</span>
+                <span class="source-loc__line">{{ loc.lineLabel }}</span>
+              </component>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div v-if="msg.question" class="message__question">
@@ -417,4 +455,30 @@ const sourceLinks = computed(() => (props.msg.sources ?? []).map(src => ({
   href: sourceHref(src),
   title: sourceTitle(src),
 })));
+
+const SOURCES_COLLAPSE_THRESHOLD = 5;
+
+const sourceGroups = computed(() => {
+  const groups = [];
+  const byKey = new Map();
+  sourceLinks.value.forEach((link, i) => {
+    const { src } = link;
+    const key = `${src.repo}:${src.version}:${src.file}`;
+    let group = byKey.get(key);
+    if (!group) {
+      group = { repo: src.repo, version: src.version ?? 'main', file: src.file, locations: [] };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    group.locations.push({
+      num: i + 1,
+      href: link.href,
+      title: link.title,
+      lineLabel: src.line ? (src.end_line ? `${src.line}-${src.end_line}` : `${src.line}`) : 'file',
+    });
+  });
+  return groups;
+});
+
+const sourcesExpanded = ref((props.msg.sources ?? []).length <= SOURCES_COLLAPSE_THRESHOLD);
 </script>
