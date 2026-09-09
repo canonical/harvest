@@ -359,6 +359,7 @@ async function loadConversation(id) {
       : await getConversation(id);
     setActiveConvId(id);
     chat.loadFromHistory(Array.isArray(conv.messages) ? conv.messages : []);
+    if (conv.title) emit('title-updated', conv.title);
     historyOpen.value = false;
     openEventStream();
     await nextTick();
