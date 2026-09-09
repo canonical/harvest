@@ -620,7 +620,7 @@ async fn drive_turn(
             }
         }
 
-        if let AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms } = &event {
+        if let AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. } = &event {
             let save_now = chrono::Utc::now().to_rfc3339();
             let chain = std::mem::take(&mut chain_builder).finish();
             match &persist {
