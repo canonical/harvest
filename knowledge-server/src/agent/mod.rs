@@ -1072,24 +1072,35 @@ fn history_to_messages(history: &[HistoryMessage]) -> Vec<Message> {
     }).collect()
 }
 
+fn parse_line_range(raw: &str) -> (u32, Option<u32>) {
+    let first = raw.split(',').next().unwrap_or("");
+    let mut parts = first.splitn(2, |c: char| c == '-' || c == '\u{2013}');
+    let start = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let end = parts.next().and_then(|s| s.parse().ok());
+    (start, end)
+}
+
 fn parse_citations(text: &str) -> Vec<Source> {
     // The line number (and range) is optional: a model sometimes cites a whole
     // file rather than a specific location (e.g. [repo:v1.0:src/lib.rs] to
     // support a claim about the file's overall purpose). Line 0 doubles as the
     // "no specific line" sentinel, matching how an explicit ":0" already parses.
-    let re = Regex::new(r"\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+)(?::(\d+)(?:-(\d+))?)?\]").unwrap();
+    let re = Regex::new(r"\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+)(?::(\d+(?:[–-]\d+)?(?:,\d+(?:[–-]\d+)?)*))?\]").unwrap();
     let mut seen = HashSet::new();
     let mut sources = Vec::new();
 
     for cap in re.captures_iter(text) {
         let key = cap[0].to_string();
         if seen.insert(key) {
+            let (line, end_line) = cap.get(4)
+                .map(|m| parse_line_range(m.as_str()))
+                .unwrap_or((0, None));
             sources.push(Source {
-                repo:     cap[1].to_string(),
-                version:  cap[2].to_string(),
-                file:     cap[3].to_string(),
-                line:     cap.get(4).and_then(|m| m.as_str().parse().ok()).unwrap_or(0),
-                end_line: cap.get(5).and_then(|m| m.as_str().parse().ok()),
+                repo: cap[1].to_string(),
+                version: cap[2].to_string(),
+                file: cap[3].to_string(),
+                line,
+                end_line,
             });
         }
     }
@@ -1982,6 +1993,22 @@ mod tests {
         let sources = parse_citations("[r:v1:f.rs:42]");
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].end_line, None);
+    }
+
+    #[test]
+    fn citation_with_multiple_ranges_uses_first_range() {
+        let sources = parse_citations("[r:v1:f.rs:32-48,77-86]");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].line, 32);
+        assert_eq!(sources[0].end_line, Some(48));
+    }
+
+    #[test]
+    fn citation_with_en_dash_range_parsed() {
+        let sources = parse_citations("[r:v1:f.rs:32\u{2013}48]");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].line, 32);
+        assert_eq!(sources[0].end_line, Some(48));
     }
 
     #[test]

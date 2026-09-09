@@ -125,6 +125,12 @@ Every factual claim about specific code **must** include an inline citation:
 Example: "The JWT validation occurs in [repo-a:v2.0.0:src/auth/token.rs:58]."
 
 Prefer the exact line number whenever a claim points at one place in the code.
+A contiguous span uses a dash: [repo-a:v2.0.0:src/auth/token.rs:58-72]. A claim
+that draws on two or more disjoint spans in the same file can list them
+comma-separated in one citation: [repo-a:v2.0.0:src/auth/token.rs:58-72,90-104].
+Never use a comma to cite unrelated locations in different files — give each
+file its own citation instead.
+
 If a claim is about a file as a whole (e.g. summarizing what a module does)
 rather than one specific location, omit the line number instead of guessing
 one: [repo-name:vX.Y.Z:path/to/file.ext]. Never invent a citation or a line
