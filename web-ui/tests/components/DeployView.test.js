@@ -28,7 +28,7 @@ vi.mock('../../src/components/deployment/DeployAgentsPanel.vue', () => ({
     name: 'DeployAgentsPanel',
     template: '<div data-testid="deploy-agents-panel"><button data-testid="stub-next" @click="$emit(\'next\')" /></div>',
     props: ['projectId', 'agents', 'reload'],
-    emits: ['next'],
+    emits: ['next', 'modal-state-change'],
   },
 }));
 vi.mock('../../src/components/deployment/DeployGenerationPanel.vue', () => ({
@@ -36,7 +36,7 @@ vi.mock('../../src/components/deployment/DeployGenerationPanel.vue', () => ({
     name: 'DeployGenerationPanel',
     template: '<div data-testid="deploy-generation-panel" />',
     props: ['projectId', 'deploymentId', 'deploymentName'],
-    emits: ['done'],
+    emits: ['done', 'cancel'],
   },
 }));
 

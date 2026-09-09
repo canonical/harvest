@@ -19,16 +19,10 @@
         :deployment-id="deployment.id"
         :deployment-name="deployment.name"
         @done="onGenerationDone"
+        @cancel="onGenerationCancel"
       />
 
       <template v-else-if="deployment.terraform_bundle">
-        <div class="deploy-view-header">
-          <p class="deploy-view__eyebrow" data-testid="deploy-eyebrow">Deploy</p>
-          <div class="deploy-view__title-row">
-            <h2 class="deploy-view__title">{{ deployment.name }}</h2>
-          </div>
-        </div>
-
         <div
           v-if="isBroken"
           class="p-notification--caution deploy-broken-banner"
@@ -55,6 +49,7 @@
         :agents="agents"
         :reload="loadAgents"
         @next="onNext"
+        @modal-state-change="onModalStateChange"
       />
     </template>
 
@@ -81,6 +76,10 @@ const agents        = ref([]);
 const loading       = ref(false);
 const generating    = ref(false);
 let eventSource     = null;
+let agentPollTimer  = null;
+
+const AGENT_POLL_INTERVAL_MS = 15_000;
+const AGENT_POLL_FAST_MS     = 1_000;
 
 const isBroken = computed(() => ['broken', 'destroy_failed'].includes(deployment.value?.infra_state));
 
@@ -110,9 +109,22 @@ function onNext() {
   generating.value = true;
 }
 
+function restartAgentPolling(ms) {
+  clearInterval(agentPollTimer);
+  agentPollTimer = setInterval(loadAgents, ms);
+}
+
+function onModalStateChange(open) {
+  restartAgentPolling(open ? AGENT_POLL_FAST_MS : AGENT_POLL_INTERVAL_MS);
+}
+
 async function onGenerationDone() {
   generating.value = false;
   await load();
+}
+
+function onGenerationCancel() {
+  generating.value = false;
 }
 
 function handleProjectEvent(e) {
@@ -125,11 +137,13 @@ function handleProjectEvent(e) {
 onMounted(() => {
   if (props.projectId) {
     eventSource = openProjectEvents(props.projectId, null, handleProjectEvent);
+    agentPollTimer = setInterval(loadAgents, AGENT_POLL_INTERVAL_MS);
   }
 });
 
 onUnmounted(() => {
   eventSource?.close();
+  clearInterval(agentPollTimer);
 });
 
 watch(() => props.projectId, () => load(), { immediate: true });
