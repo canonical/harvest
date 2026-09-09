@@ -949,13 +949,13 @@ fn is_ask_user_narration(text: &str) -> bool {
     announces_asking || (future_tense && lower.contains("question"))
 }
 
-fn last_resort_fallback() -> String {
+pub(crate) fn last_resort_fallback() -> String {
     "I reached the tool-call limit before completing my analysis. \
      Please ask a more specific question or try again."
         .to_string()
 }
 
-fn question_fallback() -> String {
+pub(crate) fn question_fallback() -> String {
     "I've gathered what I can from the codebase. \
      Please answer the question above so I can give you a precise answer."
         .to_string()
