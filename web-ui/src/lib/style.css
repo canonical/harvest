@@ -6121,8 +6121,9 @@ a.source-loc:hover .source-loc__line {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 1rem;
-  padding: 1.25rem 2rem 1rem;
+  padding: 1.25rem 0 1rem;
 }
 
 .design-panel__heading {
@@ -7347,6 +7348,23 @@ a.source-loc:hover .source-loc__line {
 
 .chat-workspace__layouts { position: relative; }
 
+.chat-workspace__toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.new-layout-save-name-input {
+  width: 100%;
+  font-size: 0.875rem;
+  padding: 0.375rem 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  box-sizing: border-box;
+}
+
 .chat-workspace__layouts-toggle {
   display: flex;
   align-items: center;
@@ -7390,6 +7408,7 @@ a.source-loc:hover .source-loc__line {
   height: 2.05rem;
   box-sizing: border-box;
   line-height: 1;
+  margin-bottom: 0;
 }
 
 .chat-workspace__layouts-save input {
