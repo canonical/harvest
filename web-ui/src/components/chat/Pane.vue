@@ -19,7 +19,7 @@
               :aria-selected="tab.tabId === node.activeTabId"
               :title="tab.title || 'New chat'"
               @click="activate(tab.tabId)"
-            >{{ tab.title || 'New chat' }}</button>
+            ><span class="pane__tab-title">{{ tab.title || 'New chat' }}</span></button>
             <button
               class="pane__tab-close"
               type="button"
