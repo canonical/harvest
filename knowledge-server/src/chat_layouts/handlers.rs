@@ -95,11 +95,19 @@ pub async fn list_named(
 ) -> Result<impl IntoResponse, ApiError> {
     let rows = state.neo4j.query_read(
         "MATCH (:User {id: $uid})-[:HAS_CHAT_LAYOUT]->(l:ChatLayout {kind: 'named', project_id: $pid})
-         RETURN l.id AS id, l.name AS name, l.updated_at AS updated_at
+         RETURN l.id AS id, l.name AS name, l.tree AS tree, l.updated_at AS updated_at
          ORDER BY l.updated_at DESC",
         json!({ "uid": user.sub, "pid": scope_id(params.project_id) }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    Ok(Json(rows))
+
+    let layouts: Vec<Value> = rows.iter().map(|row| json!({
+        "id": row.get("id"),
+        "name": row.get("name"),
+        "tree": parse_tree(row),
+        "updated_at": row.get("updated_at"),
+    })).collect();
+
+    Ok(Json(layouts))
 }
 
 #[derive(Deserialize)]

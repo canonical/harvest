@@ -29,6 +29,36 @@ export function allTabIds(root) {
   return root.children.flatMap(allTabIds);
 }
 
+export function layoutRects(root, box = { x: 0, y: 0, w: 100, h: 100 }) {
+  const rects = [];
+
+  function walk(node, x, y, w, h) {
+    if (!node) return;
+    if (node.type === 'leaf') {
+      rects.push({ x, y, w, h, tabCount: node.tabs?.length ?? 1 });
+      return;
+    }
+    const n = node.children.length;
+    const sizes = node.sizes?.length === n ? node.sizes : evenSizes(n);
+    let offset = 0;
+    node.children.forEach((child, i) => {
+      const frac = sizes[i] ?? 1 / n;
+      if (node.direction === 'row') {
+        const cw = w * frac;
+        walk(child, x + offset, y, cw, h);
+        offset += cw;
+      } else {
+        const ch = h * frac;
+        walk(child, x, y + offset, w, ch);
+        offset += ch;
+      }
+    });
+  }
+
+  walk(root, box.x, box.y, box.w, box.h);
+  return rects;
+}
+
 export function findPane(root, paneId) {
   if (root.id === paneId) return { node: root, parent: null, index: -1 };
   if (root.type !== 'split') return null;
