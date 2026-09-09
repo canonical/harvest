@@ -523,6 +523,7 @@ async function handleConfirmAllActions() {
 function handleChatEvent(event) {
   switch (event.type) {
     case 'user_message':
+      if (chat.loading) chat.reset();
       chat.addUserMessage(event.query ?? '', event.username ?? null, event.attachments ?? []);
       chat.startAssistantMessage();
       break;
