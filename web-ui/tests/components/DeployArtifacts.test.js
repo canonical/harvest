@@ -6,20 +6,11 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
   return {
     ...actual,
     getExecutionPlan: vi.fn(),
-    runDag:           vi.fn(),
-    getArtifact:      vi.fn(),
+    setExecutionPlan: vi.fn(),
     openProjectEvents: vi.fn(() => ({ close() {} })),
   };
 });
 
-vi.mock('../../src/components/deployment/DagView.vue', () => ({
-  default: {
-    name: 'DagView',
-    template: '<div data-testid="dag-view"><button data-testid="stub-node" @click="$emit(\'select-artifact\', \'a1\')" /><button data-testid="stub-run-all" @click="$emit(\'run-all\')" /></div>',
-    props: ['plan', 'stepFiles', 'stepStatus'],
-    emits: ['run-all', 'run-node', 'plan-preview', 'select-artifact'],
-  },
-}));
 vi.mock('../../src/components/deployment/ArtifactEditor.vue', () => ({
   default: {
     name: 'ArtifactEditor',
@@ -29,11 +20,20 @@ vi.mock('../../src/components/deployment/ArtifactEditor.vue', () => ({
   },
 }));
 
+vi.mock('../../src/components/deployment/AddArtifactModal.vue', () => ({
+  default: {
+    name: 'AddArtifactModal',
+    template: '<div v-if="open" data-testid="add-artifact-modal-stub" @click="$emit(\'close\')" />',
+    props: ['open', 'projectId', 'deploymentId'],
+    emits: ['close', 'added'],
+  },
+}));
+
 import DeployArtifacts from '../../src/components/deployment/DeployArtifacts.vue';
 import * as api from '../../src/lib/api.js';
 
 const DEPLOYMENT = {
-  id: 'd1', infra_state: 'none',
+  id: 'd1', name: 'MyProject', infra_state: 'none',
   terraform_bundle: { id: 'b1', kind: 'terraform' },
   context_artifacts: [],
 };
@@ -56,13 +56,13 @@ describe('DeployArtifacts', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     api.getExecutionPlan.mockResolvedValue(PLAN);
-    api.getArtifact.mockResolvedValue({ id: 'a1', title: 'Infra', kind: 'terraform', content: '{}' });
+    api.setExecutionPlan.mockResolvedValue({});
   });
 
-  it('renders the DAG on the left and editor on the right', async () => {
+  it('renders the sidebar and editor', async () => {
     const w = mountPanel();
     await flushPromises();
-    expect(w.find('[data-testid="dag-view"]').exists()).toBe(true);
+    expect(w.find('[data-testid="deploy-artifacts-sidebar"]').exists()).toBe(true);
     expect(w.find('[data-testid="artifact-editor"]').exists()).toBe(true);
   });
 
@@ -72,16 +72,17 @@ describe('DeployArtifacts', () => {
     expect(api.getExecutionPlan).toHaveBeenCalledWith('proj-1', 'd1');
   });
 
-  it('passes the plan to DagView', async () => {
+  it('lists unique artifacts from the execution plan in the sidebar', async () => {
     const w = mountPanel();
     await flushPromises();
-    expect(w.findComponent({ name: 'DagView' }).props('plan')).toEqual(PLAN);
+    expect(w.find('[data-testid="artifact-item-a0"]').exists()).toBe(true);
+    expect(w.find('[data-testid="artifact-item-a1"]').exists()).toBe(true);
   });
 
-  it('selects the corresponding artifact when a DAG node is clicked', async () => {
+  it('selects the artifact when a sidebar item is clicked', async () => {
     const w = mountPanel();
     await flushPromises();
-    await w.find('[data-testid="stub-node"]').trigger('click');
+    await w.find('[data-testid="artifact-item-a1"]').trigger('click');
     await flushPromises();
     expect(w.findComponent({ name: 'ArtifactEditor' }).props('artifactId')).toBe('a1');
   });
@@ -100,31 +101,57 @@ describe('DeployArtifacts', () => {
     expect(w.findComponent({ name: 'ArtifactEditor' }).props('artifactId')).toBeNull();
   });
 
-  it('shows an agent selector when agents are connected', async () => {
-    const w = mountPanel({ agents: [{ id: 'ag-1', hostname: 'box1' }] });
-    await flushPromises();
-    expect(w.find('[data-testid="agent-select"]').exists()).toBe(true);
-  });
-
-  it('shows Run all button that emits run-dag', async () => {
-    const w = mountPanel({ agents: [{ id: 'ag-1', hostname: 'box1' }] });
-    await flushPromises();
-    await w.find('[data-testid="run-all-btn"]').trigger('click');
-    await flushPromises();
-    expect(api.runDag).toHaveBeenCalledWith('proj-1', 'd1', { agent_id: 'ag-1', timeout_secs: 300 });
-  });
-
   it('shows the infra-state badge', async () => {
     const w = mountPanel();
     await flushPromises();
     expect(w.find('.infra-state-badge').exists()).toBe(true);
   });
 
-  it('emits refresh when ArtifactEditor emits saved', async () => {
+  it('shows an Add artifact button', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    expect(w.find('[data-testid="add-artifact-btn"]').exists()).toBe(true);
+  });
+
+  it('opens the AddArtifactModal when Add artifact is clicked', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="add-artifact-btn"]').trigger('click');
+    await flushPromises();
+    expect(w.find('[data-testid="add-artifact-modal-stub"]').exists()).toBe(true);
+  });
+
+  it('closes the AddArtifactModal on close event', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="add-artifact-btn"]').trigger('click');
+    await flushPromises();
+    await w.find('[data-testid="add-artifact-modal-stub"]').trigger('click');
+    await flushPromises();
+    expect(w.find('[data-testid="add-artifact-modal-stub"]').exists()).toBe(false);
+  });
+
+  it('adds the new artifact to the execution plan and reloads on added event', async () => {
+    api.getExecutionPlan.mockResolvedValueOnce(PLAN);
+    const w = mountPanel();
+    await flushPromises();
+    const newArtifact = { id: 'a2', kind: 'bash', content: '#!/bin/bash\necho hi' };
+    w.findComponent({ name: 'AddArtifactModal' }).vm.$emit('added', newArtifact);
+    await flushPromises();
+    expect(api.setExecutionPlan).toHaveBeenCalledWith('proj-1', 'd1', expect.objectContaining({
+      deploy_steps: expect.arrayContaining([
+        expect.objectContaining({ artifact_id: 'a2', action: 'run' }),
+      ]),
+    }));
+    expect(api.getExecutionPlan).toHaveBeenCalledTimes(2);
+    expect(w.findComponent({ name: 'ArtifactEditor' }).props('artifactId')).toBe('a2');
+  });
+
+  it('does not emit refresh when ArtifactEditor emits saved', async () => {
     const w = mountPanel();
     await flushPromises();
     w.findComponent({ name: 'ArtifactEditor' }).vm.$emit('saved');
     await flushPromises();
-    expect(w.emitted('refresh')).toBeTruthy();
+    expect(w.emitted('refresh')).toBeFalsy();
   });
 });
