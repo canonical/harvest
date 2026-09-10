@@ -58,6 +58,7 @@
           :step-files="stepFiles"
           :step-status="stepStatus"
           @run-all="runAll"
+          @run-destroy="runDestroy"
           @run-node="runNode"
           @plan-preview="planPreview"
         />
@@ -78,7 +79,7 @@ import DagView from './DagView.vue';
 import RunHistory from './RunHistory.vue';
 import BusyStatus from './BusyStatus.vue';
 import {
-  getExecutionPlan, runDag, getArtifact, generateProvision, openProjectEvents,
+  getExecutionPlan, runDag, runDestroyDag, getArtifact, generateProvision, openProjectEvents,
 } from '../../lib/api.js';
 
 const props = defineProps({
@@ -168,6 +169,23 @@ async function runAll() {
   tab.value = 'history';
   try {
     await runDag(props.projectId, props.deployment.id, { agent_id: selectedAgentId.value, timeout_secs: 300 });
+  } catch (e) {
+    runLog.value.push({ stream: 'stderr', line: e.message || 'Run failed' });
+  } finally {
+    running.value = false;
+    liveEntry.value = null;
+    emit('refresh');
+  }
+}
+
+async function runDestroy() {
+  if (!selectedAgentId.value || running.value) return;
+  running.value = true;
+  runLog.value = [];
+  liveEntry.value = { action: 'destroy', agentHostname: props.agents.find(a => a.id === selectedAgentId.value)?.hostname };
+  tab.value = 'history';
+  try {
+    await runDestroyDag(props.projectId, props.deployment.id, { agent_id: selectedAgentId.value, timeout_secs: 300 });
   } catch (e) {
     runLog.value.push({ stream: 'stderr', line: e.message || 'Run failed' });
   } finally {
