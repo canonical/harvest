@@ -29,7 +29,7 @@ use knowledge_server::{
             generate_design, generate_design_decisions, generate_design_stream,
             generate_environment_questions, generate_provision, generate_provision_stream, get_deployment, get_design_pdf, get_execution_plan, get_project_deployment, get_template,
             link_context_artifact, list_deployment_runs, list_deployments, list_templates, list_proposals, propose_artifact_change, propose_provision_change,
-            redeploy_deployment, remove_context_artifact, revise_design, run_dag, set_execution_plan, update_deployment, update_design_content, update_template,
+            redeploy_deployment, remove_context_artifact, revise_design, run_dag, run_destroy_dag, set_execution_plan, update_deployment, update_design_content, update_template,
         },
         last_applied_bundle_for_artifact, record_run_and_update_state,
     },
@@ -193,6 +193,7 @@ fn deployments_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn LlmProvider>) 
         .route("/projects/:pid/deployments/:did/proposals/:propid/discard", route_post(discard_proposal))
         .route("/projects/:pid/deployments/:did/execution-plan",            axum::routing::get(get_execution_plan).post(set_execution_plan))
         .route("/projects/:pid/deployments/:did/run-dag",                    route_post(run_dag))
+        .route("/projects/:pid/deployments/:did/run-destroy-dag",             route_post(run_destroy_dag))
         .route("/templates",
                route_get(list_templates).post(create_template))
         .route("/templates/:tid",
@@ -1859,6 +1860,7 @@ async fn run_dag_executes_steps_in_topological_order_and_sets_infra_up() {
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo prep").await;
+    let bash_destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo teardown").await;
     let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
 
     let agent_id = "agent-1";
@@ -1872,7 +1874,10 @@ async fn run_dag_executes_steps_in_topological_order_and_sets_infra_up() {
                 {"artifact_id": bash_aid, "action": "run", "label": "Prep", "depends_on": []},
                 {"artifact_id": tf_aid, "action": "apply", "label": "Apply", "depends_on": [0]}
             ],
-            "destroy_steps": []
+            "destroy_steps": [
+                {"artifact_id": tf_aid, "action": "destroy", "label": "Destroy infra", "depends_on": []},
+                {"artifact_id": bash_destroy_aid, "action": "destroy", "label": "Teardown", "depends_on": [0]}
+            ]
         })),
     ).await;
 
@@ -1907,6 +1912,7 @@ async fn run_dag_halts_downstream_on_failure_and_sets_infra_broken() {
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo prep").await;
+    let bash_destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo teardown").await;
     let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
 
     let agent_id = "agent-1";
@@ -1922,7 +1928,10 @@ async fn run_dag_halts_downstream_on_failure_and_sets_infra_broken() {
                 {"artifact_id": bash_aid, "action": "run", "label": "Prep", "depends_on": []},
                 {"artifact_id": tf_aid, "action": "apply", "label": "Apply", "depends_on": [0]}
             ],
-            "destroy_steps": []
+            "destroy_steps": [
+                {"artifact_id": tf_aid, "action": "destroy", "label": "Destroy infra", "depends_on": []},
+                {"artifact_id": bash_destroy_aid, "action": "destroy", "label": "Teardown", "depends_on": [0]}
+            ]
         })),
     ).await;
 
@@ -1975,12 +1984,13 @@ async fn run_dag_404_when_agent_not_in_project() {
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
+    let bash_destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo bye").await;
 
     let (_, _) = send(
         app.clone(),
         req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
             "deploy_steps": [{"artifact_id": bash_aid, "action": "run", "depends_on": []}],
-            "destroy_steps": []
+            "destroy_steps": [{"artifact_id": bash_destroy_aid, "action": "destroy", "depends_on": []}]
         })),
     ).await;
 
@@ -1991,6 +2001,207 @@ async fn run_dag_404_when_agent_not_in_project() {
         })),
     ).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ---- Destroy DAG ----
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn run_destroy_dag_executes_destroy_steps_and_sets_infra_destroyed() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let bash_deploy_aid = seed_bash_artifact(&neo4j, &pid, "echo deploy").await;
+    let bash_destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo destroy").await;
+    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+
+    let agent_id = "agent-1";
+    let _rx = register_agent(&registry, agent_id, &pid);
+    spawn_dag_fake_agent(_rx, Arc::clone(&registry), |_| 0);
+
+    let (_, _) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [
+                {"artifact_id": bash_deploy_aid, "action": "run", "label": "Deploy prep", "depends_on": []},
+                {"artifact_id": tf_aid, "action": "apply", "label": "Apply infra", "depends_on": [0]}
+            ],
+            "destroy_steps": [
+                {"artifact_id": tf_aid, "action": "destroy", "label": "Destroy infra", "depends_on": []},
+                {"artifact_id": bash_destroy_aid, "action": "destroy", "label": "Teardown prep", "depends_on": [0]}
+            ]
+        })),
+    ).await;
+
+    let (_, _) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
+            "agent_id": agent_id, "timeout_secs": 30
+        })),
+    ).await;
+
+    let (status, body) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/run-destroy-dag"), &tok, json!({
+            "agent_id": agent_id, "timeout_secs": 30
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    let runs = body["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().all(|r| r["exit_code"] == 0));
+    assert_eq!(body["infra_state"], "destroyed");
+
+    let (status, body) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["infra_state"], "destroyed");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn run_destroy_dag_400_when_no_destroy_steps() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
+
+    let agent_id = "agent-1";
+    let _rx = register_agent(&registry, agent_id, &pid);
+
+    let (_, _) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [{"artifact_id": bash_aid, "action": "run", "depends_on": []}],
+            "destroy_steps": [{"artifact_id": bash_aid, "action": "destroy", "depends_on": []}]
+        })),
+    ).await;
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/run-destroy-dag"), &tok, json!({
+            "agent_id": agent_id, "timeout_secs": 30
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("no destroy steps"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn deploy_destroy_deploy_cycle_is_idempotent() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let bash_deploy_aid = seed_bash_artifact(&neo4j, &pid, "echo deploy").await;
+    let bash_destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo destroy").await;
+
+    let agent_id = "agent-1";
+    let _rx = register_agent(&registry, agent_id, &pid);
+    spawn_dag_fake_agent(_rx, Arc::clone(&registry), |_| 0);
+
+    let (_, _) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [
+                {"artifact_id": bash_deploy_aid, "action": "run", "label": "Deploy", "depends_on": []}
+            ],
+            "destroy_steps": [
+                {"artifact_id": bash_destroy_aid, "action": "destroy", "label": "Teardown", "depends_on": []}
+            ]
+        })),
+    ).await;
+
+    let (status, body) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
+            "agent_id": agent_id, "timeout_secs": 30
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["infra_state"], "up");
+
+    let (status, body) = send(
+        app.clone(),
+        req_post(&format!("/projects/{pid}/deployments/{did}/run-destroy-dag"), &tok, json!({
+            "agent_id": agent_id, "timeout_secs": 30
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["infra_state"], "destroyed");
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
+            "agent_id": agent_id, "timeout_secs": 30
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["infra_state"], "up");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn set_execution_plan_rejects_bash_run_without_destroy() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [{"artifact_id": bash_aid, "action": "run", "depends_on": []}],
+            "destroy_steps": []
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("destroy"));
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn set_execution_plan_accepts_bash_run_with_bash_destroy() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+    let bash_deploy_aid = seed_bash_artifact(&neo4j, &pid, "echo deploy").await;
+    let bash_destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo destroy").await;
+
+    let (status, _body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
+            "deploy_steps": [
+                {"artifact_id": bash_deploy_aid, "action": "run", "depends_on": []}
+            ],
+            "destroy_steps": [
+                {"artifact_id": bash_destroy_aid, "action": "destroy", "depends_on": []}
+            ]
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::CREATED);
 }
 
 // ---- Context artifacts ----
@@ -2735,7 +2946,7 @@ async fn set_execution_plan_rejects_artifact_from_other_project() {
         app,
         req_post(&format!("/projects/{pid_b}/deployments/{did_b}/execution-plan"), &tok, json!({
             "deploy_steps": [{"artifact_id": aid, "action": "run", "depends_on": []}],
-            "destroy_steps": []
+            "destroy_steps": [{"artifact_id": aid, "action": "destroy", "depends_on": []}]
         })),
     ).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -2752,14 +2963,16 @@ async fn set_execution_plan_overwrites_previous_plan() {
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
+    let destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo bye").await;
 
-    let (_, _) = send(
+    let (status, _) = send(
         app.clone(),
         req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
             "deploy_steps": [{"artifact_id": aid, "action": "run", "depends_on": []}],
-            "destroy_steps": []
+            "destroy_steps": [{"artifact_id": destroy_aid, "action": "destroy", "depends_on": []}]
         })),
     ).await;
+    assert_eq!(status, StatusCode::CREATED);
 
     let (_, _) = send(
         app.clone(),

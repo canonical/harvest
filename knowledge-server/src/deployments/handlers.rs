@@ -1348,14 +1348,23 @@ async fn prepare_provision_generation(
          kind (\"terraform\", \"terragrunt\", or \"bash\"), then call link_deployment_artifact with \
          role \"terraform\" for each terraform/terragrunt bundle. \
          \
+         Every bash script that creates state (installs packages, starts services, creates files, \
+         etc.) must have a companion bash destroy script that reverses every side-effect. Generate \
+         each as a separate bash artifact: a deploy script titled \"deploy-{{name}}.sh\" and a \
+         destroy script titled \"destroy-{{name}}.sh\", where {{name}} is shared between the pair. \
+         The destroy script must undo everything the deploy script did so that running \
+         deploy → destroy → deploy works idempotently. \
+         \
          After all artifacts are generated and linked, call set_execution_plan to define the \
          deployment DAG. The deploy plan should list every step needed to bring the infrastructure \
-         up in the right order (bash scripts with action \"run\", terraform bundles with action \
-         \"apply\"), using depends_on to express ordering. The destroy plan must include a \
-         \"destroy\" step for every artifact that has an \"apply\" step in the deploy plan — \
-         terraform destroy is the inverse of apply. If a bash script needs teardown, include it \
-         with action \"run\" in the destroy plan. Use depends_on in the destroy plan to tear down \
-         in the reverse order from deploy. \
+         up in the right order — bash deploy scripts with action \"run\", terraform bundles with \
+         action \"apply\" — using depends_on to express ordering. The destroy plan must include a \
+         destroy step for every deploy step: a \"destroy\" step for every terraform \"apply\" \
+         step (same artifact, terraform destroy is the inverse of apply), and a \"destroy\" step \
+         for every bash \"run\" step (the companion destroy script artifact, with action \
+         \"destroy\"). Use depends_on in the destroy plan to tear down in the reverse order from \
+         deploy. Every artifact that appears in the deploy plan must have a corresponding destroy \
+         step — no exceptions. \
          \
          You may call generate_artifact, link_deployment_artifact, and set_execution_plan. \
          Do not call run_terraform_plan, run_terraform_apply, run_terraform_destroy, \
@@ -1880,7 +1889,7 @@ pub(crate) async fn set_execution_plan_core(
             depends_on:  s.depends_on.clone(),
         }).collect(),
     };
-    crate::agent::deployment_tools::validate_terraform_destroy_coverage(&coverage_plan)
+    crate::agent::deployment_tools::validate_destroy_coverage(&coverage_plan)
         .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
 
     neo4j.query_read(
@@ -2220,5 +2229,73 @@ pub async fn run_dag(
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let value = run_dag_core(&state, &project_id, &deployment_id, &body.agent_id, body.timeout_secs).await?;
+    Ok(Json(value))
+}
+
+pub(crate) async fn run_destroy_dag_core(
+    state:         &ProjectState,
+    project_id:    &str,
+    deployment_id: &str,
+    agent_id:      &str,
+    timeout_secs:  u64,
+) -> Result<Value, ApiError> {
+    require_agent_in_project(state, agent_id, project_id)?;
+    let rows = fetch_execution_plan_rows(&state.neo4j, project_id, deployment_id, "destroy").await?;
+    if rows.is_empty() {
+        return Err(err(StatusCode::BAD_REQUEST, "no destroy steps configured — set an execution plan first"));
+    }
+
+    let step_map: HashMap<String, &Value> = rows.iter()
+        .map(|r| (r["id"].as_str().unwrap_or_default().to_string(), r))
+        .collect();
+    let step_nodes: Vec<StepNode> = rows.iter()
+        .map(|r| {
+            let id = r["id"].as_str().unwrap_or_default().to_string();
+            let deps: Vec<String> = r.get("depends_on")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter()
+                    .filter_map(|d| d.as_str().map(String::from))
+                    .collect())
+                .unwrap_or_default();
+            StepNode { id, depends_on: deps }
+        })
+        .collect();
+    let order = topological_sort(&step_nodes).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+
+    let timeout = timeout_secs.min(MAX_RUN_TIMEOUT_SECS);
+    let mut runs = Vec::new();
+    let mut all_success = true;
+
+    for step_id in &order {
+        let step = step_map.get(step_id).copied()
+            .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "step not found"))?;
+        let result = execute_dag_step(state, project_id, deployment_id, step, agent_id, timeout).await?;
+        let success = result["success"].as_bool().unwrap_or(false);
+        runs.push(result);
+        if !success {
+            all_success = false;
+            break;
+        }
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let new_state = if all_success { InfraState::Destroyed } else { InfraState::DestroyFailed };
+    state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
+         SET d.infra_state = $new_state, d.updated_at = $now",
+        json!({ "pid": project_id, "did": deployment_id, "new_state": new_state.as_str(), "now": now }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+
+    Ok(json!({ "runs": runs, "infra_state": new_state.as_str() }))
+}
+
+pub async fn run_destroy_dag(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path((project_id, deployment_id)): Path<(String, String)>,
+    Json(body): Json<RunDeploymentBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let value = run_destroy_dag_core(&state, &project_id, &deployment_id, &body.agent_id, body.timeout_secs).await?;
     Ok(Json(value))
 }

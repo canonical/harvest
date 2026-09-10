@@ -276,7 +276,9 @@ renders as a real diagram in the final document.
   deployment steps (design, provisioning, validation, etc.) beyond what was asked in this call.
 
 All deployed infrastructure must remain destroyable — never produce a Terraform/Terragrunt bundle
-that can't be cleanly torn down with `terraform destroy`.
+that can't be cleanly torn down with `terraform destroy`. Every bash script that creates state
+(installs packages, starts services, creates files) must have a companion bash destroy script
+that reverses every side-effect, so that running deploy → destroy → deploy works idempotently.
 "#,
         name = ctx.deployment_name,
         env_desc = ctx.environment_description,
@@ -399,6 +401,15 @@ mod tests {
         assert!(prompt.contains("run_terraform_apply"));
         assert!(prompt.contains("run_terraform_destroy"));
         assert!(prompt.contains("Never call"));
+    }
+
+    #[test]
+    fn deployment_system_prompt_requires_bash_destroyability() {
+        let prompt = deployment_system_prompt(&base_ctx());
+        assert!(prompt.contains("destroyable"));
+        assert!(prompt.contains("bash script"));
+        assert!(prompt.contains("destroy script"));
+        assert!(prompt.contains("idempotently"));
     }
 
     #[test]

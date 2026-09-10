@@ -373,6 +373,8 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                get(deployment_handlers::get_execution_plan).post(deployment_handlers::set_execution_plan))
         .route("/projects/:pid/deployments/:did/run-dag",
                post(deployment_handlers::run_dag))
+        .route("/projects/:pid/deployments/:did/run-destroy-dag",
+               post(deployment_handlers::run_destroy_dag))
         .route("/templates",
                get(deployment_handlers::list_templates).post(deployment_handlers::create_template))
         .route("/templates/upload", post(deployment_handlers::upload_template))
