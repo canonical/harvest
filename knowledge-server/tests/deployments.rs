@@ -420,6 +420,24 @@ async fn seed_bash_artifact(neo4j: &Neo4jClient, project_id: &str, content: &str
     created["id"].as_str().unwrap().to_string()
 }
 
+async fn seed_bash_artifact_titled(neo4j: &Neo4jClient, project_id: &str, title: &str, content: &str) -> String {
+    let created = create_artifact(neo4j, project_id, ArtifactKind::Bash, title, content, "system")
+        .await.unwrap();
+    created["id"].as_str().unwrap().to_string()
+}
+
+async fn link_bash_step(neo4j: &Neo4jClient, deployment_id: &str, artifact_id: &str, phase: &str, action: &str) {
+    let step_id = Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    neo4j.query_read(
+        "MATCH (d:Deployment {id: $did}), (a:Artifact {id: $aid})
+         CREATE (s:ExecutionStep {id: $sid, phase: $phase, action: $action, label: $label, step_index: 0, created_at: $now})
+         CREATE (d)-[:HAS_EXECUTION_STEP]->(s)
+         CREATE (s)-[:RUNS]->(a)",
+        json!({ "did": deployment_id, "aid": artifact_id, "sid": step_id, "phase": phase, "action": action, "label": artifact_id, "now": now }),
+    ).await.unwrap();
+}
+
 async fn link_terraform_bundle(neo4j: &Neo4jClient, deployment_id: &str, artifact_id: &str) {
     neo4j.query_read(
         "MATCH (d:Deployment {id: $did}), (a:Artifact {id: $aid}) CREATE (d)-[:HAS_TERRAFORM_BUNDLE]->(a)",
@@ -1845,6 +1863,113 @@ async fn apply_provision_change_rejects_unsafe_paths() {
         })),
     ).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn propose_provision_change_for_bash_loads_both_deploy_and_destroy() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let llm = ScriptedLlm::new(vec![text_response(
+        "Here's the updated pair:\n```json\n{\"deploy-prep.sh\":\"#!/bin/bash\\necho new deploy\",\"destroy-prep.sh\":\"#!/bin/bash\\necho new destroy\"}\n```",
+    )]);
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let deploy_aid = seed_bash_artifact_titled(&neo4j, &pid, "deploy-prep.sh", "#!/bin/bash\necho deploy").await;
+    let destroy_aid = seed_bash_artifact_titled(&neo4j, &pid, "destroy-prep.sh", "#!/bin/bash\necho destroy").await;
+    link_bash_step(&neo4j, &did, &deploy_aid, "deploy", "run").await;
+    link_bash_step(&neo4j, &did, &destroy_aid, "destroy", "destroy").await;
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/provision/propose-change"), &tok, json!({
+            "instructions": "update the prep script",
+            "artifact_id": deploy_aid,
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["proposed_files"]["deploy-prep.sh"], "new deploy");
+    assert_eq!(body["proposed_files"]["destroy-prep.sh"], "new destroy");
+
+    let deploy_content = get_artifact_content(&neo4j, &deploy_aid).await;
+    assert_eq!(deploy_content, "#!/bin/bash\necho deploy", "propose must not persist");
+    let destroy_content = get_artifact_content(&neo4j, &destroy_aid).await;
+    assert_eq!(destroy_content, "#!/bin/bash\necho destroy", "propose must not persist");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn apply_provision_change_for_bash_updates_both_scripts() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let deploy_aid = seed_bash_artifact_titled(&neo4j, &pid, "deploy-prep.sh", "#!/bin/bash\necho old deploy").await;
+    let destroy_aid = seed_bash_artifact_titled(&neo4j, &pid, "destroy-prep.sh", "#!/bin/bash\necho old destroy").await;
+    link_bash_step(&neo4j, &did, &deploy_aid, "deploy", "run").await;
+    link_bash_step(&neo4j, &did, &destroy_aid, "destroy", "destroy").await;
+
+    let (status, _) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/provision/apply-change"), &tok, json!({
+            "files": {
+                "deploy-prep.sh": "#!/bin/bash\necho new deploy",
+                "destroy-prep.sh": "#!/bin/bash\necho new destroy"
+            },
+            "artifact_id": deploy_aid,
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let deploy_content = get_artifact_content(&neo4j, &deploy_aid).await;
+    assert_eq!(deploy_content, "#!/bin/bash\necho new deploy");
+    let destroy_content = get_artifact_content(&neo4j, &destroy_aid).await;
+    assert_eq!(destroy_content, "#!/bin/bash\necho new destroy");
+}
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn apply_provision_change_for_bash_creates_missing_destroy_script() {
+    neo4j!(c, neo4j);
+    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&neo4j, "eng").await;
+    join_group(&neo4j, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
+
+    let deploy_aid = seed_bash_artifact_titled(&neo4j, &pid, "deploy-prep.sh", "#!/bin/bash\necho old deploy").await;
+    link_bash_step(&neo4j, &did, &deploy_aid, "deploy", "run").await;
+
+    let (status, body) = send(
+        app,
+        req_post(&format!("/projects/{pid}/deployments/{did}/provision/apply-change"), &tok, json!({
+            "files": {
+                "deploy-prep.sh": "#!/bin/bash\necho new deploy",
+                "destroy-prep.sh": "#!/bin/bash\necho new destroy"
+            },
+            "artifact_id": deploy_aid,
+        })),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let deploy_content = get_artifact_content(&neo4j, &deploy_aid).await;
+    assert_eq!(deploy_content, "#!/bin/bash\necho new deploy");
+
+    let rows = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact {kind: 'bash', title: 'destroy-prep.sh'})
+         RETURN a.content AS content",
+        json!({ "pid": pid }),
+    ).await.unwrap();
+    assert_eq!(rows[0]["content"], "#!/bin/bash\necho new destroy");
 }
 
 // ---- DAG run orchestration ----
