@@ -19,27 +19,49 @@
         </div>
         <ul class="deploy-artifacts__list">
           <li
-            v-for="item in uniqueArtifacts"
-            :key="item.artifactId"
+            v-for="item in sidebarItems"
+            :key="item.key"
             class="deploy-artifacts__item"
-            :class="{ 'deploy-artifacts__item--active': selectedArtifactId === item.artifactId }"
-            :data-testid="`artifact-item-${item.artifactId}`"
-            @click="selectArtifact(item.artifactId)"
+            :class="{ 'deploy-artifacts__item--active': isItemSelected(item) }"
+            :data-testid="`artifact-item-${item.key}`"
+            @click="selectSidebarItem(item)"
           >
-            <span class="artifact-kind-badge" :class="kindBadgeClass(item.kind)">{{ kindLabel(item.kind) }}</span>
             <div class="deploy-artifacts__item-text">
               <span class="deploy-artifacts__item-title">{{ item.title }}</span>
-              <span class="deploy-artifacts__item-meta">{{ item.action }}</span>
+              <span class="artifact-kind-badge" :class="kindBadgeClass(item.kind)">{{ kindLabel(item.kind) }}</span>
             </div>
           </li>
         </ul>
-        <div v-if="uniqueArtifacts.length === 0" class="deploy-artifacts__sidebar-empty">
+        <div v-if="sidebarItems.length === 0" class="deploy-artifacts__sidebar-empty">
           <p>No artifacts in the execution plan.</p>
         </div>
       </aside>
 
       <div class="deploy-artifacts__editor">
+        <template v-if="selectedBashPair">
+          <ArtifactEditor
+            v-show="scriptTab === 'deploy'"
+            :project-id="projectId"
+            :deployment-id="deployment.id"
+            :artifact-id="selectedBashPair.deployId"
+            :bash-pair="selectedBashPair"
+            :script-tab="scriptTab"
+            @script-tab-change="scriptTab = $event"
+            @saved="onSaved"
+          />
+          <ArtifactEditor
+            v-show="scriptTab === 'destroy'"
+            :project-id="projectId"
+            :deployment-id="deployment.id"
+            :artifact-id="selectedBashPair.destroyId"
+            :bash-pair="selectedBashPair"
+            :script-tab="scriptTab"
+            @script-tab-change="scriptTab = $event"
+            @saved="onSaved"
+          />
+        </template>
         <ArtifactEditor
+          v-else
           :project-id="projectId"
           :deployment-id="deployment.id"
           :artifact-id="selectedArtifactId"
@@ -76,6 +98,7 @@ const emit = defineEmits(['refresh']);
 const plan                 = ref({ deploy_steps: [], destroy_steps: [] });
 const selectedArtifactId   = ref(null);
 const addArtifactOpen       = ref(false);
+const scriptTab             = ref('deploy');
 
 let eventSource = null;
 
@@ -106,22 +129,129 @@ function kindBadgeClass(kind) {
   return 'artifact-kind-badge--markdown';
 }
 
-const uniqueArtifacts = computed(() => {
+function bashNameFromTitle(title) {
+  if (!title) return null;
+  const m = title.match(/^(?:deploy|destroy)-(.+\.sh)$/i);
+  return m ? m[1] : null;
+}
+
+const bashPairs = computed(() => {
+  const deployBash = (plan.value.deploy_steps ?? [])
+    .filter(s => s.artifact?.kind === 'bash' && s.action === 'run');
+  const destroyBash = (plan.value.destroy_steps ?? [])
+    .filter(s => s.artifact?.kind === 'bash' && s.action === 'destroy');
+  const pairs = [];
+  const usedDestroy = new Set();
+  for (const ds of deployBash) {
+    const name = bashNameFromTitle(ds.artifact.title);
+    const matchingDestroy = name
+      ? destroyBash.find(s => {
+          if (usedDestroy.has(s.artifact.id)) return false;
+          return bashNameFromTitle(s.artifact.title) === name;
+        })
+      : undefined;
+    if (matchingDestroy) usedDestroy.add(matchingDestroy.artifact.id);
+    pairs.push({
+      deployId:  ds.artifact.id,
+      destroyId: matchingDestroy?.artifact.id ?? null,
+      name:      name ?? ds.artifact.title,
+    });
+  }
+  for (const s of destroyBash) {
+    if (usedDestroy.has(s.artifact.id)) continue;
+    const name = bashNameFromTitle(s.artifact.title);
+    pairs.push({
+      deployId:  null,
+      destroyId: s.artifact.id,
+      name:      name ?? s.artifact.title,
+    });
+  }
+  return pairs;
+});
+
+function bashPairForArtifact(id) {
+  if (!id) return null;
+  return bashPairs.value.find(p => p.deployId === id || p.destroyId === id) ?? null;
+}
+
+const sidebarItems = computed(() => {
   const seen = new Set();
   const items = [];
-  for (const step of [...plan.value.deploy_steps, ...plan.value.destroy_steps]) {
+  for (const step of (plan.value.deploy_steps ?? [])) {
     if (!step.artifact) continue;
-    if (seen.has(step.artifact.id)) continue;
-    seen.add(step.artifact.id);
-    items.push({
-      artifactId: step.artifact.id,
-      kind:       step.artifact.kind,
-      title:      step.artifact.title,
-      action:     step.action,
-    });
+    if (step.artifact.kind === 'bash' && step.action === 'run') {
+      const pair = bashPairs.value.find(p => p.deployId === step.artifact.id);
+      if (pair) {
+        const key = pair.deployId ?? pair.destroyId;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        items.push({
+          key,
+          kind:  'bash',
+          title: pair.name,
+          pair,
+        });
+      }
+    } else {
+      if (seen.has(step.artifact.id)) continue;
+      seen.add(step.artifact.id);
+      items.push({
+        key:   step.artifact.id,
+        kind:  step.artifact.kind,
+        title: step.artifact.title,
+        pair:  null,
+      });
+    }
+  }
+  for (const step of (plan.value.destroy_steps ?? [])) {
+    if (!step.artifact) continue;
+    if (step.artifact.kind === 'bash' && step.action === 'destroy') {
+      const pair = bashPairs.value.find(p => p.destroyId === step.artifact.id);
+      if (pair && pair.deployId) continue;
+      const key = pair ? (pair.deployId ?? pair.destroyId) : step.artifact.id;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push({
+        key,
+        kind:  'bash',
+        title: pair ? pair.name : step.artifact.title,
+        pair,
+      });
+    } else {
+      if (seen.has(step.artifact.id)) continue;
+      seen.add(step.artifact.id);
+      items.push({
+        key:   step.artifact.id,
+        kind:  step.artifact.kind,
+        title: step.artifact.title,
+        pair:  null,
+      });
+    }
   }
   return items;
 });
+
+const selectedBashPair = computed(() => {
+  if (!selectedArtifactId.value) return null;
+  return bashPairForArtifact(selectedArtifactId.value);
+});
+
+function isItemSelected(item) {
+  if (item.pair) {
+    return item.pair.deployId === selectedArtifactId.value || item.pair.destroyId === selectedArtifactId.value;
+  }
+  return item.key === selectedArtifactId.value;
+}
+
+function selectSidebarItem(item) {
+  if (item.pair) {
+    const id = item.pair.deployId ?? item.pair.destroyId;
+    selectedArtifactId.value = id;
+    scriptTab.value = (id === item.pair.deployId && item.pair.deployId) ? 'deploy' : 'destroy';
+  } else {
+    selectedArtifactId.value = item.key;
+  }
+}
 
 async function loadPlan() {
   try {
@@ -131,16 +261,13 @@ async function loadPlan() {
   }
 }
 
-function selectArtifact(artifactId) {
-  selectedArtifactId.value = artifactId;
-}
-
 function onSaved() {
 }
 
 async function onArtifactAdded(newArtifact) {
   addArtifactOpen.value = false;
-  const action = newArtifact.kind === 'terraform' || newArtifact.kind === 'terragrunt' ? 'apply' : 'run';
+  const isTerraform = newArtifact.kind === 'terraform' || newArtifact.kind === 'terragrunt';
+  const action = isTerraform ? 'apply' : 'run';
   const deploySteps = plan.value.deploy_steps.map(s => ({
     artifact_id: s.artifact.id,
     action:      s.action,
@@ -156,14 +283,36 @@ async function onArtifactAdded(newArtifact) {
     label: newArtifact.id,
     depends_on: deploySteps.length > 0 ? [deploySteps.length - 1] : [],
   });
+  const destroySteps = plan.value.destroy_steps.map(s => ({
+    artifact_id: s.artifact.id,
+    action:      s.action,
+    label:       s.label,
+    depends_on:  (s.depends_on ?? []).map(depId => {
+      const idx = plan.value.destroy_steps.findIndex(ds => ds.id === depId);
+      return idx >= 0 ? idx : 0;
+    }),
+  }));
+  if (isTerraform) {
+    destroySteps.push({
+      artifact_id: newArtifact.id,
+      action: 'destroy',
+      label: newArtifact.id,
+      depends_on: [],
+    });
+  }
   try {
     await setExecutionPlan(props.projectId, props.deployment.id, {
       deploy_steps: deploySteps,
-      destroy_steps: [],
+      destroy_steps: destroySteps,
     });
   } catch {}
   await loadPlan();
-  selectedArtifactId.value = newArtifact.id;
+  const item = sidebarItems.value.find(i => i.key === newArtifact.id);
+  if (item) {
+    selectSidebarItem(item);
+  } else {
+    selectedArtifactId.value = newArtifact.id;
+  }
 }
 
 function handleProjectEvent(e) {

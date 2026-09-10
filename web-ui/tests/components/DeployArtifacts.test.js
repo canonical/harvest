@@ -14,9 +14,14 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
 vi.mock('../../src/components/deployment/ArtifactEditor.vue', () => ({
   default: {
     name: 'ArtifactEditor',
-    template: '<div data-testid="artifact-editor" />',
-    props: ['projectId', 'deploymentId', 'artifactId'],
-    emits: ['saved'],
+    template: `<div data-testid="artifact-editor" :data-artifact-id="String(artifactId)">
+      <div v-if="bashPair" class="artifact-editor__tabs" data-testid="script-tabs">
+        <button data-testid="script-tab-deploy" @click="$emit('script-tab-change', 'deploy')">Deploy</button>
+        <button data-testid="script-tab-destroy" @click="$emit('script-tab-change', 'destroy')">Destroy</button>
+      </div>
+    </div>`,
+    props: ['projectId', 'deploymentId', 'artifactId', 'bashPair', 'scriptTab'],
+    emits: ['saved', 'script-tab-change'],
   },
 }));
 
@@ -40,10 +45,13 @@ const DEPLOYMENT = {
 
 const PLAN = {
   deploy_steps: [
-    { id: 's0', action: 'run', label: 'Prep', artifact: { id: 'a0', kind: 'bash', title: 'Prep' }, depends_on: [] },
+    { id: 's0', action: 'run', label: 'Prep', artifact: { id: 'a0', kind: 'bash', title: 'deploy-prep.sh' }, depends_on: [] },
     { id: 's1', action: 'apply', label: 'Apply', artifact: { id: 'a1', kind: 'terraform', title: 'Infra' }, depends_on: ['s0'] },
   ],
-  destroy_steps: [],
+  destroy_steps: [
+    { id: 's2', action: 'destroy', label: 'Destroy infra', artifact: { id: 'a1', kind: 'terraform', title: 'Infra' }, depends_on: [] },
+    { id: 's3', action: 'destroy', label: 'Teardown prep', artifact: { id: 'a2', kind: 'bash', title: 'destroy-prep.sh' }, depends_on: ['s2'] },
+  ],
 };
 
 function mountPanel({ deployment = DEPLOYMENT, agents = [] } = {}) {
@@ -72,11 +80,20 @@ describe('DeployArtifacts', () => {
     expect(api.getExecutionPlan).toHaveBeenCalledWith('proj-1', 'd1');
   });
 
-  it('lists unique artifacts from the execution plan in the sidebar', async () => {
+  it('lists unified artifacts in the sidebar with bash pairs shown as name.sh', async () => {
     const w = mountPanel();
     await flushPromises();
     expect(w.find('[data-testid="artifact-item-a0"]').exists()).toBe(true);
     expect(w.find('[data-testid="artifact-item-a1"]').exists()).toBe(true);
+    expect(w.find('[data-testid="artifact-item-a2"]').exists()).toBe(false);
+    expect(w.find('[data-testid="artifact-item-a0"]').text()).toContain('prep.sh');
+  });
+
+  it('does not show global deploy/destroy phase tabs', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    expect(w.find('[data-testid="phase-tab-deploy"]').exists()).toBe(false);
+    expect(w.find('[data-testid="phase-tab-destroy"]').exists()).toBe(false);
   });
 
   it('selects the artifact when a sidebar item is clicked', async () => {
@@ -84,7 +101,52 @@ describe('DeployArtifacts', () => {
     await flushPromises();
     await w.find('[data-testid="artifact-item-a1"]').trigger('click');
     await flushPromises();
-    expect(w.findComponent({ name: 'ArtifactEditor' }).props('artifactId')).toBe('a1');
+    const editors = w.findAll('[data-testid="artifact-editor"]');
+    const visible = editors.filter(e => e.isVisible());
+    expect(visible).toHaveLength(1);
+    expect(visible[0].attributes('data-artifact-id')).toBe('a1');
+  });
+
+  it('shows deploy and destroy script tabs when a bash pair is selected', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="artifact-item-a0"]').trigger('click');
+    await flushPromises();
+    expect(w.find('[data-testid="script-tab-deploy"]').exists()).toBe(true);
+    expect(w.find('[data-testid="script-tab-destroy"]').exists()).toBe(true);
+  });
+
+  it('shows the deploy script artifact in the editor by default for bash', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="artifact-item-a0"]').trigger('click');
+    await flushPromises();
+    const editors = w.findAll('[data-testid="artifact-editor"]');
+    const visible = editors.filter(e => e.isVisible());
+    expect(visible).toHaveLength(1);
+    expect(visible[0].attributes('data-artifact-id')).toBe('a0');
+  });
+
+  it('switches to the destroy script artifact when destroy tab is clicked', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="artifact-item-a0"]').trigger('click');
+    await flushPromises();
+    await w.find('[data-testid="script-tab-destroy"]').trigger('click');
+    await flushPromises();
+    const editors = w.findAll('[data-testid="artifact-editor"]');
+    const visible = editors.filter(e => e.isVisible());
+    expect(visible).toHaveLength(1);
+    expect(visible[0].attributes('data-artifact-id')).toBe('a2');
+  });
+
+  it('does not show script tabs when a terraform artifact is selected', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="artifact-item-a1"]').trigger('click');
+    await flushPromises();
+    expect(w.find('[data-testid="script-tab-deploy"]').exists()).toBe(false);
+    expect(w.find('[data-testid="script-tab-destroy"]').exists()).toBe(false);
   });
 
   it('passes projectId and deploymentId to the ArtifactEditor', async () => {
@@ -98,7 +160,10 @@ describe('DeployArtifacts', () => {
   it('shows no artifact selected initially', async () => {
     const w = mountPanel();
     await flushPromises();
-    expect(w.findComponent({ name: 'ArtifactEditor' }).props('artifactId')).toBeNull();
+    const editors = w.findAll('[data-testid="artifact-editor"]');
+    const visible = editors.filter(e => e.isVisible());
+    expect(visible).toHaveLength(1);
+    expect(visible[0].attributes('data-artifact-id')).toBe('null');
   });
 
   it('shows the infra-state badge', async () => {
@@ -135,16 +200,19 @@ describe('DeployArtifacts', () => {
     api.getExecutionPlan.mockResolvedValueOnce(PLAN);
     const w = mountPanel();
     await flushPromises();
-    const newArtifact = { id: 'a2', kind: 'bash', content: '#!/bin/bash\necho hi' };
+    const newArtifact = { id: 'a3', kind: 'bash', content: '#!/bin/bash\necho hi' };
     w.findComponent({ name: 'AddArtifactModal' }).vm.$emit('added', newArtifact);
     await flushPromises();
     expect(api.setExecutionPlan).toHaveBeenCalledWith('proj-1', 'd1', expect.objectContaining({
       deploy_steps: expect.arrayContaining([
-        expect.objectContaining({ artifact_id: 'a2', action: 'run' }),
+        expect.objectContaining({ artifact_id: 'a3', action: 'run' }),
       ]),
     }));
     expect(api.getExecutionPlan).toHaveBeenCalledTimes(2);
-    expect(w.findComponent({ name: 'ArtifactEditor' }).props('artifactId')).toBe('a2');
+    const editors = w.findAll('[data-testid="artifact-editor"]');
+    const visible = editors.filter(e => e.isVisible());
+    expect(visible).toHaveLength(1);
+    expect(visible[0].attributes('data-artifact-id')).toBe('a3');
   });
 
   it('does not emit refresh when ArtifactEditor emits saved', async () => {
