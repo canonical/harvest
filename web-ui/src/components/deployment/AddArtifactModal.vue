@@ -8,16 +8,16 @@
       <div class="deploy-artifacts-modal-tabs" data-testid="add-artifact-tabs">
         <button
           class="deploy-artifacts-modal-tab"
-          :class="{ 'deploy-artifacts-modal-tab--active': tab === 'content' }"
-          data-testid="add-artifact-tab-content"
-          @click="tab = 'content'"
-        >Content</button>
-        <button
-          class="deploy-artifacts-modal-tab"
           :class="{ 'deploy-artifacts-modal-tab--active': tab === 'generate' }"
           data-testid="add-artifact-tab-generate"
           @click="tab = 'generate'"
         >Generate</button>
+        <button
+          class="deploy-artifacts-modal-tab"
+          :class="{ 'deploy-artifacts-modal-tab--active': tab === 'content' }"
+          data-testid="add-artifact-tab-content"
+          @click="tab = 'content'"
+        >Write yourself</button>
       </div>
 
       <div class="form-group">
@@ -43,12 +43,10 @@
 
       <div v-if="tab === 'content'" class="form-group">
         <label for="add-artifact-content">Content</label>
-        <textarea
-          id="add-artifact-content"
-          v-model="content"
-          rows="10"
+        <div
+          ref="editorContainerRef"
+          class="add-artifact-editor"
           data-testid="add-artifact-content"
-          placeholder="Artifact content"
         />
       </div>
 
@@ -97,10 +95,11 @@
 </template>
 
 <script setup>
-import { ref, watch } from 'vue';
+import { ref, watch, nextTick, onBeforeUnmount } from 'vue';
 import {
   createProjectArtifact, proposeProvisionChange,
 } from '../../lib/api.js';
+import { isDarkTheme, onThemeChange } from '../../lib/theme.js';
 import LoadingSpinner from './LoadingSpinner.vue';
 
 const props = defineProps({
@@ -111,7 +110,7 @@ const props = defineProps({
 
 const emit = defineEmits(['close', 'added']);
 
-const tab       = ref('content');
+const tab       = ref('generate');
 const name      = ref('');
 const kind      = ref('bash');
 const content   = ref('');
@@ -120,9 +119,58 @@ const submitting = ref(false);
 const generating = ref(false);
 const error     = ref(null);
 
-watch(() => props.open, (v) => {
+const editorContainerRef = ref(null);
+let editor   = null;
+let monacoApi = null;
+
+function languageForKind(k) {
+  if (k === 'terraform' || k === 'terragrunt') return 'json';
+  if (k === 'bash') return 'shell';
+  if (k === 'markdown') return 'markdown';
+  return 'plaintext';
+}
+
+function inferFileExtension(k) {
+  if (k === 'terraform') return '.tf';
+  if (k === 'terragrunt') return '.tf';
+  if (k === 'bash') return '.sh';
+  if (k === 'markdown') return '.md';
+  return '';
+}
+
+async function mountEditor() {
+  if (editor) return;
+  if (!editorContainerRef.value) return;
+  if (!monacoApi) {
+    monacoApi = await import('monaco-editor');
+  }
+  editor = monacoApi.editor.create(editorContainerRef.value, {
+    value: content.value,
+    language: languageForKind(kind.value),
+    theme: isDarkTheme() ? 'vs-dark' : 'vs',
+    automaticLayout: true,
+    minimap: { enabled: false },
+    fontSize: 13,
+    lineNumbers: 'on',
+    wordWrap: 'on',
+    scrollBeyondLastLine: false,
+    readOnly: false,
+  });
+  editor.onDidChangeModelContent(() => {
+    content.value = editor.getValue();
+  });
+}
+
+function disposeEditor() {
+  if (editor) {
+    editor.dispose();
+    editor = null;
+  }
+}
+
+watch(() => props.open, async (v) => {
   if (v) {
-    tab.value = 'content';
+    tab.value = 'generate';
     name.value = '';
     kind.value = 'bash';
     content.value = '';
@@ -130,16 +178,36 @@ watch(() => props.open, (v) => {
     submitting.value = false;
     generating.value = false;
     error.value = null;
+    disposeEditor();
+  } else {
+    disposeEditor();
   }
 });
 
-function inferFileExtension(kind) {
-  if (kind === 'terraform') return '.tf';
-  if (kind === 'terragrunt') return '.tf';
-  if (kind === 'bash') return '.sh';
-  if (kind === 'markdown') return '.md';
-  return '';
-}
+watch(tab, async (t) => {
+  if (t === 'content') {
+    await nextTick();
+    await mountEditor();
+  } else {
+    disposeEditor();
+  }
+});
+
+watch(kind, (k) => {
+  if (editor && monacoApi) {
+    const model = editor.getModel();
+    if (model) monacoApi.editor.setModelLanguage(model, languageForKind(k));
+  }
+});
+
+const unsubscribeTheme = onThemeChange(() => {
+  monacoApi?.editor.setTheme(isDarkTheme() ? 'vs-dark' : 'vs');
+});
+
+onBeforeUnmount(() => {
+  disposeEditor();
+  unsubscribeTheme();
+});
 
 async function submitContent() {
   if (!name.value.trim() || submitting.value) return;
@@ -196,3 +264,12 @@ async function submitGenerate() {
   }
 }
 </script>
+
+<style scoped>
+.add-artifact-editor {
+  width: 100%;
+  height: 320px;
+  border: 1px solid var(--border-color, #c0c0c0);
+  border-radius: 4px;
+}
+</style>
