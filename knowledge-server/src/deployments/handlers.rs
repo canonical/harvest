@@ -17,7 +17,7 @@ use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentEvent};
-use crate::artifacts::{bundle, handlers::{create_artifact, get_artifact_in_project, sanitize_filename, ArtifactKind}};
+use crate::artifacts::{bundle, handlers::{create_artifact, get_artifact_in_project, sanitize_filename, update_artifact, ArtifactKind}};
 use crate::auth::jwt::Claims;
 use crate::machines::{TerraformAction, TerraformFlavor};
 use crate::neo4j::Neo4jClient;
@@ -1378,6 +1378,7 @@ async fn prepare_provision_generation(
 pub struct ProposeProvisionChangeBody {
     pub instructions:  Option<String>,
     pub error_context: Option<String>,
+    pub artifact_id:   Option<String>,
 }
 
 pub async fn propose_provision_change(
@@ -1455,15 +1456,6 @@ async fn prepare_provision_proposal(
     let group_id = project["group_id"].as_str().unwrap_or_default();
     let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id).await?;
 
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
-    let bundle_id = deployment["terraform_bundle"]["id"].as_str()
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no terraform bundle yet"))?
-        .to_string();
-    let artifact = get_artifact_in_project(&state.neo4j, &project_id, &bundle_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "terraform bundle not found"))?;
-    let current_content = artifact["content"].as_str().unwrap_or_default().to_string();
-
     let error_section = if error_context.is_empty() {
         String::new()
     } else {
@@ -1474,6 +1466,64 @@ async fn prepare_provision_proposal(
     } else {
         format!("\n\nThe user requested this change:\n{instructions}")
     };
+
+    let artifact_id = body.artifact_id.as_deref().unwrap_or_default().trim();
+
+    if !artifact_id.is_empty() {
+        let artifact = get_artifact_in_project(&state.neo4j, &project_id, artifact_id)
+            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "artifact not found in this project"))?;
+        let kind_str = artifact["kind"].as_str().unwrap_or_default();
+        let kind = ArtifactKind::parse(kind_str)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "unknown artifact kind"))?;
+
+        if kind == ArtifactKind::Bash {
+            let title = artifact["title"].as_str().unwrap_or_default().to_string();
+            let deploy_content = artifact["content"].as_str().unwrap_or_default().to_string();
+
+            let (deploy_title, destroy_title, destroy_content) = find_bash_pair(
+                &state.neo4j, &project_id, &deployment_id, artifact_id, &title,
+            ).await?;
+
+            let destroy_section = match &destroy_content {
+                Some(c) => format!(
+                    "\n\nHere is the current destroy script (titled \"{destroy_title}\"):\n{c}"
+                ),
+                None => format!(
+                    "\n\nThere is currently no destroy script for this pair. You must create one."
+                ),
+            };
+
+            let prompt = format!(
+                "Here is the current deploy bash script (titled \"{deploy_title}\"):\n{deploy_content}\
+                 {destroy_section}\
+                 {error_section}{instructions_section}\n\n\
+                 You MUST propose changes to BOTH the deploy script and the destroy script so they \
+                 always match. The destroy script must reverse every side-effect of the deploy \
+                 script so that running deploy → destroy → deploy works idempotently. \
+                 If you modify what the deploy script creates or changes, you must modify the \
+                 destroy script to undo those same changes.\n\n\
+                 Respond with a short explanation, then a ```json fenced object mapping the script \
+                 title to its complete new content. Include BOTH scripts in the object: \
+                 \"{deploy_title}\" and \"{destroy_title}\". Do not call generate_artifact, \
+                 link_deployment_artifact, set_execution_plan, run_terraform_plan, \
+                 run_terraform_apply, run_terraform_destroy, deploy_deployment, redeploy_deployment, \
+                 or destroy_deployment for this request — the proposal will only be applied after \
+                 the user reviews and approves it. You may use other tools (e.g. run_command) to \
+                 investigate first if that helps."
+            );
+            return Ok((agent, prompt));
+        }
+    }
+
+    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    let bundle_id = deployment["terraform_bundle"]["id"].as_str()
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no terraform bundle yet"))?
+        .to_string();
+    let bundle_artifact = get_artifact_in_project(&state.neo4j, &project_id, &bundle_id)
+        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "terraform bundle not found"))?;
+    let current_content = bundle_artifact["content"].as_str().unwrap_or_default().to_string();
 
     let prompt = format!(
         "Here is the current Terraform/Terragrunt bundle (JSON file map):\n{current_content}\
@@ -1489,9 +1539,72 @@ async fn prepare_provision_proposal(
     Ok((agent, prompt))
 }
 
+async fn find_bash_pair(
+    neo4j:         &Neo4jClient,
+    project_id:    &str,
+    deployment_id: &str,
+    artifact_id:   &str,
+    title:         &str,
+) -> Result<(String, String, Option<String>), ApiError> {
+    let pair_name = extract_bash_pair_name(title);
+    let is_deploy = title.starts_with("deploy-");
+
+    let (deploy_title, destroy_title) = if let Some(ref name) = pair_name {
+        (
+            format!("deploy-{}", name),
+            format!("destroy-{}", name),
+        )
+    } else {
+        return Ok((title.to_string(), title.to_string(), None));
+    };
+
+    let destroy_content = if is_deploy {
+        let rows = neo4j.query_read(
+            "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_EXECUTION_STEP]->(s:ExecutionStep {phase: 'destroy', action: 'destroy'})
+             OPTIONAL MATCH (s)-[:RUNS]->(a:Artifact {kind: 'bash'})
+             RETURN a.id AS id, a.title AS title, a.content AS content",
+            json!({ "pid": project_id, "did": deployment_id }),
+        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        find_matching_bash(&rows, &destroy_title, artifact_id)
+    } else {
+        let rows = neo4j.query_read(
+            "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_EXECUTION_STEP]->(s:ExecutionStep {phase: 'deploy', action: 'run'})
+             OPTIONAL MATCH (s)-[:RUNS]->(a:Artifact {kind: 'bash'})
+             RETURN a.id AS id, a.title AS title, a.content AS content",
+            json!({ "pid": project_id, "did": deployment_id }),
+        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        find_matching_bash(&rows, &deploy_title, artifact_id)
+    };
+
+    Ok((deploy_title, destroy_title, destroy_content))
+}
+
+fn extract_bash_pair_name(title: &str) -> Option<String> {
+    let lower = title.to_lowercase();
+    if let Some(rest) = lower.strip_prefix("deploy-") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = lower.strip_prefix("destroy-") {
+        return Some(rest.to_string());
+    }
+    None
+}
+
+fn find_matching_bash(rows: &[Value], target_title: &str, exclude_id: &str) -> Option<String> {
+    for row in rows {
+        let id = row["id"].as_str().unwrap_or_default();
+        let title = row["title"].as_str().unwrap_or_default();
+        if id != exclude_id && title.eq_ignore_ascii_case(target_title) {
+            return row["content"].as_str().map(|s| s.to_string());
+        }
+    }
+    None
+}
+
 #[derive(serde::Deserialize)]
 pub struct ApplyProvisionChangeBody {
     pub files: std::collections::BTreeMap<String, String>,
+    pub artifact_id: Option<String>,
 }
 
 pub async fn apply_provision_change(
@@ -1502,6 +1615,59 @@ pub async fn apply_provision_change(
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     bundle::validate_bundle(&body.files).map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
+
+    let artifact_id = body.artifact_id.as_deref().unwrap_or_default().trim();
+
+    if !artifact_id.is_empty() {
+        let artifact = get_artifact_in_project(&state.neo4j, &project_id, artifact_id)
+            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "artifact not found in this project"))?;
+        let kind_str = artifact["kind"].as_str().unwrap_or_default();
+        let kind = ArtifactKind::parse(kind_str)
+            .ok_or_else(|| err(StatusCode::BAD_REQUEST, "unknown artifact kind"))?;
+
+        if kind == ArtifactKind::Bash {
+            let title = artifact["title"].as_str().unwrap_or_default().to_string();
+            let pair_name = extract_bash_pair_name(&title);
+            let is_deploy = title.starts_with("deploy-");
+
+            let (deploy_title, destroy_title) = if let Some(ref name) = pair_name {
+                (format!("deploy-{}", name), format!("destroy-{}", name))
+            } else {
+                (title.clone(), title.clone())
+            };
+
+            let deploy_content = body.files.get(&deploy_title).cloned();
+            let destroy_content = body.files.get(&destroy_title).cloned();
+
+            if let Some(ref content) = deploy_content {
+                let deploy_artifact_id = if is_deploy { artifact_id.to_string() } else {
+                    find_bash_artifact_id(&state.neo4j, &project_id, &deployment_id, &deploy_title, artifact_id).await?
+                };
+                if !deploy_artifact_id.is_empty() {
+                    update_artifact(&state.neo4j, &deploy_artifact_id, ArtifactKind::Bash, ArtifactKind::Bash, &deploy_title, content)
+                        .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+                }
+            }
+
+            if let Some(ref content) = destroy_content {
+                let destroy_artifact_id = if !is_deploy { artifact_id.to_string() } else {
+                    find_bash_artifact_id(&state.neo4j, &project_id, &deployment_id, &destroy_title, artifact_id).await?
+                };
+                if destroy_artifact_id.is_empty() {
+                    let created = create_artifact(&state.neo4j, &project_id, ArtifactKind::Bash, &destroy_title, content, "user")
+                        .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+                    link_bash_to_deployment(&state.neo4j, &deployment_id, created["id"].as_str().unwrap_or_default(), "destroy").await?;
+                } else {
+                    update_artifact(&state.neo4j, &destroy_artifact_id, ArtifactKind::Bash, ArtifactKind::Bash, &destroy_title, content)
+                        .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+                }
+            }
+
+            let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+            return Ok(Json(deployment));
+        }
+    }
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
     let bundle_id = deployment["terraform_bundle"]["id"].as_str()
@@ -1521,6 +1687,50 @@ pub async fn apply_provision_change(
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
+}
+
+async fn find_bash_artifact_id(
+    neo4j:         &Neo4jClient,
+    project_id:    &str,
+    deployment_id: &str,
+    target_title:  &str,
+    exclude_id:    &str,
+) -> Result<String, ApiError> {
+    let phase = if target_title.starts_with("destroy-") { "destroy" } else { "deploy" };
+    let action = if phase == "destroy" { "destroy" } else { "run" };
+    let rows = neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_EXECUTION_STEP]->(s:ExecutionStep {phase: $phase, action: $action})
+         OPTIONAL MATCH (s)-[:RUNS]->(a:Artifact {kind: 'bash'})
+         RETURN a.id AS id, a.title AS title",
+        json!({ "pid": project_id, "did": deployment_id, "phase": phase, "action": action }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    for row in &rows {
+        let id = row["id"].as_str().unwrap_or_default();
+        let title = row["title"].as_str().unwrap_or_default();
+        if id != exclude_id && title.eq_ignore_ascii_case(target_title) {
+            return Ok(id.to_string());
+        }
+    }
+    Ok(String::new())
+}
+
+async fn link_bash_to_deployment(
+    neo4j:         &Neo4jClient,
+    deployment_id: &str,
+    artifact_id:   &str,
+    phase:         &str,
+) -> Result<(), ApiError> {
+    let step_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let action = if phase == "destroy" { "destroy" } else { "run" };
+    neo4j.query_read(
+        "MATCH (d:Deployment {id: $did}), (a:Artifact {id: $aid})
+         CREATE (s:ExecutionStep {id: $sid, phase: $phase, action: $action, label: $label, step_index: 0, created_at: $now})
+         CREATE (d)-[:HAS_EXECUTION_STEP]->(s)
+         CREATE (s)-[:RUNS]->(a)",
+        json!({ "did": deployment_id, "aid": artifact_id, "sid": step_id, "phase": phase, "action": action, "label": artifact_id, "now": now }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    Ok(())
 }
 
 pub(crate) async fn add_context_artifact_core(
