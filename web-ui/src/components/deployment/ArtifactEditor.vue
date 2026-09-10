@@ -95,7 +95,7 @@
       </div>
 
       <template v-else-if="proposalReviewing">
-        <div v-if="isBundle" class="artifact-editor__tabs" data-testid="artifact-editor-tabs">
+        <div v-if="filePaths.length > 1" class="artifact-editor__tabs" data-testid="artifact-editor-tabs">
           <button
             v-for="path in filePaths"
             :key="path"
@@ -108,6 +108,7 @@
             {{ path }}
           </button>
         </div>
+        <div ref="containerRef" class="artifact-editor__container" data-testid="artifact-editor-container" />
       </template>
 
       <template v-else>
@@ -121,16 +122,15 @@
             @click="switchTab(path)"
           >{{ path }}</button>
         </div>
+        <div ref="containerRef" class="artifact-editor__container" data-testid="artifact-editor-container" />
       </template>
-
-      <div ref="containerRef" class="artifact-editor__container" data-testid="artifact-editor-container" />
     </div>
 
     <div v-if="proposeOpen" class="modal" @click.self="closePropose">
       <div class="modal-content" data-testid="artifact-propose-modal">
         <button class="modal-close" type="button" @click="closePropose">✕</button>
         <h3>Propose a change</h3>
-        <p class="modal-lede">Describe the change you'd like to propose for <strong>{{ artifact?.title }}</strong>.</p>
+        <p class="modal-lede">Describe the change you'd like to propose for <strong>{{ proposeTargetLabel }}</strong>.</p>
         <div class="form-group">
           <label for="artifact-prompt">Change description</label>
           <textarea
@@ -211,7 +211,16 @@ const isBundle = ref(false);
 
 const proposalBody = computed(() => ({
   instructions: promptText.value.trim(),
+  artifact_id: props.artifactId,
 }));
+
+const proposeTargetLabel = computed(() => {
+  if (!artifact.value) return '';
+  if (artifact.value.kind === 'bash' && props.bashPair) {
+    return props.bashPair.name;
+  }
+  return artifact.value.title;
+});
 
 function kindLabel(kind) {
   if (kind === 'pdf') return 'PDF';
@@ -584,6 +593,34 @@ async function onProposalStreamDone(payload) {
   proposedFiles.value = proposed;
   proposalProposing.value = false;
   proposalReviewing.value = true;
+  const proposedPaths = Object.keys(proposed);
+  if (!isBundle.value && proposedPaths.length > 0) {
+    filePaths.value = proposedPaths.sort();
+    const isBash = artifact.value?.kind === 'bash';
+    for (const path of proposedPaths) {
+      if (originalFiles[path] === undefined) {
+        if (path === artifact.value?.title) {
+          originalFiles[path] = originalContent;
+        } else if (isBash && props.bashPair) {
+          const pairId = path.startsWith('destroy-') ? props.bashPair.destroyId
+            : path.startsWith('deploy-') ? props.bashPair.deployId
+            : null;
+          if (pairId && pairId !== props.artifactId) {
+            try {
+              const pairArtifact = await getArtifact(pairId);
+              originalFiles[path] = pairArtifact.content ?? '';
+            } catch {
+              originalFiles[path] = '';
+            }
+          } else {
+            originalFiles[path] = '';
+          }
+        } else {
+          originalFiles[path] = '';
+        }
+      }
+    }
+  }
   activeTab.value = filePaths.value[0] ?? '';
   await nextTick();
   await mountDiffEditor();
@@ -600,7 +637,7 @@ async function applyProposal() {
   error.value = null;
   try {
     let filesToApply;
-    if (diffEditor && isBundle.value) {
+    if (diffEditor && filePaths.value.length > 0) {
       const modEditor = diffEditor.getModifiedEditor();
       const currentPath = activeTab.value;
       diffModModels[currentPath] = monacoApi.editor.createModel(modEditor.getValue(), languageForFile(currentPath));
@@ -613,12 +650,21 @@ async function applyProposal() {
     }
     await applyProvisionChange(props.projectId, props.deploymentId, {
       files: filesToApply,
+      artifact_id: props.artifactId,
     });
-    for (const path of filePaths.value) {
-      fileContents[path] = proposedFiles.value[path] ?? '';
-      originalFiles[path] = proposedFiles.value[path] ?? '';
+    if (isBundle.value) {
+      for (const path of filePaths.value) {
+        fileContents[path] = proposedFiles.value[path] ?? '';
+        originalFiles[path] = proposedFiles.value[path] ?? '';
+      }
+      originalContent = serializeBundle(fileContents);
+    } else {
+      const currentTitle = artifact.value?.title ?? '';
+      originalContent = proposedFiles.value[currentTitle] ?? proposedFiles.value[filePaths.value[0]] ?? originalContent;
+      for (const path of filePaths.value) {
+        originalFiles[path] = proposedFiles.value[path] ?? originalFiles[path] ?? '';
+      }
     }
-    originalContent = serializeBundle(fileContents);
     dirty.value = false;
     proposalReviewing.value = false;
     proposalExplanation.value = '';
@@ -638,6 +684,7 @@ function discardProposal() {
   proposalReviewing.value = false;
   proposalExplanation.value = '';
   proposedFiles.value = {};
+  if (!isBundle.value) filePaths.value = [];
   disposeDiffEditor();
   nextTick(() => mountEditor());
 }
@@ -646,6 +693,7 @@ function modifyProposal() {
   proposalReviewing.value = false;
   proposalExplanation.value = '';
   proposedFiles.value = {};
+  if (!isBundle.value) filePaths.value = [];
   disposeDiffEditor();
   proposeOpen.value = true;
 }
