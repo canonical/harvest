@@ -6640,16 +6640,25 @@ a.source-loc:hover .source-loc__line {
 }
 
 .deploy-artifacts__phase-tab {
+  flex: 1;
   padding: 0.5rem 1rem;
-  border: none;
+  margin: 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
   background: transparent;
   color: var(--text-secondary);
   font-size: 0.8125rem;
   white-space: nowrap;
   cursor: pointer;
-  border-bottom: 2px solid transparent;
+  outline: none;
   transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
   margin-bottom: -1px;
+  text-align: center;
+}
+
+.deploy-artifacts__phase-tab:first-child {
+  border-left: none;
 }
 
 .deploy-artifacts__phase-tab:hover {
@@ -7654,7 +7663,14 @@ a.source-loc:hover .source-loc__line {
 .deploy-artifacts__status-row {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   flex-shrink: 0;
+}
+
+.deploy-artifacts__top-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .deploy-artifacts__body {
@@ -7786,6 +7802,187 @@ a.source-loc:hover .source-loc__line {
   border-radius: 0;
   background: var(--bg-surface);
   overflow: hidden;
+}
+
+.deploy-artifacts__proposing {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.proposal-review {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.proposal-review__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.proposal-review__title-group {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.proposal-review__title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.proposal-review__count {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.proposal-review__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.proposal-review__explanation {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  max-height: 8rem;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.proposal-review__body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.proposal-review__tree {
+  flex: 0 0 240px;
+  border-right: 1px solid var(--border-color);
+  overflow-y: auto;
+  padding: 0.5rem 0;
+  flex-shrink: 0;
+}
+
+.proposal-review__tree-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.proposal-review__tree-header {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  width: 100%;
+  padding: 0.375rem 0.75rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  text-align: left;
+}
+
+.proposal-review__tree-header:hover {
+  background: var(--bg-surface-hover);
+}
+
+.proposal-review__tree-chevron {
+  font-size: 0.625rem;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.proposal-review__tree-chevron--open {
+  transform: rotate(90deg);
+}
+
+.proposal-review__tree-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.2rem;
+  height: 1.2rem;
+  padding: 0 0.3rem;
+  border-radius: 2px;
+  background: var(--bg-surface-alt);
+  color: var(--text-secondary);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.proposal-review__tree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.proposal-review__tree-item {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.75rem 0.375rem 1.5rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.proposal-review__tree-item:hover {
+  background: var(--bg-surface-hover);
+}
+
+.proposal-review__tree-item--active {
+  background: var(--bg-surface-alt);
+}
+
+.proposal-review__tree-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.proposal-review__tree-indicator--changed {
+  background: var(--text-code-inline);
+}
+
+.proposal-review__tree-indicator--new {
+  background: var(--success-text, #1a7f37);
+}
+
+.proposal-review__tree-filename {
+  font-size: 0.8125rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.proposal-review__tree-item--unchanged .proposal-review__tree-filename {
+  color: var(--text-muted);
+}
+
+.proposal-review__diff {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
 }
 
 .artifact-editor {

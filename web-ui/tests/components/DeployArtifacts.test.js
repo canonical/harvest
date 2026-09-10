@@ -8,6 +8,8 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
     getExecutionPlan: vi.fn(),
     setExecutionPlan: vi.fn(),
     openProjectEvents: vi.fn(() => ({ close() {} })),
+    proposeProvisionChangeStream: vi.fn(),
+    applyProvisionChange: vi.fn(),
   };
 });
 
@@ -31,6 +33,24 @@ vi.mock('../../src/components/deployment/AddArtifactModal.vue', () => ({
     template: '<div v-if="open" data-testid="add-artifact-modal-stub" @click="$emit(\'close\')" />',
     props: ['open', 'projectId', 'deploymentId'],
     emits: ['close', 'added'],
+  },
+}));
+
+vi.mock('../../src/components/deployment/DesignGenerationPanel.vue', () => ({
+  default: {
+    name: 'DesignGenerationPanel',
+    template: '<div data-testid="design-generation-stub" />',
+    props: ['projectId', 'deploymentId', 'streamFn', 'body', 'preparingText', 'readyText', 'failedText'],
+    emits: ['done', 'cancel'],
+  },
+}));
+
+vi.mock('../../src/components/deployment/ProposalReview.vue', () => ({
+  default: {
+    name: 'ProposalReview',
+    template: '<div data-testid="proposal-review-stub" />',
+    props: ['projectId', 'deploymentId', 'proposedFiles', 'originalFiles', 'executionPlan'],
+    emits: ['apply', 'discard', 'modify'],
   },
 }));
 
@@ -65,6 +85,7 @@ describe('DeployArtifacts', () => {
     vi.clearAllMocks();
     api.getExecutionPlan.mockResolvedValue(PLAN);
     api.setExecutionPlan.mockResolvedValue({});
+    api.applyProvisionChange.mockResolvedValue({});
   });
 
   it('renders the sidebar and editor', async () => {
@@ -195,6 +216,99 @@ describe('DeployArtifacts', () => {
     const w = mountPanel();
     await flushPromises();
     expect(w.find('[data-testid="add-artifact-btn"]').exists()).toBe(true);
+  });
+
+  it('shows a global Propose a change button', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    expect(w.find('[data-testid="propose-change-btn"]').exists()).toBe(true);
+  });
+
+  it('opens the propose modal when Propose a change is clicked', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="propose-change-btn"]').trigger('click');
+    await flushPromises();
+    expect(w.find('[data-testid="propose-change-modal"]').exists()).toBe(true);
+  });
+
+  it('closes the propose modal on cancel', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="propose-change-btn"]').trigger('click');
+    await flushPromises();
+    await w.find('[data-testid="propose-change-modal"]').find('.modal-close').trigger('click');
+    await flushPromises();
+    expect(w.find('[data-testid="propose-change-modal"]').exists()).toBe(false);
+  });
+
+  it('submits the proposal and shows the generation panel', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="propose-change-btn"]').trigger('click');
+    await flushPromises();
+    await w.find('[data-testid="propose-change-prompt"]').setValue('Add a new output variable');
+    await w.find('[data-testid="submit-propose-change-btn"]').trigger('click');
+    await flushPromises();
+    expect(w.find('[data-testid="design-generation-stub"]').exists()).toBe(true);
+  });
+
+  it('shows proposal review when generation emits done with proposed files', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="propose-change-btn"]').trigger('click');
+    await flushPromises();
+    await w.find('[data-testid="propose-change-prompt"]').setValue('Add a new output variable');
+    await w.find('[data-testid="submit-propose-change-btn"]').trigger('click');
+    await flushPromises();
+    const proposed = { 'main.tf': '# new terraform', 'deploy-setup.sh': '#!/bin/bash\necho hi' };
+    w.findComponent({ name: 'DesignGenerationPanel' }).vm.$emit('done', {
+      answer: 'Here are the changes\n```json\n' + JSON.stringify(proposed) + '\n```',
+      text: '',
+    });
+    await flushPromises();
+    expect(w.find('[data-testid="proposal-review-stub"]').exists()).toBe(true);
+  });
+
+  it('applies the proposal when ProposalReview emits apply', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="propose-change-btn"]').trigger('click');
+    await flushPromises();
+    await w.find('[data-testid="propose-change-prompt"]').setValue('Add a new output variable');
+    await w.find('[data-testid="submit-propose-change-btn"]').trigger('click');
+    await flushPromises();
+    const proposed = { 'main.tf': '# new terraform' };
+    w.findComponent({ name: 'DesignGenerationPanel' }).vm.$emit('done', {
+      answer: '```json\n' + JSON.stringify(proposed) + '\n```',
+      text: '',
+    });
+    await flushPromises();
+    const filesToApply = { 'main.tf': '# new terraform' };
+    w.findComponent({ name: 'ProposalReview' }).vm.$emit('apply', filesToApply);
+    await flushPromises();
+    expect(api.applyProvisionChange).toHaveBeenCalledWith('proj-1', 'd1', { files: filesToApply });
+    expect(w.find('[data-testid="deploy-artifacts-sidebar"]').exists()).toBe(true);
+  });
+
+  it('discards the proposal and returns to the editor view', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="propose-change-btn"]').trigger('click');
+    await flushPromises();
+    await w.find('[data-testid="propose-change-prompt"]').setValue('Add a new output variable');
+    await w.find('[data-testid="submit-propose-change-btn"]').trigger('click');
+    await flushPromises();
+    const proposed = { 'main.tf': '# new terraform' };
+    w.findComponent({ name: 'DesignGenerationPanel' }).vm.$emit('done', {
+      answer: '```json\n' + JSON.stringify(proposed) + '\n```',
+      text: '',
+    });
+    await flushPromises();
+    w.findComponent({ name: 'ProposalReview' }).vm.$emit('discard');
+    await flushPromises();
+    expect(w.find('[data-testid="proposal-review-stub"]').exists()).toBe(false);
+    expect(w.find('[data-testid="deploy-artifacts-sidebar"]').exists()).toBe(true);
   });
 
   it('opens the AddArtifactModal when Add artifact is clicked', async () => {

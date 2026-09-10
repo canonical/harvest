@@ -13,33 +13,14 @@ vi.mock('monaco-editor', () => {
     focus: vi.fn(),
     getModel: vi.fn(() => mockModel),
   };
-  const mockModifiedEditor = {
-    getValue: vi.fn(() => ''),
-    dispose: vi.fn(),
-  };
-  const mockDiffEditor = {
-    dispose: vi.fn(),
-    setModel: vi.fn(),
-    getModifiedEditor: vi.fn(() => mockModifiedEditor),
-  };
-  const createdModels = [];
   const editorApi = {
     create: vi.fn(() => mockEditor),
-    createDiffEditor: vi.fn(() => mockDiffEditor),
     setModelLanguage: vi.fn(),
-    createModel: vi.fn((value) => {
-      const m = { dispose: vi.fn(), getValue: vi.fn(() => value || '') };
-      createdModels.push(m);
-      return m;
-    }),
   };
   return {
     default: { editor: editorApi },
     editor: editorApi,
     __mockEditor: mockEditor,
-    __mockDiffEditor: mockDiffEditor,
-    __mockModifiedEditor: mockModifiedEditor,
-    __createdModels: createdModels,
     __getChangeCb: () => changeCb,
     __resetChangeCb: () => { changeCb = null; },
   };
@@ -51,23 +32,8 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
     ...actual,
     getArtifact:                   vi.fn(),
     updateArtifact:                vi.fn(),
-    proposeProvisionChangeStream:  vi.fn(),
-    applyProvisionChange:          vi.fn(),
   };
 });
-
-vi.mock('../../src/lib/markdown.js', () => ({
-  renderMarkdown: vi.fn(() => '<p>explanation</p>'),
-}));
-
-vi.mock('../../src/components/deployment/DesignGenerationPanel.vue', () => ({
-  default: {
-    name: 'DesignGenerationPanel',
-    template: '<div data-testid="design-gen-panel" />',
-    props: ['projectId', 'deploymentId', 'streamFn', 'body', 'preparingText', 'readyText', 'failedText'],
-    emits: ['done', 'cancel'],
-  },
-}));
 
 import ArtifactEditor from '../../src/components/deployment/ArtifactEditor.vue';
 import * as api from '../../src/lib/api.js';
@@ -84,8 +50,6 @@ const BASH_ARTIFACT = {
   id: 'a2', title: 'Prep', kind: 'bash', content: '#!/bin/bash\necho hello',
 };
 
-const PROPOSAL_ANSWER = 'I changed the resource type\n\n```json\n{"main.tf": "resource \\"z\\" {}", "variables.tf": "variable \\"y\\" {}"}\n```';
-
 async function mountEditor({ projectId = 'proj-1', deploymentId = 'd1', artifactId = 'a1' } = {}) {
   return mount(ArtifactEditor, {
     props: { projectId, deploymentId, artifactId },
@@ -100,28 +64,13 @@ function getChangeCb() {
   return monaco.__getChangeCb();
 }
 
-async function startProposal(w, prompt = 'Change something') {
-  await w.find('[data-testid="propose-artifact-btn"]').trigger('click');
-  await flushPromises();
-  await w.find('[data-testid="artifact-propose-prompt"]').setValue(prompt);
-  await w.find('[data-testid="submit-propose-artifact-btn"]').trigger('click');
-  await flushPromises();
-}
-
-async function emitProposalDone(w, answer = PROPOSAL_ANSWER) {
-  w.findComponent({ name: 'DesignGenerationPanel' }).vm.$emit('done', { answer, text: answer });
-  await flushPromises();
-}
-
 describe('ArtifactEditor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    monaco.__createdModels.length = 0;
     const e = getMockEditor();
     e.getValue.mockReturnValue('');
     api.getArtifact.mockResolvedValue(structuredClone(ARTIFACT));
     api.updateArtifact.mockResolvedValue({ id: 'a1', title: 'Infra', kind: 'terraform', updated_at: 'now' });
-    api.applyProvisionChange.mockResolvedValue({});
   });
 
   it('fetches the artifact on mount', async () => {
@@ -161,11 +110,16 @@ describe('ArtifactEditor', () => {
     }));
   });
 
-  it('shows Save and Propose a change buttons', async () => {
+  it('shows the Save button', async () => {
     const w = await mountEditor();
     await flushPromises();
     expect(w.find('[data-testid="save-artifact-btn"]').exists()).toBe(true);
-    expect(w.find('[data-testid="propose-artifact-btn"]').exists()).toBe(true);
+  });
+
+  it('does not show a Propose a change button', async () => {
+    const w = await mountEditor();
+    await flushPromises();
+    expect(w.find('[data-testid="propose-artifact-btn"]').exists()).toBe(false);
   });
 
   it('disables the Save button when content is unchanged', async () => {
@@ -315,160 +269,5 @@ describe('ArtifactEditor', () => {
     await w.find('[data-testid="save-artifact-btn"]').trigger('click');
     await flushPromises();
     expect(w.emitted('saved')).toBeTruthy();
-  });
-
-  it('opens the propose modal when Propose a change is clicked', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    await w.find('[data-testid="propose-artifact-btn"]').trigger('click');
-    await flushPromises();
-    expect(w.find('[data-testid="artifact-propose-modal"]').exists()).toBe(true);
-  });
-
-  it('disables the Propose button when the prompt is empty', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    await w.find('[data-testid="propose-artifact-btn"]').trigger('click');
-    await flushPromises();
-    expect(w.find('[data-testid="submit-propose-artifact-btn"]').attributes('disabled')).toBeDefined();
-  });
-
-  it('shows streaming generation panel when proposing', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    await startProposal(w);
-    expect(w.find('[data-testid="design-gen-panel"]').exists()).toBe(true);
-    expect(w.find('[data-testid="save-artifact-btn"]').exists()).toBe(false);
-    expect(w.find('[data-testid="propose-artifact-btn"]').exists()).toBe(false);
-  });
-
-  it('passes the stream fn and body to the generation panel', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    await startProposal(w, 'Increase instance count');
-    const panel = w.findComponent({ name: 'DesignGenerationPanel' });
-    expect(typeof panel.props('streamFn')).toBe('function');
-    expect(panel.props('body')).toEqual({ instructions: 'Increase instance count', artifact_id: 'a1' });
-  });
-
-  it('shows diff review with Apply/Discard/Modify after stream done', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    await startProposal(w);
-    await emitProposalDone(w);
-    await flushPromises();
-    expect(w.find('[data-testid="apply-proposal-btn"]').exists()).toBe(true);
-    expect(w.find('[data-testid="modify-proposal-btn"]').exists()).toBe(true);
-    expect(w.find('[data-testid="discard-proposal-btn"]').exists()).toBe(true);
-    expect(w.find('[data-testid="save-artifact-btn"]').exists()).toBe(false);
-    expect(w.find('[data-testid="propose-artifact-btn"]').exists()).toBe(false);
-  });
-
-  it('mounts a diff editor after stream done', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    monaco.editor.createDiffEditor.mockClear();
-    await startProposal(w);
-    await emitProposalDone(w);
-    await flushPromises();
-    expect(monaco.editor.createDiffEditor).toHaveBeenCalled();
-  });
-
-  it('Apply calls applyProvisionChange and returns to editor', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    const modEditor = monaco.__mockModifiedEditor;
-    modEditor.getValue.mockReturnValue('resource "z" {}');
-    await startProposal(w);
-    await emitProposalDone(w);
-    await flushPromises();
-    await w.find('[data-testid="apply-proposal-btn"]').trigger('click');
-    await flushPromises();
-    expect(api.applyProvisionChange).toHaveBeenCalledWith('proj-1', 'd1', expect.objectContaining({
-      files: expect.objectContaining({
-        'main.tf': 'resource "z" {}',
-      }),
-    }));
-    expect(w.find('[data-testid="save-artifact-btn"]').exists()).toBe(true);
-    expect(w.find('[data-testid="apply-proposal-btn"]').exists()).toBe(false);
-  });
-
-  it('emits saved after applying a proposal', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    const modEditor = monaco.__mockModifiedEditor;
-    modEditor.getValue.mockReturnValue('resource "z" {}');
-    await startProposal(w);
-    await emitProposalDone(w);
-    await flushPromises();
-    await w.find('[data-testid="apply-proposal-btn"]').trigger('click');
-    await flushPromises();
-    expect(w.emitted('saved')).toBeTruthy();
-  });
-
-  it('Discard returns to editor without applying', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    await startProposal(w);
-    await emitProposalDone(w);
-    await flushPromises();
-    api.applyProvisionChange.mockClear();
-    await w.find('[data-testid="discard-proposal-btn"]').trigger('click');
-    await flushPromises();
-    expect(api.applyProvisionChange).not.toHaveBeenCalled();
-    expect(w.find('[data-testid="save-artifact-btn"]').exists()).toBe(true);
-    expect(w.find('[data-testid="apply-proposal-btn"]').exists()).toBe(false);
-  });
-
-  it('Modify reopens the propose modal with the previous prompt', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    await startProposal(w, 'Change something');
-    await emitProposalDone(w);
-    await flushPromises();
-    await w.find('[data-testid="modify-proposal-btn"]').trigger('click');
-    await flushPromises();
-    expect(w.find('[data-testid="artifact-propose-modal"]').exists()).toBe(true);
-    expect(w.find('[data-testid="artifact-propose-prompt"]').element.value).toBe('Change something');
-  });
-
-  it('shows error when stream done has no answer', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    await startProposal(w);
-    await emitProposalDone(w, '');
-    await flushPromises();
-    expect(w.find('[data-testid="artifact-editor-error"]').text()).toContain('Failed to propose changes');
-  });
-
-  it('shows error when stream done answer has no JSON block', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    await startProposal(w);
-    await emitProposalDone(w, 'I cannot help with that');
-    await flushPromises();
-    expect(w.find('[data-testid="artifact-editor-error"]').text()).toContain('Failed to parse');
-  });
-
-  it('shows changed indicator on tabs with proposed changes', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    await startProposal(w);
-    await emitProposalDone(w);
-    await flushPromises();
-    const mainTab = w.find('[data-testid="artifact-tab-main.tf"]');
-    const varsTab = w.find('[data-testid="artifact-tab-variables.tf"]');
-    expect(mainTab.find('[data-testid="tab-changed-dot"]').exists()).toBe(true);
-    expect(varsTab.find('[data-testid="tab-changed-dot"]').exists()).toBe(false);
-  });
-
-  it('cancel from generation panel returns to editor', async () => {
-    const w = await mountEditor();
-    await flushPromises();
-    await startProposal(w);
-    w.findComponent({ name: 'DesignGenerationPanel' }).vm.$emit('cancel');
-    await flushPromises();
-    expect(w.find('[data-testid="design-gen-panel"]').exists()).toBe(false);
-    expect(w.find('[data-testid="save-artifact-btn"]').exists()).toBe(true);
   });
 });
