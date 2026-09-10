@@ -57,7 +57,7 @@ fn validate_update_template_params(params: &Value) -> Result<String> {
 
 pub fn action_valid_for_kind(kind: ArtifactKind, action: &str) -> bool {
     match (kind, action) {
-        (ArtifactKind::Bash, "run") => true,
+        (ArtifactKind::Bash, "run" | "destroy") => true,
         (ArtifactKind::Terraform | ArtifactKind::Terragrunt, "plan" | "apply" | "destroy") => true,
         _ => false,
     }
@@ -142,7 +142,7 @@ pub fn validate_execution_plan_input(params: &Value) -> Result<ParsedExecutionPl
     })
 }
 
-pub fn validate_terraform_destroy_coverage(plan: &ParsedExecutionPlan) -> Result<()> {
+pub fn validate_destroy_coverage(plan: &ParsedExecutionPlan) -> Result<()> {
     let apply_artifacts: std::collections::HashSet<&str> = plan.deploy_steps.iter()
         .filter(|s| s.action == "apply")
         .map(|s| s.artifact_id.as_str())
@@ -152,14 +152,27 @@ pub fn validate_terraform_destroy_coverage(plan: &ParsedExecutionPlan) -> Result
         .map(|s| s.artifact_id.as_str())
         .collect();
     let missing: Vec<&str> = apply_artifacts.difference(&destroy_artifacts).copied().collect();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "every terraform artifact with an 'apply' step in deploy_steps must have a 'destroy' step in destroy_steps — missing destroy for: {}",
+    if !missing.is_empty() {
+        return Err(anyhow!(
+            "every artifact with a deploy step must have a matching destroy step in destroy_steps — missing destroy for: {}",
             missing.join(", "),
-        ))
+        ));
     }
+
+    let deploy_count = plan.deploy_steps.iter()
+        .filter(|s| s.action == "apply" || s.action == "run")
+        .count();
+    let destroy_count = plan.destroy_steps.iter()
+        .filter(|s| s.action == "destroy")
+        .count();
+    if deploy_count > 0 && destroy_count < deploy_count {
+        return Err(anyhow!(
+            "every deploy step must have a corresponding destroy step — {} destroy step(s) for {} deploy step(s)",
+            destroy_count, deploy_count,
+        ));
+    }
+
+    Ok(())
 }
 
 pub struct LinkDeploymentArtifactTool {
@@ -389,7 +402,7 @@ impl Tool for SetExecutionPlanTool {
 
     async fn execute(&self, params: Value) -> Result<String> {
         let plan = validate_execution_plan_input(&params)?;
-        validate_terraform_destroy_coverage(&plan)?;
+        validate_destroy_coverage(&plan)?;
 
         for step in plan.deploy_steps.iter().chain(plan.destroy_steps.iter()) {
             let artifact = get_artifact_in_project(&self.neo4j, &self.project_id, &step.artifact_id)
@@ -498,11 +511,11 @@ mod tests {
     }
 
     #[test]
-    fn action_valid_for_kind_bash_only_allows_run() {
+    fn action_valid_for_kind_bash_allows_run_and_destroy() {
         assert!(action_valid_for_kind(ArtifactKind::Bash, "run"));
+        assert!(action_valid_for_kind(ArtifactKind::Bash, "destroy"));
         assert!(!action_valid_for_kind(ArtifactKind::Bash, "plan"));
         assert!(!action_valid_for_kind(ArtifactKind::Bash, "apply"));
-        assert!(!action_valid_for_kind(ArtifactKind::Bash, "destroy"));
     }
 
     #[test]
@@ -632,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_terraform_destroy_coverage_passes_when_apply_has_destroy() {
+    fn validate_destroy_coverage_passes_when_apply_has_destroy() {
         let plan = ParsedExecutionPlan {
             deploy_steps:  vec![
                 ParsedStep { artifact_id: "a1".into(), action: "apply".into(),   label: "Apply".into(),  depends_on: vec![] },
@@ -641,44 +654,46 @@ mod tests {
                 ParsedStep { artifact_id: "a1".into(), action: "destroy".into(), label: "Destroy".into(), depends_on: vec![] },
             ],
         };
-        assert!(validate_terraform_destroy_coverage(&plan).is_ok());
+        assert!(validate_destroy_coverage(&plan).is_ok());
     }
 
     #[test]
-    fn validate_terraform_destroy_coverage_passes_when_no_apply_steps() {
+    fn validate_destroy_coverage_passes_when_no_apply_steps() {
         let plan = ParsedExecutionPlan {
             deploy_steps:  vec![
                 ParsedStep { artifact_id: "a1".into(), action: "run".into(), label: "Prep".into(), depends_on: vec![] },
             ],
-            destroy_steps: vec![],
+            destroy_steps: vec![
+                ParsedStep { artifact_id: "a2".into(), action: "destroy".into(), label: "Teardown".into(), depends_on: vec![] },
+            ],
         };
-        assert!(validate_terraform_destroy_coverage(&plan).is_ok());
+        assert!(validate_destroy_coverage(&plan).is_ok());
     }
 
     #[test]
-    fn validate_terraform_destroy_coverage_passes_when_empty_plan() {
+    fn validate_destroy_coverage_passes_when_empty_plan() {
         let plan = ParsedExecutionPlan {
             deploy_steps:  vec![],
             destroy_steps: vec![],
         };
-        assert!(validate_terraform_destroy_coverage(&plan).is_ok());
+        assert!(validate_destroy_coverage(&plan).is_ok());
     }
 
     #[test]
-    fn validate_terraform_destroy_coverage_fails_when_apply_missing_destroy() {
+    fn validate_destroy_coverage_fails_when_apply_missing_destroy() {
         let plan = ParsedExecutionPlan {
             deploy_steps:  vec![
                 ParsedStep { artifact_id: "a1".into(), action: "apply".into(), label: "Apply".into(), depends_on: vec![] },
             ],
             destroy_steps: vec![],
         };
-        let e = validate_terraform_destroy_coverage(&plan).unwrap_err();
+        let e = validate_destroy_coverage(&plan).unwrap_err();
         assert!(e.to_string().contains("a1"));
         assert!(e.to_string().contains("destroy"));
     }
 
     #[test]
-    fn validate_terraform_destroy_coverage_fails_when_one_of_two_applies_missing_destroy() {
+    fn validate_destroy_coverage_fails_when_one_of_two_applies_missing_destroy() {
         let plan = ParsedExecutionPlan {
             deploy_steps:  vec![
                 ParsedStep { artifact_id: "a1".into(), action: "apply".into(), label: "Apply 1".into(), depends_on: vec![] },
@@ -688,21 +703,73 @@ mod tests {
                 ParsedStep { artifact_id: "a1".into(), action: "destroy".into(), label: "Destroy 1".into(), depends_on: vec![] },
             ],
         };
-        let e = validate_terraform_destroy_coverage(&plan).unwrap_err();
+        let e = validate_destroy_coverage(&plan).unwrap_err();
         assert!(e.to_string().contains("a2"));
         assert!(!e.to_string().contains("a1"));
     }
 
     #[test]
-    fn validate_terraform_destroy_coverage_ignores_plan_and_run_actions() {
+    fn validate_destroy_coverage_fails_when_bash_run_has_no_destroy() {
         let plan = ParsedExecutionPlan {
             deploy_steps:  vec![
-                ParsedStep { artifact_id: "a1".into(), action: "plan".into(), label: "Plan".into(), depends_on: vec![] },
-                ParsedStep { artifact_id: "a2".into(), action: "run".into(),  label: "Run".into(),  depends_on: vec![] },
+                ParsedStep { artifact_id: "b1".into(), action: "run".into(), label: "Deploy prep".into(), depends_on: vec![] },
             ],
             destroy_steps: vec![],
         };
-        assert!(validate_terraform_destroy_coverage(&plan).is_ok());
+        assert!(validate_destroy_coverage(&plan).is_err());
+    }
+
+    #[test]
+    fn validate_destroy_coverage_passes_when_bash_run_has_bash_destroy() {
+        let plan = ParsedExecutionPlan {
+            deploy_steps:  vec![
+                ParsedStep { artifact_id: "b1".into(), action: "run".into(), label: "Deploy prep".into(), depends_on: vec![] },
+            ],
+            destroy_steps: vec![
+                ParsedStep { artifact_id: "b2".into(), action: "destroy".into(), label: "Teardown prep".into(), depends_on: vec![] },
+            ],
+        };
+        assert!(validate_destroy_coverage(&plan).is_ok());
+    }
+
+    #[test]
+    fn validate_destroy_coverage_passes_when_mixed_terraform_and_bash_with_destroy() {
+        let plan = ParsedExecutionPlan {
+            deploy_steps:  vec![
+                ParsedStep { artifact_id: "b1".into(), action: "run".into(),     label: "Deploy prep".into(),  depends_on: vec![] },
+                ParsedStep { artifact_id: "t1".into(), action: "apply".into(),   label: "Apply infra".into(),  depends_on: vec![0] },
+            ],
+            destroy_steps: vec![
+                ParsedStep { artifact_id: "t1".into(), action: "destroy".into(), label: "Destroy infra".into(), depends_on: vec![] },
+                ParsedStep { artifact_id: "b2".into(), action: "destroy".into(), label: "Teardown prep".into(), depends_on: vec![] },
+            ],
+        };
+        assert!(validate_destroy_coverage(&plan).is_ok());
+    }
+
+    #[test]
+    fn validate_destroy_coverage_fails_when_bash_run_destroy_count_mismatched() {
+        let plan = ParsedExecutionPlan {
+            deploy_steps:  vec![
+                ParsedStep { artifact_id: "b1".into(), action: "run".into(),   label: "Deploy 1".into(), depends_on: vec![] },
+                ParsedStep { artifact_id: "b2".into(), action: "run".into(),   label: "Deploy 2".into(), depends_on: vec![] },
+            ],
+            destroy_steps: vec![
+                ParsedStep { artifact_id: "b3".into(), action: "destroy".into(), label: "Teardown".into(), depends_on: vec![] },
+            ],
+        };
+        assert!(validate_destroy_coverage(&plan).is_err());
+    }
+
+    #[test]
+    fn validate_destroy_coverage_ignores_plan_and_run_actions_for_apply_coverage() {
+        let plan = ParsedExecutionPlan {
+            deploy_steps:  vec![
+                ParsedStep { artifact_id: "a1".into(), action: "plan".into(), label: "Plan".into(), depends_on: vec![] },
+            ],
+            destroy_steps: vec![],
+        };
+        assert!(validate_destroy_coverage(&plan).is_ok());
     }
 
 }
