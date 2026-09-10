@@ -348,7 +348,7 @@ describe('ArtifactEditor', () => {
     await startProposal(w, 'Increase instance count');
     const panel = w.findComponent({ name: 'DesignGenerationPanel' });
     expect(typeof panel.props('streamFn')).toBe('function');
-    expect(panel.props('body')).toEqual({ instructions: 'Increase instance count' });
+    expect(panel.props('body')).toEqual({ instructions: 'Increase instance count', artifact_id: 'a1' });
   });
 
   it('shows diff review with Apply/Discard/Modify after stream done', async () => {
