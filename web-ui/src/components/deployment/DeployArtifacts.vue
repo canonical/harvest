@@ -17,23 +17,29 @@
             @click="addArtifactOpen = true"
           >Add artifact</button>
         </div>
-        <ul class="deploy-artifacts__list">
-          <li
-            v-for="item in sidebarItems"
-            :key="item.key"
-            class="deploy-artifacts__item"
-            :class="{ 'deploy-artifacts__item--active': isItemSelected(item) }"
-            :data-testid="`artifact-item-${item.key}`"
-            @click="selectSidebarItem(item)"
-          >
-            <div class="deploy-artifacts__item-text">
-              <span class="deploy-artifacts__item-title">{{ item.title }}</span>
-              <span class="artifact-kind-badge" :class="kindBadgeClass(item.kind)">{{ kindLabel(item.kind) }}</span>
-            </div>
-          </li>
-        </ul>
-        <div v-if="sidebarItems.length === 0" class="deploy-artifacts__sidebar-empty">
-          <p>No artifacts in the execution plan.</p>
+
+        <div class="deploy-artifacts__pipeline">
+          <div class="deploy-artifacts__phase-tabs" data-testid="deploy-artifacts-phase-tabs">
+            <button
+              type="button"
+              class="deploy-artifacts__phase-tab"
+              :class="{ 'deploy-artifacts__phase-tab--active': phase === 'deploy' }"
+              data-testid="phase-tab-deploy"
+              @click="phase = 'deploy'"
+            >Deploy</button>
+            <button
+              type="button"
+              class="deploy-artifacts__phase-tab"
+              :class="{ 'deploy-artifacts__phase-tab--active': phase === 'destroy' }"
+              data-testid="phase-tab-destroy"
+              @click="phase = 'destroy'"
+            >Destroy</button>
+          </div>
+          <PipelineStepper
+            :steps="currentPhaseSteps"
+            :selected-step-id="selectedArtifactId"
+            @select="onPipelineSelect"
+          />
         </div>
       </aside>
 
@@ -84,6 +90,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import ArtifactEditor from './ArtifactEditor.vue';
 import AddArtifactModal from './AddArtifactModal.vue';
+import PipelineStepper from './PipelineStepper.vue';
 import {
   getExecutionPlan, setExecutionPlan, openProjectEvents,
 } from '../../lib/api.js';
@@ -99,8 +106,13 @@ const plan                 = ref({ deploy_steps: [], destroy_steps: [] });
 const selectedArtifactId   = ref(null);
 const addArtifactOpen       = ref(false);
 const scriptTab             = ref('deploy');
+const phase                  = ref('deploy');
 
 let eventSource = null;
+
+const currentPhaseSteps = computed(() =>
+  phase.value === 'deploy' ? (plan.value.deploy_steps ?? []) : (plan.value.destroy_steps ?? [])
+);
 
 const INFRA_STATE_LABELS = {
   none: 'Not deployed', up: 'Up', broken: 'Broken', destroyed: 'Destroyed', destroy_failed: 'Destroy failed',
@@ -250,6 +262,18 @@ function selectSidebarItem(item) {
     scriptTab.value = (id === item.pair.deployId && item.pair.deployId) ? 'deploy' : 'destroy';
   } else {
     selectedArtifactId.value = item.key;
+  }
+}
+
+function onPipelineSelect(artifactId) {
+  selectedArtifactId.value = artifactId;
+  const pair = bashPairForArtifact(artifactId);
+  if (pair) {
+    if (artifactId === pair.deployId) {
+      scriptTab.value = 'deploy';
+    } else if (artifactId === pair.destroyId) {
+      scriptTab.value = 'destroy';
+    }
   }
 }
 
