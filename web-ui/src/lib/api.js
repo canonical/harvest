@@ -525,6 +525,8 @@ export const setExecutionPlan = (projectId, id, body) =>
   projectFetch(`${deploymentUrl(projectId, id)}/execution-plan`, { method: 'POST', body: JSON.stringify(body) });
 export const runDag = (projectId, id, body) =>
   projectFetch(`${deploymentUrl(projectId, id)}/run-dag`, { method: 'POST', body: JSON.stringify(body) });
+export const runDestroyDag = (projectId, id, body) =>
+  projectFetch(`${deploymentUrl(projectId, id)}/run-destroy-dag`, { method: 'POST', body: JSON.stringify(body) });
 
 
 const TEMPLATES_URL = '/templates';

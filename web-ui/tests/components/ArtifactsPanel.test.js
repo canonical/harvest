@@ -8,6 +8,7 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
     getExecutionPlan:     vi.fn(),
     setExecutionPlan:      vi.fn(),
     runDag:                vi.fn(),
+    runDestroyDag:         vi.fn(),
     getArtifact:           vi.fn(),
     generateProvision:     vi.fn(),
     openProjectEvents:     vi.fn(),
@@ -16,9 +17,9 @@ vi.mock('../../src/lib/api.js', async (importOriginal) => {
 
 vi.mock('../../src/components/deployment/DagView.vue', () => ({
   default: {
-    template: '<div class="stub-dag-view" data-testid="dag-view"><button data-testid="stub-run-all" @click="$emit(\'run-all\')" /></div>',
+    template: '<div class="stub-dag-view" data-testid="dag-view"><button data-testid="stub-run-all" @click="$emit(\'run-all\')" /><button data-testid="stub-run-destroy" @click="$emit(\'run-destroy\')" /></div>',
     props: ['plan', 'stepFiles', 'stepStatus'],
-    emits: ['run-all', 'run-node', 'plan-preview'],
+    emits: ['run-all', 'run-destroy', 'run-node', 'plan-preview'],
   },
 }));
 vi.mock('../../src/components/deployment/RunHistory.vue', () => ({
@@ -122,5 +123,19 @@ describe('ArtifactsPanel', () => {
     const w = mountPanel(DEPLOYMENT_WITH_BUNDLE);
     await flushPromises();
     expect(w.find('[data-testid="coverage-warning"]').exists()).toBe(false);
+  });
+
+  it('run-destroy calls runDestroyDag with selected agent', async () => {
+    api.getExecutionPlan.mockResolvedValue({
+      deploy_steps: [{ id: 's0', action: 'run', label: 'Prep', artifact: { kind: 'bash' }, depends_on: [] }],
+      destroy_steps: [{ id: 's1', action: 'destroy', label: 'Teardown', artifact: { kind: 'bash' }, depends_on: [] }],
+    });
+    api.runDestroyDag.mockResolvedValue({ runs: [{ exit_code: 0 }], infra_state: 'destroyed' });
+    const w = mountPanel(DEPLOYMENT_WITH_BUNDLE);
+    await flushPromises();
+    await w.find('[data-testid="stub-run-destroy"]').trigger('click');
+    await flushPromises();
+    expect(api.runDestroyDag).toHaveBeenCalledWith('proj-1', 'd1', { agent_id: 'agent-1', timeout_secs: 300 });
+    expect(w.find('[data-testid="run-history"]').exists()).toBe(true);
   });
 });
