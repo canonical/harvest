@@ -19,8 +19,8 @@
         class="p-button--positive is-dense"
         type="button"
         data-testid="run-all-btn"
-        :disabled="!plan.deploy_steps.length"
-        @click="$emit('run-all')"
+        :disabled="currentSteps.length === 0"
+        @click="emitRunAll"
       >Run all</button>
     </div>
 
@@ -74,7 +74,7 @@ const props = defineProps({
   stepStatus: { type: Object, default: () => ({}) },
 });
 
-const emit = defineEmits(['run-all', 'run-node', 'plan-preview', 'select-artifact']);
+const emit = defineEmits(['run-all', 'run-destroy', 'run-node', 'plan-preview', 'select-artifact']);
 
 const canvasRef     = ref(null);
 const selectedStep   = ref(null);
@@ -85,6 +85,14 @@ let cy = null;
 const currentSteps = computed(() =>
   phase.value === 'deploy' ? (props.plan.deploy_steps ?? []) : (props.plan.destroy_steps ?? [])
 );
+
+function emitRunAll() {
+  if (phase.value === 'destroy') {
+    emit('run-destroy');
+  } else {
+    emit('run-all');
+  }
+}
 
 const KIND_COLORS = {
   bash:        '#7b42c9',

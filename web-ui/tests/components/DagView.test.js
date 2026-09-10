@@ -73,10 +73,20 @@ describe('DagView', () => {
     expect(tabs).toHaveLength(2);
   });
 
-  it('emits run-all when Run all button clicked', async () => {
+  it('emits run-all when Run all button clicked in deploy phase', async () => {
     const w = mountDag();
     await w.find('[data-testid="run-all-btn"]').trigger('click');
     expect(w.emitted('run-all')).toBeTruthy();
+    expect(w.emitted('run-destroy')).toBeFalsy();
+  });
+
+  it('emits run-destroy when Run all button clicked in destroy phase', async () => {
+    const w = mountDag();
+    const destroyTab = w.findAll('.dag-view__tab')[1];
+    await destroyTab.trigger('click');
+    await w.find('[data-testid="run-all-btn"]').trigger('click');
+    expect(w.emitted('run-destroy')).toBeTruthy();
+    expect(w.emitted('run-all')).toBeFalsy();
   });
 
   it('emits select-artifact with the artifact id when a node is tapped', async () => {
