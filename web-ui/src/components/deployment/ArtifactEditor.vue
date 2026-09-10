@@ -10,7 +10,7 @@
     </div>
 
     <div v-else-if="artifact" class="artifact-editor__content">
-      <div v-if="!proposalProposing" class="artifact-editor__header">
+      <div class="artifact-editor__header">
         <div class="artifact-editor__meta">
           <h3 class="artifact-editor__title">{{ artifact.title }}</h3>
           <span class="artifact-kind-badge" :class="kindBadgeClass(artifact.kind)">{{ kindLabel(artifact.kind) }}</span>
@@ -19,7 +19,7 @@
             <span class="artifact-editor__diff-removed">−{{ diffStats.removed }}</span>
           </span>
         </div>
-        <div class="artifact-editor__actions" v-if="!proposalReviewing">
+        <div class="artifact-editor__actions">
           <button
             class="p-button--positive is-dense"
             type="button"
@@ -27,33 +27,6 @@
             :disabled="!dirty || saving"
             @click="save"
           >{{ saving ? 'Saving…' : 'Save' }}</button>
-          <button
-            class="p-button--brand is-dense"
-            type="button"
-            data-testid="propose-artifact-btn"
-            @click="openPropose"
-          >Propose a change</button>
-        </div>
-        <div class="artifact-editor__actions" v-else>
-          <button
-            class="p-button--positive is-dense"
-            type="button"
-            data-testid="apply-proposal-btn"
-            :disabled="applying"
-            @click="applyProposal"
-          >{{ applying ? 'Applying…' : 'Apply' }}</button>
-          <button
-            class="p-button--base is-dense"
-            type="button"
-            data-testid="modify-proposal-btn"
-            @click="modifyProposal"
-          >Modify</button>
-          <button
-            class="p-button--negative is-dense"
-            type="button"
-            data-testid="discard-proposal-btn"
-            @click="discardProposal"
-          >Discard</button>
         </div>
       </div>
 
@@ -80,94 +53,26 @@
         </div>
       </div>
 
-      <div v-if="proposalProposing" class="artifact-editor__proposing" data-testid="artifact-editor-proposing">
-        <DesignGenerationPanel
-          :project-id="projectId"
-          :deployment-id="deploymentId"
-          :stream-fn="proposeProvisionChangeStream"
-          :body="proposalBody"
-          preparing-text="Preparing proposed changes…"
-          ready-text="Proposed changes ready"
-          failed-text="Failed to propose changes"
-          @done="onProposalStreamDone"
-          @cancel="onProposalStreamCancel"
-        />
+      <div v-if="isBundle" class="artifact-editor__tabs" data-testid="artifact-editor-tabs">
+        <button
+          v-for="path in filePaths"
+          :key="path"
+          class="artifact-editor__tab"
+          :class="{ 'artifact-editor__tab--active': activeTab === path }"
+          :data-testid="`artifact-tab-${path}`"
+          @click="switchTab(path)"
+        >{{ path }}</button>
       </div>
-
-      <template v-else-if="proposalReviewing">
-        <div v-if="filePaths.length > 1" class="artifact-editor__tabs" data-testid="artifact-editor-tabs">
-          <button
-            v-for="path in filePaths"
-            :key="path"
-            class="artifact-editor__tab"
-            :class="{ 'artifact-editor__tab--active': activeTab === path }"
-            :data-testid="`artifact-tab-${path}`"
-            @click="switchDiffTab(path)"
-          >
-            <span v-if="isFileChanged(path)" class="artifact-editor__tab-dot" data-testid="tab-changed-dot"></span>
-            {{ path }}
-          </button>
-        </div>
-        <div ref="containerRef" class="artifact-editor__container" data-testid="artifact-editor-container" />
-      </template>
-
-      <template v-else>
-        <div v-if="isBundle" class="artifact-editor__tabs" data-testid="artifact-editor-tabs">
-          <button
-            v-for="path in filePaths"
-            :key="path"
-            class="artifact-editor__tab"
-            :class="{ 'artifact-editor__tab--active': activeTab === path }"
-            :data-testid="`artifact-tab-${path}`"
-            @click="switchTab(path)"
-          >{{ path }}</button>
-        </div>
-        <div ref="containerRef" class="artifact-editor__container" data-testid="artifact-editor-container" />
-      </template>
-    </div>
-
-    <div v-if="proposeOpen" class="modal" @click.self="closePropose">
-      <div class="modal-content" data-testid="artifact-propose-modal">
-        <button class="modal-close" type="button" @click="closePropose">✕</button>
-        <h3>Propose a change</h3>
-        <p class="modal-lede">Describe the change you'd like to propose for <strong>{{ proposeTargetLabel }}</strong>.</p>
-        <div class="form-group">
-          <label for="artifact-prompt">Change description</label>
-          <textarea
-            id="artifact-prompt"
-            v-model="promptText"
-            rows="8"
-            data-testid="artifact-propose-prompt"
-            placeholder="Describe what you'd like to change"
-          />
-        </div>
-        <div v-if="proposeError" class="p-notification--negative">
-          <div class="p-notification__content">
-            <p class="p-notification__message">{{ proposeError }}</p>
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="closePropose">Cancel</button>
-          <button
-            class="p-button--positive is-dense"
-            type="button"
-            data-testid="submit-propose-artifact-btn"
-            :disabled="!promptText.trim() || proposalProposing"
-            @click="submitProposal"
-          >{{ proposalProposing ? 'Proposing…' : 'Propose' }}</button>
-        </div>
-      </div>
+      <div ref="containerRef" class="artifact-editor__container" data-testid="artifact-editor-container" />
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
-import { getArtifact, updateArtifact, proposeProvisionChangeStream, applyProvisionChange } from '../../lib/api.js';
+import { getArtifact, updateArtifact } from '../../lib/api.js';
 import { isDarkTheme, onThemeChange } from '../../lib/theme.js';
-import { renderMarkdown } from '../../lib/markdown.js';
 import LoadingSpinner from './LoadingSpinner.vue';
-import DesignGenerationPanel from './DesignGenerationPanel.vue';
 
 const props = defineProps({
   projectId:    { type: String, required: true },
@@ -185,22 +90,9 @@ const dirty    = ref(false);
 const saving   = ref(false);
 const error    = ref(null);
 
-const proposeOpen        = ref(false);
-const promptText         = ref('');
-const proposeError       = ref(null);
-const proposalProposing  = ref(false);
-const proposalReviewing  = ref(false);
-const proposalExplanation = ref('');
-const proposedFiles      = ref({});
-const applying           = ref(false);
-
 let editor      = null;
-let diffEditor   = null;
 let monacoApi    = null;
 let originalContent = '';
-
-let diffOrigModels = {};
-let diffModModels  = {};
 
 const filePaths  = ref([]);
 const fileContents = {};
@@ -208,19 +100,6 @@ const originalFiles = {};
 const activeTab  = ref('');
 
 const isBundle = ref(false);
-
-const proposalBody = computed(() => ({
-  instructions: promptText.value.trim(),
-  artifact_id: props.artifactId,
-}));
-
-const proposeTargetLabel = computed(() => {
-  if (!artifact.value) return '';
-  if (artifact.value.kind === 'bash' && props.bashPair) {
-    return props.bashPair.name;
-  }
-  return artifact.value.title;
-});
 
 function kindLabel(kind) {
   if (kind === 'pdf') return 'PDF';
@@ -331,10 +210,6 @@ const diffStats = computed(() => {
   return computeLineDiff(originalContent, curr);
 });
 
-const renderedExplanation = computed(() => {
-  return proposalExplanation.value ? renderMarkdown(proposalExplanation.value, {}, {}) : '';
-});
-
 async function loadArtifact() {
   if (!props.artifactId) {
     artifact.value = null;
@@ -344,8 +219,6 @@ async function loadArtifact() {
   loading.value = true;
   error.value = null;
   dirty.value = false;
-  proposalReviewing.value = false;
-  proposalProposing.value = false;
   try {
     const a = await getArtifact(props.artifactId);
     artifact.value = a;
@@ -410,18 +283,8 @@ function disposeEditor() {
   }
 }
 
-function disposeDiffEditor() {
-  if (diffEditor) {
-    diffEditor.dispose();
-    diffEditor = null;
-  }
-  for (const k of Object.keys(diffOrigModels)) { diffOrigModels[k]?.dispose(); delete diffOrigModels[k]; }
-  for (const k of Object.keys(diffModModels))  { diffModModels[k]?.dispose();  delete diffModModels[k]; }
-}
-
 async function mountEditor() {
   disposeEditor();
-  disposeDiffEditor();
   if (!containerRef.value || !artifact.value) return;
   if (!monacoApi) {
     monacoApi = await import('monaco-editor');
@@ -449,42 +312,6 @@ async function mountEditor() {
   });
 }
 
-async function mountDiffEditor() {
-  disposeEditor();
-  disposeDiffEditor();
-  if (!containerRef.value) return;
-  if (!monacoApi) {
-    monacoApi = await import('monaco-editor');
-  }
-  diffEditor = monacoApi.editor.createDiffEditor(containerRef.value, {
-    theme: isDarkTheme() ? 'vs-dark' : 'vs',
-    automaticLayout: true,
-    minimap: { enabled: false },
-    fontSize: 13,
-    lineNumbers: 'on',
-    wordWrap: 'on',
-    scrollBeyondLastLine: false,
-    renderSideBySide: true,
-    originalEditable: false,
-    readOnly: true,
-  });
-  for (const path of filePaths.value) {
-    const lang = languageForFile(path);
-    diffOrigModels[path] = monacoApi.editor.createModel(originalFiles[path] ?? '', lang);
-    diffModModels[path]  = monacoApi.editor.createModel(proposedFiles.value[path] ?? '', lang);
-  }
-  applyDiffModels();
-}
-
-function applyDiffModels() {
-  if (!diffEditor) return;
-  const path = activeTab.value;
-  diffEditor.setModel({
-    original: diffOrigModels[path],
-    modified: diffModModels[path],
-  });
-}
-
 function switchTab(path) {
   if (editor && activeTab.value) {
     fileContents[activeTab.value] = editor.getValue();
@@ -497,16 +324,6 @@ function switchTab(path) {
     if (model) monacoApi.editor.setModelLanguage(model, lang);
     checkDirty();
   }
-}
-
-function isFileChanged(path) {
-  if (!proposalReviewing.value) return false;
-  return (originalFiles[path] ?? '') !== (proposedFiles.value[path] ?? '');
-}
-
-function switchDiffTab(path) {
-  activeTab.value = path;
-  applyDiffModels();
 }
 
 async function save() {
@@ -539,169 +356,11 @@ async function save() {
   }
 }
 
-function openPropose() {
-  proposeOpen.value = true;
-  promptText.value = '';
-  proposeError.value = null;
-}
-
-function closePropose() {
-  proposeOpen.value = false;
-  promptText.value = '';
-  proposeError.value = null;
-}
-
-async function submitProposal() {
-  if (!promptText.value.trim() || proposalProposing.value) return;
-  proposalProposing.value = true;
-  proposeError.value = null;
-  proposeOpen.value = false;
-}
-
-function extractJsonBlock(text) {
-  const match = text.match(/```json\s*\n([\s\S]*?)```/);
-  if (match) {
-    try {
-      return JSON.parse(match[1]);
-    } catch {}
-  }
-  try {
-    return JSON.parse(text);
-  } catch {}
-  return null;
-}
-
-async function onProposalStreamDone(payload) {
-  const answer = (payload?.answer || payload?.text || '').trim();
-  if (!answer) {
-    proposalProposing.value = false;
-    error.value = 'Failed to propose changes';
-    return;
-  }
-  const jsonStart = answer.indexOf('```json');
-  if (jsonStart !== -1) {
-    proposalExplanation.value = answer.slice(0, jsonStart).trim();
-  } else {
-    proposalExplanation.value = answer.trim();
-  }
-  const proposed = extractJsonBlock(answer);
-  if (!proposed) {
-    proposalProposing.value = false;
-    error.value = 'Failed to parse proposed changes from AI response';
-    return;
-  }
-  proposedFiles.value = proposed;
-  proposalProposing.value = false;
-  proposalReviewing.value = true;
-  const proposedPaths = Object.keys(proposed);
-  if (!isBundle.value && proposedPaths.length > 0) {
-    filePaths.value = proposedPaths.sort();
-    const isBash = artifact.value?.kind === 'bash';
-    for (const path of proposedPaths) {
-      if (originalFiles[path] === undefined) {
-        if (path === artifact.value?.title) {
-          originalFiles[path] = originalContent;
-        } else if (isBash && props.bashPair) {
-          const pairId = path.startsWith('destroy-') ? props.bashPair.destroyId
-            : path.startsWith('deploy-') ? props.bashPair.deployId
-            : null;
-          if (pairId && pairId !== props.artifactId) {
-            try {
-              const pairArtifact = await getArtifact(pairId);
-              originalFiles[path] = pairArtifact.content ?? '';
-            } catch {
-              originalFiles[path] = '';
-            }
-          } else {
-            originalFiles[path] = '';
-          }
-        } else {
-          originalFiles[path] = '';
-        }
-      }
-    }
-  }
-  activeTab.value = filePaths.value[0] ?? '';
-  await nextTick();
-  await mountDiffEditor();
-}
-
-function onProposalStreamCancel() {
-  proposalProposing.value = false;
-  error.value = null;
-}
-
-async function applyProposal() {
-  if (applying.value) return;
-  applying.value = true;
-  error.value = null;
-  try {
-    let filesToApply;
-    if (diffEditor && filePaths.value.length > 0) {
-      const modEditor = diffEditor.getModifiedEditor();
-      const currentPath = activeTab.value;
-      diffModModels[currentPath] = monacoApi.editor.createModel(modEditor.getValue(), languageForFile(currentPath));
-      for (const path of filePaths.value) {
-        proposedFiles.value[path] = diffModModels[path].getValue();
-      }
-      filesToApply = { ...proposedFiles.value };
-    } else {
-      filesToApply = proposedFiles.value;
-    }
-    await applyProvisionChange(props.projectId, props.deploymentId, {
-      files: filesToApply,
-      artifact_id: props.artifactId,
-    });
-    if (isBundle.value) {
-      for (const path of filePaths.value) {
-        fileContents[path] = proposedFiles.value[path] ?? '';
-        originalFiles[path] = proposedFiles.value[path] ?? '';
-      }
-      originalContent = serializeBundle(fileContents);
-    } else {
-      const currentTitle = artifact.value?.title ?? '';
-      originalContent = proposedFiles.value[currentTitle] ?? proposedFiles.value[filePaths.value[0]] ?? originalContent;
-      for (const path of filePaths.value) {
-        originalFiles[path] = proposedFiles.value[path] ?? originalFiles[path] ?? '';
-      }
-    }
-    dirty.value = false;
-    proposalReviewing.value = false;
-    proposalExplanation.value = '';
-    proposedFiles.value = {};
-    disposeDiffEditor();
-    await nextTick();
-    await mountEditor();
-    emit('saved');
-  } catch (e) {
-    error.value = e.message || 'Failed to apply changes';
-  } finally {
-    applying.value = false;
-  }
-}
-
-function discardProposal() {
-  proposalReviewing.value = false;
-  proposalExplanation.value = '';
-  proposedFiles.value = {};
-  if (!isBundle.value) filePaths.value = [];
-  disposeDiffEditor();
-  nextTick(() => mountEditor());
-}
-
-function modifyProposal() {
-  proposalReviewing.value = false;
-  proposalExplanation.value = '';
-  proposedFiles.value = {};
-  if (!isBundle.value) filePaths.value = [];
-  disposeDiffEditor();
-  proposeOpen.value = true;
-}
-
 function handleKeydown(e) {
   if (e.ctrlKey && (e.key === 's' || e.key === 'S')) {
     e.preventDefault();
-    if (!proposalReviewing.value) save();
+    if (!dirty.value) return;
+    save();
   }
 }
 
@@ -719,7 +378,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleKeydown);
   disposeEditor();
-  disposeDiffEditor();
   unsubscribeTheme();
 });
 

@@ -1517,23 +1517,57 @@ async fn prepare_provision_proposal(
     }
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
-    let bundle_id = deployment["terraform_bundle"]["id"].as_str()
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no terraform bundle yet"))?
-        .to_string();
-    let bundle_artifact = get_artifact_in_project(&state.neo4j, &project_id, &bundle_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "terraform bundle not found"))?;
-    let current_content = bundle_artifact["content"].as_str().unwrap_or_default().to_string();
+
+    let mut all_files = std::collections::BTreeMap::new();
+
+    if let Some(bundle_id) = deployment["terraform_bundle"]["id"].as_str() {
+        let bundle_artifact = get_artifact_in_project(&state.neo4j, &project_id, bundle_id)
+            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "terraform bundle not found"))?;
+        let bundle_content = bundle_artifact["content"].as_str().unwrap_or_default().to_string();
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&bundle_content) {
+            if let Some(map) = obj.as_object() {
+                for (path, content) in map {
+                    all_files.insert(path.clone(), content.as_str().unwrap_or("").to_string());
+                }
+            }
+        }
+    }
+
+    let deploy_rows = fetch_execution_plan_rows(&state.neo4j, &project_id, &deployment_id, "deploy").await?;
+    let destroy_rows = fetch_execution_plan_rows(&state.neo4j, &project_id, &deployment_id, "destroy").await?;
+    for rows in [&deploy_rows, &destroy_rows] {
+        for row in rows {
+            if let (Some(aid), Some(kind)) = (row["artifact_id"].as_str(), row["artifact_kind"].as_str()) {
+                if kind == "bash" {
+                    if let Ok(Some(artifact)) = get_artifact_in_project(&state.neo4j, &project_id, aid).await {
+                        let title = artifact["title"].as_str().unwrap_or_default().to_string();
+                        let content = artifact["content"].as_str().unwrap_or_default().to_string();
+                        all_files.insert(title, content);
+                    }
+                }
+            }
+        }
+    }
+
+    let all_files_json = serde_json::to_string_pretty(&all_files)
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let prompt = format!(
-        "Here is the current Terraform/Terragrunt bundle (JSON file map):\n{current_content}\
+        "Here are all the current deployment artifacts (title/path → content):\n{all_files_json}\
          {error_section}{instructions_section}\n\n\
-         Propose a revised version of this bundle. Respond with a short explanation, then a \
-         ```json fenced object mapping every file path (all files, whether changed or not) to its \
-         complete new content. Do not call generate_artifact, link_deployment_artifact, \
-         run_terraform_plan, run_terraform_apply, or run_terraform_destroy for this request — the \
-         proposal will only be applied after the user reviews and approves it. You may use other \
-         tools (e.g. run_command) to investigate first if that helps."
+         You may propose changes to any subset of these artifacts, or create new ones. \
+         For bash scripts, always include both deploy-*.sh and destroy-*.sh for any pair \
+         you modify or create — the destroy script must reverse every side-effect of the \
+         deploy script so that running deploy → destroy → deploy works idempotently.\n\n\
+         Respond with a short explanation, then a ```json fenced object mapping each \
+         file title or path to its complete new content. Only include files you want \
+         to create or modify — do not include unchanged files. \
+         Do not call generate_artifact, link_deployment_artifact, set_execution_plan, \
+         run_terraform_plan, run_terraform_apply, run_terraform_destroy, deploy_deployment, \
+         redeploy_deployment, or destroy_deployment for this request — the proposal will \
+         only be applied after the user reviews and approves it. You may use other tools \
+         (e.g. run_command) to investigate first if that helps."
     );
 
     Ok((agent, prompt))
@@ -1670,20 +1704,48 @@ pub async fn apply_provision_change(
     }
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
-    let bundle_id = deployment["terraform_bundle"]["id"].as_str()
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no terraform bundle yet"))?
-        .to_string();
-    let existing = get_artifact_in_project(&state.neo4j, &project_id, &bundle_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "terraform bundle not found"))?;
-    let kind = ArtifactKind::parse(existing["kind"].as_str().unwrap_or(""))
-        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let title = existing["title"].as_str().unwrap_or("Infrastructure");
-    let content = serde_json::to_string(&body.files)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    crate::artifacts::handlers::update_artifact(&state.neo4j, &bundle_id, kind, kind, title, &content)
-        .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    let mut bundle_files: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut bash_files: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+
+    for (key, value) in &body.files {
+        let lower = key.to_lowercase();
+        if lower.ends_with(".tf") || lower.ends_with(".hcl") || lower.ends_with(".json") || lower.ends_with(".yaml") || lower.ends_with(".yml") {
+            bundle_files.insert(key.clone(), value.clone());
+        } else if lower.ends_with(".sh") || lower.ends_with(".bash") || lower.starts_with("deploy-") || lower.starts_with("destroy-") {
+            bash_files.insert(key.clone(), value.clone());
+        } else {
+            bundle_files.insert(key.clone(), value.clone());
+        }
+    }
+
+    if !bundle_files.is_empty() {
+        if let Some(bundle_id) = deployment["terraform_bundle"]["id"].as_str() {
+            let existing = get_artifact_in_project(&state.neo4j, &project_id, bundle_id)
+                .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+                .ok_or_else(|| err(StatusCode::NOT_FOUND, "terraform bundle not found"))?;
+            let kind = ArtifactKind::parse(existing["kind"].as_str().unwrap_or(""))
+                .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            let title = existing["title"].as_str().unwrap_or("Infrastructure");
+            let content = serde_json::to_string(&bundle_files)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+            crate::artifacts::handlers::update_artifact(&state.neo4j, bundle_id, kind, kind, title, &content)
+                .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+        }
+    }
+
+    for (title, content) in &bash_files {
+        let phase = if title.to_lowercase().starts_with("destroy-") { "destroy" } else { "deploy" };
+        let existing_id = find_bash_artifact_id(&state.neo4j, &project_id, &deployment_id, title, "").await?;
+        if existing_id.is_empty() {
+            let created = create_artifact(&state.neo4j, &project_id, ArtifactKind::Bash, title, content, "user")
+                .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+            link_bash_to_deployment(&state.neo4j, &deployment_id, created["id"].as_str().unwrap_or_default(), phase).await?;
+        } else {
+            update_artifact(&state.neo4j, &existing_id, ArtifactKind::Bash, ArtifactKind::Bash, title, content)
+                .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+        }
+    }
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
     Ok(Json(deployment))

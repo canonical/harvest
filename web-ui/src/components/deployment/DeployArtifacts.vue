@@ -4,85 +4,153 @@
       <span class="infra-state-badge" :class="infraStateClass(deployment.infra_state)" data-testid="infra-state-badge">
         {{ infraStateLabel(deployment.infra_state) }}
       </span>
-    </div>
-
-    <div class="deploy-artifacts__body">
-      <aside class="deploy-artifacts__sidebar" data-testid="deploy-artifacts-sidebar">
-        <div class="deploy-artifacts__sidebar-header">
-          <h3>Artifacts</h3>
-          <button
-            class="p-button--positive is-dense"
-            type="button"
-            data-testid="add-artifact-btn"
-            @click="addArtifactOpen = true"
-          >Add artifact</button>
-        </div>
-
-        <div class="deploy-artifacts__pipeline">
-          <div class="deploy-artifacts__phase-tabs" data-testid="deploy-artifacts-phase-tabs">
-            <button
-              type="button"
-              class="deploy-artifacts__phase-tab"
-              :class="{ 'deploy-artifacts__phase-tab--active': phase === 'deploy' }"
-              data-testid="phase-tab-deploy"
-              @click="phase = 'deploy'"
-            >Deploy</button>
-            <button
-              type="button"
-              class="deploy-artifacts__phase-tab"
-              :class="{ 'deploy-artifacts__phase-tab--active': phase === 'destroy' }"
-              data-testid="phase-tab-destroy"
-              @click="phase = 'destroy'"
-            >Destroy</button>
-          </div>
-          <PipelineStepper
-            :steps="currentPhaseSteps"
-            :selected-step-id="selectedArtifactId"
-            @select="onPipelineSelect"
-          />
-        </div>
-      </aside>
-
-      <div class="deploy-artifacts__editor">
-        <template v-if="selectedBashPair">
-          <ArtifactEditor
-            v-show="scriptTab === 'deploy'"
-            :project-id="projectId"
-            :deployment-id="deployment.id"
-            :artifact-id="selectedBashPair.deployId"
-            :bash-pair="selectedBashPair"
-            :script-tab="scriptTab"
-            @script-tab-change="scriptTab = $event"
-            @saved="onSaved"
-          />
-          <ArtifactEditor
-            v-show="scriptTab === 'destroy'"
-            :project-id="projectId"
-            :deployment-id="deployment.id"
-            :artifact-id="selectedBashPair.destroyId"
-            :bash-pair="selectedBashPair"
-            :script-tab="scriptTab"
-            @script-tab-change="scriptTab = $event"
-            @saved="onSaved"
-          />
-        </template>
-        <ArtifactEditor
-          v-else
-          :project-id="projectId"
-          :deployment-id="deployment.id"
-          :artifact-id="selectedArtifactId"
-          @saved="onSaved"
-        />
+      <div class="deploy-artifacts__top-actions">
+        <button
+          class="p-button--brand is-dense"
+          type="button"
+          data-testid="propose-change-btn"
+          @click="openProposeModal"
+        >Propose a change</button>
+        <button
+          class="p-button--positive is-dense"
+          type="button"
+          data-testid="add-artifact-btn"
+          @click="addArtifactOpen = true"
+        >Add artifact</button>
       </div>
     </div>
 
-    <AddArtifactModal
-      :open="addArtifactOpen"
+    <div v-if="proposalProposing" class="deploy-artifacts__proposing" data-testid="deploy-artifacts-proposing">
+      <DesignGenerationPanel
+        :project-id="projectId"
+        :deployment-id="deployment.id"
+        :stream-fn="proposeProvisionChangeStream"
+        :body="proposalBody"
+        preparing-text="Preparing proposed changes…"
+        ready-text="Proposed changes ready"
+        failed-text="Failed to propose changes"
+        @done="onProposalStreamDone"
+        @cancel="onProposalStreamCancel"
+      />
+    </div>
+
+    <ProposalReview
+      v-else-if="proposalReviewing"
       :project-id="projectId"
       :deployment-id="deployment.id"
-      @close="addArtifactOpen = false"
-      @added="onArtifactAdded"
+      :proposed-files="proposedFiles"
+      :original-files="originalFiles"
+      :execution-plan="plan"
+      @apply="onApplyProposal"
+      @discard="onDiscardProposal"
+      @modify="onModifyProposal"
     />
+
+    <template v-else>
+      <div class="deploy-artifacts__body">
+        <aside class="deploy-artifacts__sidebar" data-testid="deploy-artifacts-sidebar">
+          <div class="deploy-artifacts__sidebar-header">
+            <h3>Deployment artifacts</h3>
+          </div>
+
+          <div class="deploy-artifacts__pipeline">
+            <div class="deploy-artifacts__phase-tabs" data-testid="deploy-artifacts-phase-tabs">
+              <button
+                type="button"
+                class="deploy-artifacts__phase-tab"
+                :class="{ 'deploy-artifacts__phase-tab--active': phase === 'deploy' }"
+                data-testid="phase-tab-deploy"
+                @click="phase = 'deploy'"
+              >Deploy</button><button
+                type="button"
+                class="deploy-artifacts__phase-tab"
+                :class="{ 'deploy-artifacts__phase-tab--active': phase === 'destroy' }"
+                data-testid="phase-tab-destroy"
+                @click="phase = 'destroy'"
+              >Destroy</button>
+            </div>
+            <PipelineStepper
+              :steps="currentPhaseSteps"
+              :selected-step-id="selectedArtifactId"
+              @select="onPipelineSelect"
+            />
+          </div>
+        </aside>
+
+        <div class="deploy-artifacts__editor">
+          <template v-if="selectedBashPair">
+            <ArtifactEditor
+              v-show="scriptTab === 'deploy'"
+              :project-id="projectId"
+              :deployment-id="deployment.id"
+              :artifact-id="selectedBashPair.deployId"
+              :bash-pair="selectedBashPair"
+              :script-tab="scriptTab"
+              @script-tab-change="scriptTab = $event"
+              @saved="onSaved"
+            />
+            <ArtifactEditor
+              v-show="scriptTab === 'destroy'"
+              :project-id="projectId"
+              :deployment-id="deployment.id"
+              :artifact-id="selectedBashPair.destroyId"
+              :bash-pair="selectedBashPair"
+              :script-tab="scriptTab"
+              @script-tab-change="scriptTab = $event"
+              @saved="onSaved"
+            />
+          </template>
+          <ArtifactEditor
+            v-else
+            :project-id="projectId"
+            :deployment-id="deployment.id"
+            :artifact-id="selectedArtifactId"
+            @saved="onSaved"
+          />
+        </div>
+      </div>
+
+      <AddArtifactModal
+        :open="addArtifactOpen"
+        :project-id="projectId"
+        :deployment-id="deployment.id"
+        @close="addArtifactOpen = false"
+        @added="onArtifactAdded"
+      />
+    </template>
+
+    <div v-if="proposeModalOpen" class="modal" @click.self="closeProposeModal">
+      <div class="modal-content" data-testid="propose-change-modal">
+        <button class="modal-close" type="button" @click="closeProposeModal">✕</button>
+        <h3>Propose a change</h3>
+        <p class="modal-lede">Describe the changes you'd like to make to the deployment artifacts. Any artifact can be modified or created.</p>
+        <div class="form-group">
+          <label for="propose-change-prompt">Change description</label>
+          <textarea
+            id="propose-change-prompt"
+            v-model="proposePrompt"
+            rows="8"
+            data-testid="propose-change-prompt"
+            placeholder="Describe what you'd like to change"
+          />
+        </div>
+        <div v-if="proposeError" class="p-notification--negative">
+          <div class="p-notification__content">
+            <p class="p-notification__message">{{ proposeError }}</p>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="p-button--base is-dense" type="button" @click="closeProposeModal">Cancel</button>
+          <button
+            class="p-button--positive is-dense"
+            type="button"
+            data-testid="submit-propose-change-btn"
+            :disabled="!proposePrompt.trim() || proposalProposing"
+            @click="submitProposal"
+          >{{ proposalProposing ? 'Proposing…' : 'Propose' }}</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -91,8 +159,11 @@ import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import ArtifactEditor from './ArtifactEditor.vue';
 import AddArtifactModal from './AddArtifactModal.vue';
 import PipelineStepper from './PipelineStepper.vue';
+import DesignGenerationPanel from './DesignGenerationPanel.vue';
+import ProposalReview from './ProposalReview.vue';
 import {
   getExecutionPlan, setExecutionPlan, openProjectEvents,
+  proposeProvisionChangeStream, applyProvisionChange,
 } from '../../lib/api.js';
 
 const props = defineProps({
@@ -108,11 +179,23 @@ const addArtifactOpen       = ref(false);
 const scriptTab             = ref('deploy');
 const phase                  = ref('deploy');
 
+const proposeModalOpen       = ref(false);
+const proposePrompt          = ref('');
+const proposeError           = ref(null);
+const proposalProposing      = ref(false);
+const proposalReviewing      = ref(false);
+const proposedFiles          = ref({});
+const originalFiles          = ref({});
+
 let eventSource = null;
 
 const currentPhaseSteps = computed(() =>
   phase.value === 'deploy' ? (plan.value.deploy_steps ?? []) : (plan.value.destroy_steps ?? [])
 );
+
+const proposalBody = computed(() => ({
+  instructions: proposePrompt.value.trim(),
+}));
 
 const INFRA_STATE_LABELS = {
   none: 'Not deployed', up: 'Up', broken: 'Broken', destroyed: 'Destroyed', destroy_failed: 'Destroy failed',
@@ -337,6 +420,90 @@ async function onArtifactAdded(newArtifact) {
   } else {
     selectedArtifactId.value = newArtifact.id;
   }
+}
+
+function openProposeModal() {
+  proposeModalOpen.value = true;
+  proposePrompt.value = '';
+  proposeError.value = null;
+}
+
+function closeProposeModal() {
+  proposeModalOpen.value = false;
+  proposePrompt.value = '';
+  proposeError.value = null;
+}
+
+function submitProposal() {
+  if (!proposePrompt.value.trim() || proposalProposing.value) return;
+  proposalProposing.value = true;
+  proposeError.value = null;
+  proposeModalOpen.value = false;
+}
+
+function extractJsonBlock(text) {
+  const match = text.match(/```json\s*\n([\s\S]*?)```/);
+  if (match) {
+    try {
+      return JSON.parse(match[1]);
+    } catch {}
+  }
+  try {
+    return JSON.parse(text);
+  } catch {}
+  return null;
+}
+
+async function onProposalStreamDone(payload) {
+  const answer = (payload?.answer || payload?.text || '').trim();
+  if (!answer) {
+    proposalProposing.value = false;
+    proposeError.value = 'Failed to propose changes';
+    return;
+  }
+  const proposed = extractJsonBlock(answer);
+  if (!proposed) {
+    proposalProposing.value = false;
+    proposeError.value = 'Failed to parse proposed changes from AI response';
+    return;
+  }
+  proposedFiles.value = proposed;
+  originalFiles.value = {};
+  proposalProposing.value = false;
+  proposalReviewing.value = true;
+}
+
+function onProposalStreamCancel() {
+  proposalProposing.value = false;
+  proposeError.value = null;
+}
+
+async function onApplyProposal(filesToApply) {
+  try {
+    await applyProvisionChange(props.projectId, props.deployment.id, {
+      files: filesToApply,
+    });
+    proposalReviewing.value = false;
+    proposedFiles.value = {};
+    originalFiles.value = {};
+    emit('refresh');
+    await loadPlan();
+  } catch (e) {
+    proposeError.value = e.message || 'Failed to apply changes';
+  }
+}
+
+function onDiscardProposal() {
+  proposalReviewing.value = false;
+  proposedFiles.value = {};
+  originalFiles.value = {};
+}
+
+function onModifyProposal() {
+  proposalReviewing.value = false;
+  proposedFiles.value = {};
+  originalFiles.value = {};
+  proposeModalOpen.value = true;
 }
 
 function handleProjectEvent(e) {
