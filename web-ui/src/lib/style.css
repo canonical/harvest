@@ -4729,7 +4729,7 @@ a.source-loc:hover .source-loc__line {
   letter-spacing: 0.03em;
   line-height: 1;
   padding: 0.1875rem 0.5rem;
-  border-radius: 1rem;
+  border-radius: 2px;
   white-space: nowrap;
 }
 
@@ -4771,7 +4771,7 @@ a.source-loc:hover .source-loc__line {
   white-space: pre-wrap;
   word-break: break-word;
   background: var(--bg-surface-alt);
-  border-radius: 0.375rem;
+  border-radius: 2px;
 }
 
 .artifacts-detail {
@@ -5257,7 +5257,7 @@ a.source-loc:hover .source-loc__line {
   letter-spacing: 0.03em;
   line-height: 1;
   padding: 0.1875rem 0.5rem;
-  border-radius: 1rem;
+  border-radius: 2px;
   white-space: nowrap;
 }
 
@@ -6300,17 +6300,19 @@ a.source-loc:hover .source-loc__line {
 
 .artifacts-panel__tab {
   padding: 0.3rem 0.75rem;
-  border: 1px solid #cdcdcd;
-  border-radius: 4px;
-  background: #fff;
+  border: 1px solid var(--border-color);
+  border-radius: 2px;
+  background: var(--bg-surface);
   cursor: pointer;
   font-size: 0.8rem;
+  color: var(--text-secondary);
 }
 
 .artifacts-panel__tab--active {
-  border-color: #06c;
-  background: #f0f6ff;
+  border-color: var(--user-bubble-bg, #0066cc);
+  background: var(--bg-surface-alt);
   font-weight: 600;
+  color: var(--text-primary);
 }
 
 .artifacts-panel__generate-area {
@@ -6350,16 +6352,19 @@ a.source-loc:hover .source-loc__line {
 
 .dag-view__tab {
   padding: 0.25rem 0.75rem;
-  border: 1px solid #cdcdcd;
-  background: #fff;
+  border: 1px solid var(--border-color);
+  background: var(--bg-surface);
   cursor: pointer;
   font-size: 0.8rem;
+  color: var(--text-secondary);
+  border-radius: 2px;
 }
 
 .dag-view__tab--active {
-  background: #f0f6ff;
-  border-color: #06c;
+  background: var(--bg-surface-alt);
+  border-color: var(--user-bubble-bg, #0066cc);
   font-weight: 600;
+  color: var(--text-primary);
 }
 
 .dag-view__body {
@@ -6373,16 +6378,16 @@ a.source-loc:hover .source-loc__line {
 .dag-view__canvas {
   flex: 1;
   min-width: 0;
-  border: 1px solid #e0e0e0;
-  border-radius: 4px;
-  background: #fafafa;
+  border: 1px solid var(--border-color);
+  border-radius: 2px;
+  background: var(--bg-surface-alt);
 }
 
 .dag-view__detail {
   width: 320px;
   flex-shrink: 0;
-  border: 1px solid #e0e0e0;
-  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  border-radius: 2px;
   padding: 0.75rem;
   overflow-y: auto;
   display: flex;
@@ -6411,7 +6416,7 @@ a.source-loc:hover .source-loc__line {
 
 .dag-view__detail-action {
   font-size: 0.7rem;
-  color: #666;
+  color: var(--text-muted);
   text-transform: uppercase;
 }
 
@@ -6436,7 +6441,7 @@ a.source-loc:hover .source-loc__line {
 .dag-view__file-path {
   font-family: monospace;
   font-size: 0.8rem;
-  color: #06c;
+  color: var(--user-bubble-bg, #0066cc);
   margin-bottom: 0.25rem;
 }
 
@@ -6444,9 +6449,9 @@ a.source-loc:hover .source-loc__line {
   font-family: monospace;
   font-size: 0.75rem;
   white-space: pre-wrap;
-  background: #f7f7f7;
+  background: var(--bg-surface-alt);
   padding: 0.5rem;
-  border-radius: 4px;
+  border-radius: 2px;
   margin: 0;
 }
 
@@ -7322,7 +7327,7 @@ a.source-loc:hover .source-loc__line {
   max-width: 640px;
   margin: 0 auto;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--bg-page);
   overflow: hidden;
 }
@@ -7359,7 +7364,7 @@ a.source-loc:hover .source-loc__line {
   min-width: 1.4rem;
   height: 1.4rem;
   padding: 0 0.4rem;
-  border-radius: 999px;
+  border-radius: 2px;
   background: var(--bg-surface-alt);
   color: var(--text-secondary);
   font-size: 0.75rem;
@@ -7456,7 +7461,7 @@ a.source-loc:hover .source-loc__line {
   flex-direction: column;
   min-height: 0;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--bg-page);
   overflow: hidden;
 }
@@ -7491,7 +7496,7 @@ a.source-loc:hover .source-loc__line {
   min-width: 1.4rem;
   height: 1.4rem;
   padding: 0 0.4rem;
-  border-radius: 999px;
+  border-radius: 2px;
   background: var(--bg-surface-alt);
   color: var(--text-secondary);
   font-size: 0.75rem;
@@ -7510,11 +7515,12 @@ a.source-loc:hover .source-loc__line {
 
 .deploy-artifacts__item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.75rem;
   padding: 0.625rem 0.75rem;
-  border-radius: 6px;
+  border-radius: 0;
   cursor: pointer;
+  overflow: hidden;
   transition: background 0.15s ease;
 }
 
@@ -7529,8 +7535,10 @@ a.source-loc:hover .source-loc__line {
 .deploy-artifacts__item-text {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 0.125rem;
   min-width: 0;
+  max-width: 100%;
 }
 
 .deploy-artifacts__item-title {
@@ -7540,6 +7548,7 @@ a.source-loc:hover .source-loc__line {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .deploy-artifacts__item-meta {
@@ -7565,7 +7574,7 @@ a.source-loc:hover .source-loc__line {
   flex-direction: column;
   min-height: 0;
   border: 1px solid var(--border-color);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--bg-surface);
   overflow: hidden;
 }
@@ -7708,8 +7717,9 @@ a.source-loc:hover .source-loc__line {
   display: flex;
   gap: 0;
   border-bottom: 1px solid var(--border-color);
-  overflow-x: auto;
+  overflow: hidden;
   flex-shrink: 0;
+  margin-bottom: 0;
 }
 
 .artifact-editor__tab {
@@ -7723,6 +7733,7 @@ a.source-loc:hover .source-loc__line {
   cursor: pointer;
   border-bottom: 2px solid transparent;
   transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  margin-bottom: -1px;
 }
 
 .artifact-editor__tab:hover {
