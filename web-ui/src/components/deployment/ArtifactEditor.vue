@@ -57,6 +57,23 @@
         </div>
       </div>
 
+      <div v-if="bashPair" class="artifact-editor__tabs" data-testid="script-tabs">
+        <button
+          type="button"
+          class="artifact-editor__tab"
+          :class="{ 'artifact-editor__tab--active': scriptTab === 'deploy' }"
+          data-testid="script-tab-deploy"
+          @click="emit('script-tab-change', 'deploy')"
+        >Deploy</button>
+        <button
+          type="button"
+          class="artifact-editor__tab"
+          :class="{ 'artifact-editor__tab--active': scriptTab === 'destroy' }"
+          data-testid="script-tab-destroy"
+          @click="emit('script-tab-change', 'destroy')"
+        >Destroy</button>
+      </div>
+
       <div v-if="error" class="p-notification--negative artifact-editor__error" data-testid="artifact-editor-error">
         <div class="p-notification__content">
           <p class="p-notification__message">{{ error }}</p>
@@ -156,8 +173,10 @@ const props = defineProps({
   projectId:    { type: String, required: true },
   deploymentId: { type: String, required: true },
   artifactId:   { type: String, default: null },
+  bashPair:     { type: Object, default: null },
+  scriptTab:    { type: String, default: 'deploy' },
 });
-const emit = defineEmits(['saved']);
+const emit = defineEmits(['saved', 'script-tab-change']);
 
 const containerRef = ref(null);
 const artifact = ref(null);
