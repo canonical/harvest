@@ -80,26 +80,45 @@ describe('DeployArtifacts', () => {
     expect(api.getExecutionPlan).toHaveBeenCalledWith('proj-1', 'd1');
   });
 
-  it('lists unified artifacts in the sidebar with bash pairs shown as name.sh', async () => {
+  it('renders the pipeline stepper with steps in topological order', async () => {
     const w = mountPanel();
     await flushPromises();
-    expect(w.find('[data-testid="artifact-item-a0"]').exists()).toBe(true);
-    expect(w.find('[data-testid="artifact-item-a1"]').exists()).toBe(true);
-    expect(w.find('[data-testid="artifact-item-a2"]').exists()).toBe(false);
-    expect(w.find('[data-testid="artifact-item-a0"]').text()).toContain('prep.sh');
+    expect(w.find('[data-testid="pipeline-stepper"]').exists()).toBe(true);
+    const steps = w.findAll('.pipeline-stepper__item');
+    expect(steps).toHaveLength(2);
+    expect(w.find('[data-testid="pipeline-step-a0"]').exists()).toBe(true);
+    expect(w.find('[data-testid="pipeline-step-a1"]').exists()).toBe(true);
   });
 
-  it('does not show global deploy/destroy phase tabs', async () => {
+  it('shows dependency info in the pipeline cards', async () => {
     const w = mountPanel();
     await flushPromises();
-    expect(w.find('[data-testid="phase-tab-deploy"]').exists()).toBe(false);
-    expect(w.find('[data-testid="phase-tab-destroy"]').exists()).toBe(false);
+    const stepA1 = w.find('[data-testid="pipeline-step-a1"]');
+    expect(stepA1.text()).toContain('depends on');
+    expect(stepA1.text()).toContain('Infra');
   });
 
-  it('selects the artifact when a sidebar item is clicked', async () => {
+  it('shows deploy and destroy phase tabs', async () => {
     const w = mountPanel();
     await flushPromises();
-    await w.find('[data-testid="artifact-item-a1"]').trigger('click');
+    expect(w.find('[data-testid="phase-tab-deploy"]').exists()).toBe(true);
+    expect(w.find('[data-testid="phase-tab-destroy"]').exists()).toBe(true);
+  });
+
+  it('switches to destroy steps when destroy phase tab is clicked', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="phase-tab-destroy"]').trigger('click');
+    await flushPromises();
+    const steps = w.findAll('.pipeline-stepper__item');
+    expect(steps).toHaveLength(2);
+    expect(w.find('[data-testid="pipeline-step-a2"]').exists()).toBe(true);
+  });
+
+  it('selects the artifact when a pipeline step is clicked', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    await w.find('[data-testid="pipeline-step-a1"]').trigger('click');
     await flushPromises();
     const editors = w.findAll('[data-testid="artifact-editor"]');
     const visible = editors.filter(e => e.isVisible());
@@ -107,10 +126,10 @@ describe('DeployArtifacts', () => {
     expect(visible[0].attributes('data-artifact-id')).toBe('a1');
   });
 
-  it('shows deploy and destroy script tabs when a bash pair is selected', async () => {
+  it('shows deploy and destroy script tabs when a bash pair step is selected', async () => {
     const w = mountPanel();
     await flushPromises();
-    await w.find('[data-testid="artifact-item-a0"]').trigger('click');
+    await w.find('[data-testid="pipeline-step-a0"]').trigger('click');
     await flushPromises();
     expect(w.find('[data-testid="script-tab-deploy"]').exists()).toBe(true);
     expect(w.find('[data-testid="script-tab-destroy"]').exists()).toBe(true);
@@ -119,7 +138,7 @@ describe('DeployArtifacts', () => {
   it('shows the deploy script artifact in the editor by default for bash', async () => {
     const w = mountPanel();
     await flushPromises();
-    await w.find('[data-testid="artifact-item-a0"]').trigger('click');
+    await w.find('[data-testid="pipeline-step-a0"]').trigger('click');
     await flushPromises();
     const editors = w.findAll('[data-testid="artifact-editor"]');
     const visible = editors.filter(e => e.isVisible());
@@ -130,7 +149,7 @@ describe('DeployArtifacts', () => {
   it('switches to the destroy script artifact when destroy tab is clicked', async () => {
     const w = mountPanel();
     await flushPromises();
-    await w.find('[data-testid="artifact-item-a0"]').trigger('click');
+    await w.find('[data-testid="pipeline-step-a0"]').trigger('click');
     await flushPromises();
     await w.find('[data-testid="script-tab-destroy"]').trigger('click');
     await flushPromises();
@@ -143,7 +162,7 @@ describe('DeployArtifacts', () => {
   it('does not show script tabs when a terraform artifact is selected', async () => {
     const w = mountPanel();
     await flushPromises();
-    await w.find('[data-testid="artifact-item-a1"]').trigger('click');
+    await w.find('[data-testid="pipeline-step-a1"]').trigger('click');
     await flushPromises();
     expect(w.find('[data-testid="script-tab-deploy"]').exists()).toBe(false);
     expect(w.find('[data-testid="script-tab-destroy"]').exists()).toBe(false);
