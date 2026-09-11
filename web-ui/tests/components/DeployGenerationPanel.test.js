@@ -99,15 +99,19 @@ describe('DeployGenerationPanel', () => {
     expect(w.emitted('done')).toBeTruthy();
   });
 
-  it('shows error and emits done when error event arrives', async () => {
-    const ctl = makeStreamController();
+  it('shows error and stays mounted when error event arrives', async () => {
+    let onEvent;
+    api.generateProvisionStream.mockImplementation(async (_p, _d, cb) => {
+      onEvent = cb;
+      return new Promise(() => {});
+    });
     const w = mountPanel();
     await flushPromises();
-    ctl.onEvent({ type: 'error', message: 'LLM failed' });
+    onEvent({ type: 'error', message: 'LLM failed' });
     await flushPromises();
     expect(w.find('[data-testid="deploy-gen-error"]').exists()).toBe(true);
     expect(w.find('[data-testid="deploy-gen-error"]').text()).toContain('LLM failed');
-    expect(w.emitted('done')).toBeTruthy();
+    expect(w.emitted('done')).toBeFalsy();
   });
 
   it('shows error when the stream promise rejects', async () => {
@@ -116,7 +120,7 @@ describe('DeployGenerationPanel', () => {
     await flushPromises();
     expect(w.find('[data-testid="deploy-gen-error"]').exists()).toBe(true);
     expect(w.find('[data-testid="deploy-gen-error"]').text()).toContain('Network down');
-    expect(w.emitted('done')).toBeTruthy();
+    expect(w.emitted('done')).toBeFalsy();
   });
 
   it('shows a spinner while waiting for the first event', async () => {
