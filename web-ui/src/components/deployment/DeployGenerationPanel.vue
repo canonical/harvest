@@ -220,7 +220,6 @@ function handleEvent(event) {
       error.value = event.message || 'Generation failed';
       finished.value = true;
       stopTimer();
-      emit('done');
       break;
   }
 }
@@ -245,7 +244,6 @@ async function runGeneration() {
   } catch (e) {
     error.value = e.message || 'Generation failed';
     finished.value = true;
-    emit('done');
   } finally {
     stopTimer();
   }
