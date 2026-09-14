@@ -9,11 +9,14 @@ use crate::api::{AgentEvent, IntentMode, QueryRequest, Source, UsedProvider};
 use crate::app::AppData;
 use crate::widgets::markdown::render_markdown;
 
+use std::collections::BTreeMap;
+
 #[derive(Clone, Debug)]
 struct StepEntry {
     name: String,
     input_preview: String,
     result_preview: Option<String>,
+    #[allow(dead_code)]
     open: bool,
 }
 
@@ -38,6 +41,7 @@ struct MessageBlock {
     confirm: Option<ConfirmCard>,
     provider: Option<UsedProvider>,
     parallel_research: Vec<ParallelLead>,
+    duration_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +78,76 @@ pub struct ChatView {
     history_state: ListState,
     #[allow(dead_code)]
     source_idx: Option<usize>,
+}
+
+const CHAIN_BORDER: char = '│';
+const CHAIN_INDENT: &str = " │  ";
+const SECTION_GAP: &str = "";
+
+fn intent_label(mode: &IntentMode) -> &'static str {
+    match mode {
+        IntentMode::Research => "Researching",
+        IntentMode::Action => "Executing",
+        IntentMode::Hybrid => "Researching + Executing",
+        IntentMode::Conversational => "Answering",
+    }
+}
+
+fn intent_color(mode: &IntentMode) -> Color {
+    match mode {
+        IntentMode::Research => Color::Blue,
+        IntentMode::Action => Color::Red,
+        IntentMode::Hybrid => Color::Blue,
+        IntentMode::Conversational => Color::DarkGray,
+    }
+}
+
+fn intent_short(mode: &IntentMode) -> &'static str {
+    match mode {
+        IntentMode::Research => "research",
+        IntentMode::Action => "action",
+        IntentMode::Hybrid => "hybrid",
+        IntentMode::Conversational => "conversational",
+    }
+}
+
+fn label_span(text: &str) -> Span<'static> {
+    Span::styled(
+        text.to_string(),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn chain_line(spans: Vec<Span<'_>>) -> Line<'_> {
+    let mut out = vec![Span::styled(CHAIN_INDENT.to_string(), Style::default().fg(Color::DarkGray))];
+    out.extend(spans);
+    Line::from(out)
+}
+
+fn chain_header(text: &str) -> Line<'_> {
+    Line::from(vec![
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            text.to_string(),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn group_sources(sources: &[Source]) -> Vec<(String, String, String, Vec<&Source>)> {
+    let mut groups: BTreeMap<(String, String, String), Vec<&Source>> = BTreeMap::new();
+    for s in sources {
+        let key = (s.repo.clone(), s.version.clone(), s.file.clone());
+        groups.entry(key).or_default().push(s);
+    }
+    groups
+        .into_iter()
+        .map(|((repo, version, file), srcs)| (repo, version, file, srcs))
+        .collect()
 }
 
 impl ChatView {
@@ -182,6 +256,7 @@ impl ChatView {
                 answer,
                 sources,
                 provider_used,
+                duration_ms,
                 ..
             } => {
                 if let Some(m) = self.current_assistant() {
@@ -189,6 +264,7 @@ impl ChatView {
                     m.text = answer;
                     m.sources = sources.clone();
                     m.provider = provider_used.clone();
+                    m.duration_ms = duration_ms;
                 }
                 self.cur_sources = sources;
                 self.cur_provider = provider_used;
@@ -272,6 +348,7 @@ impl ChatView {
             confirm: None,
             provider: None,
             parallel_research: Vec::new(),
+            duration_ms: 0,
         });
         let now2 = chrono::Local::now().format("%H:%M").to_string();
         self.messages.push(MessageBlock {
@@ -288,6 +365,7 @@ impl ChatView {
             confirm: None,
             provider: None,
             parallel_research: Vec::new(),
+            duration_ms: 0,
         });
         self.input.clear();
         self.streaming = true;
@@ -309,22 +387,21 @@ impl ChatView {
             .constraints([Constraint::Length(2), Constraint::Min(0), Constraint::Length(3)])
             .split(area);
 
-        let header = if self.streaming {
-            let phase = self.cur_phase.as_deref().unwrap_or("thinking");
-            let intent = match self.cur_intent {
-                Some(IntentMode::Research) => "research",
-                Some(IntentMode::Action) => "action",
-                Some(IntentMode::Hybrid) => "hybrid",
-                _ => "conversational",
-            };
-            format!(" Chat  [{intent} · {phase}] ▮ streaming")
+        let header_line = if self.streaming {
+            let phase = self.cur_phase.as_deref().unwrap_or("Thinking…");
+            let intent_str = self
+                .cur_intent
+                .as_ref()
+                .map(|m| intent_short(m))
+                .unwrap_or("conversational");
+            format!(" Chat  [{intent_str} · {phase}]")
         } else {
             " Chat".to_string()
         };
-        let header_para = Paragraph::new(Line::from(Span::styled(
-            header,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        )))
+        let header_para = Paragraph::new(Line::from(vec![
+            Span::styled(header_line, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+        ]))
         .block(Block::default().borders(Borders::BOTTOM));
         f.render_widget(header_para, chunks[0]);
 
@@ -332,202 +409,28 @@ impl ChatView {
         let mut lines: Vec<Line> = Vec::new();
 
         if let Some(err) = &self.error_banner {
-            lines.push(Line::from(Span::styled(
-                format!(" ⚠ {err}"),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            )));
-            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(" ✖ ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled(err.clone(), Style::default().fg(Color::Red)),
+            ]));
+            lines.push(Line::from(SECTION_GAP));
         }
 
         for m in &self.messages {
-            let (marker, color) = match m.role {
-                Role::User => ("▸ You", Color::Blue),
-                Role::Assistant => ("◂ Assistant", Color::Green),
-            };
-            let mut header_spans: Vec<Span> = vec![
-                Span::styled(
-                    format!(" {marker} · {} ", m.timestamp),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-            ];
-            if let Some(intent) = &m.intent {
-                let label = match intent {
-                    IntentMode::Research => "research",
-                    IntentMode::Action => "action",
-                    IntentMode::Hybrid => "hybrid",
-                    IntentMode::Conversational => "conversational",
-                };
-                header_spans.push(Span::styled(
-                    format!("[{label}] "),
-                    Style::default().fg(Color::Magenta),
-                ));
-            }
-            if let Some(phase) = &m.phase {
-                header_spans.push(Span::styled(
-                    format!("· {phase} "),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-            if m.streaming {
-                header_spans.push(Span::styled(
-                    "▮",
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
-                ));
-            }
-            lines.push(Line::from(header_spans));
-            lines.push(Line::from(""));
-
-            if !m.thinking.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    " thinking:",
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-                )));
-                for l in wrap_dim(&m.thinking, transcript_area.width as usize).into_iter().take(6) {
-                    lines.push(Line::from(Span::styled(
-                        format!("   {l}"),
-                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-                    )));
-                }
-                lines.push(Line::from(""));
-            }
-
-            if !m.parallel_research.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    " parallel research:",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                )));
-                for lead in &m.parallel_research {
-                    let dot = if lead.status == "done" { "●" } else { "◐" };
-                    let c = if lead.status == "done" {
-                        Color::Green
-                    } else {
-                        Color::Yellow
-                    };
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("   {dot} "), Style::default().fg(c)),
-                        Span::styled(lead.name.clone(), Style::default().fg(Color::Reset)),
-                        Span::styled(
-                            format!(" ({})", lead.status),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]));
-                }
-                lines.push(Line::from(""));
-            }
-
-            if !m.text.is_empty() {
-                let rendered = render_markdown(&m.text, transcript_area.width as usize);
-                for l in rendered {
-                    lines.push(l);
-                }
-            } else if m.streaming && m.steps.is_empty() && m.thinking.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  ▮",
-                    Style::default().fg(Color::Yellow),
-                )));
-            }
-
-            if !m.steps.is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    " steps:",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                )));
-                for step in m.steps.iter() {
-                    let arrow = if step.open { "▼" } else { "▸" };
-                    let result = step
-                        .result_preview
-                        .as_ref()
-                        .map(|r| format!("→ {}", truncate(r, 40)))
-                        .unwrap_or_else(|| "↻".to_string());
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("   {arrow} "),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::styled(
-                            step.name.clone(),
-                            Style::default().fg(Color::Yellow),
-                        ),
-                        Span::styled(
-                            format!("({})", truncate(&step.input_preview, 40)),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::styled(
-                            format!("  {result}"),
-                            Style::default().fg(Color::Green),
-                        ),
-                    ]));
-                }
-                lines.push(Line::from(""));
-            }
-
-            if let Some((question, choices)) = &m.question {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    format!(" ❓ {question}"),
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-                )));
-                for (i, c) in choices.iter().enumerate() {
-                    lines.push(Line::from(Span::styled(
-                        format!("   {}. {c}", i + 1),
-                        Style::default().fg(Color::Reset),
-                    )));
-                }
-                lines.push(Line::from(Span::styled(
-                    "   (press 1-9 to answer or type below)",
-                    Style::default().fg(Color::DarkGray),
-                )));
-                lines.push(Line::from(""));
-            }
-
-            if let Some(confirm) = &m.confirm {
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    format!(" ⚠ confirm: {} — {}", confirm.name, confirm.description),
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                lines.push(Line::from(Span::styled(
-                    "   [y] approve   [n] deny",
-                    Style::default().fg(Color::Yellow),
-                )));
-                lines.push(Line::from(""));
-            }
-
-            if !m.sources.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    " Sources:",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                )));
-                for s in &m.sources {
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            "   [{}:{}:{}:{}]",
-                            s.repo, s.version, s.file, s.line
-                        ),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::UNDERLINED),
-                    )));
-                }
-                lines.push(Line::from(""));
-            }
-
-            lines.push(Line::from(""));
+            self.render_message(m, &mut lines, transcript_area.width as usize);
         }
 
         if self.messages.is_empty() && self.error_banner.is_none() {
             lines.push(Line::from(Span::styled(
-                " Welcome to Harvest TUI. Type a question below and press Alt-Enter to send.",
+                " Welcome to Harvest TUI.",
+                Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(Span::styled(
+                " Type a question below and press Alt-Enter to send.",
                 Style::default().fg(Color::DarkGray),
             )));
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                " Examples:",
-                Style::default().fg(Color::Cyan),
-            )));
+            lines.push(Line::from(SECTION_GAP));
+            lines.push(Line::from(label_span("EXAMPLES")));
             lines.push(Line::from(Span::styled(
                 "   How does the retry logic work?",
                 Style::default().fg(Color::DarkGray),
@@ -609,6 +512,266 @@ impl ChatView {
                     )),
             );
             f.render_widget(para, pop);
+        }
+    }
+
+    fn render_message(&self, m: &MessageBlock, lines: &mut Vec<Line>, width: usize) {
+        match m.role {
+            Role::User => self.render_user_message(m, lines, width),
+            Role::Assistant => self.render_assistant_message(m, lines, width),
+        }
+        lines.push(Line::from(SECTION_GAP));
+    }
+
+    fn render_user_message(&self, m: &MessageBlock, lines: &mut Vec<Line>, _width: usize) {
+        lines.push(Line::from(vec![
+            Span::styled(" ● ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+            Span::styled("You", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {}", m.timestamp), Style::default().fg(Color::DarkGray)),
+        ]));
+        lines.push(Line::from(""));
+        let indent = "   ";
+        for l in m.text.lines() {
+            lines.push(Line::from(Span::styled(
+                format!("{indent}{l}"),
+                Style::default().fg(Color::Reset),
+            )));
+        }
+    }
+
+    fn render_assistant_message(&self, m: &MessageBlock, lines: &mut Vec<Line>, width: usize) {
+        lines.push(Line::from(vec![
+            Span::styled(" ● ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled("Assistant", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("  {}", m.timestamp), Style::default().fg(Color::DarkGray)),
+        ]));
+
+        if let Some(p) = &m.provider {
+            lines.push(Line::from(vec![
+                Span::styled("   ", Style::default()),
+                Span::styled(
+                    format!(" {} ", p.model),
+                    Style::default().fg(Color::LightRed),
+                ),
+                Span::styled(
+                    format!("· {} ", p.kind),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+
+        if m.duration_ms > 0 {
+            let secs = m.duration_ms / 1000;
+            let label = if secs >= 60 {
+                format!("{}m {}s", secs / 60, secs % 60)
+            } else {
+                format!("{}.{:01}s", secs, (m.duration_ms % 1000) / 100)
+            };
+            lines.push(Line::from(vec![
+                Span::styled("   ", Style::default()),
+                Span::styled(
+                    format!(" {} ", label),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+
+        if let Some(intent) = &m.intent {
+            let color = intent_color(intent);
+            let label = intent_label(intent);
+            lines.push(Line::from(vec![
+                Span::styled("   ", Style::default()),
+                Span::styled(
+                    format!(" {} ", label),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        }
+
+        if let Some(phase) = &m.phase {
+            if m.streaming {
+                lines.push(Line::from(vec![
+                    Span::styled("   ", Style::default()),
+                    Span::styled(
+                        format!(" {} ", phase),
+                        Style::default().fg(Color::Blue),
+                    ),
+                ]));
+            }
+        }
+
+        if m.streaming {
+            lines.push(Line::from(vec![
+                Span::styled("   ", Style::default()),
+                Span::styled("▮", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+
+        let has_chain = !m.thinking.is_empty()
+            || !m.steps.is_empty()
+            || !m.parallel_research.is_empty()
+            || m.confirm.is_some();
+
+        if has_chain {
+            self.render_activity_chain(m, lines, width);
+            lines.push(Line::from(""));
+        }
+
+        if !m.text.is_empty() {
+            let rendered = render_markdown(&m.text, width);
+            for l in rendered {
+                lines.push(l);
+            }
+        } else if m.streaming && !has_chain {
+            lines.push(Line::from(vec![
+                Span::styled("   ", Style::default()),
+                Span::styled("Thinking", Style::default().fg(Color::DarkGray)),
+                Span::styled("…", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
+            ]));
+        }
+
+        if m.streaming && m.text.is_empty() && !m.thinking.is_empty() && m.steps.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("   ", Style::default()),
+                Span::styled("▮", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
+            ]));
+        }
+
+        if !m.sources.is_empty() {
+            lines.push(Line::from(""));
+            self.render_sources(m, lines);
+        }
+
+        if let Some((question, choices)) = &m.question {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("   ", Style::default()),
+                Span::styled("? ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                Span::styled(question.clone(), Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD)),
+            ]));
+            for (i, c) in choices.iter().enumerate() {
+                lines.push(Line::from(vec![
+                    Span::styled("     ", Style::default()),
+                    Span::styled(format!("{}. ", i + 1), Style::default().fg(Color::Magenta)),
+                    Span::styled(c.clone(), Style::default().fg(Color::Reset)),
+                ]));
+            }
+            lines.push(Line::from(Span::styled(
+                "     (press 1-9 or type your own answer below)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    fn render_activity_chain(&self, m: &MessageBlock, lines: &mut Vec<Line>, width: usize) {
+        let chain_color = if m.streaming { Color::Blue } else { Color::DarkGray };
+
+        if !m.thinking.is_empty() {
+            lines.push(chain_header("THINKING"));
+            let wrapped = wrap_dim(&m.thinking, width.saturating_sub(6));
+            for l in wrapped.into_iter().take(6) {
+                lines.push(chain_line(vec![
+                    Span::styled(l, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+                ]));
+            }
+            lines.push(Line::from(Span::styled(format!(" {}", CHAIN_BORDER), Style::default().fg(chain_color))));
+        }
+
+        if !m.parallel_research.is_empty() {
+            lines.push(chain_header("PARALLEL RESEARCH"));
+            for lead in &m.parallel_research {
+                let (dot, c) = if lead.status == "done" {
+                    ("✓", Color::Green)
+                } else {
+                    ("◐", Color::Yellow)
+                };
+                lines.push(chain_line(vec![
+                    Span::styled(format!("{dot} "), Style::default().fg(c)),
+                    Span::styled(lead.name.clone(), Style::default().fg(Color::Reset)),
+                    Span::styled(
+                        format!("  ({})", lead.status),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(Span::styled(format!(" {}", CHAIN_BORDER), Style::default().fg(chain_color))));
+        }
+
+        if !m.steps.is_empty() {
+            lines.push(chain_header("STEPS"));
+            for step in m.steps.iter() {
+                let (icon, result_color, result_text) = match &step.result_preview {
+                    Some(r) => ("✓", Color::Green, format!("→ {}", truncate(r, 50))),
+                    None => ("◐", Color::Yellow, "running…".to_string()),
+                };
+                lines.push(chain_line(vec![
+                    Span::styled(format!("{icon} "), Style::default().fg(result_color)),
+                    Span::styled(step.name.clone(), Style::default().fg(Color::LightRed)),
+                    Span::styled(
+                        format!("({})", truncate(&step.input_preview, 50)),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+                lines.push(chain_line(vec![
+                    Span::styled(format!("  {result_text}"), Style::default().fg(result_color)),
+                ]));
+            }
+            lines.push(Line::from(Span::styled(format!(" {}", CHAIN_BORDER), Style::default().fg(chain_color))));
+        }
+
+        if let Some(confirm) = &m.confirm {
+            lines.push(chain_header("CONFIRM ACTION"));
+            lines.push(chain_line(vec![
+                Span::styled("! ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled(confirm.name.clone(), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            ]));
+            let wrapped = wrap_dim(&confirm.description, width.saturating_sub(6));
+            for l in &wrapped {
+                lines.push(chain_line(vec![
+                    Span::styled(l.clone(), Style::default().fg(Color::Reset)),
+                ]));
+            }
+            lines.push(chain_line(vec![
+                Span::styled("[y] approve   [n] deny", Style::default().fg(Color::Yellow)),
+            ]));
+            lines.push(Line::from(Span::styled(format!(" {}", CHAIN_BORDER), Style::default().fg(chain_color))));
+        }
+    }
+
+    fn render_sources(&self, m: &MessageBlock, lines: &mut Vec<Line>) {
+        let count = m.sources.len();
+        lines.push(Line::from(vec![
+            Span::styled("   ", Style::default()),
+            label_span(&format!("SOURCES ({count})")),
+        ]));
+
+        let groups = group_sources(&m.sources);
+        for (repo, version, file, srcs) in &groups {
+            let locs: Vec<String> = srcs
+                .iter()
+                .map(|s| {
+                    if s.line > 0 {
+                        format!("L{}", s.line)
+                    } else {
+                        "file".to_string()
+                    }
+                })
+                .collect();
+
+            lines.push(Line::from(vec![
+                Span::styled("     ", Style::default()),
+                Span::styled(file.clone(), Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("  {} {}", repo, version),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("       ", Style::default()),
+                Span::styled(locs.join("  "), Style::default().fg(Color::Blue)),
+            ]));
         }
     }
 
