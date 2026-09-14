@@ -60,7 +60,7 @@ pub async fn require_group_access(
 }
 
 pub async fn list_templates(
-    Extension(user): Extension<Claims>,
+    Extension(_user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let rows = state.neo4j.query_read(
@@ -74,7 +74,7 @@ pub async fn list_templates(
 }
 
 pub async fn get_template(
-    Extension(user): Extension<Claims>,
+    Extension(_user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
     Path(template_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -128,7 +128,7 @@ pub struct UpdateTemplateBody {
 }
 
 pub async fn update_template(
-    Extension(user): Extension<Claims>,
+    Extension(_user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
     Path(template_id): Path<String>,
     Json(body): Json<UpdateTemplateBody>,
@@ -165,7 +165,7 @@ pub async fn update_template(
 }
 
 pub async fn delete_template(
-    Extension(user): Extension<Claims>,
+    Extension(_user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
     Path(template_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -174,6 +174,109 @@ pub async fn delete_template(
         json!({ "tid": template_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn download_template(
+    Extension(_user): Extension<Claims>,
+    State(state): State<Arc<ProjectState>>,
+    Path(template_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let rows = state.neo4j.query_read(
+        "MATCH (t:ProductTemplate {id: $tid})
+         RETURN t.name AS name, t.description AS description, t.content AS content",
+        json!({ "tid": template_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let row = rows.into_iter().next()
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+
+    let name = row["name"].as_str().unwrap_or("template").to_string();
+    let description = row["description"].as_str().unwrap_or("").to_string();
+    let content_str = row["content"].as_str().unwrap_or("{}").to_string();
+    let content: Value = serde_json::from_str(&content_str)
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "invalid template content"))?;
+
+    let slug = sanitize_filename(&name);
+    let filename = format!("{slug}.harvest");
+
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::SimpleFileOptions::default();
+
+        let metadata = format!("name: {name}\ndescription: {description}\n");
+        zip.start_file("metadata.yaml", opts)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+        use std::io::Write;
+        zip.write_all(metadata.as_bytes())
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+
+        if let Some(design) = content["design_template"].as_str() {
+            zip.start_file("design.md", opts)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+            zip.write_all(design.as_bytes())
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+        }
+
+        if let Some(skills) = content["skills"].as_array() {
+            for skill in skills {
+                let skill_name = skill["name"].as_str().unwrap_or("unnamed");
+                let skill_desc = skill["description"].as_str().unwrap_or("");
+                let skill_content = skill["content"].as_str().unwrap_or("");
+                let path = format!("skills/{skill_name}.md");
+                zip.start_file(&path, opts)
+                    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+                let full = format!("---\nname: {skill_name}\ndescription: {skill_desc}\n---\n{skill_content}");
+                zip.write_all(full.as_bytes())
+                    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+            }
+        }
+
+        if let Some(artifacts) = content["artifacts"].as_array() {
+            for artifact in artifacts {
+                let art_name = artifact["name"].as_str().unwrap_or("artifact");
+                let kind = artifact["kind"].as_str().unwrap_or("markdown");
+                let art_content = artifact["content"].as_str().unwrap_or("");
+
+                let extension = match kind {
+                    "terraform" => "tf",
+                    "terragrunt" => "tg.hcl",
+                    "bash" => "sh",
+                    "pdf" => "pdf",
+                    _ => "md",
+                };
+                let path = format!("artifacts/{art_name}.{extension}");
+
+                let file_content = if kind == "terraform" || kind == "terragrunt" {
+                    if let Ok(bundle) = serde_json::from_str::<serde_json::Map<String, Value>>(art_content) {
+                        bundle.values().filter_map(|v| v.as_str()).next().unwrap_or("").to_string()
+                    } else {
+                        art_content.to_string()
+                    }
+                } else {
+                    art_content.to_string()
+                };
+
+                zip.start_file(&path, opts)
+                    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+                zip.write_all(file_content.as_bytes())
+                    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+            }
+        }
+
+        zip.finish()
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+    }
+
+    let bytes = buf.into_inner();
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"))
+        .header(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")).unwrap(),
+        )
+        .body(Body::from(bytes))
+        .unwrap())
 }
 
 pub async fn upload_template(
@@ -248,7 +351,8 @@ fn deployment_detail_cypher() -> &'static str {
      OPTIONAL MATCH (d)-[:HAS_TERRAFORM_BUNDLE]->(tf:Artifact)
      OPTIONAL MATCH (d)-[:HAS_GUIDE]->(guide:Artifact)
      OPTIONAL MATCH (d)-[:HAS_CONTEXT_ARTIFACT]->(ca:Artifact)
-     WITH d, t, design, creator, tf, guide, collect({id: ca.id, title: ca.title, kind: ca.kind}) AS context_artifacts
+     OPTIONAL MATCH (d)-[:HAS_EXECUTION_STEP]->(es:ExecutionStep)
+     WITH d, t, design, creator, tf, guide, collect(DISTINCT {id: ca.id, title: ca.title, kind: ca.kind}) AS context_artifacts, count(DISTINCT es) AS execution_step_count
      RETURN d.id AS id, d.name AS name, d.environment_description AS environment_description,
             d.infra_state AS infra_state, d.last_applied_artifact_id AS last_applied_artifact_id,
             d.last_applied_at AS last_applied_at, d.created_by AS created_by,
@@ -260,7 +364,8 @@ fn deployment_detail_cypher() -> &'static str {
             creator.name AS design_doc_created_by_name,
             tf.id AS terraform_bundle_id, tf.title AS terraform_bundle_title, tf.kind AS terraform_bundle_kind,
             guide.id AS guide_id, guide.title AS guide_title,
-            context_artifacts"
+            context_artifacts,
+            execution_step_count"
 }
 
 async fn fetch_deployment_detail(
@@ -302,7 +407,8 @@ pub async fn get_project_deployment(
          OPTIONAL MATCH (d)-[:HAS_TERRAFORM_BUNDLE]->(tf:Artifact)
          OPTIONAL MATCH (d)-[:HAS_GUIDE]->(guide:Artifact)
          OPTIONAL MATCH (d)-[:HAS_CONTEXT_ARTIFACT]->(ca:Artifact)
-         WITH d, t, design, creator, tf, guide, collect({id: ca.id, title: ca.title, kind: ca.kind}) AS context_artifacts
+         OPTIONAL MATCH (d)-[:HAS_EXECUTION_STEP]->(es:ExecutionStep)
+         WITH d, t, design, creator, tf, guide, collect(DISTINCT {id: ca.id, title: ca.title, kind: ca.kind}) AS context_artifacts, count(DISTINCT es) AS execution_step_count
          RETURN d.id AS id, d.name AS name, d.environment_description AS environment_description,
                 d.infra_state AS infra_state, d.last_applied_artifact_id AS last_applied_artifact_id,
                 d.last_applied_at AS last_applied_at, d.created_by AS created_by,
@@ -314,7 +420,8 @@ pub async fn get_project_deployment(
                 creator.name AS design_doc_created_by_name,
                 tf.id AS terraform_bundle_id, tf.title AS terraform_bundle_title, tf.kind AS terraform_bundle_kind,
                 guide.id AS guide_id, guide.title AS guide_title,
-                context_artifacts",
+                context_artifacts,
+                execution_step_count",
         json!({ "pid": project_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next()
@@ -335,7 +442,7 @@ pub async fn create_deployment(
     Path(project_id): Path<String>,
     Json(body): Json<CreateDeploymentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let _project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let name = body.name.trim().to_string();
     if name.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "name is required"));
@@ -786,6 +893,17 @@ async fn build_deployment_agent_text_only(
     Ok(state.agent_builder.build_for_deployment_text_only(&ctx))
 }
 
+async fn build_deployment_agent_design(
+    state:         &ProjectState,
+    project_id:    &str,
+    deployment_id: &str,
+) -> Result<Arc<Agent>, ApiError> {
+    let ctx = load_deployment_context(&state.neo4j, project_id, deployment_id)
+        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+    Ok(state.agent_builder.build_for_deployment_design(project_id.to_string(), &ctx))
+}
+
 fn generation_failed(response_text: &str) -> ApiError {
     err(
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -887,7 +1005,7 @@ async fn prepare_design_generation(
     let ctx = load_deployment_context(&state.neo4j, project_id, deployment_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
-    let agent = build_deployment_agent_text_only(state, project_id, deployment_id).await?;
+    let agent = build_deployment_agent_design(state, project_id, deployment_id).await?;
 
     let mut prompt = String::from(match &ctx.product_template_design {
         Some(_) => "Write the deployment design document in Markdown, following the Design \
@@ -907,8 +1025,34 @@ async fn prepare_design_generation(
             let content = a["content"].as_str().unwrap_or("");
             prompt.push_str(&format!("### {title} ({kind})\n\n{content}\n\n"));
         }
+        prompt.push_str("\n## Context artifact integration\n\nThe context artifacts above contain \
+                         customer-specific values (hardware specs, network configuration, SLA \
+                         requirements, security requirements, etc.). You MUST incorporate these \
+                         values into the design document — do not leave generic template defaults \
+                         in place where the customer has provided specific values. For example:\n\
+                         - If the context specifies exact CPU cores and RAM per node, state these as \
+                           the deployment's hardware configuration, not as a generic \
+                           minimum/recommended table.\n\
+                         - If the context specifies an uptime SLA, include it in the requirements \
+                           summary and reference it in the availability section.\n\
+                         - If the context specifies full disk encryption, include the encryption \
+                           configuration in the storage section.\n\
+                         - If the context specifies specific node IPs, DNS, or NTP servers, use \
+                           them in the network configuration tables.\n\
+                         - If the context specifies workload counts or types, reflect them in the \
+                           sizing and architecture sections.\n");
     }
-    prompt.push_str("Respond with the complete design document itself, in Markdown, and \
+    prompt.push_str("\n\n## Research\n\nYou may call list_skills, load_skill, and codebase \
+                     search tools (list_repositories, search_symbols, get_symbol_source, \
+                     get_file_symbols, find_callers, find_callees, get_imports, \
+                     compare_symbol_across_versions) to research how the software works before \
+                     writing the document. Use what you learn to make informed design decisions \
+                     only — never quote, cite, or reference tool outputs, code snippets, function \
+                     signatures, or skill guide text in the document. The design document is a \
+                     high-level engineering document written in your own words.\n\n\
+                     Do all tool research first. Once you have what you need, write the complete \
+                     design document as your final text response.");
+    prompt.push_str("\n\nRespond with the complete design document itself, in Markdown, and \
                      nothing else — no preamble, no meta-commentary, no questions back to the \
                      user. Your entire response is saved verbatim as the design document.");
 
@@ -970,19 +1114,33 @@ async fn save_design_doc(
     deployment_id: &str,
     answer:        &str,
 ) -> Result<(), String> {
-    let content = answer.trim();
-    if content.is_empty()
-        || content == crate::agent::last_resort_fallback()
-        || content == crate::agent::question_fallback()
+    let content = format!("{}\n", answer.trim());
+    if content.trim().is_empty()
+        || content.trim() == crate::agent::last_resort_fallback()
+        || content.trim() == crate::agent::question_fallback()
     {
         return Err("the model did not produce a usable design document".to_string());
+    }
+
+    const MIN_DESIGN_DOC_CHARS: usize = 500;
+    if content.trim().len() < MIN_DESIGN_DOC_CHARS {
+        return Err(format!(
+            "the design document is suspiciously short ({} chars, expected at least {MIN_DESIGN_DOC_CHARS}) — the model may have produced a garbled or truncated response",
+            content.trim().len()
+        ));
+    }
+
+    if !content.trim().starts_with('#') {
+        return Err(
+            "the design document does not start with a Markdown heading — the model may have produced a garbled response".to_string()
+        );
     }
 
     let deployment = fetch_deployment_detail(neo4j, project_id, deployment_id).await
         .map_err(|_| "could not load the deployment".to_string())?;
     let title = format!("{} Design", deployment["name"].as_str().unwrap_or("Deployment"));
 
-    let created = create_artifact(neo4j, project_id, ArtifactKind::Markdown, &title, content, "assistant").await
+    let created = create_artifact(neo4j, project_id, ArtifactKind::Markdown, &title, &content, "assistant").await
         .map_err(|e| format!("failed to save the design document: {e}"))?;
     let artifact_id = created["id"].as_str()
         .ok_or_else(|| "artifact creation returned no id".to_string())?;
@@ -1341,6 +1499,31 @@ async fn prepare_provision_generation(
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "design document not found"))?;
     let design_content = design["content"].as_str().unwrap_or_default();
 
+    let context_artifact_rows = state.neo4j.query_read(
+        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
+         OPTIONAL MATCH (d)-[:HAS_CONTEXT_ARTIFACT]->(a:Artifact)
+         RETURN a.title AS title, a.kind AS kind, a.content AS content
+         ORDER BY a.title",
+        json!({ "pid": project_id, "did": deployment_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+
+    let mut context_artifact_section = String::new();
+    let has_context_artifacts = context_artifact_rows.iter().any(|r| r.get("title").and_then(|v| v.as_str()).is_some());
+    if has_context_artifacts {
+        context_artifact_section.push_str(
+            "\n\n## Context artifacts\n\nThe following artifacts were used to inform the design. \
+             Use them to customize the Terraform and bash scripts — do not leave generic template \
+             defaults where the customer has provided specific values:\n\n"
+        );
+        for a in &context_artifact_rows {
+            let title = a["title"].as_str().unwrap_or("(untitled)");
+            let kind  = a["kind"].as_str().unwrap_or("markdown");
+            let content = a["content"].as_str().unwrap_or("");
+            if title == "(untitled)" && content.is_empty() { continue; }
+            context_artifact_section.push_str(&format!("### {title} ({kind})\n\n{content}\n\n"));
+        }
+    }
+
     let prompt = format!(
         "Here is the design document:\n\n{design_content}\n\n\
          Write the Terraform or Terragrunt bundle (and any bash prep scripts the design calls for) \
@@ -1348,12 +1531,35 @@ async fn prepare_provision_generation(
          kind (\"terraform\", \"terragrunt\", or \"bash\"), then call link_deployment_artifact with \
          role \"terraform\" for each terraform/terragrunt bundle. \
          \
+         The product template may include seed artifacts (Terraform, bash scripts, etc.). These \
+         are starting points — you MUST customize them to match the specific values in the design \
+         document and context artifacts below. Do not copy seed artifacts verbatim. Specifically:\
+         \n- Set CPU, memory, and disk sizes to match the design document's hardware specifications.\
+         \n- Set network configurations (CIDRs, gateways, DNS, NTP) to match the design document's \
+         networking section.\
+         \n- Include any security configuration the design specifies (e.g., full disk encryption, \
+         dm-crypt setup).\
+         \n- Ensure all snap channels, cohort flags, and update hold commands match the design \
+         document's software version table.\
+         \n- Include any initialization steps the design describes (e.g., preseed configuration, \
+         cluster init) as bash deploy scripts in the execution plan.\
+         \n- Fix any typos in variable names from the seed artifact.\
+         \
          Every bash script that creates state (installs packages, starts services, creates files, \
          etc.) must have a companion bash destroy script that reverses every side-effect. Generate \
          each as a separate bash artifact: a deploy script titled \"deploy-{{name}}.sh\" and a \
          destroy script titled \"destroy-{{name}}.sh\", where {{name}} is shared between the pair. \
          The destroy script must undo everything the deploy script did so that running \
-         deploy → destroy → deploy works idempotently. \
+         deploy → destroy → deploy works idempotently.\
+         \n\
+         Every bash deploy script must:\
+         \n- Start with `set -euo pipefail` (or at minimum `set -e`).\
+         \n- Be idempotent: check whether the operation has already been performed before executing \
+         it (e.g., check if a network already exists, check if a cluster is already initialized).\
+         \n- Include a meaningful destroy counterpart that actually reverses every side-effect, not \
+         just a comment saying \"Terraform destroy will handle it.\" If the deploy script installs \
+         snaps, the destroy script must remove them. If the deploy script creates files, the \
+         destroy script must delete them.\
          \
          After all artifacts are generated and linked, call set_execution_plan to define the \
          deployment DAG. The deploy plan should list every step needed to bring the infrastructure \
@@ -1368,7 +1574,7 @@ async fn prepare_provision_generation(
          \
          You may call generate_artifact, link_deployment_artifact, and set_execution_plan. \
          Do not call run_terraform_plan, run_terraform_apply, run_terraform_destroy, \
-         deploy_deployment, redeploy_deployment, or destroy_deployment."
+         deploy_deployment, redeploy_deployment, or destroy_deployment.{context_artifact_section}"
     );
 
     Ok((agent, prompt))
