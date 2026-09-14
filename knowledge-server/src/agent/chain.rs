@@ -66,6 +66,31 @@ impl ChainBuilder {
         }
     }
 
+    pub fn parallel_research_started(&mut self, leads: &[String]) {
+        self.flush_pending();
+        self.chain.push(json!({
+            "type": "parallel_research_started",
+            "leads": leads,
+        }));
+    }
+
+    pub fn parallel_research_lead_done(&mut self, index: usize, iterations: usize, preview: &str, duration_ms: u64) {
+        self.chain.push(json!({
+            "type": "parallel_research_lead_done",
+            "index": index,
+            "iterations": iterations,
+            "preview": preview,
+            "duration_ms": duration_ms,
+        }));
+    }
+
+    pub fn parallel_research_merge_started(&mut self, duration_ms: u64) {
+        self.chain.push(json!({
+            "type": "parallel_research_merge_started",
+            "duration_ms": duration_ms,
+        }));
+    }
+
     fn flush_pending(&mut self) {
         if !self.pending_thinking_delta.is_empty() {
             let text = std::mem::take(&mut self.pending_thinking_delta);
