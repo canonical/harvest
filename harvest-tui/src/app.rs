@@ -541,15 +541,18 @@ impl App {
             .iter()
             .enumerate()
             .flat_map(|(i, t)| {
-                let marker = if i == self.active_view { "▶ " } else { "  " };
-                let style = if i == self.active_view {
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                let active = i == self.active_view;
+                let style = if active {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
+                let separator = if i > 0 { "  " } else { "" };
                 vec![
-                    Span::styled(marker.to_string(), style),
-                    Span::styled(format!("{}. {}  ", i + 1, t), style),
+                    Span::styled(separator, Style::default()),
+                    Span::styled(format!("{}. {}", i + 1, t), style),
                 ]
             })
             .collect();
@@ -570,22 +573,28 @@ impl App {
         let mut items: Vec<ListItem> = Vec::new();
         items.push(ListItem::new(Line::from(Span::styled(
             " PROJECTS",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ))));
         for (i, p) in self.data.projects.iter().enumerate() {
-            let marker = if Some(i) == self.data.current_project {
-                "▸ "
+            let active = Some(i) == self.data.current_project;
+            let marker = if active { "▸ " } else { "  " };
+            let style = if active {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
             } else {
-                "  "
+                Style::default().fg(Color::Reset)
             };
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(marker.to_string(), Style::default().fg(Color::Cyan)),
-                Span::styled(p.name.clone(), Style::default().fg(Color::Reset)),
+                Span::styled(p.name.clone(), style),
             ])));
         }
         items.push(ListItem::new(Line::from(Span::styled(
-            "─ repos ─",
-            Style::default().fg(Color::DarkGray),
+            " REPOSITORIES",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ))));
         for r in &self.data.repositories {
             items.push(ListItem::new(Line::from(vec![
@@ -595,7 +604,7 @@ impl App {
             for v in r.versions.iter().take(3) {
                 items.push(ListItem::new(Line::from(vec![
                     Span::styled("    ◦ ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(v.clone(), Style::default().fg(Color::Reset)),
+                    Span::styled(v.clone(), Style::default().fg(Color::DarkGray)),
                 ])));
             }
         }
@@ -603,7 +612,7 @@ impl App {
         let border_style = if projects_focus {
             Style::default().fg(Color::Yellow)
         } else {
-            Style::default()
+            Style::default().fg(Color::DarkGray)
         };
 
         let list = List::new(items)
@@ -643,9 +652,14 @@ impl App {
                 .map(|(id, _)| id == &p.id)
                 .unwrap_or(false);
             let marker = if active { "◉" } else { "•" };
+            let style = if active {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Reset)
+            };
             model_lines.push(Line::from(Span::styled(
                 format!(" {marker} {label}"),
-                Style::default().fg(if active { Color::Yellow } else { Color::Reset }),
+                style,
             )));
             for m in p.models.iter().take(2) {
                 let mlabel = m.display_name.clone().unwrap_or_else(|| m.id.clone());
@@ -658,7 +672,7 @@ impl App {
         let model_border = if models_focus {
             Style::default().fg(Color::Yellow)
         } else {
-            Style::default()
+            Style::default().fg(Color::DarkGray)
         };
         let para = Paragraph::new(model_lines).block(
             Block::default()
