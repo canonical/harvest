@@ -56,16 +56,16 @@
       class="design-gen__activity"
       :class="{ 'design-gen__activity--bounded': streamText }"
     >
-      <div v-if="thinkingText" class="design-gen__thinking" data-testid="deploy-gen-thinking">
-        <ThinkingBlock :text="thinkingText" :streaming="thinkingStreaming" />
-      </div>
-
       <div v-if="chain.length" class="design-gen__timeline tc-chain" :class="{ 'tc-chain--running': !finished }" data-testid="deploy-gen-timeline">
-        <ToolCallStep
-          v-for="(step, i) in chain"
-          :key="i"
-          :step="step"
-        />
+        <template v-for="(step, i) in chain" :key="i">
+          <div v-if="step.type === 'thinking'" class="design-gen__thinking" data-testid="deploy-gen-thinking">
+            <ThinkingBlock :text="step.text" :streaming="step.streaming" />
+          </div>
+          <ToolCallStep
+            v-else-if="step.type === 'tool_call'"
+            :step="step"
+          />
+        </template>
       </div>
     </div>
 
@@ -97,8 +97,6 @@ const finished            = ref(false);
 const error               = ref(null);
 const intent              = ref(null);
 const phase               = ref('');
-const thinkingText        = ref('');
-const thinkingStreaming   = ref(false);
 const streamText          = ref('');
 const chain               = ref([]);
 const hasDetails          = ref(false);
@@ -109,9 +107,14 @@ let startedAt = 0;
 
 const renderedStream = computed(() => streamText.value ? renderMarkdown(streamText.value, {}, {}) : '');
 
+const isThinking = computed(() => {
+  const last = chain.value.at(-1);
+  return last?.type === 'thinking' && last.streaming;
+});
+
 const runningStep = computed(() => {
   for (let i = chain.value.length - 1; i >= 0; i--) {
-    if (chain.value[i].status === 'running') return chain.value[i];
+    if (chain.value[i].type === 'tool_call' && chain.value[i].status === 'running') return chain.value[i];
   }
   return null;
 });
@@ -121,7 +124,7 @@ const statusText = computed(() => {
   if (finished.value)     return 'Deployment artifacts ready';
   if (streamText.value)   return 'Writing deployment artifacts…';
   if (runningStep.value)  return `${runningStep.value.description}…`;
-  if (thinkingText.value)  return 'Thinking…';
+  if (isThinking.value)   return 'Thinking…';
   return 'Preparing deployment artifacts…';
 });
 
@@ -147,7 +150,7 @@ function scrollToBottom() {
   el.scrollTop = el.scrollHeight;
 }
 
-watch([chain, thinkingText], scrollToBottom, { deep: true, flush: 'post' });
+watch(chain, scrollToBottom, { deep: true, flush: 'post' });
 
 function startTimer() {
   stopTimer();
@@ -165,8 +168,15 @@ function stopTimer() {
   }
 }
 
+function finalizeThinking() {
+  const last = chain.value.at(-1);
+  if (last?.type === 'thinking' && last.streaming) {
+    last.streaming = false;
+  }
+}
+
 function completeToolCall(name, preview) {
-  const idx = chain.value.findIndex(s => s.name === name && s.status === 'running');
+  const idx = chain.value.findIndex(s => s.type === 'tool_call' && s.name === name && s.status === 'running');
   if (idx !== -1) {
     chain.value[idx] = { ...chain.value[idx], status: 'done', preview };
   }
@@ -182,23 +192,27 @@ function handleEvent(event) {
       phase.value = event.label;
       break;
     case 'thinking':
-      thinkingText.value = event.text || '';
-      thinkingStreaming.value = false;
+      finalizeThinking();
       hasDetails.value = true;
+      chain.value = [...chain.value, { type: 'thinking', text: event.text || '', streaming: false }];
       break;
     case 'thinking_delta':
-      thinkingText.value += event.text || '';
-      thinkingStreaming.value = true;
       hasDetails.value = true;
+      {
+        const last = chain.value.at(-1);
+        if (last?.type === 'thinking' && last.streaming) {
+          last.text += event.text || '';
+        } else {
+          chain.value = [...chain.value, { type: 'thinking', text: event.text || '', streaming: true }];
+        }
+      }
       break;
     case 'text_delta':
-      thinkingText.value = '';
-      thinkingStreaming.value = false;
+      finalizeThinking();
       streamText.value += event.text || '';
       break;
     case 'tool_call':
-      thinkingText.value = '';
-      thinkingStreaming.value = false;
+      finalizeThinking();
       hasDetails.value = true;
       chain.value = [...chain.value, {
         type: 'tool_call',
@@ -229,8 +243,6 @@ async function runGeneration() {
   error.value              = null;
   intent.value             = null;
   phase.value              = '';
-  thinkingText.value       = '';
-  thinkingStreaming.value  = false;
   streamText.value         = '';
   chain.value              = [];
   hasDetails.value         = false;
