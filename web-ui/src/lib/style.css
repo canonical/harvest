@@ -7309,6 +7309,13 @@ a.source-loc:hover .source-loc__line {
   margin-bottom: 1.5rem;
 }
 
+.templates-article__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
 .templates-article__title {
   margin: 0;
   font-size: 1.25rem;

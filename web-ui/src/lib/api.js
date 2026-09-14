@@ -536,6 +536,7 @@ export const listTemplates  = ()           => projectFetch(TEMPLATES_URL);
 export const getTemplate    = (id)         => projectFetch(templateDetailUrl(id));
 export const createTemplate = (body)      => projectFetch(TEMPLATES_URL, { method: 'POST', body: JSON.stringify(body) });
 export const updateTemplate = (id, body)   => projectFetch(templateDetailUrl(id), { method: 'PUT', body: JSON.stringify(body) });
+export const templateDownloadUrl = (id)   => `${templateDetailUrl(id)}/download`;
 export async function deleteTemplate(id) {
   const res = await fetch(templateDetailUrl(id), { method: 'DELETE' });
   if (!res.ok) {
