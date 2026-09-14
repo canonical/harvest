@@ -14,9 +14,10 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug)]
 struct StepEntry {
     name: String,
+    input: serde_json::Value,
+    #[allow(dead_code)]
     input_preview: String,
     result_preview: Option<String>,
-    #[allow(dead_code)]
     open: bool,
 }
 
@@ -76,6 +77,8 @@ pub struct ChatView {
     conversation_id: Option<String>,
     show_history: bool,
     history_state: ListState,
+    step_selected: Option<usize>,
+    step_mode: bool,
     #[allow(dead_code)]
     source_idx: Option<usize>,
 }
@@ -126,9 +129,9 @@ fn chain_line(spans: Vec<Span<'_>>) -> Line<'_> {
     Line::from(out)
 }
 
-fn chain_header(text: &str) -> Line<'_> {
+fn chain_header(text: &str) -> Line<'static> {
     Line::from(vec![
-        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" │ ".to_string(), Style::default().fg(Color::DarkGray)),
         Span::styled(
             text.to_string(),
             Style::default()
@@ -136,6 +139,13 @@ fn chain_header(text: &str) -> Line<'_> {
                 .add_modifier(Modifier::BOLD),
         ),
     ])
+}
+
+fn chain_close(color: Color) -> Line<'static> {
+    Line::from(Span::styled(
+        format!(" {}", CHAIN_BORDER),
+        Style::default().fg(color),
+    ))
 }
 
 fn group_sources(sources: &[Source]) -> Vec<(String, String, String, Vec<&Source>)> {
@@ -148,6 +158,316 @@ fn group_sources(sources: &[Source]) -> Vec<(String, String, String, Vec<&Source
         .into_iter()
         .map(|((repo, version, file), srcs)| (repo, version, file, srcs))
         .collect()
+}
+
+fn describe_tool_call(name: &str, input: &serde_json::Value) -> String {
+    let get = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let get_raw = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    match name {
+        "list_repositories" => "Discovering available repositories".to_string(),
+        "list_agents" => "Checking connected agents".to_string(),
+        "list_skills" => "Listing available skills".to_string(),
+        "search_symbols" => {
+            let q = get("query");
+            let kind = {
+                let k = get("kind");
+                if k.is_empty() || k == "any" { String::new() } else { format!(" {}s", k) }
+            };
+            let scope = {
+                let r = get("repo");
+                if r.is_empty() { String::new() } else { format!(" in {}", r) }
+            };
+            format!("Searching for \"{}\"{}{}", q, kind, scope)
+        }
+        "get_symbol_source" => format!("Reading source of {}", get("name")),
+        "get_file_symbols" => {
+            let f = get("file");
+            let short = f.rsplit('/').next().unwrap_or(f);
+            format!("Scanning symbols in {}", short)
+        }
+        "find_callers" => format!("Tracing callers of {}", get("function_name")),
+        "find_callees" => format!("Tracing calls made by {}", get("function_name")),
+        "get_imports" => {
+            let f = get("file");
+            let short = f.rsplit('/').next().unwrap_or(f);
+            format!("Checking imports in {}", short)
+        }
+        "compare_symbol_across_versions" => {
+            let sym = get("name");
+            let va = get("version_a");
+            let vb = get("version_b");
+            if !va.is_empty() && !vb.is_empty() {
+                format!("Comparing {} {} → {}", sym, va, vb)
+            } else {
+                format!("Comparing {} across versions", sym)
+            }
+        }
+        "run_cypher" => "Querying the code graph".to_string(),
+        "run_command" => {
+            let cmd = get_raw("command");
+            let agent = get("agent_id");
+            let host = get("hostname");
+            let target = if !host.is_empty() { host } else if !agent.is_empty() { agent } else { "agent" };
+            let cmd_short = if cmd.len() > 28 { format!("{}…", &cmd[..27]) } else { cmd.to_string() };
+            format!("Running \"{}\" on {}", cmd_short, target)
+        }
+        "create_lxd_agent" => format!("Provisioning agent {}", get("name")),
+        "delete_agent" => format!("Deleting agent {}", get("agent_id")),
+        "list_port_forwards" => "Listing port forwards".to_string(),
+        "create_port_forward" => {
+            let lp = input.get("local_port").and_then(|v| v.as_i64()).unwrap_or(0);
+            let rp = input.get("remote_port").and_then(|v| v.as_i64()).unwrap_or(0);
+            format!("Creating port forward {} → {}", lp, rp)
+        }
+        "update_port_forward" => format!("Updating port forward {}", get("id")),
+        "delete_port_forward" => format!("Deleting port forward {}", get("id")),
+        "generate_artifact" => format!("Generating artifact {}", get("name")),
+        "read_provision_bundle" => "Reading provision bundle".to_string(),
+        "set_execution_plan" => "Setting execution plan".to_string(),
+        "update_product_template" => "Updating product template".to_string(),
+        "link_deployment_artifact" => "Linking deployment artifact".to_string(),
+        "run_terraform_plan" => "Running terraform plan".to_string(),
+        "run_terraform_apply" => "Running terraform apply".to_string(),
+        "run_terraform_destroy" => "Running terraform destroy".to_string(),
+        "load_skill" => format!("Loading skill {}", get("name")),
+        _ => name.replace('_', " "),
+    }
+}
+
+fn summarize_tool_result(name: &str, preview: &str, input: &serde_json::Value) -> String {
+    let parsed: serde_json::Value = match serde_json::from_str(preview) {
+        Ok(v) => v,
+        Err(_) => return truncate(preview, 60),
+    };
+
+    let get = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("");
+
+    match name {
+        "list_repositories" => {
+            if let Some(arr) = parsed.as_array() {
+                return format!("{} repositories found", arr.len());
+            }
+            truncate(preview, 60)
+        }
+        "search_symbols" => {
+            if let Some(arr) = parsed.as_array() {
+                let n = arr.len();
+                let names: Vec<&str> = arr.iter().take(3).filter_map(|v| v.get("name").and_then(|n| n.as_str())).collect();
+                if n == 0 {
+                    return "no matches".to_string();
+                }
+                let label = if n <= 3 { names.join(", ") } else { format!("{}… +{} more", names.join(", "), n - 3) };
+                return format!("{} results: {}", n, label);
+            }
+            truncate(preview, 60)
+        }
+        "get_file_symbols" => {
+            if let Some(arr) = parsed.as_array() {
+                return format!("{} symbols found", arr.len());
+            }
+            truncate(preview, 60)
+        }
+        "find_callers" | "find_callees" => {
+            if let Some(arr) = parsed.as_array() {
+                let n = arr.len();
+                if n == 0 {
+                    return "none found".to_string();
+                }
+                let names: Vec<&str> = arr.iter().take(2).filter_map(|v| v.get("name").and_then(|n| n.as_str())).collect();
+                return format!("{}: {}", n, names.join(", "));
+            }
+            truncate(preview, 60)
+        }
+        "get_imports" => {
+            if let Some(arr) = parsed.as_array() {
+                return format!("{} imports", arr.len());
+            }
+            truncate(preview, 60)
+        }
+        "get_symbol_source" => {
+            if let Some(obj) = parsed.as_array().and_then(|a| a.first()) {
+                let n = obj.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let start = obj.get("start_line").and_then(|v| v.as_i64()).unwrap_or(0);
+                let end = obj.get("end_line").and_then(|v| v.as_i64()).unwrap_or(0);
+                return format!("{} L{}–{}", n, start, end);
+            }
+            truncate(preview, 60)
+        }
+        "run_cypher" => {
+            if let Some(arr) = parsed.as_array() {
+                if arr.is_empty() {
+                    return "0 rows".to_string();
+                }
+                let keys: Vec<&str> = arr.first()
+                    .and_then(|v| v.as_object())
+                    .map(|o| o.keys().take(3).map(|k| k.as_str()).collect())
+                    .unwrap_or_default();
+                return format!("{} rows: {}", arr.len(), keys.join(", "));
+            }
+            truncate(preview, 60)
+        }
+        "run_command" => {
+            let stdout = parsed.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+            let exit = parsed.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let first_line = stdout.lines().next().unwrap_or("");
+            if !first_line.is_empty() {
+                return format!("[exit {}] {}", exit, truncate(first_line, 40));
+            }
+            format!("[exit {}]", exit)
+        }
+        "list_agents" => {
+            if let Some(arr) = parsed.as_array() {
+                let online = arr.iter().filter(|a| a.get("online").and_then(|v| v.as_bool()).unwrap_or(false)).count();
+                return format!("{} agents ({} online)", arr.len(), online);
+            }
+            truncate(preview, 60)
+        }
+        "list_skills" => {
+            if let Some(arr) = parsed.as_array() {
+                return format!("{} skills", arr.len());
+            }
+            truncate(preview, 60)
+        }
+        "list_port_forwards" => {
+            if let Some(arr) = parsed.as_array() {
+                return format!("{} port forwards", arr.len());
+            }
+            truncate(preview, 60)
+        }
+        "load_skill" => {
+            let skill_name = get("name");
+            if !skill_name.is_empty() {
+                return format!("loaded: {}", skill_name);
+            }
+            truncate(preview, 60)
+        }
+        "compare_symbol_across_versions" => {
+            if let Some(arr) = parsed.as_array() {
+                return format!("{} versions compared", arr.len());
+            }
+            truncate(preview, 60)
+        }
+        _ => {
+            if let Some(arr) = parsed.as_array() {
+                if arr.is_empty() {
+                    return "empty".to_string();
+                }
+                return format!("{} items", arr.len());
+            }
+            if let Some(obj) = parsed.as_object() {
+                if obj.is_empty() {
+                    return "empty".to_string();
+                }
+                let keys: Vec<&str> = obj.keys().take(3).map(|k| k.as_str()).collect();
+                return format!("{{{}{}}}", keys.join(", "), if obj.len() > 3 { ", …" } else { "" });
+            }
+            truncate(preview, 60)
+        }
+    }
+}
+
+fn extract_result_lines(name: &str, preview: &str, _input: &serde_json::Value, width: usize) -> Vec<String> {
+    let parsed: serde_json::Value = match serde_json::from_str(preview) {
+        Ok(v) => v,
+        Err(_) => {
+            return preview.lines().take(8).map(|l| l.to_string()).collect();
+        }
+    };
+
+    let w = width.saturating_sub(8).max(20);
+
+    match name {
+        "run_command" => {
+            let stdout = parsed.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+            let stderr = parsed.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+            let exit = parsed.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let mut out = Vec::new();
+            for l in stdout.lines().take(w.min(10)) {
+                out.push(format!("  {}", truncate(l, w)));
+            }
+            if !stderr.is_empty() {
+                out.push("  [stderr]".to_string());
+                for l in stderr.lines().take(3) {
+                    out.push(format!("  {}", truncate(l, w)));
+                }
+            }
+            out.push(format!("  [exit {}]", exit));
+            out
+        }
+        "get_symbol_source" | "get_file_symbols" => {
+            if let Some(arr) = parsed.as_array() {
+                let mut out = Vec::new();
+                for item in arr.iter().take(3) {
+                    let n = item.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                    let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                    let start = item.get("start_line").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let end = item.get("end_line").and_then(|v| v.as_i64()).unwrap_or(0);
+                    out.push(format!("  {} [{}] L{}–{}", n, kind, start, end));
+                }
+                if arr.len() > 3 {
+                    out.push(format!("  …+{} more", arr.len() - 3));
+                }
+                out
+            } else {
+                vec![truncate(preview, w)]
+            }
+        }
+        "search_symbols" | "find_callers" | "find_callees" => {
+            if let Some(arr) = parsed.as_array() {
+                let mut out = Vec::new();
+                for item in arr.iter().take(5) {
+                    let n = item.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                    let f = item.get("file").and_then(|v| v.as_str()).unwrap_or("");
+                    let short = f.rsplit('/').next().unwrap_or(f);
+                    let line = item.get("start_line").and_then(|v| v.as_i64()).unwrap_or(0);
+                    out.push(format!("  {} — {}:{}", truncate(n, 30), short, line));
+                }
+                if arr.len() > 5 {
+                    out.push(format!("  …+{} more", arr.len() - 5));
+                }
+                out
+            } else {
+                vec![truncate(preview, w)]
+            }
+        }
+        "list_repositories" | "list_agents" | "list_skills" | "list_port_forwards" => {
+            if let Some(arr) = parsed.as_array() {
+                let name_key = if name == "list_repositories" { "name" } else if name == "list_agents" { "hostname" } else { "name" };
+                let mut out = Vec::new();
+                for item in arr.iter().take(5) {
+                    let n = item.get(name_key).and_then(|v| v.as_str()).unwrap_or("?");
+                    if name == "list_agents" {
+                        let online = item.get("online").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let dot = if online { "●" } else { "○" };
+                        out.push(format!("  {} {}", dot, n));
+                    } else {
+                        out.push(format!("  • {}", n));
+                    }
+                }
+                if arr.len() > 5 {
+                    out.push(format!("  …+{} more", arr.len() - 5));
+                }
+                out
+            } else {
+                vec![truncate(preview, w)]
+            }
+        }
+        _ => {
+            if let Some(arr) = parsed.as_array() {
+                let mut out = Vec::new();
+                for item in arr.iter().take(5) {
+                    let s = serde_json::to_string(item).unwrap_or_default();
+                    out.push(format!("  {}", truncate(&s, w)));
+                }
+                if arr.len() > 5 {
+                    out.push(format!("  …+{} more", arr.len() - 5));
+                }
+                out
+            } else {
+                preview.lines().take(8).map(|l| format!("  {}", truncate(l, w))).collect()
+            }
+        }
+    }
 }
 
 impl ChatView {
@@ -170,6 +490,8 @@ impl ChatView {
             conversation_id: None,
             show_history: false,
             history_state: ListState::default(),
+            step_selected: None,
+            step_mode: false,
             source_idx: None,
         }
     }
@@ -214,6 +536,7 @@ impl ChatView {
                     .collect();
                 let step = StepEntry {
                     name,
+                    input: input.clone(),
                     input_preview,
                     result_preview: None,
                     open: false,
@@ -273,6 +596,8 @@ impl ChatView {
                 self.cur_intent = None;
                 self.cur_phase = None;
                 self.streaming = false;
+                self.step_mode = false;
+                self.step_selected = None;
                 app.status = "done".to_string();
             }
             AgentEvent::Error { message } => {
@@ -370,6 +695,8 @@ impl ChatView {
         self.input.clear();
         self.streaming = true;
         self.error_banner = None;
+        self.step_mode = false;
+        self.step_selected = None;
         app.status = "streaming…".to_string();
 
         let body = QueryRequest {
@@ -468,6 +795,11 @@ impl ChatView {
             &mut scroll_state,
         );
 
+        let input_hint = if self.step_mode {
+            " Steps mode: j/k select, Enter expand, Esc exit "
+        } else {
+            " Query (Alt+Enter to send, Ctrl-H history) "
+        };
         let input_para = Paragraph::new(Line::from(vec![
             Span::styled("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw(self.input.clone()),
@@ -476,7 +808,7 @@ impl ChatView {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Query (Alt+Enter to send, Ctrl-H history) "),
+                .title(input_hint),
         );
         f.render_widget(input_para, chunks[2]);
 
@@ -676,7 +1008,7 @@ impl ChatView {
                     Span::styled(l, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
                 ]));
             }
-            lines.push(Line::from(Span::styled(format!(" {}", CHAIN_BORDER), Style::default().fg(chain_color))));
+            lines.push(chain_close(chain_color));
         }
 
         if !m.parallel_research.is_empty() {
@@ -696,29 +1028,11 @@ impl ChatView {
                     ),
                 ]));
             }
-            lines.push(Line::from(Span::styled(format!(" {}", CHAIN_BORDER), Style::default().fg(chain_color))));
+            lines.push(chain_close(chain_color));
         }
 
         if !m.steps.is_empty() {
-            lines.push(chain_header("STEPS"));
-            for step in m.steps.iter() {
-                let (icon, result_color, result_text) = match &step.result_preview {
-                    Some(r) => ("✓", Color::Green, format!("→ {}", truncate(r, 50))),
-                    None => ("◐", Color::Yellow, "running…".to_string()),
-                };
-                lines.push(chain_line(vec![
-                    Span::styled(format!("{icon} "), Style::default().fg(result_color)),
-                    Span::styled(step.name.clone(), Style::default().fg(Color::LightRed)),
-                    Span::styled(
-                        format!("({})", truncate(&step.input_preview, 50)),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
-                lines.push(chain_line(vec![
-                    Span::styled(format!("  {result_text}"), Style::default().fg(result_color)),
-                ]));
-            }
-            lines.push(Line::from(Span::styled(format!(" {}", CHAIN_BORDER), Style::default().fg(chain_color))));
+            self.render_steps(m, lines, width, chain_color);
         }
 
         if let Some(confirm) = &m.confirm {
@@ -736,7 +1050,124 @@ impl ChatView {
             lines.push(chain_line(vec![
                 Span::styled("[y] approve   [n] deny", Style::default().fg(Color::Yellow)),
             ]));
-            lines.push(Line::from(Span::styled(format!(" {}", CHAIN_BORDER), Style::default().fg(chain_color))));
+            lines.push(chain_close(chain_color));
+        }
+    }
+
+    fn render_steps(&self, m: &MessageBlock, lines: &mut Vec<Line>, width: usize, chain_color: Color) {
+        let groups = group_tool_calls(&m.steps);
+        let mut step_idx = 0usize;
+        let total = m.steps.len();
+
+        if total > 1 {
+            lines.push(chain_header(&format!("STEPS ({})", total)));
+        } else {
+            lines.push(chain_header("STEPS"));
+        }
+
+        for group in &groups {
+            if group.steps.len() >= 3 {
+                lines.push(chain_line(vec![
+                    Span::styled(
+                        format!(" {} ", group.noun()),
+                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("× {}", group.steps.len()),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+                for (i, step) in group.steps.iter().enumerate() {
+                    let is_selected = self.step_mode && self.step_selected == Some(step_idx);
+                    self.render_step_line(step, is_selected, lines, width, i + 1, group.steps.len());
+                    step_idx += 1;
+                }
+            } else {
+                for step in &group.steps {
+                    let is_selected = self.step_mode && self.step_selected == Some(step_idx);
+                    self.render_step_line(step, is_selected, lines, width, 0, 0);
+                    step_idx += 1;
+                }
+            }
+        }
+
+        if self.step_mode {
+            lines.push(chain_line(vec![
+                Span::styled(
+                    " j/k select  Enter expand  Esc exit",
+                    Style::default().fg(Color::Blue),
+                ),
+            ]));
+        }
+
+        lines.push(chain_close(chain_color));
+    }
+
+    fn render_step_line(
+        &self,
+        step: &StepEntry,
+        selected: bool,
+        lines: &mut Vec<Line>,
+        width: usize,
+        group_num: usize,
+        group_len: usize,
+    ) {
+        let (icon, status_color) = match &step.result_preview {
+            Some(_) => ("✓", Color::Green),
+            None => ("◐", Color::Yellow),
+        };
+
+        let label = describe_tool_call(&step.name, &step.input);
+
+        let prefix = if group_len > 0 {
+            format!("  {}. ", group_num)
+        } else {
+            "  ".to_string()
+        };
+
+        let sel_marker = if selected { "▶" } else { " " };
+
+        let result_summary = if let Some(preview) = &step.result_preview {
+            summarize_tool_result(&step.name, preview, &step.input)
+        } else {
+            "running…".to_string()
+        };
+
+        lines.push(chain_line(vec![
+            Span::styled(format!("{}{}", sel_marker, prefix), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{icon} "), Style::default().fg(status_color)),
+            Span::styled(label, Style::default().fg(Color::Reset)),
+        ]));
+
+        let result_color = match &step.result_preview {
+            Some(preview) => {
+                if preview.contains("\"error\"") || preview.starts_with("error") {
+                    Color::Red
+                } else {
+                    Color::DarkGray
+                }
+            }
+            None => Color::Yellow,
+        };
+        lines.push(chain_line(vec![
+            Span::styled(format!("    → {}", result_summary), Style::default().fg(result_color)),
+        ]));
+
+        if step.open {
+            if let Some(preview) = &step.result_preview {
+                let detail_lines = extract_result_lines(&step.name, preview, &step.input, width);
+                for l in &detail_lines {
+                    lines.push(chain_line(vec![
+                        Span::styled(l.clone(), Style::default().fg(Color::DarkGray)),
+                    ]));
+                }
+            }
+            let input_str = serde_json::to_string_pretty(&step.input).unwrap_or_default();
+            for l in input_str.lines().take(4) {
+                lines.push(chain_line(vec![
+                    Span::styled(format!("  {}", truncate(l, width.saturating_sub(8))), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
         }
     }
 
@@ -820,37 +1251,7 @@ impl ChatView {
         }
 
         if self.show_history {
-            match key.code {
-                KeyCode::Esc => {
-                    self.show_history = false;
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    let i = self.history_state.selected().unwrap_or(0);
-                    self.history_state.select(Some(i.saturating_sub(1)));
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    let len = app.conversations.len();
-                    if len > 0 {
-                        let i = self.history_state.selected().unwrap_or(0);
-                        self.history_state.select(Some((i + 1).min(len - 1)));
-                    }
-                }
-                KeyCode::Char('d') => {
-                    if let Some(idx) = self.history_state.selected() {
-                        if let Some(c) = app.conversations.get(idx) {
-                            let cid = c.id.clone();
-                            if let Some(pid) = app.current_project_id() {
-                                let client = app.client.clone();
-                                let _ = client
-                                    .delete(&format!("/projects/{pid}/conversations/{cid}"))
-                                    .await;
-                                app.refresh_side_data().await;
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
+            self.handle_history_key(key, app).await;
             return;
         }
 
@@ -863,6 +1264,17 @@ impl ChatView {
             if self.show_history {
                 self.history_state.select(Some(0));
             }
+            return;
+        }
+
+        if self.step_mode {
+            self.handle_step_key(key, app).await;
+            return;
+        }
+
+        if key.code == KeyCode::Tab && self.streaming {
+            self.step_mode = true;
+            self.step_selected = Some(0);
             return;
         }
 
@@ -991,6 +1403,110 @@ impl ChatView {
             _ => {}
         }
     }
+
+    async fn handle_history_key(&mut self, key: KeyEvent, app: &mut AppData) {
+        match key.code {
+            KeyCode::Esc => {
+                self.show_history = false;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let i = self.history_state.selected().unwrap_or(0);
+                self.history_state.select(Some(i.saturating_sub(1)));
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let len = app.conversations.len();
+                if len > 0 {
+                    let i = self.history_state.selected().unwrap_or(0);
+                    self.history_state.select(Some((i + 1).min(len - 1)));
+                }
+            }
+            KeyCode::Char('d') => {
+                if let Some(idx) = self.history_state.selected() {
+                    if let Some(c) = app.conversations.get(idx) {
+                        let cid = c.id.clone();
+                        if let Some(pid) = app.current_project_id() {
+                            let client = app.client.clone();
+                            let _ = client
+                                .delete(&format!("/projects/{pid}/conversations/{cid}"))
+                                .await;
+                            app.refresh_side_data().await;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    async fn handle_step_key(&mut self, key: KeyEvent, _app: &mut AppData) {
+        match key.code {
+            KeyCode::Esc => {
+                self.step_mode = false;
+                self.step_selected = None;
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(m) = self.messages.iter().rev().find(|m| m.streaming) {
+                    let len = m.steps.len();
+                    if len > 0 {
+                        let i = self.step_selected.unwrap_or(0);
+                        self.step_selected = Some((i + 1).min(len - 1));
+                    }
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let i = self.step_selected.unwrap_or(0);
+                self.step_selected = Some(i.saturating_sub(1));
+            }
+            KeyCode::Enter => {
+                if let Some(idx) = self.step_selected {
+                    if let Some(m) = self.messages.iter_mut().rev().find(|m| m.streaming) {
+                        if let Some(step) = m.steps.get_mut(idx) {
+                            step.open = !step.open;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+struct ToolGroup {
+    steps: Vec<StepEntry>,
+    name: String,
+}
+
+impl ToolGroup {
+    fn noun(&self) -> String {
+        match self.name.as_str() {
+            "run_cypher" => "graph queries".to_string(),
+            "get_symbol_source" => "source lookups".to_string(),
+            "get_file_symbols" => "file scans".to_string(),
+            "search_symbols" => "searches".to_string(),
+            "find_callers" => "caller traces".to_string(),
+            "find_callees" => "callee traces".to_string(),
+            "get_imports" => "import checks".to_string(),
+            "compare_symbol_across_versions" => "version comparisons".to_string(),
+            _ => self.name.replace('_', " "),
+        }
+    }
+}
+
+fn group_tool_calls(steps: &[StepEntry]) -> Vec<ToolGroup> {
+    let mut groups: Vec<ToolGroup> = Vec::new();
+    for step in steps {
+        if let Some(last) = groups.last_mut() {
+            if last.name == step.name {
+                last.steps.push(step.clone());
+                continue;
+            }
+        }
+        groups.push(ToolGroup {
+            steps: vec![step.clone()],
+            name: step.name.clone(),
+        });
+    }
+    groups
 }
 
 fn wrap_dim(text: &str, width: usize) -> Vec<String> {
