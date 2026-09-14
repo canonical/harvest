@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
+use tokio::sync::Semaphore;
 
 use crate::llm::{
     types::{
@@ -166,6 +167,7 @@ pub struct Agent {
     compaction_keep_last: usize,
     system_prompt_override: Option<String>,
     enable_parallel_research: bool,
+    llm_concurrency: Arc<Semaphore>,
 }
 
 impl Agent {
@@ -182,6 +184,7 @@ impl Agent {
             compaction_keep_last: 6,
             system_prompt_override: None,
             enable_parallel_research: false,
+            llm_concurrency: Arc::new(Semaphore::new(20)),
         }
     }
 
@@ -437,7 +440,7 @@ impl Agent {
         let duration_ms = elapsed_before_ms + start.elapsed().as_millis() as u64;
         match outcome {
             LoopOutcome::Finished { text, iterations, provider_used, hit_max_iterations } => {
-                let answer = if text.is_empty() { last_resort_fallback() } else { text };
+                let answer = if text.is_empty() { last_resort_fallback() } else { strip_answer_preamble(&text) };
                 let sources = parse_citations(&answer);
                 let _ = event_sender.send(AgentEvent::Done {
                     answer,
@@ -491,6 +494,7 @@ impl Agent {
         let mut last_provider_used: Option<UsedProvider> = None;
         let mut accumulated_text = String::new();
         let mut accumulated_answer = String::new();
+        let mut consecutive_searches: usize = 0;
         loop {
             if iterations >= max_iterations {
                 tracing::warn!(max_iterations, "agent hit max_iterations — requesting synthesis");
@@ -502,6 +506,7 @@ impl Agent {
                      Tool results so far:\n{tool_summary}"
                 );
                 messages.push(Message::user(synthesis_prompt));
+                let _synthesis_permit = self.llm_concurrency.acquire().await;
                 let text = match self.llm.chat_routed(selection, &messages, &[]).await {
                     Ok((LlmResponse::Message { text }, used)) => {
                         last_provider_used = Some(used);
@@ -528,7 +533,9 @@ impl Agent {
             let msgs_snapshot  = messages.clone();
             let tools_snapshot = tool_defs.to_vec();
             let selection_owned = selection.cloned();
+            let permit = self.llm_concurrency.clone().acquire_owned().await;
             let stream_handle = tokio::spawn(async move {
+                let _permit = permit;
                 llm.chat_stream_routed(selection_owned.as_ref(), &msgs_snapshot, &tools_snapshot, stream_tx).await
             });
 
@@ -703,6 +710,25 @@ impl Agent {
             let phase = derive_phase(&tool_calls);
             let _ = event_sender.send(AgentEvent::Phase { label: phase.to_string() }).await;
 
+            let has_search = tool_calls.iter().any(|c| c.name == "search_symbols");
+            let has_deep = tool_calls.iter().any(|c| matches!(c.name.as_str(),
+                "get_symbol_source" | "get_file_symbols" | "find_callers" | "find_callees" | "get_imports"
+            ));
+            if has_search && !has_deep {
+                consecutive_searches += 1;
+            } else if has_deep {
+                consecutive_searches = 0;
+            }
+            if consecutive_searches >= 3 {
+                messages.push(Message::user(
+                    "You have searched multiple times without diving deeper. \
+                     Pick the most relevant result from your previous searches and \
+                     retrieve its source with get_symbol_source, or use find_callers/find_callees \
+                     to trace relationships. Synthesize your answer from what you already have."
+                ));
+                consecutive_searches = 0;
+            }
+
             for call in &tool_calls {
                 let _ = event_sender.send(AgentEvent::ToolCall {
                     name:  call.name.clone(),
@@ -828,9 +854,16 @@ impl Agent {
         event_sender: &mpsc::Sender<AgentEvent>,
     ) -> (String, usize) {
         let lead_start = Instant::now();
-        let (silent_tx, silent_rx) = mpsc::channel::<AgentEvent>(1);
-        drop(silent_rx);
-        let outcome = self.run_loop(messages, 0, tool_defs, tool_map, selection, &silent_tx, max_iterations, depth).await;
+        let (sub_tx, mut sub_rx) = mpsc::channel::<AgentEvent>(64);
+        let sender_clone = event_sender.clone();
+        let forward_handle = tokio::spawn(async move {
+            while let Some(ev) = sub_rx.recv().await {
+                let _ = sender_clone.send(ev).await;
+            }
+        });
+        let outcome = self.run_loop(messages, 0, tool_defs, tool_map, selection, &sub_tx, max_iterations, depth).await;
+        drop(sub_tx);
+        let _ = forward_handle.await;
         let (text, iterations) = match outcome {
             LoopOutcome::Finished { text, iterations, .. } => (text, iterations),
             LoopOutcome::EndedWithQuestion { text, iterations, .. } => (text, iterations),
@@ -889,6 +922,7 @@ impl Agent {
         );
         let mut synth_messages = messages.to_vec();
         synth_messages.push(Message::user(prompt));
+        let _synth_permit = self.llm_concurrency.acquire().await;
         match self.llm.chat_routed(selection, &synth_messages, &[]).await {
             Ok((LlmResponse::Message { text }, _)) if !text.is_empty() => Some(text),
             Ok((LlmResponse::ToolCalls { preamble, .. }, _)) if !preamble.is_empty() => Some(preamble),
@@ -972,6 +1006,38 @@ pub(crate) fn question_fallback() -> String {
     "I've gathered what I can from the codebase. \
      Please answer the question above so I can give you a precise answer."
         .to_string()
+}
+
+fn strip_answer_preamble(text: &str) -> String {
+    let preamble_patterns = [
+        "i am examining", "i am looking at", "i am investigating",
+        "i will examine", "i will look at", "i will investigate",
+        "i'll examine", "i'll look at", "i'll investigate",
+        "let me look at", "let me examine", "let me check",
+        "let me investigate", "let me search",
+        "based on my research", "based on my analysis",
+        "after looking at the code", "after examining",
+        "after investigating", "after analyzing",
+    ];
+    let trimmed = text.trim_start();
+    let lower = trimmed.to_lowercase();
+    for pattern in &preamble_patterns {
+        if lower.starts_with(pattern) {
+            if let Some(end) = trimmed.find('.') {
+                let after = trimmed[end + 1..].trim_start();
+                if !after.is_empty() {
+                    return after.to_string();
+                }
+            }
+            if let Some(end) = trimmed.find('\n') {
+                let after = trimmed[end + 1..].trim_start();
+                if !after.is_empty() {
+                    return after.to_string();
+                }
+            }
+        }
+    }
+    text.to_string()
 }
 
 fn derive_phase(tool_calls: &[ToolCall]) -> &'static str {
