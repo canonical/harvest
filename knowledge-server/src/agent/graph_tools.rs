@@ -46,7 +46,7 @@ impl Tool for SearchSymbolsTool {
         ToolDefinition {
             name: "search_symbols".into(),
             description: "Full-text search for functions or classes by name fragment. \
-                          Returns up to 20 matches ranked by relevance.".into(),
+                           Returns up to 10 matches ranked by relevance.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -65,17 +65,32 @@ impl Tool for SearchSymbolsTool {
         let q = params["query"].as_str().unwrap_or("").to_string();
         let repo    = params["repo"].as_str().unwrap_or("").to_string();
         let version = params["version"].as_str().unwrap_or("").to_string();
+        let kind    = params["kind"].as_str().unwrap_or("any").to_string();
 
         let rows = self.0.query_read(
             "CALL db.index.fulltext.queryNodes('symbol_names', $query) YIELD node, score
              WHERE ($repo    = '' OR node.repo    = $repo)
                AND ($version = '' OR node.version = $version)
+               AND ($kind    = 'any' OR
+                    ($kind = 'function' AND n:Function) OR
+                    ($kind = 'class' AND n:Class))
+             WITH node, score,
+                  CASE WHEN node.name = $query THEN 1000
+                       WHEN toLower(node.name) = toLower($query) THEN 900
+                       ELSE score END AS boosted_score
              RETURN node.repo AS repo, node.version AS version, node.file AS file,
-                    node.name AS name, node.start_line AS start_line, score
-             ORDER BY score DESC LIMIT 20",
-            json!({ "query": q, "repo": repo, "version": version }),
+                    node.name AS name, node.start_line AS start_line,
+                    CASE WHEN n:Function THEN 'function' ELSE 'class' END AS kind,
+                    boosted_score AS score
+             ORDER BY boosted_score DESC LIMIT 10",
+            json!({ "query": q, "repo": repo, "version": version, "kind": kind }),
         ).await?;
-        Ok(serde_json::to_string_pretty(&rows)?)
+
+        if rows.is_empty() {
+            Ok("No symbols found. Try a different name fragment or broader search term.".into())
+        } else {
+            Ok(serde_json::to_string_pretty(&rows)?)
+        }
     }
 }
 
