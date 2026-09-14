@@ -22,7 +22,7 @@
         @cancel="onGenerationCancel"
       />
 
-      <template v-else-if="deployment.terraform_bundle">
+      <template v-else-if="deployment.provisioned || deployment.terraform_bundle">
         <div
           v-if="isBroken"
           class="p-notification--caution deploy-broken-banner"

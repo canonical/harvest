@@ -524,7 +524,7 @@ onUnmounted(() => {
   eventSource?.close();
 });
 
-watch(() => props.deployment.terraform_bundle?.id, () => {
+watch(() => [props.deployment.terraform_bundle?.id, props.deployment.provisioned], () => {
   loadPlan();
 });
 </script>
