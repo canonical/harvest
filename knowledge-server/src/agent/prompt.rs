@@ -264,6 +264,14 @@ renders as a real diagram in the final document.
 
 {design_template_section}
 
+## Tool Discipline
+
+When tools are available, use them to research and understand the software before
+producing your output. Tool results inform your decisions — they never appear in
+your response. Never quote code snippets, function signatures, skill guide text,
+or tool output verbatim. Your output is always written in your own words at the
+appropriate level for the task.
+
 ## Hard rules
 
 - **Never call `ask_user`.** There is nobody to answer it and the call will be silently dropped,
@@ -440,6 +448,14 @@ mod tests {
         let prompt = deployment_system_prompt(&base_ctx());
         assert!(!prompt.contains("## Workflow"));
         assert!(!prompt.contains("**Design** —"));
+    }
+
+    #[test]
+    fn deployment_system_prompt_includes_tool_discipline_section() {
+        let prompt = deployment_system_prompt(&base_ctx());
+        assert!(prompt.contains("## Tool Discipline"));
+        assert!(prompt.contains("never appear in"));
+        assert!(prompt.contains("written in your own words"));
     }
 
 }
