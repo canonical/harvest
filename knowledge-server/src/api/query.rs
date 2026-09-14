@@ -134,6 +134,15 @@ pub async fn handle_query_stream(
                         "status": "pending", "steps": [], "result_text": "",
                     }));
                 }
+                AgentEvent::ParallelResearchStarted { leads } => {
+                    chain_builder.parallel_research_started(leads);
+                }
+                AgentEvent::ParallelResearchLeadDone { index, iterations, preview, duration_ms } => {
+                    chain_builder.parallel_research_lead_done(*index, *iterations, preview, *duration_ms);
+                }
+                AgentEvent::ParallelResearchMergeStarted { duration_ms } => {
+                    chain_builder.parallel_research_merge_started(*duration_ms);
+                }
                 _ => {}
             }
 
