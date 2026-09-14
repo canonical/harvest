@@ -609,6 +609,15 @@ async fn drive_turn(
             AgentEvent::ConfirmAction { id, name, input, description } => {
                 chain_builder.confirm_action(id, name, input, description);
             }
+            AgentEvent::ParallelResearchStarted { leads } => {
+                chain_builder.parallel_research_started(leads);
+            }
+            AgentEvent::ParallelResearchLeadDone { index, iterations, preview, duration_ms } => {
+                chain_builder.parallel_research_lead_done(*index, *iterations, preview, *duration_ms);
+            }
+            AgentEvent::ParallelResearchMergeStarted { duration_ms } => {
+                chain_builder.parallel_research_merge_started(*duration_ms);
+            }
             _ => {}
         }
 
@@ -616,6 +625,68 @@ async fn drive_turn(
             let mut map = in_flight.write().await;
             if let Some(entry) = map.get_mut(&project_id).and_then(|m| m.get_mut(&conv_id)) {
                 record_in_flight(entry, &event, description.clone(), hostname.clone());
+            }
+        }
+
+        {
+            let channels_guard = channels.lock().await;
+            if let Some(sender) = channels_guard.get(&project_id) {
+                let broadcast_data = match &event {
+                    AgentEvent::TextDelta { text } => Some(json!({
+                        "type": "text_delta", "conv_id": &conv_id, "text": text,
+                    })),
+                    AgentEvent::ThinkingDelta { text } => Some(json!({
+                        "type": "thinking_delta", "conv_id": &conv_id, "text": text,
+                    })),
+                    AgentEvent::Thinking { text } => Some(json!({
+                        "type": "thinking", "conv_id": &conv_id, "text": text,
+                    })),
+                    AgentEvent::ToolCall { name, input } => {
+                        let mut v = json!({
+                            "type": "tool_call", "conv_id": &conv_id,
+                            "name": name, "input": input,
+                        });
+                        if let Some(d) = &description { v["description"] = json!(d); }
+                        if let Some(h) = &hostname { v["hostname"] = json!(h); }
+                        Some(v)
+                    }
+                    AgentEvent::ToolResult { name, preview } => Some(json!({
+                        "type": "tool_result", "conv_id": &conv_id,
+                        "name": name, "preview": preview,
+                    })),
+                    AgentEvent::Phase { label } => Some(json!({
+                        "type": "phase", "conv_id": &conv_id, "label": label,
+                    })),
+                    AgentEvent::Intent { mode } => Some(json!({
+                        "type": "intent", "conv_id": &conv_id,
+                        "mode": format!("{:?}", mode).to_lowercase(),
+                    })),
+                    AgentEvent::ParallelResearchStarted { leads } => Some(json!({
+                        "type": "parallel_research_started", "conv_id": &conv_id, "leads": leads,
+                    })),
+                    AgentEvent::ParallelResearchLeadDone { index, iterations, preview, duration_ms } => Some(json!({
+                        "type": "parallel_research_lead_done", "conv_id": &conv_id,
+                        "index": index, "iterations": iterations, "preview": preview, "duration_ms": duration_ms,
+                    })),
+                    AgentEvent::ParallelResearchMergeStarted { duration_ms } => Some(json!({
+                        "type": "parallel_research_merge_started", "conv_id": &conv_id, "duration_ms": duration_ms,
+                    })),
+                    AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. } => Some(json!({
+                        "type": "done", "conv_id": &conv_id,
+                        "answer": answer, "sources": sources,
+                        "tool_calls_made": tool_calls_made,
+                        "provider_used": provider_used,
+                        "duration_ms": duration_ms,
+                    })),
+                    AgentEvent::Question { question, choices } => Some(json!({
+                        "type": "question", "conv_id": &conv_id,
+                        "question": question, "choices": choices,
+                    })),
+                    _ => None,
+                };
+                if let Some(data) = broadcast_data {
+                    let _ = sender.send(data.to_string());
+                }
             }
         }
 
