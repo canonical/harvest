@@ -201,6 +201,27 @@ impl ProjectAgentBuilder {
         )
     }
 
+    pub fn build_for_deployment_design(
+        &self,
+        project_id: String,
+        ctx:        &deployments::DeploymentContext,
+    ) -> Arc<Agent> {
+        let mut tools = graph_tools::all_tools(Arc::clone(&self.neo4j));
+        tools.push(Box::new(skill_tools::ListSkillsTool {
+            store:      Arc::clone(&self.skills),
+            project_id: project_id.clone(),
+        }));
+        tools.push(Box::new(skill_tools::LoadSkillTool {
+            store:      Arc::clone(&self.skills),
+            project_id,
+        }));
+        Arc::new(
+            Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
+                .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+                .with_system_prompt(prompt::deployment_system_prompt(ctx)),
+        )
+    }
+
 }
 
 pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Router {
@@ -382,6 +403,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                get(deployment_handlers::get_template)
                .put(deployment_handlers::update_template)
                .delete(deployment_handlers::delete_template))
+        .route("/templates/:tid/download", get(deployment_handlers::download_template))
         .with_state(project_state);
 
     let machine_state = Arc::new(MachineState {
