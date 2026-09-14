@@ -1095,7 +1095,8 @@ mod tests {
         });
         assert!(has_arabic_1);
     }
-}
+
+    }
 
 
 
