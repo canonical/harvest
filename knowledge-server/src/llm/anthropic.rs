@@ -15,7 +15,7 @@ use super::{
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const MAX_TOKENS: u32 = 8192;
+const MAX_TOKENS: u32 = 65536;
 const OVERLOAD_STATUS_CODES: &[u16] = &[529, 503];
 
 pub struct AnthropicProvider {
@@ -313,10 +313,12 @@ async fn process_stream_event(
             }
         }
         "message_delta" => {
-            let stop_reason = event["delta"]["stop_reason"]
-                .as_str()
-                .unwrap_or("end_turn")
-                .to_string();
+            let stop_reason = match event["delta"]["stop_reason"].as_str().unwrap_or("end_turn") {
+                "tool_use" => "tool_use".to_string(),
+                "end_turn" => "end_turn".to_string(),
+                "max_tokens" => "max_tokens".to_string(),
+                other => other.to_string(),
+            };
             let _ = tx.send(StreamEvent::Done { stop_reason }).await;
         }
         _ => {}

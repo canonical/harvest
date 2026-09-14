@@ -12,8 +12,8 @@ use super::{
 };
 
 const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
-const MAX_OUTPUT_TOKENS: u32 = 8192;
-const THINKING_BUDGET_TOKENS: i32 = 4096;
+const MAX_OUTPUT_TOKENS: u32 = 65536;
+const THINKING_BUDGET_TOKENS: i32 = 24576;
 const OVERLOAD_STATUS_CODES: &[u16] = &[503];
 
 /// Gemma models don't support extended thinking — only the Gemini family does.
@@ -251,7 +251,11 @@ async fn process_stream_event(
 
     let candidate = &event["candidates"][0];
     if let Some(reason) = candidate["finishReason"].as_str() {
-        *finish_reason = Some(if reason == "STOP" { "end_turn".to_string() } else { reason.to_string() });
+        *finish_reason = Some(match reason {
+            "STOP" => "end_turn".to_string(),
+            "MAX_TOKENS" => "max_tokens".to_string(),
+            other => other.to_string(),
+        });
     }
 
     let Some(parts) = candidate["content"]["parts"].as_array() else { return Ok(()) };
