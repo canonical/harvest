@@ -511,6 +511,9 @@ pub fn shape_deployment(row: &Value) -> Value {
         Some(id) => json!({ "id": id, "name": opt_str(row, "template_name") }),
         None => Value::Null,
     };
+    let has_tf = opt_str(row, "terraform_bundle_id").is_some();
+    let has_steps = row["execution_step_count"].as_i64().map(|n| n > 0).unwrap_or(false);
+    let provisioned = has_tf || has_steps;
     json!({
         "id":                       row["id"],
         "name":                     row["name"],
@@ -526,6 +529,7 @@ pub fn shape_deployment(row: &Value) -> Value {
         "terraform_bundle":         artifact_ref(row, "terraform_bundle_id", "terraform_bundle_title", Some("terraform_bundle_kind")),
         "guide":                    artifact_ref(row, "guide_id", "guide_title", None),
         "context_artifacts":        shape_context_artifacts(row),
+        "provisioned":              provisioned,
     })
 }
 

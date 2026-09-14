@@ -26,7 +26,7 @@
       <BusyStatus v-if="busyLabel" :text="busyLabel" />
     </div>
 
-    <template v-if="!deployment.terraform_bundle">
+    <template v-if="!deployment.provisioned && !deployment.terraform_bundle">
       <div class="artifacts-panel__generate-area">
         <button
           class="p-button--positive is-dense"
