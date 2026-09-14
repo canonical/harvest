@@ -38,7 +38,7 @@ enum InFlightEvent {
 }
 
 #[derive(Clone, Default)]
-struct InFlightState {
+pub struct InFlightState {
     query:       String,
     username:    String,
     attachments: Vec<Value>,
@@ -569,7 +569,6 @@ async fn drive_turn(
     registry:  Arc<crate::machines::MachineRegistry>,
     in_flight: Arc<RwLock<HashMap<String, HashMap<String, InFlightState>>>>,
     paused_confirmations: Arc<RwLock<HashMap<String, PausedConfirm>>>,
-    agent:      Arc<Agent>,
     project_id: String,
     conv_id:    String,
     query:      String,
@@ -815,7 +814,7 @@ pub async fn project_query_stream(
 
         drive_turn(
             locks, channels, neo4j, llm, registry, in_flight, paused_confirmations,
-            agent, project_id_owned, conv_id, query, username, history,
+            project_id_owned, conv_id, query, username, history,
             TurnPersist::New { prior_messages: prior_messages_for_save, attachment_meta },
             selection,
             agent_rx, paused_rx,
@@ -1244,7 +1243,7 @@ pub async fn resume_confirm_action(
 
         drive_turn(
             locks, channels, neo4j, llm, registry, in_flight, paused_confirmations,
-            agent, project_id_owned, conv_id_owned, query, username, prior_history,
+            project_id_owned, conv_id_owned, query, username, prior_history,
             TurnPersist::Continuation,
             selection,
             agent_rx, paused_rx,
