@@ -299,21 +299,26 @@ impl Agent {
         selection: Option<&ProviderSelection>,
     ) -> Result<QueryResponse> {
         let (event_sender, mut receiver) = mpsc::channel::<AgentEvent>(64);
-        self.query_streaming(user_query, history, attachments, selection, event_sender).await;
 
-        let mut response = None;
-        let mut error = None;
-        while let Some(event) = receiver.recv().await {
-            match event {
-                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. } => {
-                    response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms });
+        let stream_fut = self.query_streaming(user_query, history, attachments, selection, event_sender);
+        let drain_fut = async {
+            let mut response = None;
+            let mut error = None;
+            while let Some(event) = receiver.recv().await {
+                match event {
+                    AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. } => {
+                        response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms });
+                    }
+                    AgentEvent::Error { message } => {
+                        error = Some(anyhow::anyhow!(message));
+                    }
+                    _ => {}
                 }
-                AgentEvent::Error { message } => {
-                    error = Some(anyhow::anyhow!(message));
-                }
-                _ => {}
             }
-        }
+            (response, error)
+        };
+
+        let (_paused, (response, error)) = tokio::join!(stream_fut, drain_fut);
 
         response.ok_or_else(|| error.unwrap_or_else(|| anyhow::anyhow!("agent produced no response")))
     }
@@ -327,22 +332,27 @@ impl Agent {
         progress: mpsc::Sender<AgentEvent>,
     ) -> Result<QueryResponse> {
         let (event_sender, mut receiver) = mpsc::channel::<AgentEvent>(64);
-        self.query_streaming(user_query, history, attachments, selection, event_sender).await;
 
-        let mut response = None;
-        let mut error = None;
-        while let Some(event) = receiver.recv().await {
-            let _ = progress.send(event.clone()).await;
-            match event {
-                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. } => {
-                    response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms });
+        let stream_fut = self.query_streaming(user_query, history, attachments, selection, event_sender);
+        let drain_fut = async {
+            let mut response = None;
+            let mut error = None;
+            while let Some(event) = receiver.recv().await {
+                let _ = progress.send(event.clone()).await;
+                match event {
+                    AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. } => {
+                        response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms });
+                    }
+                    AgentEvent::Error { message } => {
+                        error = Some(anyhow::anyhow!(message));
+                    }
+                    _ => {}
                 }
-                AgentEvent::Error { message } => {
-                    error = Some(anyhow::anyhow!(message));
-                }
-                _ => {}
             }
-        }
+            (response, error)
+        };
+
+        let (_paused, (response, error)) = tokio::join!(stream_fut, drain_fut);
 
         response.ok_or_else(|| error.unwrap_or_else(|| anyhow::anyhow!("agent produced no response")))
     }
@@ -480,6 +490,7 @@ impl Agent {
     ) -> LoopOutcome {
         let mut last_provider_used: Option<UsedProvider> = None;
         let mut accumulated_text = String::new();
+        let mut accumulated_answer = String::new();
         loop {
             if iterations >= max_iterations {
                 tracing::warn!(max_iterations, "agent hit max_iterations — requesting synthesis");
@@ -499,11 +510,14 @@ impl Agent {
                     Ok((LlmResponse::ToolCalls { preamble, .. }, used)) => {
                         last_provider_used = Some(used);
                         if !preamble.is_empty() { preamble }
+                        else if !accumulated_answer.is_empty() { accumulated_answer }
                         else if !accumulated_text.is_empty() { accumulated_text }
                         else { last_resort_fallback() }
                     }
                     Err(_) => {
-                        if !accumulated_text.is_empty() { accumulated_text } else { last_resort_fallback() }
+                        if !accumulated_answer.is_empty() { accumulated_answer }
+                        else if !accumulated_text.is_empty() { accumulated_text }
+                        else { last_resort_fallback() }
                     }
                 };
                 return LoopOutcome::Finished { text, iterations, provider_used: last_provider_used, hit_max_iterations: true };
@@ -521,12 +535,10 @@ impl Agent {
             let mut text_buf     = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut stop_reason  = String::new();
-            let mut thinking_streamed = false;
 
             while let Some(ev) = stream_rx.recv().await {
                 match ev {
                     StreamEvent::ThinkingDelta { text } => {
-                        thinking_streamed = true;
                         let _ = event_sender.send(AgentEvent::ThinkingDelta { text }).await;
                     }
                     StreamEvent::TextDelta { text } => {
@@ -552,12 +564,17 @@ impl Agent {
                 accumulated_text.push_str(&text_buf);
             }
 
+            if stop_reason == "max_tokens" && tool_calls.is_empty() && iterations + 1 < max_iterations {
+                tracing::warn!(iteration = iterations, chars = text_buf.len(), "LLM hit max_tokens — auto-continuing");
+                let _ = event_sender.send(AgentEvent::Phase { label: "Continuing…".to_string() }).await;
+                accumulated_answer.push_str(&text_buf);
+                messages.push(Message::assistant_text(text_buf));
+                messages.push(Message::user("Continue from exactly where you left off. Do not repeat any content already written — start mid-sentence if necessary and complete the document."));
+                iterations += 1;
+                continue;
+            }
+
             if stop_reason == "end_turn" || tool_calls.is_empty() {
-                // Fix 2: Check whether the LLM emitted an ask_user call as a JSON
-                // code block in its text instead of using the proper tool-calling
-                // mechanism. This happens with some models (e.g. Gemini Flash) when
-                // they know about the tool from the system prompt but did not receive
-                // it as a declared function — or simply got confused.
                 if let Some((question, choices, cleaned)) = extract_text_ask_user(&text_buf) {
                     let answer_text = self.resolve_ask_user_answer_text(
                         cleaned, &messages, selection, &accumulated_text, &question,
@@ -567,7 +584,13 @@ impl Agent {
                         text: answer_text, iterations, provider_used: last_provider_used,
                     };
                 }
-                return LoopOutcome::Finished { text: text_buf, iterations, provider_used: last_provider_used, hit_max_iterations: false };
+                let final_text = if accumulated_answer.is_empty() {
+                    text_buf
+                } else {
+                    accumulated_answer.push_str(&text_buf);
+                    accumulated_answer
+                };
+                return LoopOutcome::Finished { text: final_text, iterations, provider_used: last_provider_used, hit_max_iterations: false };
             }
 
             iterations += 1;
@@ -895,20 +918,6 @@ impl Agent {
         question.to_string()
     }
 
-    fn last_assistant_text(&self, messages: &[Message]) -> String {
-        messages
-            .iter()
-            .rev()
-            .find(|m| matches!(m.role, crate::llm::types::Role::Assistant))
-            .and_then(|m| match &m.content {
-                MessageContent::Text(t) => Some(t.clone()),
-                MessageContent::Parts(parts) => parts.iter().find_map(|p| match p {
-                    ContentPart::Text { text, .. } => Some(text.clone()),
-                    _ => None,
-                }),
-            })
-            .unwrap_or_default()
-    }
 }
 
 fn collect_tool_result_summary(messages: &[Message]) -> String {
@@ -1408,6 +1417,62 @@ mod tests {
         let agent = agent_with(llm, vec![MockTool::new("some_tool", "ok")], 5);
         let resp = agent.query("hi", &[], &[], None).await.unwrap();
         assert_eq!(resp.answer, "handled gracefully");
+    }
+
+    #[tokio::test]
+    async fn max_tokens_auto_continues_then_end_turn() {
+        let llm = MockStreamingLlm::new(vec![
+            vec![
+                StreamEvent::TextDelta { text: "Hello ".into() },
+                StreamEvent::TextDelta { text: "world".into() },
+                StreamEvent::Done { stop_reason: "max_tokens".into() },
+            ],
+            vec![
+                StreamEvent::TextDelta { text: " continued".into() },
+                StreamEvent::Done { stop_reason: "end_turn".into() },
+            ],
+        ]);
+        let agent = Arc::new(agent_with(llm, vec![], 5));
+        let events = collect_agent_events(agent, "hi").await;
+
+        let done = events.iter().find_map(|e| match e {
+            AgentEvent::Done { answer, tool_calls_made, .. } => Some((answer.clone(), *tool_calls_made)),
+            _ => None,
+        }).expect("expected Done event");
+        assert_eq!(done.0, "Hello world continued");
+        assert_eq!(done.1, 1);
+    }
+
+    #[tokio::test]
+    async fn max_tokens_without_remaining_iterations_returns_partial() {
+        let llm = MockStreamingLlm::new(vec![
+            vec![
+                StreamEvent::TextDelta { text: "partial text".into() },
+                StreamEvent::Done { stop_reason: "max_tokens".into() },
+            ],
+        ]);
+        let agent = Arc::new(agent_with(llm, vec![], 1));
+        let events = collect_agent_events(agent, "hi").await;
+
+        let done = events.iter().find_map(|e| match e {
+            AgentEvent::Done { answer, .. } => Some(answer.clone()),
+            _ => None,
+        }).expect("expected Done event");
+        assert_eq!(done, "partial text");
+    }
+
+    #[tokio::test]
+    async fn query_does_not_deadlock_with_many_events() {
+        let mut round1 = Vec::new();
+        for i in 0..100 {
+            round1.push(StreamEvent::ThinkingDelta { text: format!("thinking chunk {i} ") });
+        }
+        round1.push(StreamEvent::TextDelta { text: "final answer".into() });
+        round1.push(StreamEvent::Done { stop_reason: "end_turn".into() });
+        let llm = MockStreamingLlm::new(vec![round1]);
+        let agent = agent_with(llm, vec![], 5);
+        let resp = agent.query("hi", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "final answer");
     }
 
     #[tokio::test]
