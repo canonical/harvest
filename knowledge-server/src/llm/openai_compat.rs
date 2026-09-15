@@ -37,6 +37,7 @@ impl LlmProvider for OpenAiCompatProvider {
     fn default_model(&self) -> &str { &self.model }
     fn name(&self) -> Option<&str> { self.meta.name.as_deref() }
     fn expose_to_ui(&self) -> bool { self.meta.expose_to_ui }
+    fn user_provided_key(&self) -> bool { self.meta.user_provided_key }
     fn configured_models(&self) -> Option<&[String]> { self.meta.models.as_deref() }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
@@ -543,14 +544,14 @@ mod tests {
     #[test]
     fn expose_to_ui_reflects_constructor_value() {
         let visible = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta::new("a"));
-        let hidden  = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta { id: "b".into(), expose_to_ui: false, name: None, models: None });
+        let hidden  = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta { id: "b".into(), expose_to_ui: false, ..Default::default() });
         assert!(visible.expose_to_ui());
         assert!(!hidden.expose_to_ui());
     }
 
     #[test]
     fn name_reflects_constructor_value() {
-        let named   = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta { id: "a".into(), expose_to_ui: true, name: Some("Lemonade (local)".into()), models: None });
+        let named   = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta { id: "a".into(), expose_to_ui: true, name: Some("Lemonade (local)".into()), ..Default::default() });
         let unnamed = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta::new("b"));
         assert_eq!(named.name(), Some("Lemonade (local)"));
         assert_eq!(unnamed.name(), None);

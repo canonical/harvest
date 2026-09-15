@@ -875,33 +875,57 @@ async fn build_deployment_agent(
     project_id:    &str,
     group_id:      &str,
     deployment_id: &str,
+    user_sub:      &str,
 ) -> Result<Arc<Agent>, ApiError> {
     let ctx = load_deployment_context(&state.neo4j, project_id, deployment_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
-    Ok(state.agent_builder.build_for_deployment(project_id.to_string(), group_id.to_string(), &ctx))
+    let user_llm = crate::api::resolve_user_llm(
+        &state.llm, &state.llm_configs, &state.user_key_store, user_sub,
+    ).await;
+    Ok(if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
+        state.agent_builder.build_for_deployment(project_id.to_string(), group_id.to_string(), &ctx)
+    } else {
+        state.agent_builder.build_for_deployment_with_llm(project_id.to_string(), group_id.to_string(), &ctx, user_llm)
+    })
 }
 
 async fn build_deployment_agent_text_only(
     state:         &ProjectState,
     project_id:    &str,
     deployment_id: &str,
+    user_sub:      &str,
 ) -> Result<Arc<Agent>, ApiError> {
     let ctx = load_deployment_context(&state.neo4j, project_id, deployment_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
-    Ok(state.agent_builder.build_for_deployment_text_only(&ctx))
+    let user_llm = crate::api::resolve_user_llm(
+        &state.llm, &state.llm_configs, &state.user_key_store, user_sub,
+    ).await;
+    Ok(if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
+        state.agent_builder.build_for_deployment_text_only(&ctx)
+    } else {
+        state.agent_builder.build_for_deployment_text_only_with_llm(&ctx, user_llm)
+    })
 }
 
 async fn build_deployment_agent_design(
     state:         &ProjectState,
     project_id:    &str,
     deployment_id: &str,
+    user_sub:      &str,
 ) -> Result<Arc<Agent>, ApiError> {
     let ctx = load_deployment_context(&state.neo4j, project_id, deployment_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
-    Ok(state.agent_builder.build_for_deployment_design(project_id.to_string(), &ctx))
+    let user_llm = crate::api::resolve_user_llm(
+        &state.llm, &state.llm_configs, &state.user_key_store, user_sub,
+    ).await;
+    Ok(if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
+        state.agent_builder.build_for_deployment_design(project_id.to_string(), &ctx)
+    } else {
+        state.agent_builder.build_for_deployment_design_with_llm(project_id.to_string(), &ctx, user_llm)
+    })
 }
 
 fn generation_failed(response_text: &str) -> ApiError {
@@ -918,7 +942,7 @@ pub async fn generate_environment_questions(
 ) -> Result<impl IntoResponse, ApiError> {
     let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id).await?;
+    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
     let prompt = "List 4 to 8 short, concrete questions a field engineer should answer about the \
                   customer's environment before designing this deployment, based on the product \
@@ -1005,7 +1029,7 @@ async fn prepare_design_generation(
     let ctx = load_deployment_context(&state.neo4j, project_id, deployment_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
-    let agent = build_deployment_agent_design(state, project_id, deployment_id).await?;
+    let agent = build_deployment_agent_design(state, project_id, deployment_id, &user.sub).await?;
 
     let mut prompt = String::from(match &ctx.product_template_design {
         Some(_) => "Write the deployment design document in Markdown, following the Design \
@@ -1176,7 +1200,7 @@ pub async fn generate_design_decisions(
 ) -> Result<impl IntoResponse, ApiError> {
     let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id).await?;
+    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
     let design_doc_id = deployment["design_doc"]["id"].as_str()
@@ -1229,7 +1253,7 @@ pub async fn revise_design(
     }
     let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id).await?;
+    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
     let design_doc_id = deployment["design_doc"]["id"].as_str()
@@ -1278,7 +1302,7 @@ async fn prepare_design_change_proposal(
     }
 
     require_project_access(&state.neo4j, &user.sub, &user.role, project_id).await?;
-    let agent = build_deployment_agent_text_only(state, project_id, deployment_id).await?;
+    let agent = build_deployment_agent_text_only(state, project_id, deployment_id, &user.sub).await?;
 
     let deployment = fetch_deployment_detail(&state.neo4j, project_id, deployment_id).await?;
     let design_doc_id = deployment["design_doc"]["id"].as_str()
@@ -1489,7 +1513,7 @@ async fn prepare_provision_generation(
 ) -> Result<(Arc<Agent>, String), ApiError> {
     let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id).await?;
+    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
     let design_doc_id = deployment["design_doc"]["id"].as_str()
@@ -1660,7 +1684,7 @@ async fn prepare_provision_proposal(
 
     let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id).await?;
+    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
     let error_section = if error_context.is_empty() {
         String::new()

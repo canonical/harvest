@@ -160,7 +160,7 @@ fn deployments_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn LlmProvider>) 
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,
     });
-    let project_state = Arc::new(ProjectState::new(Arc::clone(&neo4j), agent, builder));
+    let project_state = Arc::new(ProjectState::new(Arc::clone(&neo4j), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None));
 
     let project_routes = Router::new()
         .route("/projects", route_post(create_project))
