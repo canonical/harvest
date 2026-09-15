@@ -1,4 +1,5 @@
 use std::io::Stdout;
+use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers};
@@ -9,7 +10,7 @@ use crossterm::{execute, event::DisableMouseCapture, event::EnableMouseCapture};
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
@@ -21,11 +22,17 @@ use crate::chat::ChatView;
 pub enum AppEvent {
     Chat(crate::api::AgentEvent),
     ChatError(String),
+    Authenticated(String, String),
+    AuthFailed(String),
 }
 
 pub struct AppData {
     pub client: Client,
     pub status: String,
+    pub authenticated: bool,
+    pub user_email: Option<String>,
+    pub auth_url: Option<String>,
+    pub auth_polling: bool,
     pub event_tx: mpsc::UnboundedSender<AppEvent>,
 }
 
@@ -51,6 +58,65 @@ impl AppData {
             }
         });
     }
+
+    pub fn start_tui_login(&mut self) {
+        if self.auth_polling {
+            return;
+        }
+        let client = self.client.clone();
+        let tx = self.event_tx.clone();
+        self.auth_polling = true;
+        self.status = "Requesting authorization…".to_string();
+
+        tokio::spawn(async move {
+            let body = serde_json::json!({});
+            match client.post_json::<_, serde_json::Value>("/auth/tui/login", &body).await {
+                Ok(resp) => {
+                    let uuid = resp.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let auth_url = resp.get("auth_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+                    if uuid.is_empty() {
+                        let _ = tx.send(AppEvent::AuthFailed("no uuid returned".to_string()));
+                        return;
+                    }
+
+                    let _ = tx.send(AppEvent::AuthFailed(format!("__auth_url__{}", auth_url)));
+
+                    let poll_client = client.clone();
+                    for _ in 0..150 {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        match poll_client.get_json::<serde_json::Value>(&format!("/auth/tui/poll/{}", uuid)).await {
+                            Ok(resp) => {
+                                let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                                match status {
+                                    "authorized" => {
+                                        let token = resp.get("token").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                        let email = resp.get("email").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                        let _ = tx.send(AppEvent::Authenticated(token, email));
+                                        return;
+                                    }
+                                    "denied" => {
+                                        let _ = tx.send(AppEvent::AuthFailed("denied".to_string()));
+                                        return;
+                                    }
+                                    "expired" => {
+                                        let _ = tx.send(AppEvent::AuthFailed("expired".to_string()));
+                                        return;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    let _ = tx.send(AppEvent::AuthFailed("timeout".to_string()));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppEvent::AuthFailed(format!("login request failed: {}", e)));
+                }
+            }
+        });
+    }
 }
 
 pub struct App {
@@ -66,9 +132,20 @@ impl App {
         let client = Client::new(cfg)?;
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
+        let authenticated = client.token.is_some();
+        let status = if authenticated {
+            "ready".to_string()
+        } else {
+            "not authenticated — type /login".to_string()
+        };
+
         let data = AppData {
             client,
-            status: String::from("ready"),
+            status,
+            authenticated,
+            user_email: None,
+            auth_url: None,
+            auth_polling: false,
             event_tx,
         };
 
@@ -139,6 +216,25 @@ impl App {
             AppEvent::ChatError(msg) => {
                 self.chat.on_chat_error(&mut self.data, msg);
             }
+            AppEvent::Authenticated(token, email) => {
+                self.data.client = self.data.client.rebuild_with_token(token);
+                self.data.authenticated = true;
+                self.data.user_email = Some(email.clone());
+                self.data.auth_url = None;
+                self.data.auth_polling = false;
+                self.data.status = format!("authenticated as {}", email);
+            }
+            AppEvent::AuthFailed(msg) => {
+                if msg.starts_with("__auth_url__") {
+                    let url = msg["__auth_url__".len()..].to_string();
+                    self.data.auth_url = Some(url);
+                    self.data.status = "waiting for authorization…".to_string();
+                } else {
+                    self.data.auth_url = None;
+                    self.data.auth_polling = false;
+                    self.data.status = format!("auth failed: {}", msg);
+                }
+            }
         }
     }
 
@@ -161,6 +257,11 @@ impl App {
             return;
         }
 
+        if !self.data.authenticated {
+            self.chat.handle_key_async(key, &mut self.data).await;
+            return;
+        }
+
         self.chat.handle_key_async(key, &mut self.data).await;
     }
 
@@ -171,7 +272,12 @@ impl App {
             .constraints([Constraint::Min(0), Constraint::Length(1)])
             .split(area);
 
-        self.chat.render(f, chunks[0], &self.data);
+        if self.data.authenticated {
+            self.chat.render(f, chunks[0], &self.data);
+        } else {
+            self.draw_unauthenticated(f, chunks[0]);
+        }
+
         self.draw_statusbar(f, chunks[1]);
 
         if self.show_help {
@@ -179,12 +285,71 @@ impl App {
         }
     }
 
-    fn draw_statusbar(&self, f: &mut ratatui::Frame, area: Rect) {
-        let line = Line::from(vec![
-            Span::styled(
-                " q quit  ? help  Alt-Enter send  Ctrl-S send  PgUp/PgDn scroll ",
+    fn draw_unauthenticated(&self, f: &mut ratatui::Frame, area: Rect) {
+        let mut lines: Vec<Line> = Vec::new();
+
+        lines.push(Line::from(Span::styled(
+            " Not authenticated",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " Type /login to authenticate via the Harvest Web UI.",
+            Style::default().fg(Color::Reset),
+        )));
+        lines.push(Line::from(Span::styled(
+            " Or set HARVEST_EMAIL + HARVEST_PASSWORD environment variables.",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(""));
+
+        if let Some(url) = &self.data.auth_url {
+            lines.push(Line::from(Span::styled(
+                " Open this link in your browser to authenticate:",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!("  {}", url),
+                Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " Waiting for authorization…",
                 Style::default().fg(Color::DarkGray),
-            ),
+            )));
+        }
+
+        let input_area = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(3)])
+            .split(area);
+
+        let para = Paragraph::new(lines);
+        f.render_widget(para, input_area[0]);
+
+        let input_text = self.chat.get_input_for_auth();
+        let input_para = Paragraph::new(Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(input_text.clone()),
+            Span::styled(" ", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+        ]))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Type /login to authenticate "),
+        );
+        f.render_widget(input_para, input_area[1]);
+    }
+
+    fn draw_statusbar(&self, f: &mut ratatui::Frame, area: Rect) {
+        let hint = if self.data.authenticated {
+            " q quit  ? help  Alt-Enter send  Ctrl-S send  PgUp/PgDn scroll "
+        } else {
+            " q quit  ? help  /login to authenticate "
+        };
+        let line = Line::from(vec![
+            Span::styled(hint, Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled(
                 format!(" {} ", self.data.status),
@@ -200,6 +365,7 @@ impl App {
             "",
             "  q               quit",
             "  ? / F1          toggle this help",
+            "  /login          authenticate via Web UI",
             "",
             "Chat:",
             "  Alt-Enter       send query",

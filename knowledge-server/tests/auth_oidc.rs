@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt as _;
 
 use knowledge_server::{
-    auth::{handlers as auth_handlers, AuthState, OidcEndpoints},
+    auth::{handlers as auth_handlers, tui as auth_tui, AuthState, OidcEndpoints},
     config::{AuthConfig, OidcConfig, UiConfig},
 };
 
@@ -40,6 +40,7 @@ fn auth_config_with_oidc(issuer_url: &str) -> Arc<AuthConfig> {
         allow_local_login: true,
         google:            None,
         oidc:              Some(oidc_config(issuer_url)),
+        public_url:        None,
     })
 }
 
@@ -49,6 +50,7 @@ fn auth_config_no_oidc() -> Arc<AuthConfig> {
         allow_local_login: true,
         google:            None,
         oidc:              None,
+        public_url:        None,
     })
 }
 
@@ -82,6 +84,7 @@ async fn config_reports_oidc_enabled_with_display_name() {
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
+        tui_auth:         auth_tui::new_auth_map(),
     });
     let app  = oidc_router(auth);
 
@@ -106,6 +109,7 @@ async fn config_reports_oidc_disabled_when_not_configured() {
         oidc_endpoints:  None,
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
+        tui_auth:         auth_tui::new_auth_map(),
     });
     let app = oidc_router(auth);
 
@@ -132,6 +136,7 @@ async fn config_oidc_display_name_null_when_not_set() {
             redirect_uri:  "https://app.example.com/cb".into(),
             display_name:  None,
         }),
+        public_url:        None,
     });
     let ep = Arc::new(endpoints(&server.base_url()));
     let auth = Arc::new(AuthState {
@@ -142,6 +147,7 @@ async fn config_oidc_display_name_null_when_not_set() {
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
+        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
@@ -164,6 +170,7 @@ async fn oidc_redirect_returns_501_when_not_configured() {
         oidc_endpoints:  None,
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
+        tui_auth:         auth_tui::new_auth_map(),
     });
     let resp = oidc_router(auth)
         .oneshot(Request::builder().uri("/auth/oidc").body(Body::empty()).unwrap())
@@ -186,6 +193,7 @@ async fn oidc_redirect_returns_302_to_authorization_endpoint() {
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
+        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
@@ -211,6 +219,7 @@ async fn oidc_redirect_url_contains_required_params() {
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
+        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
@@ -244,6 +253,7 @@ async fn oidc_redirect_stores_session_server_side() {
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
+        tui_auth:         auth_tui::new_auth_map(),
     });
     let auth_ref = Arc::clone(&auth);
 
@@ -281,6 +291,7 @@ async fn oidc_callback_returns_400_when_no_code() {
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
+        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
@@ -309,6 +320,7 @@ async fn oidc_callback_returns_400_on_idp_error_param() {
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
+        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
@@ -339,6 +351,7 @@ async fn oidc_callback_returns_400_on_state_mismatch() {
         oidc_endpoints:  Some(ep),
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
+        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
@@ -366,6 +379,7 @@ async fn oidc_callback_returns_501_when_not_configured() {
         oidc_endpoints:  None,
         oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
+        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
