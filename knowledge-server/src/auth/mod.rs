@@ -48,6 +48,13 @@ pub async fn setup_constraints(neo4j: &Neo4jClient) -> Result<()> {
 }
 
 fn token_from_request(req: &Request) -> Option<String> {
+    if let Some(auth) = req.headers().get(axum::http::header::AUTHORIZATION) {
+        if let Ok(s) = auth.to_str() {
+            if let Some(bearer) = s.strip_prefix("Bearer ") {
+                return Some(bearer.to_string());
+            }
+        }
+    }
     req.headers()
         .get(axum::http::header::COOKIE)
         .and_then(|v| v.to_str().ok())
