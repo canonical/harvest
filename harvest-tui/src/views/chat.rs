@@ -63,6 +63,7 @@ pub struct ChatView {
     messages: Vec<MessageBlock>,
     input: String,
     scroll: usize,
+    at_bottom: bool,
     cur_steps: Vec<StepEntry>,
     cur_thinking: String,
     cur_intent: Option<IntentMode>,
@@ -476,6 +477,7 @@ impl ChatView {
             messages: Vec::new(),
             input: String::new(),
             scroll: 0,
+            at_bottom: true,
             cur_steps: Vec::new(),
             cur_thinking: String::new(),
             cur_intent: None,
@@ -697,6 +699,8 @@ impl ChatView {
         self.error_banner = None;
         self.step_mode = false;
         self.step_selected = None;
+        self.at_bottom = true;
+        self.scroll = 0;
         app.status = "streaming…".to_string();
 
         let body = QueryRequest {
@@ -771,8 +775,15 @@ impl ChatView {
         let count = lines.len();
         let visible = transcript_area.height as usize;
         let max_scroll = count.saturating_sub(visible);
+
+        if self.at_bottom {
+            self.scroll = max_scroll;
+        }
         if self.scroll > max_scroll {
             self.scroll = max_scroll;
+        }
+        if max_scroll == 0 || self.scroll == max_scroll {
+            self.at_bottom = true;
         }
         let start = if count > visible {
             count - visible - (max_scroll - self.scroll).min(count - visible)
@@ -1381,16 +1392,18 @@ impl ChatView {
                 }
             }
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_add(5);
+                self.scroll = self.scroll.saturating_sub(5);
+                self.at_bottom = false;
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_sub(5);
+                self.scroll = self.scroll.saturating_add(5);
             }
             KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.scroll = self.scroll.saturating_add(3);
             }
             KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.scroll = self.scroll.saturating_sub(3);
+                self.at_bottom = false;
             }
             KeyCode::Enter => {
                 if let Some(m) = self.messages.iter().rev().find(|m| m.streaming) {
