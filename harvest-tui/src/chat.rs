@@ -1327,10 +1327,19 @@ fn render_markdown(input: &str, width: usize) -> Vec<Line<'static>> {
         let line = raw.trim_end();
         if line.trim_start().starts_with("```") {
             if in_code {
-                for cl in &code_buf {
-                    lines.push(Line::from(Span::styled(cl.clone(), Style::default().fg(Color::Green))));
+                let code_content = code_buf.join("\n");
+                let lang_lower = code_lang.to_lowercase();
+                if lang_lower == "mermaid" || lang_lower == "harvest-graph" {
+                    let diagram_lines = crate::diagram::render_diagram(&code_content, &lang_lower, width);
+                    for dl in diagram_lines {
+                        lines.push(dl);
+                    }
+                } else {
+                    for cl in &code_buf {
+                        lines.push(Line::from(Span::styled(cl.clone(), Style::default().fg(Color::Green))));
+                    }
+                    lines.push(Line::from(""));
                 }
-                lines.push(Line::from(""));
                 code_buf.clear();
                 code_lang.clear();
                 in_code = false;
@@ -1338,7 +1347,8 @@ fn render_markdown(input: &str, width: usize) -> Vec<Line<'static>> {
                 flush_para(&mut paragraph, &mut lines, width);
                 in_code = true;
                 code_lang = line.trim_start().trim_start_matches('`').trim().to_string();
-                if !code_lang.is_empty() {
+                let lang_lower = code_lang.to_lowercase();
+                if lang_lower != "mermaid" && lang_lower != "harvest-graph" && !code_lang.is_empty() {
                     lines.push(Line::from(Span::styled(
                         format!(" {} ", code_lang),
                         Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::ITALIC),
@@ -1396,8 +1406,17 @@ fn render_markdown(input: &str, width: usize) -> Vec<Line<'static>> {
     }
 
     if in_code {
-        for cl in &code_buf {
-            lines.push(Line::from(Span::styled(cl.clone(), Style::default().fg(Color::Green))));
+        let code_content = code_buf.join("\n");
+        let lang_lower = code_lang.to_lowercase();
+        if lang_lower == "mermaid" || lang_lower == "harvest-graph" {
+            let diagram_lines = crate::diagram::render_diagram(&code_content, &lang_lower, width);
+            for dl in diagram_lines {
+                lines.push(dl);
+            }
+        } else {
+            for cl in &code_buf {
+                lines.push(Line::from(Span::styled(cl.clone(), Style::default().fg(Color::Green))));
+            }
         }
     } else {
         flush_para(&mut paragraph, &mut lines, width);
