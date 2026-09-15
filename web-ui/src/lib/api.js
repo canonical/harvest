@@ -114,6 +114,38 @@ export async function fetchLlmProviders() {
   }
 }
 
+const LLM_USER_KEYS_URL = '/llm/user-keys';
+
+export async function fetchLlmUserKeys() {
+  const res = await fetch(LLM_USER_KEYS_URL);
+  if (!res.ok) return { providers: [] };
+  return res.json();
+}
+
+export async function setLlmUserKey(providerId, apiKey) {
+  const res = await fetch(`${LLM_USER_KEYS_URL}/${encodeURIComponent(providerId)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function deleteLlmUserKey(providerId) {
+  const res = await fetch(`${LLM_USER_KEYS_URL}/${encodeURIComponent(providerId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
 export async function queryOnce(query) {
   const response = await fetch(QUERY_URL, {
     method: 'POST',
