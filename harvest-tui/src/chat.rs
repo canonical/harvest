@@ -2,87 +2,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use ratatui::Frame;
 
 use crate::api::{AgentEvent, IntentMode, QueryRequest, Source, UsedProvider};
 use crate::app::AppData;
-use crate::widgets::markdown::render_markdown;
 
 use std::collections::BTreeMap;
-
-#[derive(Clone, Debug)]
-struct StepEntry {
-    name: String,
-    input: serde_json::Value,
-    #[allow(dead_code)]
-    input_preview: String,
-    result_preview: Option<String>,
-    open: bool,
-}
-
-#[derive(Clone, Debug)]
-enum Role {
-    User,
-    Assistant,
-}
-
-#[derive(Clone, Debug)]
-struct MessageBlock {
-    role: Role,
-    timestamp: String,
-    text: String,
-    steps: Vec<StepEntry>,
-    sources: Vec<Source>,
-    intent: Option<IntentMode>,
-    phase: Option<String>,
-    thinking: String,
-    streaming: bool,
-    question: Option<(String, Vec<String>)>,
-    confirm: Option<ConfirmCard>,
-    provider: Option<UsedProvider>,
-    parallel_research: Vec<ParallelLead>,
-    duration_ms: u64,
-}
-
-#[derive(Clone, Debug)]
-struct ConfirmCard {
-    id: String,
-    name: String,
-    description: String,
-}
-
-#[derive(Clone, Debug)]
-struct ParallelLead {
-    name: String,
-    status: String,
-    preview: String,
-}
-
-pub struct ChatView {
-    messages: Vec<MessageBlock>,
-    input: String,
-    scroll: usize,
-    at_bottom: bool,
-    cur_steps: Vec<StepEntry>,
-    cur_thinking: String,
-    cur_intent: Option<IntentMode>,
-    cur_phase: Option<String>,
-    cur_sources: Vec<Source>,
-    cur_provider: Option<UsedProvider>,
-    streaming: bool,
-    citation_open: Option<(Source, Option<crate::api::SymbolSource>)>,
-    error_banner: Option<String>,
-    history: Vec<String>,
-    history_idx: Option<usize>,
-    conversation_id: Option<String>,
-    show_history: bool,
-    history_state: ListState,
-    step_selected: Option<usize>,
-    step_mode: bool,
-    #[allow(dead_code)]
-    source_idx: Option<usize>,
-}
 
 const CHAIN_BORDER: char = '│';
 const CHAIN_INDENT: &str = " │  ";
@@ -106,6 +32,7 @@ fn intent_color(mode: &IntentMode) -> Color {
     }
 }
 
+#[allow(dead_code)]
 fn intent_short(mode: &IntentMode) -> &'static str {
     match mode {
         IntentMode::Research => "research",
@@ -163,7 +90,6 @@ fn group_sources(sources: &[Source]) -> Vec<(String, String, String, Vec<&Source
 
 fn describe_tool_call(name: &str, input: &serde_json::Value) -> String {
     let get = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("");
-    let get_raw = |k: &str| input.get(k).and_then(|v| v.as_str()).unwrap_or("");
     match name {
         "list_repositories" => "Discovering available repositories".to_string(),
         "list_agents" => "Checking connected agents".to_string(),
@@ -205,7 +131,7 @@ fn describe_tool_call(name: &str, input: &serde_json::Value) -> String {
         }
         "run_cypher" => "Querying the code graph".to_string(),
         "run_command" => {
-            let cmd = get_raw("command");
+            let cmd = get("command");
             let agent = get("agent_id");
             let host = get("hostname");
             let target = if !host.is_empty() { host } else if !agent.is_empty() { agent } else { "agent" };
@@ -383,7 +309,7 @@ fn extract_result_lines(name: &str, preview: &str, _input: &serde_json::Value, w
             let stderr = parsed.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
             let exit = parsed.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
             let mut out = Vec::new();
-            for l in stdout.lines().take(w.min(10)) {
+            for l in stdout.lines().take(10) {
                 out.push(format!("  {}", truncate(l, w)));
             }
             if !stderr.is_empty() {
@@ -471,6 +397,75 @@ fn extract_result_lines(name: &str, preview: &str, _input: &serde_json::Value, w
     }
 }
 
+#[derive(Clone, Debug)]
+struct StepEntry {
+    name: String,
+    input: serde_json::Value,
+    #[allow(dead_code)]
+    input_preview: String,
+    result_preview: Option<String>,
+    open: bool,
+}
+
+#[derive(Clone, Debug)]
+enum Role {
+    User,
+    Assistant,
+}
+
+#[derive(Clone, Debug)]
+struct MessageBlock {
+    role: Role,
+    timestamp: String,
+    text: String,
+    steps: Vec<StepEntry>,
+    sources: Vec<Source>,
+    intent: Option<IntentMode>,
+    phase: Option<String>,
+    thinking: String,
+    streaming: bool,
+    question: Option<(String, Vec<String>)>,
+    confirm: Option<ConfirmCard>,
+    provider: Option<UsedProvider>,
+    parallel_research: Vec<ParallelLead>,
+    duration_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ConfirmCard {
+    #[allow(dead_code)]
+    id: String,
+    name: String,
+    description: String,
+}
+
+#[derive(Clone, Debug)]
+struct ParallelLead {
+    name: String,
+    status: String,
+    #[allow(dead_code)]
+    preview: String,
+}
+
+pub struct ChatView {
+    messages: Vec<MessageBlock>,
+    input: String,
+    scroll: usize,
+    at_bottom: bool,
+    cur_steps: Vec<StepEntry>,
+    cur_thinking: String,
+    cur_intent: Option<IntentMode>,
+    cur_phase: Option<String>,
+    cur_sources: Vec<Source>,
+    cur_provider: Option<UsedProvider>,
+    streaming: bool,
+    error_banner: Option<String>,
+    history: Vec<String>,
+    history_idx: Option<usize>,
+    step_selected: Option<usize>,
+    step_mode: bool,
+}
+
 impl ChatView {
     pub fn new() -> Self {
         Self {
@@ -485,16 +480,11 @@ impl ChatView {
             cur_sources: Vec::new(),
             cur_provider: None,
             streaming: false,
-            citation_open: None,
             error_banner: None,
             history: Vec::new(),
             history_idx: None,
-            conversation_id: None,
-            show_history: false,
-            history_state: ListState::default(),
             step_selected: None,
             step_mode: false,
-            source_idx: None,
         }
     }
 
@@ -705,38 +695,20 @@ impl ChatView {
 
         let body = QueryRequest {
             query: q,
-            conversation_id: self.conversation_id.clone(),
-            provider_id: app.model_pick.as_ref().map(|(id, _)| id.clone()),
-            model: app.model_pick.as_ref().map(|(_, m)| m.clone()),
+            conversation_id: None,
+            provider_id: None,
+            model: None,
         };
         app.spawn_stream(body);
     }
 
-    pub fn render(&mut self, f: &mut Frame, area: Rect, app: &AppData) {
+    pub fn render(&mut self, f: &mut Frame, area: Rect, _app: &AppData) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Min(0), Constraint::Length(3)])
+            .constraints([Constraint::Min(0), Constraint::Length(3)])
             .split(area);
 
-        let header_line = if self.streaming {
-            let phase = self.cur_phase.as_deref().unwrap_or("Thinking…");
-            let intent_str = self
-                .cur_intent
-                .as_ref()
-                .map(|m| intent_short(m))
-                .unwrap_or("conversational");
-            format!(" Chat  [{intent_str} · {phase}]")
-        } else {
-            " Chat".to_string()
-        };
-        let header_para = Paragraph::new(Line::from(vec![
-            Span::styled(header_line, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" "),
-        ]))
-        .block(Block::default().borders(Borders::BOTTOM));
-        f.render_widget(header_para, chunks[0]);
-
-        let transcript_area = chunks[1];
+        let transcript_area = chunks[0];
         let mut lines: Vec<Line> = Vec::new();
 
         if let Some(err) = &self.error_banner {
@@ -785,6 +757,7 @@ impl ChatView {
         if max_scroll == 0 || self.scroll == max_scroll {
             self.at_bottom = true;
         }
+
         let start = if count > visible {
             count - visible - (max_scroll - self.scroll).min(count - visible)
         } else {
@@ -809,7 +782,7 @@ impl ChatView {
         let input_hint = if self.step_mode {
             " Steps mode: j/k select, Enter expand, Esc exit "
         } else {
-            " Query (Alt+Enter to send, Ctrl-H history) "
+            " Query (Alt+Enter to send) "
         };
         let input_para = Paragraph::new(Line::from(vec![
             Span::styled("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
@@ -821,62 +794,27 @@ impl ChatView {
                 .borders(Borders::ALL)
                 .title(input_hint),
         );
-        f.render_widget(input_para, chunks[2]);
-
-        if self.show_history {
-            self.render_history_popup(f, area, app);
-        }
-
-        if let Some((source, sym)) = &self.citation_open {
-            let pop = centered(area, 70, 60);
-            let content = sym
-                .as_ref()
-                .and_then(|s| s.source.clone())
-                .unwrap_or_else(|| "(no source available)".to_string());
-            let lines: Vec<Line> = content
-                .lines()
-                .enumerate()
-                .map(|(i, l)| {
-                    Line::from(vec![
-                        Span::styled(
-                            format!("{:>4} ", i + 1),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                        Span::styled(l.to_string(), Style::default().fg(Color::Green)),
-                    ])
-                })
-                .collect();
-            let para = Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(
-                        " {}:{}:{} ",
-                        source.file, source.line, source.repo
-                    )),
-            );
-            f.render_widget(para, pop);
-        }
+        f.render_widget(input_para, chunks[1]);
     }
 
     fn render_message(&self, m: &MessageBlock, lines: &mut Vec<Line>, width: usize) {
         match m.role {
-            Role::User => self.render_user_message(m, lines, width),
+            Role::User => self.render_user_message(m, lines),
             Role::Assistant => self.render_assistant_message(m, lines, width),
         }
         lines.push(Line::from(SECTION_GAP));
     }
 
-    fn render_user_message(&self, m: &MessageBlock, lines: &mut Vec<Line>, _width: usize) {
+    fn render_user_message(&self, m: &MessageBlock, lines: &mut Vec<Line>) {
         lines.push(Line::from(vec![
             Span::styled(" ● ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
             Span::styled("You", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
             Span::styled(format!("  {}", m.timestamp), Style::default().fg(Color::DarkGray)),
         ]));
         lines.push(Line::from(""));
-        let indent = "   ";
         for l in m.text.lines() {
             lines.push(Line::from(Span::styled(
-                format!("{indent}{l}"),
+                format!("   {l}"),
                 Style::default().fg(Color::Reset),
             )));
         }
@@ -892,14 +830,8 @@ impl ChatView {
         if let Some(p) = &m.provider {
             lines.push(Line::from(vec![
                 Span::styled("   ", Style::default()),
-                Span::styled(
-                    format!(" {} ", p.model),
-                    Style::default().fg(Color::LightRed),
-                ),
-                Span::styled(
-                    format!("· {} ", p.kind),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!(" {} ", p.model), Style::default().fg(Color::LightRed)),
+                Span::styled(format!("· {} ", p.kind), Style::default().fg(Color::DarkGray)),
             ]));
         }
 
@@ -912,10 +844,7 @@ impl ChatView {
             };
             lines.push(Line::from(vec![
                 Span::styled("   ", Style::default()),
-                Span::styled(
-                    format!(" {} ", label),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!(" {} ", label), Style::default().fg(Color::DarkGray)),
             ]));
         }
 
@@ -924,10 +853,7 @@ impl ChatView {
             let label = intent_label(intent);
             lines.push(Line::from(vec![
                 Span::styled("   ", Style::default()),
-                Span::styled(
-                    format!(" {} ", label),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(format!(" {} ", label), Style::default().fg(color).add_modifier(Modifier::BOLD)),
             ]));
         }
 
@@ -935,10 +861,7 @@ impl ChatView {
             if m.streaming {
                 lines.push(Line::from(vec![
                     Span::styled("   ", Style::default()),
-                    Span::styled(
-                        format!(" {} ", phase),
-                        Style::default().fg(Color::Blue),
-                    ),
+                    Span::styled(format!(" {} ", phase), Style::default().fg(Color::Blue)),
                 ]));
             }
         }
@@ -1033,10 +956,7 @@ impl ChatView {
                 lines.push(chain_line(vec![
                     Span::styled(format!("{dot} "), Style::default().fg(c)),
                     Span::styled(lead.name.clone(), Style::default().fg(Color::Reset)),
-                    Span::styled(
-                        format!("  ({})", lead.status),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled(format!("  ({})", lead.status), Style::default().fg(Color::DarkGray)),
                 ]));
             }
             lines.push(chain_close(chain_color));
@@ -1079,14 +999,8 @@ impl ChatView {
         for group in &groups {
             if group.steps.len() >= 3 {
                 lines.push(chain_line(vec![
-                    Span::styled(
-                        format!(" {} ", group.noun()),
-                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("× {}", group.steps.len()),
-                        Style::default().fg(Color::DarkGray),
-                    ),
+                    Span::styled(format!(" {} ", group.noun()), Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("× {}", group.steps.len()), Style::default().fg(Color::DarkGray)),
                 ]));
                 for (i, step) in group.steps.iter().enumerate() {
                     let is_selected = self.step_mode && self.step_selected == Some(step_idx);
@@ -1104,10 +1018,7 @@ impl ChatView {
 
         if self.step_mode {
             lines.push(chain_line(vec![
-                Span::styled(
-                    " j/k select  Enter expand  Esc exit",
-                    Style::default().fg(Color::Blue),
-                ),
+                Span::styled(" j/k select  Enter expand  Esc exit", Style::default().fg(Color::Blue)),
             ]));
         }
 
@@ -1205,10 +1116,7 @@ impl ChatView {
             lines.push(Line::from(vec![
                 Span::styled("     ", Style::default()),
                 Span::styled(file.clone(), Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD)),
-                Span::styled(
-                    format!("  {} {}", repo, version),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled(format!("  {} {}", repo, version), Style::default().fg(Color::DarkGray)),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("       ", Style::default()),
@@ -1217,69 +1125,13 @@ impl ChatView {
         }
     }
 
-    fn render_history_popup(&mut self, f: &mut Frame, area: Rect, app: &AppData) {
-        let pop = centered(area, 50, 60);
-        let mut items: Vec<ListItem> = Vec::new();
-        for c in &app.conversations {
-            items.push(ListItem::new(vec![
-                Line::from(Span::styled(
-                    c.title.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    format!("  {} messages", c.message_count),
-                    Style::default().fg(Color::DarkGray),
-                )),
-            ]));
-        }
-        if items.is_empty() {
-            items.push(ListItem::new(Line::from(Span::styled(
-                " no conversations",
-                Style::default().fg(Color::DarkGray),
-            ))));
-        }
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" History (Esc close, Enter load, d delete) "),
-            )
-            .highlight_style(
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("▶ ");
-        f.render_stateful_widget(list, pop, &mut self.history_state);
-    }
-
     pub async fn handle_key_async(&mut self, key: KeyEvent, app: &mut AppData) {
-        if self.citation_open.is_some() {
-            if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
-                self.citation_open = None;
-            }
-            return;
-        }
-
-        if self.show_history {
-            self.handle_history_key(key, app).await;
-            return;
-        }
-
         if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
             return;
         }
 
-        if key.code == KeyCode::Char('h') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.show_history = !self.show_history;
-            if self.show_history {
-                self.history_state.select(Some(0));
-            }
-            return;
-        }
-
         if self.step_mode {
-            self.handle_step_key(key, app).await;
+            self.handle_step_key(key);
             return;
         }
 
@@ -1310,50 +1162,14 @@ impl ChatView {
                     }
                 }
             }
-            if let Some(confirm) = &m.confirm {
+if let Some(_confirm) = &m.confirm {
                 if key.code == KeyCode::Char('y') && key.modifiers == KeyModifiers::NONE {
-                    let id = confirm.id.clone();
-                    let pid = app.current_project_id();
-                    let conv = self.conversation_id.clone();
-                    let client = app.client.clone();
-                    if let (Some(pid), Some(conv)) = (pid, conv) {
-                        let body = serde_json::json!({
-                            "results": [{
-                                "action_id": id,
-                                "approved": true,
-                            }]
-                        });
-                        let _ = client
-                            .post_text(
-                                &format!("/projects/{pid}/conversations/{conv}/resume"),
-                                &body,
-                            )
-                            .await;
-                    }
                     if let Some(m) = self.messages.iter_mut().rev().find(|m| m.streaming) {
                         m.confirm = None;
                     }
                     return;
                 }
                 if key.code == KeyCode::Char('n') && key.modifiers == KeyModifiers::NONE {
-                    let id = confirm.id.clone();
-                    let pid = app.current_project_id();
-                    let conv = self.conversation_id.clone();
-                    let client = app.client.clone();
-                    if let (Some(pid), Some(conv)) = (pid, conv) {
-                        let body = serde_json::json!({
-                            "results": [{
-                                "action_id": id,
-                                "approved": false,
-                            }]
-                        });
-                        let _ = client
-                            .post_text(
-                                &format!("/projects/{pid}/conversations/{conv}/resume"),
-                                &body,
-                            )
-                            .await;
-                    }
                     if let Some(m) = self.messages.iter_mut().rev().find(|m| m.streaming) {
                         m.confirm = None;
                     }
@@ -1417,41 +1233,7 @@ impl ChatView {
         }
     }
 
-    async fn handle_history_key(&mut self, key: KeyEvent, app: &mut AppData) {
-        match key.code {
-            KeyCode::Esc => {
-                self.show_history = false;
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                let i = self.history_state.selected().unwrap_or(0);
-                self.history_state.select(Some(i.saturating_sub(1)));
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                let len = app.conversations.len();
-                if len > 0 {
-                    let i = self.history_state.selected().unwrap_or(0);
-                    self.history_state.select(Some((i + 1).min(len - 1)));
-                }
-            }
-            KeyCode::Char('d') => {
-                if let Some(idx) = self.history_state.selected() {
-                    if let Some(c) = app.conversations.get(idx) {
-                        let cid = c.id.clone();
-                        if let Some(pid) = app.current_project_id() {
-                            let client = app.client.clone();
-                            let _ = client
-                                .delete(&format!("/projects/{pid}/conversations/{cid}"))
-                                .await;
-                            app.refresh_side_data().await;
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    async fn handle_step_key(&mut self, key: KeyEvent, _app: &mut AppData) {
+    fn handle_step_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
                 self.step_mode = false;
@@ -1522,34 +1304,143 @@ fn group_tool_calls(steps: &[StepEntry]) -> Vec<ToolGroup> {
     groups
 }
 
-fn wrap_dim(text: &str, width: usize) -> Vec<String> {
+fn render_markdown(input: &str, width: usize) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut in_code = false;
+    let mut code_lang = String::new();
+    let mut code_buf: Vec<String> = Vec::new();
+    let mut paragraph: Vec<String> = Vec::new();
+
+    let flush_para = |para: &mut Vec<String>, out: &mut Vec<Line<'static>>, w: usize| {
+        if para.is_empty() {
+            return;
+        }
+        let joined = para.join(" ");
+        *para = Vec::new();
+        for chunk in wrap_text(&joined, w) {
+            out.push(Line::from(Span::styled(chunk, Style::default().fg(Color::Reset))));
+        }
+        out.push(Line::from(""));
+    };
+
+    for raw in input.lines() {
+        let line = raw.trim_end();
+        if line.trim_start().starts_with("```") {
+            if in_code {
+                for cl in &code_buf {
+                    lines.push(Line::from(Span::styled(cl.clone(), Style::default().fg(Color::Green))));
+                }
+                lines.push(Line::from(""));
+                code_buf.clear();
+                code_lang.clear();
+                in_code = false;
+            } else {
+                flush_para(&mut paragraph, &mut lines, width);
+                in_code = true;
+                code_lang = line.trim_start().trim_start_matches('`').trim().to_string();
+                if !code_lang.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {} ", code_lang),
+                        Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    )));
+                }
+            }
+            continue;
+        }
+        if in_code {
+            code_buf.push(line.to_string());
+            continue;
+        }
+        if line.is_empty() {
+            flush_para(&mut paragraph, &mut lines, width);
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("# ") {
+            flush_para(&mut paragraph, &mut lines, width);
+            for w in wrap_text(rest.trim(), width.saturating_sub(2)) {
+                lines.push(Line::from(Span::styled(w, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+            }
+            lines.push(Line::from(""));
+        } else if let Some(rest) = line.strip_prefix("## ") {
+            flush_para(&mut paragraph, &mut lines, width);
+            for w in wrap_text(rest.trim(), width.saturating_sub(2)) {
+                lines.push(Line::from(Span::styled(w, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+            }
+            lines.push(Line::from(""));
+        } else if let Some(rest) = line.strip_prefix("### ") {
+            flush_para(&mut paragraph, &mut lines, width);
+            for w in wrap_text(rest.trim(), width.saturating_sub(2)) {
+                lines.push(Line::from(Span::styled(w, Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))));
+            }
+            lines.push(Line::from(""));
+        } else if line.starts_with("- ") || line.starts_with("* ") {
+            flush_para(&mut paragraph, &mut lines, width);
+            let item = line[2..].trim();
+            for (i, w) in wrap_text(item, width.saturating_sub(2)).into_iter().enumerate() {
+                let prefix = if i == 0 { "  • " } else { "    " };
+                lines.push(Line::from(Span::styled(format!("{prefix}{w}"), Style::default().fg(Color::Reset))));
+            }
+        } else if let Some(idx) = line.find(". ") {
+            if line[..idx].chars().all(|c| c.is_ascii_digit()) {
+                flush_para(&mut paragraph, &mut lines, width);
+                let item = line[idx + 2..].trim();
+                for w in wrap_text(item, width.saturating_sub(3)) {
+                    lines.push(Line::from(Span::styled(format!("  {w}"), Style::default().fg(Color::Reset))));
+                }
+                continue;
+            }
+            paragraph.push(line.to_string());
+        } else {
+            paragraph.push(line.to_string());
+        }
+    }
+
+    if in_code {
+        for cl in &code_buf {
+            lines.push(Line::from(Span::styled(cl.clone(), Style::default().fg(Color::Green))));
+        }
+    } else {
+        flush_para(&mut paragraph, &mut lines, width);
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = Vec::new();
-    for raw in text.lines() {
-        if raw.is_empty() {
+    for raw_line in text.split('\n') {
+        if raw_line.is_empty() {
             out.push(String::new());
             continue;
         }
-        let mut cur = String::new();
-        for word in raw.split_whitespace() {
-            if cur.is_empty() {
-                cur = word.to_string();
-            } else if cur.len() + 1 + word.len() <= width {
-                cur.push(' ');
-                cur.push_str(word);
+        let mut current = String::new();
+        for word in raw_line.split_whitespace() {
+            if current.is_empty() {
+                current = word.to_string();
+            } else if current.len() + 1 + word.len() <= width {
+                current.push(' ');
+                current.push_str(word);
             } else {
-                out.push(std::mem::take(&mut cur));
-                cur = word.to_string();
+                out.push(std::mem::take(&mut current));
+                current = word.to_string();
             }
         }
-        if !cur.is_empty() {
-            out.push(cur);
+        if !current.is_empty() {
+            out.push(current);
         }
     }
     if out.is_empty() {
         out.push(String::new());
     }
     out
+}
+
+fn wrap_dim(text: &str, width: usize) -> Vec<String> {
+    wrap_text(text, width)
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -1560,12 +1451,4 @@ fn truncate(s: &str, n: usize) -> String {
         out.push('…');
         out
     }
-}
-
-fn centered(area: Rect, width_pct: u16, height_pct: u16) -> Rect {
-    let h = area.height * height_pct / 100;
-    let w = area.width * width_pct / 100;
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    Rect::new(x, y, w, h)
 }
