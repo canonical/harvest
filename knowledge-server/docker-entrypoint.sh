@@ -32,9 +32,17 @@ password = "${NEO4J_PASSWORD:-devpassword}"
 jwt_secret        = "${JWT_SECRET}"
 allow_local_login = ${ALLOW_LOCAL_LOGIN:-true}
 
-[agent]
+ [agent]
 max_iterations = ${LLM_MAX_ITERATIONS:-20}
 EOF
+
+if [ -n "${USER_KEY_ENCRYPTION_KEY:-}" ]; then
+  cat >> "$CONFIG" << EOF
+
+[security]
+user_key_encryption_key = "${USER_KEY_ENCRYPTION_KEY}"
+EOF
+fi
 
 # Appends one [[llm]] block, reading fields from the env vars named
 # ${1}_PROVIDER, ${1}_MODEL, ${1}_API_KEY, etc. (indirect lookup via eval,
@@ -61,6 +69,7 @@ emit_llm_block() {
   eval "expose_to_ui=\"\${${prefix}_EXPOSE_TO_UI:-}\""
   eval "display_name=\"\${${prefix}_NAME:-}\""
   eval "models=\"\${${prefix}_MODELS:-}\""
+  eval "user_provided_key=\"\${${prefix}_USER_PROVIDED_KEY:-}\""
 
   : "${provider:?${prefix}_PROVIDER environment variable is required}"
 
@@ -70,11 +79,15 @@ emit_llm_block() {
 
   case "$provider" in
     anthropic)
-      : "${api_key:?${prefix}_API_KEY environment variable is required}"
+      if [ "$user_provided_key" != "true" ]; then
+        : "${api_key:?${prefix}_API_KEY environment variable is required}"
+      fi
       default_model="claude-sonnet-4-6"
       ;;
     gemini)
-      : "${api_key:?${prefix}_API_KEY environment variable is required}"
+      if [ "$user_provided_key" != "true" ]; then
+        : "${api_key:?${prefix}_API_KEY environment variable is required}"
+      fi
       default_model="gemini-2.5-flash-preview-05-20"
       ;;
     openai-compatible)
@@ -104,6 +117,7 @@ EOF
   [ "$provider" = "openai-compatible" ] && printf 'base_url       = "%s"\n' "${base_url}" >> "$CONFIG"
   [ -n "$id" ]           && printf 'id             = "%s"\n' "${id}" >> "$CONFIG"
   [ -n "$expose_to_ui" ] && printf 'expose_to_ui   = %s\n' "${expose_to_ui}" >> "$CONFIG"
+  [ -n "$user_provided_key" ] && printf 'user_provided_key = %s\n' "${user_provided_key}" >> "$CONFIG"
   [ -n "$display_name" ] && printf 'name           = "%s"\n' "${display_name}" >> "$CONFIG"
   if [ -n "$models" ]; then
     models_toml=$(printf '%s' "$models" | awk -F',' '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i); printf "\"%s\"%s", $i, (i<NF?", ":"")}}')

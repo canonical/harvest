@@ -62,6 +62,7 @@ impl LlmProvider for AnthropicProvider {
     fn kind(&self) -> &str { "anthropic" }
     fn default_model(&self) -> &str { &self.model }
     fn expose_to_ui(&self) -> bool { self.meta.expose_to_ui }
+    fn user_provided_key(&self) -> bool { self.meta.user_provided_key }
     fn name(&self) -> Option<&str> { self.meta.name.as_deref() }
     fn configured_models(&self) -> Option<&[String]> { self.meta.models.as_deref() }
 
@@ -653,14 +654,14 @@ mod tests {
     #[test]
     fn expose_to_ui_reflects_constructor_value() {
         let visible = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("a"));
-        let hidden  = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "b".into(), expose_to_ui: false, name: None, models: None });
+        let hidden  = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "b".into(), expose_to_ui: false, ..Default::default() });
         assert!(visible.expose_to_ui());
         assert!(!hidden.expose_to_ui());
     }
 
     #[test]
     fn name_reflects_constructor_value() {
-        let named   = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "a".into(), expose_to_ui: true, name: Some("Claude Direct".into()), models: None });
+        let named   = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "a".into(), expose_to_ui: true, name: Some("Claude Direct".into()), ..Default::default() });
         let unnamed = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("b"));
         assert_eq!(named.name(), Some("Claude Direct"));
         assert_eq!(unnamed.name(), None);

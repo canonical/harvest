@@ -6,6 +6,7 @@ pub mod api;
 pub mod auth;
 pub mod chat_layouts;
 pub mod config;
+pub mod crypto;
 pub mod conversations;
 pub mod deployments;
 pub mod llm;

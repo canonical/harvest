@@ -67,7 +67,8 @@ impl LlmProvider for ErrorLlm {
 
 
 fn query_app(agent: Arc<Agent>) -> Router {
-    let qs = Arc::new(QueryState { agent, neo4j: None });
+    let llm = Arc::clone(agent.llm());
+    let qs = Arc::new(QueryState { agent, neo4j: None, llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6 });
     Router::new()
         .route("/query", post(handle_query))
         .route("/query/stream", post(handle_query_stream))
@@ -369,7 +370,8 @@ use neo4rs::{query, Graph};
 use knowledge_server::conversations::handlers as conv_handlers;
 
 fn query_app_with_neo4j(agent: Arc<Agent>, neo4j: Arc<Neo4jClient>) -> Router {
-    let qs = Arc::new(QueryState { agent, neo4j: Some(Arc::clone(&neo4j)) });
+    let llm = Arc::clone(agent.llm());
+    let qs = Arc::new(QueryState { agent, neo4j: Some(Arc::clone(&neo4j)), llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6 });
     let query_router = Router::new()
         .route("/query/stream", post(handle_query_stream))
         .with_state(qs);

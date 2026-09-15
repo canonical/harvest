@@ -131,6 +131,9 @@ pub struct ProjectState {
     pub neo4j:         Arc<Neo4jClient>,
     pub agent:         Arc<Agent>,
     pub agent_builder: Arc<ProjectAgentBuilder>,
+    pub llm:           Arc<dyn crate::llm::LlmProvider>,
+    pub llm_configs:   Arc<Vec<crate::config::LlmProviderConfig>>,
+    pub user_key_store: Option<Arc<crate::auth::user_keys::UserKeyStore>>,
     pub locks:     Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
     pub channels:  Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
     pub presence:  Arc<RwLock<HashMap<String, HashMap<String, UserPresence>>>>,
@@ -145,11 +148,21 @@ pub struct UserPresence {
 }
 
 impl ProjectState {
-    pub fn new(neo4j: Arc<Neo4jClient>, agent: Arc<Agent>, agent_builder: Arc<ProjectAgentBuilder>) -> Self {
+    pub fn new(
+        neo4j: Arc<Neo4jClient>,
+        agent: Arc<Agent>,
+        agent_builder: Arc<ProjectAgentBuilder>,
+        llm: Arc<dyn crate::llm::LlmProvider>,
+        llm_configs: Arc<Vec<crate::config::LlmProviderConfig>>,
+        user_key_store: Option<Arc<crate::auth::user_keys::UserKeyStore>>,
+    ) -> Self {
         Self {
             neo4j,
             agent,
             agent_builder,
+            llm,
+            llm_configs,
+            user_key_store,
             locks:     Arc::new(RwLock::new(HashMap::new())),
             channels:  Arc::new(Mutex::new(HashMap::new())),
             presence:  Arc::new(RwLock::new(HashMap::new())),
@@ -813,7 +826,14 @@ pub async fn project_query_stream(
         locks.entry(project_id.clone()).or_default().insert(body.conversation_id.clone(), user.name.clone());
     }
 
-    let agent = state.agent_builder.build(project_id.clone());
+    let user_llm = crate::api::resolve_user_llm(
+        &state.llm, &state.llm_configs, &state.user_key_store, &user.sub,
+    ).await;
+    let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
+        state.agent_builder.build(project_id.clone())
+    } else {
+        state.agent_builder.build_with_llm(project_id.clone(), user_llm.clone())
+    };
     let raw_messages = load_project_messages_raw(&state.neo4j, &project_id, &body.conversation_id).await;
     let raw_history = history_messages_from_raw(&raw_messages);
     let history = agent.compact_history(&raw_history).await;
@@ -846,7 +866,7 @@ pub async fn project_query_stream(
     let locks     = Arc::clone(&state.locks);
     let channels  = Arc::clone(&state.channels);
     let neo4j     = Arc::clone(&state.neo4j);
-    let llm       = Arc::clone(&state.agent_builder.llm);
+    let llm       = Arc::clone(agent.llm());
     let registry  = Arc::clone(&state.agent_builder.registry);
     let in_flight = Arc::clone(&state.in_flight);
     let paused_confirmations = Arc::clone(&state.paused_confirmations);
@@ -1265,7 +1285,14 @@ pub async fn resume_confirm_action(
         })
     }).collect();
 
-    let agent = state.agent_builder.build(project_id.clone());
+    let user_llm = crate::api::resolve_user_llm(
+        &state.llm, &state.llm_configs, &state.user_key_store, &user.sub,
+    ).await;
+    let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
+        state.agent_builder.build(project_id.clone())
+    } else {
+        state.agent_builder.build_with_llm(project_id.clone(), user_llm.clone())
+    };
     let raw_messages = load_project_messages_raw(&state.neo4j, &project_id, &conv_id).await;
     let split = raw_messages.len().saturating_sub(2);
     let (prior_raw, tail_raw) = raw_messages.split_at(split);
@@ -1290,7 +1317,7 @@ pub async fn resume_confirm_action(
     let locks     = Arc::clone(&state.locks);
     let channels  = Arc::clone(&state.channels);
     let neo4j     = Arc::clone(&state.neo4j);
-    let llm       = Arc::clone(&state.agent_builder.llm);
+    let llm       = Arc::clone(agent.llm());
     let registry  = Arc::clone(&state.agent_builder.registry);
     let in_flight = Arc::clone(&state.in_flight);
     let paused_confirmations = Arc::clone(&state.paused_confirmations);
@@ -1685,7 +1712,14 @@ pub async fn project_query(
     if let Err(e) = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await {
         return e.into_response();
     }
-    let agent = state.agent_builder.build(project_id.clone());
+    let user_llm = crate::api::resolve_user_llm(
+        &state.llm, &state.llm_configs, &state.user_key_store, &user.sub,
+    ).await;
+    let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
+        state.agent_builder.build(project_id.clone())
+    } else {
+        state.agent_builder.build_with_llm(project_id.clone(), user_llm)
+    };
     let raw_history = match &body.conversation_id {
         Some(conv_id) => load_project_history(&state.neo4j, &project_id, conv_id).await,
         None => vec![],
