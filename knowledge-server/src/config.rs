@@ -18,12 +18,20 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(default)]
     pub lxd: Option<LxdConfig>,
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 #[derive(Deserialize, Default, Clone)]
 pub struct UiConfig {
     #[serde(default)]
     pub enable_docs: bool,
+}
+
+#[derive(Deserialize, Default, Clone)]
+pub struct SecurityConfig {
+    #[serde(default)]
+    pub user_key_encryption_key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -35,6 +43,8 @@ pub struct AuthConfig {
     pub google: Option<GoogleConfig>,
     #[serde(default)]
     pub oidc: Option<OidcConfig>,
+    #[serde(default)]
+    pub public_url: Option<String>,
 }
 
 fn default_true() -> bool { true }
@@ -138,7 +148,7 @@ impl Default for AgentBehaviorConfig {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(tag = "provider", rename_all = "kebab-case")]
 pub enum LlmProviderConfig {
     Anthropic {
@@ -158,6 +168,8 @@ pub enum LlmProviderConfig {
         name: Option<String>,
         #[serde(default)]
         models: Option<Vec<String>>,
+        #[serde(default)]
+        user_provided_key: bool,
     },
     Gemini {
         model: String,
@@ -176,6 +188,8 @@ pub enum LlmProviderConfig {
         name: Option<String>,
         #[serde(default)]
         models: Option<Vec<String>>,
+        #[serde(default)]
+        user_provided_key: bool,
     },
     #[serde(rename = "openai-compatible")]
     OpenAiCompat {
@@ -196,6 +210,8 @@ pub enum LlmProviderConfig {
         name: Option<String>,
         #[serde(default)]
         models: Option<Vec<String>>,
+        #[serde(default)]
+        user_provided_key: bool,
     },
 }
 
@@ -253,6 +269,45 @@ impl LlmProviderConfig {
             Self::Anthropic    { models, .. } => models.as_deref(),
             Self::Gemini       { models, .. } => models.as_deref(),
             Self::OpenAiCompat { models, .. } => models.as_deref(),
+        }
+    }
+
+    pub fn user_provided_key(&self) -> bool {
+        match self {
+            Self::Anthropic    { user_provided_key, .. } => *user_provided_key,
+            Self::Gemini       { user_provided_key, .. } => *user_provided_key,
+            Self::OpenAiCompat { user_provided_key, .. } => *user_provided_key,
+        }
+    }
+
+    pub fn api_key(&self) -> &str {
+        match self {
+            Self::Anthropic    { api_key, .. } => api_key,
+            Self::Gemini       { api_key, .. } => api_key,
+            Self::OpenAiCompat { api_key, .. } => api_key,
+        }
+    }
+
+    pub fn timeout_secs(&self) -> u64 {
+        match self {
+            Self::Anthropic    { timeout_secs, .. } => *timeout_secs,
+            Self::Gemini       { timeout_secs, .. } => *timeout_secs,
+            Self::OpenAiCompat { timeout_secs, .. } => *timeout_secs,
+        }
+    }
+
+    pub fn max_retries(&self) -> u32 {
+        match self {
+            Self::Anthropic    { max_retries, .. } => *max_retries,
+            Self::Gemini       { max_retries, .. } => *max_retries,
+            Self::OpenAiCompat { max_retries, .. } => *max_retries,
+        }
+    }
+
+    pub fn base_url(&self) -> Option<&str> {
+        match self {
+            Self::OpenAiCompat { base_url, .. } => Some(base_url),
+            _ => None,
         }
     }
 }
@@ -615,6 +670,31 @@ mod tests {
         "#);
         let cfg = parse_config(&toml);
         assert_eq!(cfg.llm[0].models(), Some(&["gemini-2.5-flash".to_string(), "gemini-2.5-pro".to_string()][..]));
+    }
+
+    #[test]
+    fn user_provided_key_defaults_to_false() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+        "#);
+        let cfg = parse_config(&toml);
+        assert!(!cfg.llm[0].user_provided_key());
+    }
+
+    #[test]
+    fn user_provided_key_can_be_set_true() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider           = "anthropic"
+            model              = "m"
+            api_key            = ""
+            user_provided_key  = true
+        "#);
+        let cfg = parse_config(&toml);
+        assert!(cfg.llm[0].user_provided_key());
     }
 
     #[test]

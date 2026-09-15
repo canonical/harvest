@@ -63,7 +63,13 @@ async function handleLogin() {
   loading.value = true;
   try {
     await auth.login(email.value, password.value);
-    router.push('/');
+    const next = sessionStorage.getItem('tui_auth_next');
+    if (next) {
+      sessionStorage.removeItem('tui_auth_next');
+      router.push(next);
+    } else {
+      router.push('/');
+    }
   } catch (e) {
     error.value = e.message;
   } finally {
@@ -72,10 +78,18 @@ async function handleLogin() {
 }
 
 function loginWithGoogle() {
+  const next = window.location.hash.replace('#', '');
+  if (next && next.startsWith('/authenticate/')) {
+    sessionStorage.setItem('tui_auth_next', next);
+  }
   window.location.href = '/auth/google';
 }
 
 function loginWithOidc() {
+  const next = window.location.hash.replace('#', '');
+  if (next && next.startsWith('/authenticate/')) {
+    sessionStorage.setItem('tui_auth_next', next);
+  }
   window.location.href = '/auth/oidc';
 }
 </script>

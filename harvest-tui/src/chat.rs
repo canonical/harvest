@@ -1145,6 +1145,19 @@ impl ChatView {
             && key.modifiers.contains(KeyModifiers::ALT))
             || (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL));
 
+        if is_send || (key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE) {
+            let trimmed = self.input.trim();
+            if trimmed == "/login" {
+                self.input.clear();
+                app.start_tui_login();
+                return;
+            }
+            if trimmed == "/quit" || trimmed == "/exit" {
+                self.input.clear();
+                return;
+            }
+        }
+
         if is_send {
             self.send_query(app);
             return;
@@ -1263,6 +1276,14 @@ if let Some(_confirm) = &m.confirm {
             }
             _ => {}
         }
+    }
+
+    pub fn is_input_focused(&self) -> bool {
+        true
+    }
+
+    pub fn get_input_for_auth(&self) -> String {
+        self.input.clone()
     }
 }
 

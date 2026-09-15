@@ -2,6 +2,8 @@ pub mod handlers;
 pub mod jwt;
 pub mod oidc;
 pub mod password;
+pub mod tui;
+pub mod user_keys;
 
 use anyhow::Result;
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::IntoResponse, Json};
@@ -14,6 +16,7 @@ use crate::config::{AuthConfig, UiConfig};
 use crate::neo4j::Neo4jClient;
 
 pub use oidc::OidcEndpoints;
+pub use tui::TuiAuthMap;
 
 pub const TOKEN_COOKIE: &str = "token";
 
@@ -33,6 +36,7 @@ pub struct AuthState {
     pub oidc_endpoints: Option<Arc<OidcEndpoints>>,
     pub oauth_sessions: OAuthSessions,
     pub lxd_enabled:    bool,
+    pub tui_auth:       TuiAuthMap,
 }
 
 pub async fn setup_constraints(neo4j: &Neo4jClient) -> Result<()> {

@@ -17,6 +17,7 @@ pub struct ClientConfig {
 pub struct Client {
     pub base_url: String,
     pub http: reqwest::Client,
+    pub token: Option<String>,
 }
 
 impl Client {
@@ -34,6 +35,7 @@ impl Client {
         Ok(Self {
             base_url: cfg.base_url,
             http,
+            token: cfg.token,
         })
     }
 
@@ -45,14 +47,64 @@ impl Client {
         }
     }
 
+    fn auth_header(&self) -> Option<reqwest::header::HeaderValue> {
+        self.token.as_ref().and_then(|t| {
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", t)).ok()
+        })
+    }
+
     pub async fn post_text<B: Serialize>(&self, path: &str, body: &B) -> Result<String> {
-        let resp = self.http.post(self.url(path)).json(body).send().await?;
+        let mut req = self.http.post(self.url(path)).json(body);
+        if let Some(h) = self.auth_header() {
+            req = req.header(reqwest::header::AUTHORIZATION, h);
+        }
+        let resp = req.send().await?;
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("POST {path} -> {status}: {body}"));
         }
         Ok(resp.text().await?)
+    }
+
+    pub async fn post_json<B: Serialize, T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
+        let mut req = self.http.post(self.url(path)).json(body);
+        if let Some(h) = self.auth_header() {
+            req = req.header(reqwest::header::AUTHORIZATION, h);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("POST {path} -> {status}: {body}"));
+        }
+        Ok(resp.json().await?)
+    }
+
+    pub async fn get_json<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T> {
+        let mut req = self.http.get(self.url(path));
+        if let Some(h) = self.auth_header() {
+            req = req.header(reqwest::header::AUTHORIZATION, h);
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("GET {path} -> {status}: {body}"));
+        }
+        Ok(resp.json().await?)
+    }
+
+    pub fn rebuild_with_token(&self, token: String) -> Self {
+        Self {
+            base_url: self.base_url.clone(),
+            http: self.http.clone(),
+            token: Some(token),
+        }
     }
 }
 
@@ -184,8 +236,13 @@ pub fn stream_query<'a>(
     body: &'a QueryRequest,
 ) -> impl Stream<Item = Result<AgentEvent>> + 'a {
     let url = client.url(path);
+    let auth_header = client.auth_header();
     async_stream::stream! {
-        let resp = match client.http.post(&url).json(body).send().await {
+        let mut req = client.http.post(&url).json(body);
+        if let Some(h) = &auth_header {
+            req = req.header(reqwest::header::AUTHORIZATION, h.clone());
+        }
+        let resp = match req.send().await {
             Ok(r) => r,
             Err(e) => {
                 yield Err(anyhow!(e));
