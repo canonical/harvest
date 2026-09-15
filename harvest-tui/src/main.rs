@@ -51,9 +51,6 @@ async fn main() -> anyhow::Result<()> {
                 config.cookie_store = Some(store);
             }
             _ => {
-                anyhow::bail!(
-                    "no credentials: set HARVEST_TOKEN, or HARVEST_EMAIL + HARVEST_PASSWORD"
-                );
             }
         }
     }

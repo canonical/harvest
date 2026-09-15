@@ -4,6 +4,7 @@ import { useAuthStore } from '../stores/auth.js';
 const routes = [
   { path: '/login',          component: () => import('../views/LoginView.vue'),         meta: { public: true } },
   { path: '/register',       component: () => import('../views/RegisterView.vue'),       meta: { public: true } },
+  { path: '/authenticate/:uuid', component: () => import('../views/AuthenticateView.vue'), meta: { public: true } },
   { path: '/',               component: () => import('../views/ChatWorkspaceView.vue'),  meta: { requiresProject: true, stableAcrossProjects: true } },
   { path: '/deployments',     redirect: '/deploy' },
   { path: '/deployments/:id', redirect: '/deploy' },
@@ -18,6 +19,7 @@ const routes = [
   { path: '/repositories',   component: () => import('../views/RepositoriesView.vue'),   meta: { requiresProject: true } },
   { path: '/product-templates', component: () => import('../views/ProductTemplatesView.vue'), meta: { directEntry: true } },
   { path: '/admin',          component: () => import('../views/AdminView.vue'),          meta: { requiresAuth: true } },
+  { path: '/settings',       component: () => import('../views/SettingsView.vue'),       meta: { requiresAuth: true, stableAcrossProjects: true } },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ];
 

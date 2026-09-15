@@ -21,9 +21,9 @@ use crate::agent::{
 };
 use crate::artifacts::handlers::{self as artifact_handlers, ArtifactState};
 use crate::skills::{handlers as skill_handlers, SkillStore};
-use crate::auth::{self, handlers as auth_handlers, AuthState};
+use crate::auth::{self, handlers as auth_handlers, tui as auth_tui, AuthState};
 use crate::chat_layouts::handlers::{self as chat_layout_handlers, ChatLayoutState};
-use crate::config::UiConfig;
+use crate::config::{LlmProviderConfig, UiConfig};
 use crate::config::AuthConfig;
 use crate::conversations::handlers::{self as conv_handlers, ConvState};
 use crate::deployments::{self, handlers as deployment_handlers};
@@ -37,8 +37,28 @@ use crate::machines::{
 };
 use crate::neo4j::Neo4jClient;
 use crate::projects::handlers::{self as proj_handlers, ProjectState};
+use crate::auth::user_keys::UserKeyStore;
 
 pub type GraphCache = RwLock<HashMap<String, Arc<String>>>;
+
+pub async fn resolve_user_llm(
+    llm: &Arc<dyn LlmProvider>,
+    configs: &[LlmProviderConfig],
+    user_key_store: &Option<Arc<UserKeyStore>>,
+    user_id: &str,
+) -> Arc<dyn LlmProvider> {
+    let has_user_key_providers = configs.iter().any(|c| c.user_provided_key());
+    if !has_user_key_providers {
+        return Arc::clone(llm);
+    }
+    let Some(store) = user_key_store else {
+        return Arc::clone(llm);
+    };
+    match store.resolve_all(user_id).await {
+        Ok(keys) if !keys.is_empty() => crate::llm::with_user_keys(llm, configs, &keys),
+        _ => Arc::clone(llm),
+    }
+}
 
 #[derive(Clone)]
 pub struct GraphState {
@@ -50,6 +70,12 @@ pub struct GraphState {
 pub struct QueryState {
     pub agent: Arc<Agent>,
     pub neo4j: Option<Arc<Neo4jClient>>,
+    pub llm: Arc<dyn LlmProvider>,
+    pub llm_configs: Arc<Vec<LlmProviderConfig>>,
+    pub user_key_store: Option<Arc<UserKeyStore>>,
+    pub max_iterations: usize,
+    pub compaction_threshold_chars: usize,
+    pub compaction_keep_last: usize,
 }
 
 #[derive(Clone)]
@@ -63,6 +89,8 @@ pub struct AppState {
     pub agent_builder:    Arc<ProjectAgentBuilder>,
     pub binary_path:      Option<PathBuf>,
     pub llm:              Arc<dyn LlmProvider>,
+    pub llm_configs:      Arc<Vec<LlmProviderConfig>>,
+    pub user_key_store:   Option<Arc<UserKeyStore>>,
     pub lxd:              Option<Arc<LxdClient>>,
 }
 
@@ -152,9 +180,13 @@ impl ProjectAgentBuilder {
     }
 
     pub fn build(&self, project_id: String) -> Arc<Agent> {
+        self.build_with_llm(project_id, Arc::clone(&self.llm))
+    }
+
+    pub fn build_with_llm(&self, project_id: String, llm: Arc<dyn LlmProvider>) -> Arc<Agent> {
         let tools = self.base_tools(project_id);
         Arc::new(
-            Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
+            Agent::new(llm, tools, self.max_iterations)
                 .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
                 .with_parallel_research(true),
         )
@@ -165,6 +197,16 @@ impl ProjectAgentBuilder {
         project_id: String,
         group_id:   String,
         ctx:        &deployments::DeploymentContext,
+    ) -> Arc<Agent> {
+        self.build_for_deployment_with_llm(project_id, group_id, ctx, Arc::clone(&self.llm))
+    }
+
+    pub fn build_for_deployment_with_llm(
+        &self,
+        project_id: String,
+        group_id:   String,
+        ctx:        &deployments::DeploymentContext,
+        llm:        Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
         let mut tools = self.base_tools(project_id.clone());
         tools.push(Box::new(deployment_tools::LinkDeploymentArtifactTool {
@@ -183,7 +225,7 @@ impl ProjectAgentBuilder {
             deployment_id: ctx.deployment_id.clone(),
         }));
         Arc::new(
-            Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
+            Agent::new(llm, tools, self.max_iterations)
                 .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
                 .with_system_prompt(prompt::deployment_system_prompt(ctx)),
         )
@@ -194,8 +236,16 @@ impl ProjectAgentBuilder {
     /// (e.g. proposing a design change), and must not be able to write to the deployment directly
     /// even if it ignores a "do not call tools" instruction in the prompt.
     pub fn build_for_deployment_text_only(&self, ctx: &deployments::DeploymentContext) -> Arc<Agent> {
+        self.build_for_deployment_text_only_with_llm(ctx, Arc::clone(&self.llm))
+    }
+
+    pub fn build_for_deployment_text_only_with_llm(
+        &self,
+        ctx: &deployments::DeploymentContext,
+        llm: Arc<dyn LlmProvider>,
+    ) -> Arc<Agent> {
         Arc::new(
-            Agent::new(Arc::clone(&self.llm), Vec::new(), self.max_iterations)
+            Agent::new(llm, Vec::new(), self.max_iterations)
                 .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
                 .with_system_prompt(prompt::deployment_system_prompt(ctx)),
         )
@@ -205,6 +255,15 @@ impl ProjectAgentBuilder {
         &self,
         project_id: String,
         ctx:        &deployments::DeploymentContext,
+    ) -> Arc<Agent> {
+        self.build_for_deployment_design_with_llm(project_id, ctx, Arc::clone(&self.llm))
+    }
+
+    pub fn build_for_deployment_design_with_llm(
+        &self,
+        project_id: String,
+        ctx:        &deployments::DeploymentContext,
+        llm:        Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
         let mut tools = graph_tools::all_tools(Arc::clone(&self.neo4j));
         tools.push(Box::new(skill_tools::ListSkillsTool {
@@ -216,7 +275,7 @@ impl ProjectAgentBuilder {
             project_id,
         }));
         Arc::new(
-            Agent::new(Arc::clone(&self.llm), tools, self.max_iterations)
+            Agent::new(llm, tools, self.max_iterations)
                 .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
                 .with_system_prompt(prompt::deployment_system_prompt(ctx)),
         )
@@ -253,6 +312,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         oidc_endpoints,
         oauth_sessions: Arc::new(dashmap::DashMap::new()),
         lxd_enabled:    state.lxd.is_some(),
+        tui_auth:       auth_tui::new_auth_map(),
     });
 
     let jwt_secret = Arc::new(state.auth.jwt_secret.clone());
@@ -275,11 +335,19 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .route("/auth/google/callback",   get(auth_handlers::google_callback))
         .route("/auth/oidc",              get(auth_handlers::oidc_redirect))
         .route("/auth/oidc/callback",     get(auth_handlers::oidc_callback))
+        .route("/auth/tui/login",         post(auth_tui::create_auth_request))
+        .route("/auth/tui/poll/:uuid",    get(auth_tui::poll_auth_request))
         .with_state(Arc::clone(&auth_state));
 
     let query_state = Arc::new(QueryState {
         agent: Arc::clone(&state.agent),
         neo4j: Some(Arc::clone(&state.neo4j)),
+        llm: Arc::clone(&state.llm),
+        llm_configs: Arc::clone(&state.llm_configs),
+        user_key_store: state.user_key_store.clone(),
+        max_iterations: state.agent_builder.max_iterations,
+        compaction_threshold_chars: state.agent_builder.compaction_threshold_chars,
+        compaction_keep_last: state.agent_builder.compaction_keep_last,
     });
     let agent_router = Router::new()
         .route("/query",            post(query::handle_query))
@@ -293,13 +361,20 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .route("/graph/:repo/:version/source",      get(graph::handle_get_symbol_source))
         .with_state(Arc::clone(&graph_state));
 
-    let llm_state = Arc::new(llm::LlmState::new(Arc::clone(&state.llm)));
+    let llm_state = Arc::new(llm::LlmState::new(
+        Arc::clone(&state.llm),
+        Arc::clone(&state.llm_configs),
+        state.user_key_store.clone(),
+    ));
     let llm_router = Router::new()
         .route("/llm/providers", get(llm::list_providers))
+        .route("/llm/user-keys", get(llm::get_user_keys))
+        .route("/llm/user-keys/:provider_id", put(llm::set_user_key).delete(llm::delete_user_key))
         .with_state(llm_state);
 
     let me_router = Router::new()
         .route("/auth/me", get(auth_handlers::me).patch(auth_handlers::update_me))
+        .route("/auth/tui/authorize/:uuid", post(auth_tui::authorize_request))
         .with_state(Arc::clone(&auth_state));
 
     let conv_router = Router::new()
@@ -323,6 +398,9 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         Arc::clone(&state.neo4j),
         Arc::clone(&state.agent),
         Arc::clone(&state.agent_builder),
+        Arc::clone(&state.llm),
+        Arc::clone(&state.llm_configs),
+        state.user_key_store.clone(),
     ));
 
     let skill_store = Arc::new(SkillStore::new(Arc::clone(&state.neo4j)));
