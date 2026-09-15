@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser as ClapParser;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,7 +9,9 @@ use knowledge_server::agent::{graph_tools, Agent};
 use knowledge_server::api::{AppState, GraphCache, ProjectAgentBuilder};
 use knowledge_server::skills::SkillStore;
 use knowledge_server::auth;
+use knowledge_server::auth::user_keys::UserKeyStore;
 use knowledge_server::config::Config;
+use knowledge_server::crypto::Crypto;
 use knowledge_server::llm;
 use knowledge_server::lxd;
 use knowledge_server::machines::MachineRegistry;
@@ -45,13 +47,34 @@ async fn main() -> Result<()> {
     neo4j.run("CREATE CONSTRAINT port_forward_id IF NOT EXISTS FOR (f:PortForward) REQUIRE f.id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT artifact_id    IF NOT EXISTS FOR (a:Artifact)     REQUIRE a.id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT template_id    IF NOT EXISTS FOR (t:ProductTemplate) REQUIRE t.id IS UNIQUE").await?;
+    neo4j.run("CREATE CONSTRAINT user_llm_key_pid IF NOT EXISTS FOR (k:UserLlmKey) REQUIRE k.provider_id IS UNIQUE").await?;
 
     knowledge_server::skills::seed_defaults_if_needed(&neo4j).await?;
 
     if config.llm.is_empty() {
         anyhow::bail!("at least one [[llm]] provider must be configured in server.toml");
     }
+
+    let has_user_key_providers = config.llm.iter().any(|c| c.user_provided_key());
+    let user_key_store = if has_user_key_providers {
+        let crypto = match &config.security.user_key_encryption_key {
+            Some(key_hex) => {
+                Crypto::from_hex(key_hex).context("invalid user_key_encryption_key")?
+            }
+            None => {
+                anyhow::bail!(
+                    "security.user_key_encryption_key must be configured when any provider has user_provided_key = true.\n\
+                     Generate one with: openssl rand -hex 32"
+                );
+            }
+        };
+        Some(Arc::new(UserKeyStore::new(Arc::clone(&neo4j), Arc::new(crypto))))
+    } else {
+        None
+    };
+
     let llm_provider                = llm::from_config(&config.llm);
+    let llm_configs                 = Arc::new(config.llm.clone());
     let max_iterations              = config.agent.max_iterations;
     let compaction_threshold_chars  = config.agent.compaction_threshold_chars;
     let compaction_keep_last        = config.agent.compaction_keep_last;
@@ -98,6 +121,8 @@ async fn main() -> Result<()> {
         agent_builder:    Arc::clone(&agent_builder),
         binary_path,
         llm:              Arc::clone(&llm_provider),
+        llm_configs,
+        user_key_store,
         lxd,
     };
 

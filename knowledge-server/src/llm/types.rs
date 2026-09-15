@@ -116,16 +116,17 @@ pub struct UsedProvider {
     pub model: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProviderMeta {
     pub id: String,
     pub expose_to_ui: bool,
     pub name: Option<String>,
     pub models: Option<Vec<String>>,
+    pub user_provided_key: bool,
 }
 
 impl ProviderMeta {
     pub fn new(id: impl Into<String>) -> Self {
-        Self { id: id.into(), expose_to_ui: true, name: None, models: None }
+        Self { id: id.into(), expose_to_ui: true, name: None, models: None, user_provided_key: false }
     }
 }

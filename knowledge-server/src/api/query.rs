@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 use std::{convert::Infallible, sync::Arc};
 use tokio::sync::mpsc;
 
-use crate::agent::{chain::ChainBuilder, AgentEvent, Attachment};
-use crate::api::QueryState;
+use crate::agent::{chain::ChainBuilder, Agent, AgentEvent, Attachment};
+use crate::api::{resolve_user_llm, QueryState};
 use crate::auth::jwt::Claims;
 use crate::conversations::handlers::{append_user_turn, load_conversation_context};
 use crate::conversations::title_generation::maybe_regenerate_title;
@@ -42,9 +42,22 @@ pub async fn handle_query(
 ) -> impl IntoResponse {
     let attachments = req.attachments.as_deref().unwrap_or(&[]);
     let (raw_messages, history) = load_context_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
-    let compacted = qs.agent.compact_history(&history).await;
     let selection = selection_from(&req);
-    match qs.agent.query(&req.query, &compacted, attachments, selection.as_ref()).await {
+    let user_llm = resolve_user_llm(&qs.llm, &qs.llm_configs, &qs.user_key_store, &user.sub).await;
+    let agent = if Arc::ptr_eq(&user_llm, &qs.llm) {
+        Arc::clone(&qs.agent)
+    } else {
+        let neo4j = qs.neo4j.clone().unwrap_or_else(|| {
+            panic!("neo4j must be available when user key providers are configured")
+        });
+        Arc::new(
+            Agent::new(user_llm, crate::agent::graph_tools::all_tools(neo4j), qs.max_iterations)
+                .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
+                .with_parallel_research(true),
+        )
+    };
+    let compacted = agent.compact_history(&history).await;
+    match agent.query(&req.query, &compacted, attachments, selection.as_ref()).await {
         Ok(response) => {
             if let (Some(neo4j), Some(cid)) = (&qs.neo4j, &req.conversation_id) {
                 let att_meta: Vec<_> = attachments.iter()
@@ -59,7 +72,7 @@ pub async fn handle_query(
 
                 let msg_count = compacted.len() + 2;
                 let neo4j_t   = Arc::clone(neo4j);
-                let llm_t     = Arc::clone(qs.agent.llm());
+                let llm_t     = Arc::clone(agent.llm());
                 let cid_t     = cid.clone();
                 let prior_t   = compacted.clone();
                 let query_t   = req.query.clone();
@@ -88,8 +101,20 @@ pub async fn handle_query_stream(
     let attachments = req.attachments.unwrap_or_default();
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
-    let llm      = Arc::clone(qs.agent.llm());
-    let agent    = Arc::clone(&qs.agent);
+    let user_llm = resolve_user_llm(&qs.llm, &qs.llm_configs, &qs.user_key_store, &user.sub).await;
+    let agent = if Arc::ptr_eq(&user_llm, &qs.llm) {
+        Arc::clone(&qs.agent)
+    } else {
+        let neo4j = qs.neo4j.clone().unwrap_or_else(|| {
+            panic!("neo4j must be available when user key providers are configured")
+        });
+        Arc::new(
+            Agent::new(user_llm.clone(), crate::agent::graph_tools::all_tools(neo4j), qs.max_iterations)
+                .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
+                .with_parallel_research(true),
+        )
+    };
+    let llm      = Arc::clone(agent.llm());
     let qs_ctx   = Arc::clone(&qs);
     let neo4j    = qs.neo4j.clone();
     let user_id  = user.sub.clone();

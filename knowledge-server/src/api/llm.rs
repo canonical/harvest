@@ -1,22 +1,36 @@
-use axum::{extract::{Query, State}, Json};
+use axum::{
+    extract::{Extension, Path, Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+use crate::auth::jwt::Claims;
+use crate::auth::user_keys::UserKeyStore;
+use crate::config::LlmProviderConfig;
 use crate::llm::LlmProvider;
 
 const CACHE_TTL: Duration = Duration::from_secs(300);
 
 pub struct LlmState {
     pub llm: Arc<dyn LlmProvider>,
+    pub configs: Arc<Vec<LlmProviderConfig>>,
+    pub user_key_store: Option<Arc<UserKeyStore>>,
     cache: RwLock<Option<(Instant, Value)>>,
 }
 
 impl LlmState {
-    pub fn new(llm: Arc<dyn LlmProvider>) -> Self {
-        Self { llm, cache: RwLock::new(None) }
+    pub fn new(
+        llm: Arc<dyn LlmProvider>,
+        configs: Arc<Vec<LlmProviderConfig>>,
+        user_key_store: Option<Arc<UserKeyStore>>,
+    ) -> Self {
+        Self { llm, configs, user_key_store, cache: RwLock::new(None) }
     }
 }
 
@@ -30,6 +44,10 @@ fn effective_providers(llm: &Arc<dyn LlmProvider>) -> Vec<Arc<dyn LlmProvider>> 
     candidates.into_iter().filter(|p| p.expose_to_ui()).collect()
 }
 
+fn has_user_key_providers(configs: &[LlmProviderConfig]) -> bool {
+    configs.iter().any(|c| c.user_provided_key())
+}
+
 async fn build_providers_response(providers: &[Arc<dyn LlmProvider>]) -> Value {
     let mut list = Vec::with_capacity(providers.len());
     for provider in providers {
@@ -40,13 +58,15 @@ async fn build_providers_response(providers: &[Arc<dyn LlmProvider>]) -> Value {
             "name": provider.name().unwrap_or_else(|| provider.kind()),
             "default_model": provider.default_model(),
             "models": models,
+            "requires_user_key": provider.user_provided_key(),
         }));
     }
     json!({ "providers": list })
 }
 
 async fn cached_or_fresh(state: &LlmState, force_refresh: bool) -> Value {
-    if !force_refresh {
+    let caching_enabled = !has_user_key_providers(&state.configs);
+    if caching_enabled && !force_refresh {
         if let Some((fetched_at, value)) = state.cache.read().await.as_ref() {
             if fetched_at.elapsed() < CACHE_TTL {
                 return value.clone();
@@ -55,7 +75,9 @@ async fn cached_or_fresh(state: &LlmState, force_refresh: bool) -> Value {
     }
     let providers = effective_providers(&state.llm);
     let response = build_providers_response(&providers).await;
-    *state.cache.write().await = Some((Instant::now(), response.clone()));
+    if caching_enabled {
+        *state.cache.write().await = Some((Instant::now(), response.clone()));
+    }
     response
 }
 
@@ -66,10 +88,143 @@ pub struct ListProvidersQuery {
 }
 
 pub async fn list_providers(
+    Extension(user): Extension<Claims>,
     State(state): State<Arc<LlmState>>,
     Query(params): Query<ListProvidersQuery>,
 ) -> Json<Value> {
-    Json(cached_or_fresh(&state, params.refresh).await)
+    if !has_user_key_providers(&state.configs) {
+        return Json(cached_or_fresh(&state, params.refresh).await);
+    }
+
+    let user_keys: Vec<String> = match &state.user_key_store {
+        Some(store) => store.list_set_keys(&user.sub).await.unwrap_or_default(),
+        None => vec![],
+    };
+
+    let all = effective_providers(&state.llm);
+    let visible: Vec<Arc<dyn LlmProvider>> = all.into_iter().filter(|p| {
+        if p.user_provided_key() {
+            user_keys.iter().any(|k| k == p.id())
+        } else {
+            true
+        }
+    }).collect();
+
+    Json(build_providers_response(&visible).await)
+}
+
+#[derive(serde::Deserialize)]
+pub struct SetKeyBody {
+    pub api_key: String,
+}
+
+pub async fn get_user_keys(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<LlmState>>,
+) -> Response {
+    let user_key_providers: Vec<&LlmProviderConfig> = state.configs.iter()
+        .filter(|c| c.user_provided_key())
+        .collect();
+
+    if user_key_providers.is_empty() {
+        return Json(json!({ "providers": [] })).into_response();
+    }
+
+    let statuses = match &state.user_key_store {
+        Some(store) => store.list_with_status(&user.sub).await.unwrap_or_default(),
+        None => vec![],
+    };
+
+    let providers: Vec<Value> = user_key_providers.iter().map(|config| {
+        let status = statuses.iter().find(|s| s.provider_id == config.id());
+        json!({
+            "id": config.id(),
+            "kind": config.kind(),
+            "name": config.name().unwrap_or_else(|| config.kind()),
+            "key_set": status.is_some(),
+            "updated_at": status.and_then(|s| s.updated_at.clone()),
+        })
+    }).collect();
+
+    Json(json!({ "providers": providers })).into_response()
+}
+
+pub async fn set_user_key(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<LlmState>>,
+    Path(provider_id): Path<String>,
+    Json(body): Json<SetKeyBody>,
+) -> Response {
+    let config = state.configs.iter().find(|c| c.id() == provider_id && c.user_provided_key());
+    if config.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "provider not found or does not use user-provided keys" })),
+        ).into_response();
+    }
+
+    let Some(store) = &state.user_key_store else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "user key storage is not configured" })),
+        ).into_response();
+    };
+
+    if body.api_key.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "api_key must not be empty" })),
+        ).into_response();
+    }
+
+    match store.upsert(&user.sub, &provider_id, &body.api_key).await {
+        Ok(_) => {
+            *state.cache.write().await = None;
+            Json(json!({ "ok": true, "key_set": true })).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to store user key");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to store key" })),
+            ).into_response()
+        }
+    }
+}
+
+pub async fn delete_user_key(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<LlmState>>,
+    Path(provider_id): Path<String>,
+) -> Response {
+    let config = state.configs.iter().find(|c| c.id() == provider_id && c.user_provided_key());
+    if config.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "provider not found or does not use user-provided keys" })),
+        ).into_response();
+    }
+
+    let Some(store) = &state.user_key_store else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "user key storage is not configured" })),
+        ).into_response();
+    };
+
+    match store.delete(&user.sub, &provider_id).await {
+        Ok(_) => {
+            *state.cache.write().await = None;
+            Json(json!({ "ok": true })).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to delete user key");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "failed to delete key" })),
+            ).into_response()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -87,6 +242,7 @@ mod tests {
         children: Vec<Arc<dyn LlmProvider>>,
         list_models_calls: AtomicUsize,
         expose_to_ui: bool,
+        user_provided_key: bool,
         name: Option<String>,
         configured_models: Option<Vec<String>>,
     }
@@ -101,6 +257,7 @@ mod tests {
                 children: vec![],
                 list_models_calls: AtomicUsize::new(0),
                 expose_to_ui: true,
+                user_provided_key: false,
                 name: None,
                 configured_models: None,
             })
@@ -115,6 +272,7 @@ mod tests {
                 children: vec![],
                 list_models_calls: AtomicUsize::new(0),
                 expose_to_ui: true,
+                user_provided_key: false,
                 name: Some(name.into()),
                 configured_models: None,
             })
@@ -129,6 +287,7 @@ mod tests {
                 children: vec![],
                 list_models_calls: AtomicUsize::new(0),
                 expose_to_ui: false,
+                user_provided_key: false,
                 name: None,
                 configured_models: None,
             })
@@ -143,6 +302,7 @@ mod tests {
                 children: vec![],
                 list_models_calls: AtomicUsize::new(0),
                 expose_to_ui: true,
+                user_provided_key: false,
                 name: None,
                 configured_models: Some(allowed),
             })
@@ -157,6 +317,7 @@ mod tests {
                 children,
                 list_models_calls: AtomicUsize::new(0),
                 expose_to_ui: true,
+                user_provided_key: false,
                 name: None,
                 configured_models: None,
             })
@@ -172,6 +333,7 @@ mod tests {
         fn name(&self) -> Option<&str> { self.name.as_deref() }
         fn children(&self) -> &[Arc<dyn LlmProvider>] { &self.children }
         fn expose_to_ui(&self) -> bool { self.expose_to_ui }
+        fn user_provided_key(&self) -> bool { self.user_provided_key }
 
         async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
             self.list_models_calls.fetch_add(1, Ordering::SeqCst);
@@ -270,7 +432,7 @@ mod tests {
     #[tokio::test]
     async fn second_call_within_ttl_uses_cache_not_a_fresh_fetch() {
         let leaf = TestProvider::leaf("a");
-        let state = LlmState::new(Arc::clone(&leaf) as Arc<dyn LlmProvider>);
+        let state = LlmState::new(Arc::clone(&leaf) as Arc<dyn LlmProvider>, Arc::new(vec![]), None);
 
         let _ = cached_or_fresh(&state, false).await;
         let _ = cached_or_fresh(&state, false).await;
@@ -281,7 +443,7 @@ mod tests {
     #[tokio::test]
     async fn force_refresh_bypasses_cache() {
         let leaf = TestProvider::leaf("a");
-        let state = LlmState::new(Arc::clone(&leaf) as Arc<dyn LlmProvider>);
+        let state = LlmState::new(Arc::clone(&leaf) as Arc<dyn LlmProvider>, Arc::new(vec![]), None);
 
         let _ = cached_or_fresh(&state, false).await;
         let _ = cached_or_fresh(&state, true).await;

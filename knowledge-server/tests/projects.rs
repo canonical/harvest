@@ -88,7 +88,7 @@ fn projects_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn knowledge_server:
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,
     });
-    let state = Arc::new(ProjectState::new(neo4j, agent, builder));
+    let state = Arc::new(ProjectState::new(neo4j, agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None));
 
     Router::new()
         .route("/projects",     route_get(list_projects).post(create_project))

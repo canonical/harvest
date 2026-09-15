@@ -22,6 +22,10 @@ pub trait LlmProvider: Send + Sync {
         true
     }
 
+    fn user_provided_key(&self) -> bool {
+        false
+    }
+
     fn name(&self) -> Option<&str> {
         None
     }
@@ -263,23 +267,29 @@ fn build_meta(config: &LlmProviderConfig) -> ProviderMeta {
         expose_to_ui: config.expose_to_ui(),
         name: config.name().map(str::to_string),
         models: config.models().map(|m| m.to_vec()),
+        user_provided_key: config.user_provided_key(),
     }
 }
 
 fn build_provider(config: &LlmProviderConfig) -> Arc<dyn LlmProvider> {
+    build_provider_with_key(config, None)
+}
+
+fn build_provider_with_key(config: &LlmProviderConfig, api_key_override: Option<&str>) -> Arc<dyn LlmProvider> {
     let meta = build_meta(config);
+    let api_key = api_key_override.unwrap_or_else(|| config.api_key());
     match config {
-        LlmProviderConfig::Anthropic { model, api_key, timeout_secs, max_retries, .. } =>
+        LlmProviderConfig::Anthropic { model, timeout_secs, max_retries, .. } =>
             Arc::new(anthropic::AnthropicProvider::new(
-                model.clone(), api_key.clone(), *timeout_secs, *max_retries, meta,
+                model.clone(), api_key.to_string(), *timeout_secs, *max_retries, meta,
             )),
-        LlmProviderConfig::Gemini { model, api_key, timeout_secs, max_retries, .. } =>
+        LlmProviderConfig::Gemini { model, timeout_secs, max_retries, .. } =>
             Arc::new(gemini::GeminiProvider::new(
-                model.clone(), api_key.clone(), *timeout_secs, *max_retries, meta,
+                model.clone(), api_key.to_string(), *timeout_secs, *max_retries, meta,
             )),
-        LlmProviderConfig::OpenAiCompat { base_url, api_key, model, timeout_secs, max_retries, .. } =>
+        LlmProviderConfig::OpenAiCompat { base_url, model, timeout_secs, max_retries, .. } =>
             Arc::new(openai_compat::OpenAiCompatProvider::new(
-                base_url.clone(), api_key.clone(), model.clone(), *timeout_secs, *max_retries, meta,
+                base_url.clone(), api_key.to_string(), model.clone(), *timeout_secs, *max_retries, meta,
             )),
     }
 }
@@ -289,6 +299,28 @@ pub fn from_config(configs: &[LlmProviderConfig]) -> Arc<dyn LlmProvider> {
     ordered.sort_by_key(|c| c.priority());
     let providers = ordered.iter().map(|c| build_provider(c)).collect();
     Arc::new(FallbackProvider::new(providers))
+}
+
+pub fn with_user_keys(
+    llm: &Arc<dyn LlmProvider>,
+    configs: &[LlmProviderConfig],
+    keys: &std::collections::HashMap<String, String>,
+) -> Arc<dyn LlmProvider> {
+    let children = llm.children();
+    if children.is_empty() || keys.is_empty() {
+        return Arc::clone(llm);
+    }
+    let config_map: std::collections::HashMap<&str, &LlmProviderConfig> =
+        configs.iter().map(|c| (c.id(), c)).collect();
+    let new_children: Vec<Arc<dyn LlmProvider>> = children.iter().map(|child| {
+        if let Some(user_key) = keys.get(child.id()) {
+            if let Some(config) = config_map.get(child.id()) {
+                return build_provider_with_key(config, Some(user_key));
+            }
+        }
+        Arc::clone(child)
+    }).collect();
+    Arc::new(FallbackProvider::new(new_children))
 }
 
 #[cfg(test)]
@@ -476,6 +508,7 @@ mod tests {
             expose_to_ui: true,
             name:         None,
             models:       None,
+            user_provided_key: false,
         }];
         let _ = from_config(&cfg);
     }
