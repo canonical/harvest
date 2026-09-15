@@ -14,6 +14,11 @@ COPY Cargo.toml Cargo.lock ./
 # ships the stable toolchain already. Copying it causes rustup to reach out to
 # static.rust-lang.org to sync the channel manifest, which fails in restricted
 # or slow network environments.
+#
+# The `tui` workspace member is a front-end CLI tool and is not built or
+# shipped in this image. Strip it from the workspace manifest so cargo can
+# resolve the remaining members without its Cargo.toml.
+RUN sed -i '/^\s*"tui",$/d' Cargo.toml
 COPY knowledge-server/Cargo.toml    knowledge-server/Cargo.toml
 COPY knowledge-harvester/Cargo.toml knowledge-harvester/Cargo.toml
 COPY agent/Cargo.toml               agent/Cargo.toml
