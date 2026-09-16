@@ -7,6 +7,10 @@ ENV CARGO_HTTP_TIMEOUT=300
 
 WORKDIR /build
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends cmake pkg-config libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+
 # Workspace manifests first — lets Docker cache the (slow) dep-compilation
 # layer independently of source changes.
 COPY Cargo.toml Cargo.lock ./
@@ -24,9 +28,10 @@ COPY knowledge-harvester/Cargo.toml knowledge-harvester/Cargo.toml
 COPY agent/Cargo.toml               agent/Cargo.toml
 
 # Minimal stubs so cargo can resolve and compile all external dependencies.
-# knowledge-server is a lib + bin; the other two are pure binaries.
+# knowledge-server and knowledge-harvester are lib + bin; agent is a binary.
 RUN mkdir -p knowledge-server/src knowledge-harvester/src agent/src \
  && echo '' > knowledge-server/src/lib.rs \
+ && echo '' > knowledge-harvester/src/lib.rs \
  && printf 'fn main(){}\n' | tee knowledge-server/src/main.rs \
                                   knowledge-harvester/src/main.rs \
                                   agent/src/main.rs > /dev/null
@@ -36,13 +41,16 @@ RUN cargo build --release -p knowledge-server \
 
 # Replace stubs with real source — only user code is recompiled from here.
 RUN rm -f knowledge-server/src/lib.rs knowledge-server/src/main.rs \
-          agent/src/main.rs
+           knowledge-harvester/src/lib.rs knowledge-harvester/src/main.rs \
+           agent/src/main.rs
 COPY knowledge-server/src    knowledge-server/src
 COPY knowledge-server/skills knowledge-server/skills
 COPY knowledge-server/assets knowledge-server/assets
+COPY knowledge-harvester/src knowledge-harvester/src
 COPY agent/src               agent/src
 RUN touch knowledge-server/src/lib.rs knowledge-server/src/main.rs \
-          agent/src/main.rs \
+           knowledge-harvester/src/lib.rs knowledge-harvester/src/main.rs \
+           agent/src/main.rs \
  && cargo build --release -p knowledge-server \
  && cargo build --release -p agent
 

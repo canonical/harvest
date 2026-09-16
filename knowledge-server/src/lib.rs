@@ -9,6 +9,7 @@ pub mod config;
 pub mod crypto;
 pub mod conversations;
 pub mod deployments;
+pub mod ingestion;
 pub mod llm;
 pub mod lxd;
 pub mod machines;

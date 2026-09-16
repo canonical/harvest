@@ -38,6 +38,7 @@ use crate::machines::{
 use crate::neo4j::Neo4jClient;
 use crate::projects::handlers::{self as proj_handlers, ProjectState};
 use crate::auth::user_keys::UserKeyStore;
+use crate::ingestion::IngestionRegistry;
 
 pub type GraphCache = RwLock<HashMap<String, Arc<String>>>;
 
@@ -64,6 +65,10 @@ pub async fn resolve_user_llm(
 pub struct GraphState {
     pub neo4j: Arc<Neo4jClient>,
     pub cache: Arc<GraphCache>,
+    pub ingestion: IngestionRegistry,
+    pub neo4j_uri: String,
+    pub neo4j_user: String,
+    pub neo4j_password: String,
 }
 
 #[derive(Clone)]
@@ -82,6 +87,10 @@ pub struct QueryState {
 pub struct AppState {
     pub agent:            Arc<Agent>,
     pub neo4j:            Arc<Neo4jClient>,
+    pub neo4j_uri:        String,
+    pub neo4j_user:       String,
+    pub neo4j_password:   String,
+    pub ingestion:        IngestionRegistry,
     pub docs_dir:         Option<Arc<PathBuf>>,
     pub auth:             Arc<AuthConfig>,
     pub ui:               Arc<UiConfig>,
@@ -287,6 +296,10 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let graph_state = Arc::new(GraphState {
         neo4j: Arc::clone(&state.neo4j),
         cache,
+        ingestion: Arc::clone(&state.ingestion),
+        neo4j_uri: state.neo4j_uri.clone(),
+        neo4j_user: state.neo4j_user.clone(),
+        neo4j_password: state.neo4j_password.clone(),
     });
 
     let http = reqwest::Client::new();
@@ -356,7 +369,13 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .with_state(query_state);
 
     let graph_router = Router::new()
-        .route("/repositories",                     get(repositories::handle_list_repositories))
+        .route("/repositories",                     get(repositories::handle_list_repositories)
+                                                    .post(repositories::handle_add_repository))
+        .route("/repositories/verify",               post(repositories::handle_verify_repository))
+        .route("/repositories/:name/progress",        get(repositories::handle_repository_progress))
+        .route("/repositories/:name/stats",          get(repositories::handle_get_repository_stats))
+        .route("/repositories/:name/versions",        post(repositories::handle_ingest_versions))
+        .route("/repositories/:name/versions/:version/resync", post(repositories::handle_resync_version))
         .route("/graph/:repo/:version",             get(graph::handle_get_graph))
         .route("/graph/:repo/:version/source",      get(graph::handle_get_symbol_source))
         .with_state(Arc::clone(&graph_state));
@@ -548,8 +567,14 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                                    .delete(skill_handlers::delete_global_skill))
         .with_state(Arc::clone(&skill_store));
 
+    let admin_graph_routes = Router::new()
+        .route("/admin/repositories/:name",                   delete(repositories::handle_delete_repository))
+        .route("/admin/repositories/:name/versions/:version",  delete(repositories::handle_delete_version))
+        .with_state(Arc::clone(&graph_state));
+
     let admin_router = admin_auth_routes
         .merge(admin_skills_routes)
+        .merge(admin_graph_routes)
         .layer(from_fn_with_state(Arc::clone(&jwt_secret), auth::require_admin));
 
     Router::new()

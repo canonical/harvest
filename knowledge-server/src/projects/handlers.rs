@@ -1097,14 +1097,18 @@ pub async fn list_conversations(
     require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
     let rows = state.neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation)
-         OPTIONAL MATCH (u:User {id: c.created_by})
-         RETURN c.id AS id, c.title AS title,
-                c.created_by AS created_by, u.name AS created_by_name,
-                c.message_count AS message_count,
-                c.created_at AS created_at, c.updated_at AS updated_at
-         ORDER BY c.updated_at DESC",
+          OPTIONAL MATCH (u:User {id: c.created_by})
+          WITH c, head(collect(u.name)) AS created_by_name
+          RETURN c.id AS id, c.title AS title,
+                 c.created_by AS created_by, created_by_name AS created_by_name,
+                 c.message_count AS message_count,
+                 c.created_at AS created_at, c.updated_at AS updated_at
+          ORDER BY c.updated_at DESC",
         json!({ "pid": project_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    ).await.map_err(|e| {
+        tracing::error!(error = %e, "list_conversations: neo4j query failed");
+        err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
+    })?;
     Ok(Json(rows))
 }
 
