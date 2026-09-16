@@ -17,6 +17,33 @@ impl Neo4jClient {
         Ok(())
     }
 
+    pub async fn run_with_params(&self, cypher: &str, params: Value) -> Result<()> {
+        let mut q = query(cypher);
+        if let Value::Object(map) = params {
+            for (key, val) in map {
+                q = match val {
+                    Value::String(s)  => q.param(&key, s),
+                    Value::Number(n) if n.is_i64() => q.param(&key, n.as_i64().unwrap()),
+                    Value::Number(n)  => q.param(&key, n.as_f64().unwrap()),
+                    Value::Bool(b)    => q.param(&key, b),
+                    Value::Null       => q.param(&key, BoltType::Null(BoltNull)),
+                    Value::Array(arr) => {
+                        let items: Vec<String> = arr.into_iter()
+                            .map(|v| match v {
+                                Value::String(s) => s,
+                                other            => other.to_string(),
+                            })
+                            .collect();
+                        q.param(&key, items)
+                    }
+                    other => q.param(&key, other.to_string()),
+                };
+            }
+        }
+        self.graph.run(q).await?;
+        Ok(())
+    }
+
     pub async fn query_read(&self, cypher: &str, params: Value) -> Result<Vec<Value>> {
         let mut q = query(cypher);
 

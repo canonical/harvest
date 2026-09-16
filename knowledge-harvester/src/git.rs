@@ -11,6 +11,7 @@ pub struct TagInfo {
     pub timestamp: i64,
 }
 
+#[derive(Clone)]
 pub struct GitClient {
     clone_root: PathBuf,
     ssh_key_path: Option<PathBuf>,
@@ -70,6 +71,24 @@ impl GitClient {
             )?;
         }
         Ok(())
+    }
+
+    pub fn list_remote_refs(&self, url: &str) -> Result<Vec<TagInfo>> {
+        let tmp_dir = tempfile::TempDir::new()?;
+        let repo = Repository::init_opts(
+            tmp_dir.path(),
+            &git2::RepositoryInitOptions::new().external_template(false),
+        )?;
+        let mut remote = repo.remote("origin", url)?;
+
+        remote.connect(git2::Direction::Fetch)?;
+        let refs: Vec<(String, String)> = remote
+            .list()?
+            .iter()
+            .map(|h| (h.name().to_string(), h.oid().to_string()))
+            .collect();
+        remote.disconnect()?;
+        Ok(parse_refs(refs))
     }
 
     pub fn list_tags(&self, repo_path: &Path) -> Result<Vec<TagInfo>> {
@@ -146,6 +165,26 @@ fn resolve_one<'r>(repo: &'r Repository, refname: &str) -> Result<git2::Object<'
     let origin_ref = format!("refs/remotes/origin/{refname}");
     repo.revparse_single(&origin_ref)
         .with_context(|| format!("resolving ref '{refname}'"))
+}
+
+fn parse_refs(refs: Vec<(String, String)>) -> Vec<TagInfo> {
+    let mut result = Vec::new();
+    for (name, sha) in refs {
+        if name == "HEAD" { continue; }
+        let display_name = name
+            .strip_prefix("refs/tags/")
+            .unwrap_or(&name)
+            .strip_prefix("refs/heads/")
+            .unwrap_or(&name)
+            .to_string();
+        result.push(TagInfo {
+            name: display_name,
+            commit_sha: sha,
+            timestamp: 0,
+        });
+    }
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+    result
 }
 
 #[cfg(test)]

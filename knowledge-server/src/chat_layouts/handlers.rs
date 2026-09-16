@@ -48,7 +48,7 @@ pub async fn get_current(
         "MATCH (:User {id: $uid})-[:HAS_CHAT_LAYOUT]->(l:ChatLayout {kind: 'current', project_id: $pid})
          RETURN l.tree AS tree, l.updated_at AS updated_at",
         json!({ "uid": user.sub, "pid": scope_id(params.project_id) }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: neo4j query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
 
     let Some(row) = rows.into_iter().next() else {
         return Ok(Json(Value::Null));
@@ -83,7 +83,10 @@ pub async fn put_current(
          ON MATCH  SET l.tree = $tree, l.updated_at = $now
          RETURN l.id AS id",
         json!({ "uid": user.sub, "id": id, "pid": scope_id(params.project_id), "tree": tree_json, "now": now }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    ).await.map_err(|e| {
+        tracing::error!(error = %e, "put_current: neo4j query failed");
+        err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
+    })?;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -98,7 +101,7 @@ pub async fn list_named(
          RETURN l.id AS id, l.name AS name, l.tree AS tree, l.updated_at AS updated_at
          ORDER BY l.updated_at DESC",
         json!({ "uid": user.sub, "pid": scope_id(params.project_id) }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: neo4j query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
 
     let layouts: Vec<Value> = rows.iter().map(|row| json!({
         "id": row.get("id"),
@@ -139,7 +142,7 @@ pub async fn create_named(
             "uid": user.sub, "id": id, "name": body.name, "tree": tree_json,
             "pid": scope_id(body.project_id), "now": now,
         }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: neo4j query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
 
     Ok((StatusCode::CREATED, Json(json!({ "id": id, "name": body.name, "created_at": now }))))
 }
@@ -154,7 +157,7 @@ pub async fn get_named(
          RETURN l.id AS id, l.name AS name, l.tree AS tree,
                 l.created_at AS created_at, l.updated_at AS updated_at",
         json!({ "uid": user.sub, "lid": layout_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: neo4j query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
 
     let row = rows.into_iter().next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
@@ -189,7 +192,7 @@ pub async fn update_named(
          SET l.name = $name, l.tree = $tree, l.updated_at = $now
          RETURN l.id AS id",
         json!({ "uid": user.sub, "lid": layout_id, "name": body.name, "tree": tree_json, "now": now }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: neo4j query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -203,7 +206,7 @@ pub async fn delete_named(
         "MATCH (:User {id: $uid})-[:HAS_CHAT_LAYOUT]->(l:ChatLayout {id: $lid, kind: 'named'})
          DETACH DELETE l RETURN count(l) AS n",
         json!({ "uid": user.sub, "lid": layout_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: neo4j query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
 
     Ok(Json(json!({ "ok": true })))
 }

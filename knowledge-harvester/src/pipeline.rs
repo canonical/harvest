@@ -1,9 +1,10 @@
 use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::{Duration, interval};
 
-use crate::config::{Config, RepoConfig};
+use crate::config::{Config, Neo4jConfig, RepoConfig};
 use crate::git::GitClient;
 use crate::graph::writer::GraphWriter;
 use crate::parser::ParserRegistry;
@@ -13,9 +14,20 @@ pub struct Pipeline {
     git: GitClient,
     parsers: Arc<ParserRegistry>,
     writer: GraphWriter,
+    progress_tx: Option<UnboundedSender<String>>,
 }
 
 impl Pipeline {
+    pub fn set_progress_tx(&mut self, tx: UnboundedSender<String>) {
+        self.progress_tx = Some(tx);
+    }
+
+    fn emit(&self, msg: impl Into<String>) {
+        if let Some(tx) = &self.progress_tx {
+            let _ = tx.send(msg.into());
+        }
+    }
+
     pub async fn new(config: Config) -> Result<Self> {
         let clone_root = std::env::temp_dir().join("harvest-repos");
         std::fs::create_dir_all(&clone_root)?;
@@ -31,7 +43,43 @@ impl Pipeline {
         )
         .await?;
         writer.ensure_indexes().await?;
-        Ok(Self { config, git, parsers, writer })
+        Ok(Self { config, git, parsers, writer, progress_tx: None })
+    }
+
+    pub async fn new_with_neo4j(uri: &str, user: &str, password: &str) -> Result<Self> {
+        let clone_root = std::env::temp_dir().join("harvest-repos");
+        std::fs::create_dir_all(&clone_root)?;
+        let git = GitClient::new(clone_root);
+        let parsers = Arc::new(ParserRegistry::with_defaults());
+        let writer = GraphWriter::new(uri, user, password).await?;
+        writer.ensure_indexes().await?;
+        let config = Config {
+            neo4j: Neo4jConfig {
+                uri: uri.to_string(),
+                user: user.to_string(),
+                password: password.to_string(),
+            },
+            git: None,
+            repositories: vec![],
+            llm: None,
+            documentation: None,
+        };
+        Ok(Self { config, git, parsers, writer, progress_tx: None })
+    }
+
+    pub async fn process_single(&self, repo: &RepoConfig, force: bool) -> Result<()> {
+        self.process_repo(repo, force).await
+    }
+
+    pub async fn list_remote_refs(&self, url: &str) -> Result<Vec<crate::git::TagInfo>> {
+        let git = self.git.clone();
+        let url = url.to_string();
+        tokio::task::spawn_blocking(move || git.list_remote_refs(&url))
+            .await?
+    }
+
+    pub async fn ingested_versions(&self, repo: &str) -> Result<Vec<String>> {
+        self.writer.ingested_versions(repo).await
     }
 
     pub async fn run(&self, force: bool) -> Result<()> {
@@ -69,24 +117,38 @@ impl Pipeline {
     }
 
     async fn process_repo(&self, repo: &RepoConfig, force: bool) -> Result<()> {
+        self.emit(format!("Registering repository '{}' in Neo4j…", repo.name));
         self.writer.upsert_repository(&repo.name, &repo.resolved_browse_url()).await?;
+        self.emit("Cloning repository…");
         let repo_path = self.git.ensure_cloned(repo)?;
+        self.emit("Repository cloned. Discovering refs…");
         let tags = match &repo.refs {
-            Some(wanted) => self.git.resolve_refs(&repo_path, wanted)?,
-            None => self.git.list_tags(&repo_path)?,
+            Some(wanted) => {
+                self.emit(format!("Resolving {} specified ref(s)…", wanted.len()));
+                self.git.resolve_refs(&repo_path, wanted)?
+            }
+            None => {
+                self.emit("Listing all tags…");
+                self.git.list_tags(&repo_path)?
+            }
         };
+
+        self.emit(format!("Found {} ref(s) to process.", tags.len()));
 
         for tag in tags {
             if !force && self.writer.is_ingested(&repo.name, &tag.name).await? {
+                self.emit(format!("Ref '{}' already ingested, skipping.", tag.name));
                 tracing::debug!(repo = repo.name, tag = tag.name, "already ingested, skipping");
                 continue;
             }
             self.process_version(&repo_path, &repo.name, &tag.name, tag.timestamp).await?;
         }
 
+        self.emit("Cleaning up temporary clone…");
         if let Err(e) = std::fs::remove_dir_all(&repo_path) {
             tracing::warn!(repo = repo.name, error = %e, "failed to remove cloned repository");
         }
+        self.emit("Ingestion complete.");
         Ok(())
     }
 
@@ -97,13 +159,18 @@ impl Pipeline {
         tag: &str,
         timestamp: i64,
     ) -> Result<()> {
+        self.emit(format!("Processing ref '{}'…", tag));
         tracing::info!(repo, tag, "ingesting version");
 
         self.writer.upsert_version(repo, tag, timestamp, false).await?;
 
+        self.emit(format!("Checking out '{}'…", tag));
         self.git.checkout(repo_path, tag)?;
 
+        self.emit("Walking source files…");
         let files = self.git.walk_source_files(repo_path)?;
+        self.emit(format!("Found {} source files to parse.", files.len()));
+
         let parsers = Arc::clone(&self.parsers);
         let repo_owned = repo.to_owned();
         let tag_owned = tag.to_owned();
@@ -130,7 +197,11 @@ impl Pipeline {
         })
         .await?;
 
+        let parsed_count = parsed.len();
+        self.emit(format!("Parsed {} file(s). Writing to Neo4j…", parsed_count));
+
         self.writer.write_version(&repo_owned, &tag_owned, &parsed).await?;
+        self.emit(format!("Ref '{}' ingested successfully ({} files).", tag, parsed_count));
         Ok(())
     }
 }
