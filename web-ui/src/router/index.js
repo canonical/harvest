@@ -5,11 +5,11 @@ const routes = [
   { path: '/login',          component: () => import('../views/LoginView.vue'),         meta: { public: true } },
   { path: '/register',       component: () => import('../views/RegisterView.vue'),       meta: { public: true } },
   { path: '/authenticate/:uuid', component: () => import('../views/AuthenticateView.vue'), meta: { public: true } },
-  { path: '/',               component: () => import('../views/ChatWorkspaceView.vue'),  meta: { requiresProject: true, stableAcrossProjects: true } },
+  { path: '/',               component: () => import('../views/ChatWorkspaceView.vue'),  meta: { requiresProject: true, stableAcrossProjects: true, requiresApiKey: true } },
   { path: '/deployments',     redirect: '/deploy' },
   { path: '/deployments/:id', redirect: '/deploy' },
-  { path: '/design',          component: () => import('../views/DesignView.vue'),         meta: { requiresProject: true, directEntry: true } },
-  { path: '/deploy',          component: () => import('../views/DeployView.vue'),          meta: { requiresProject: true, directEntry: true } },
+  { path: '/design',          component: () => import('../views/DesignView.vue'),         meta: { requiresProject: true, directEntry: true, requiresApiKey: true } },
+  { path: '/deploy',          component: () => import('../views/DeployView.vue'),          meta: { requiresProject: true, directEntry: true, requiresApiKey: true } },
   { path: '/agents',         component: () => import('../views/AgentsView.vue'),         meta: { requiresProject: true } },
   { path: '/agents/:agentId/console', component: () => import('../views/AgentConsoleView.vue'), meta: { requiresProject: true } },
   { path: '/artifacts',      component: () => import('../views/ArtifactsView.vue'),      meta: { requiresProject: true } },
@@ -38,6 +38,11 @@ router.beforeEach(async (to, from) => {
   }
 
   if (to.meta.feature && !auth.features[to.meta.feature]) return '/';
+
+  if (to.meta.requiresApiKey && auth.apiKeyRequired) {
+    auth.apiKeyDismissed = false;
+    return '/settings';
+  }
 
   if (!to.meta.directEntry && from.matched.length === 0 && to.path !== '/') return '/';
 

@@ -136,7 +136,7 @@
                   <li class="p-side-navigation__item">
                     <router-link to="/repositories" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
                       <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-                      <span class="p-side-navigation__label">Explore code</span>
+                      <span class="p-side-navigation__label">Code repositories</span>
                     </router-link>
                   </li>
                   <li class="p-side-navigation__item">
@@ -235,6 +235,21 @@
         >Create</button>
       </div>
     </div>
+
+    <div v-if="auth.apiKeyRequired && !auth.apiKeyDismissed" class="modal">
+      <div class="modal-content">
+        <button class="modal-close" type="button" @click="auth.apiKeyDismissed = true" style="display:none"></button>
+        <h3>API key required</h3>
+        <p class="modal-lede">
+          <template v-if="auth.apiKeyProviderName">An API key is required for <strong>{{ auth.apiKeyProviderName }}</strong>.</template>
+          <template v-else>An API key is required.</template>
+          Please go to <strong>Settings</strong> to add your API key.
+        </p>
+        <div class="modal-actions">
+          <button class="p-button--positive is-dense" type="button" @click="goToSettings">Go to Settings</button>
+        </div>
+      </div>
+    </div>
   </template>
 
   <template v-else>
@@ -248,10 +263,13 @@ import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore }    from './stores/auth.js';
 import { useThemeStore }   from './stores/theme.js';
 import { useProjectStore } from './stores/project.js';
+import { useLlmStore }    from './stores/llm.js';
+import { fetchLlmProviders, fetchLlmUserKeys } from './lib/api.js';
 
 const auth    = useAuthStore();
 const theme   = useThemeStore();
 const project = useProjectStore();
+const llm     = useLlmStore();
 const route   = useRoute();
 const router  = useRouter();
 
@@ -361,11 +379,39 @@ onMounted(async () => {
       }
       if (auth.user?.last_project_id) project.selectProjectById(auth.user.last_project_id);
       await project.fetchProjects();
+      await checkApiKeys();
     }
   } finally {
     project.markReady();
   }
 });
+
+async function checkApiKeys() {
+  try {
+    const [providersRes, keysRes] = await Promise.all([
+      fetchLlmProviders(),
+      fetchLlmUserKeys(),
+    ]);
+    const visibleProviders = providersRes.providers ?? [];
+    const userKeyProviders = keysRes.providers ?? [];
+    if (userKeyProviders.length > 0 && visibleProviders.length === 0) {
+      if (userKeyProviders.length === 1) {
+        auth.apiKeyProviderName = userKeyProviders[0]?.name || userKeyProviders[0]?.kind || 'the LLM provider';
+      } else {
+        auth.apiKeyProviderName = '';
+      }
+      auth.apiKeyRequired = true;
+      auth.apiKeyDismissed = false;
+    } else {
+      auth.apiKeyRequired = false;
+    }
+  } catch {}
+}
+
+function goToSettings() {
+  auth.apiKeyDismissed = true;
+  router.push('/settings');
+}
 
 watch(() => auth.isLoggedIn, async (loggedIn) => {
   if (loggedIn) {
@@ -373,4 +419,10 @@ watch(() => auth.isLoggedIn, async (loggedIn) => {
     if (auth.user?.last_project_id) project.selectProjectById(auth.user.last_project_id);
   }
 });
+
+watch(() => llm.userKeyProviders, async () => {
+  if (auth.isLoggedIn) {
+    await checkApiKeys();
+  }
+}, { deep: true });
 </script>
