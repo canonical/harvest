@@ -198,6 +198,83 @@ export async function fetchRepositories() {
   }
 }
 
+export async function addRepository(body) {
+  const response = await fetch(REPOSITORIES_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${response.status})`);
+  }
+  return response.json();
+}
+
+export async function deleteRepository(name) {
+  return adminFetch(`/admin/repositories/${encodeURIComponent(name)}`, { method: 'DELETE' });
+}
+
+export async function deleteVersion(repo, version) {
+  return adminFetch(`/admin/repositories/${encodeURIComponent(repo)}/versions/${encodeURIComponent(version)}`, { method: 'DELETE' });
+}
+
+export async function ingestVersions(repo, refs) {
+  const response = await fetch(`${REPOSITORIES_URL}/${encodeURIComponent(repo)}/versions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refs }),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${response.status})`);
+  }
+  return response.json();
+}
+
+export async function resyncRepository(repo, version) {
+  const response = await fetch(`${REPOSITORIES_URL}/${encodeURIComponent(repo)}/versions/${encodeURIComponent(version)}/resync`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${response.status})`);
+  }
+  return response.json();
+}
+
+export async function verifyRepository(url) {
+  const response = await fetch(`${REPOSITORIES_URL}/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Request failed (${response.status})`);
+  }
+  return response.json();
+}
+
+export function streamRepositoryProgress(repo, onEvent) {
+  const url = `${REPOSITORIES_URL}/${encodeURIComponent(repo)}/progress`;
+  const es = new EventSource(url);
+  es.onmessage = (e) => {
+    try { onEvent(JSON.parse(e.data)); } catch {}
+  };
+  return es;
+}
+
+export async function fetchRepositoryStats(repo, version) {
+  const url = version
+    ? `${REPOSITORIES_URL}/${encodeURIComponent(repo)}/stats?version=${encodeURIComponent(version)}`
+    : `${REPOSITORIES_URL}/${encodeURIComponent(repo)}/stats`;
+  const response = await fetch(url);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Server error ${response.status}`);
+  return response.json();
+}
+
 export async function fetchGraph(repo, version) {
   const url = `${GRAPH_URL}/${encodeURIComponent(repo)}/${encodeURIComponent(version)}`;
   const response = await fetch(url);

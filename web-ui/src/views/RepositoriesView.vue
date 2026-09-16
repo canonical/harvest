@@ -1,191 +1,367 @@
 <template>
   <div class="repositories-page">
-    <div class="repo-toolbar">
-      <div class="doc-selector">
-        <label class="doc-selector__label">
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2 2.5A2.5 2.5 0 0 1 4.5 0h8.75a.75.75 0 0 1 .75.75v12.5a.75.75 0 0 1-.75.75h-2.5a.75.75 0 0 1 0-1.5h1.75v-2h-8a1 1 0 0 0-.714 1.7.75.75 0 1 1-1.072 1.05A2.495 2.495 0 0 1 2 11.5Zm10.5-1h-8a1 1 0 0 0-1 1v6.708A2.486 2.486 0 0 1 4.5 9h8Z"/></svg>
-          Repository
-        </label>
-        <select class="doc-select" v-model="selectedRepo" @change="onRepoChange">
-          <option value="" disabled>Choose a repository</option>
-          <option v-for="r in repos" :key="r.name" :value="r.name">{{ r.name }}</option>
-        </select>
+    <div class="repositories-header">
+      <div class="repositories-header__title">
+        <h2>Code repositories</h2>
+        <span v-if="repos.length" class="repositories-header__count">{{ repos.length }}</span>
       </div>
-
-      <svg class="doc-selector__sep" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="5.5 3.5 10.5 8 5.5 12.5"/></svg>
-
-      <div class="doc-selector">
-        <label class="doc-selector__label">
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1 7.775V2.75C1 1.784 1.784 1 2.75 1h5.025c.464 0 .91.184 1.238.513l6.25 6.25a1.75 1.75 0 0 1 0 2.474l-5.026 5.026a1.75 1.75 0 0 1-2.474 0l-6.25-6.25A1.752 1.752 0 0 1 1 7.775Zm1.5 0c0 .066.026.13.073.177l6.25 6.25a.25.25 0 0 0 .354 0l5.025-5.025a.25.25 0 0 0 0-.354l-6.25-6.25a.25.25 0 0 0-.177-.073H2.75a.25.25 0 0 0-.25.25ZM6 5a1 1 0 1 1 0 2 1 1 0 0 1 0-2Z"/></svg>
-          Version
-        </label>
-        <select class="doc-select" v-model="selectedVersion" :disabled="!selectedRepo" @change="onVersionChange">
-          <option value="" disabled>Choose a version</option>
-          <option v-for="v in sortedVersions" :key="v" :value="v">{{ v }}</option>
-        </select>
-      </div>
-
-      <div class="repo-search-bar">
-        <input
-          v-model="searchQuery"
-          type="search"
-          placeholder="Smart search with AI…"
-          autocomplete="off"
-          :disabled="!cyReady"
-          @keydown.enter="doSearch"
-        />
-        <button id="graph-search-btn" :disabled="!cyReady || searching" @click="doSearch">{{ searching ? '…' : 'Search' }}</button>
-        <button v-if="searchActive" id="graph-search-clear" aria-label="Clear search" @click="clearSearch">✕</button>
-      </div>
-
-      <div class="repo-toolbar__actions">
-        <button :disabled="!cyReady" @click="fitGraph">Fit</button>
+      <div class="repositories-header__actions">
+        <button class="p-button--positive is-dense" type="button" @click="openAddModal">+ Add repository</button>
       </div>
     </div>
 
-    <p v-if="searchStatus" class="repo-search-status">{{ searchStatus }}</p>
+    <div class="repositories-layout">
+      <div class="repositories-list">
+        <div class="repo-list-search-bar">
+          <svg class="repo-list-search-bar__icon" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input
+            v-model="repoSearch"
+            type="search"
+            placeholder="Search repositories…"
+            autocomplete="off"
+          />
+        </div>
+        <div v-if="listLoading" class="repositories-list-loading">
+          <LoadingSpinner text="Loading…" />
+        </div>
+        <p v-else-if="!filteredRepos.length" class="repositories-list-empty">
+          {{ repos.length ? 'No repositories match your search.' : 'No repositories yet. Click "Add repository" to ingest one.' }}
+        </p>
+        <button
+          v-for="r in filteredRepos"
+          :key="r.name"
+          class="repo-list-item"
+          :class="{ 'repo-list-item--active': r.name === selectedRepo }"
+          type="button"
+          @click="selectRepo(r.name)"
+        >
+          <span class="repo-list-item__name">{{ r.name }}</span>
+          <span class="repo-list-item__meta">
+            <span v-if="r.ingestion_status" class="repo-status-badge" :class="`repo-status-badge--${r.ingestion_status}`">{{ r.ingestion_status }}</span>
+            <span v-if="r.versions.length" class="repo-list-item__versions">{{ r.versions.length }} version{{ r.versions.length !== 1 ? 's' : '' }}</span>
+          </span>
+          <span v-if="r.ingestion_status === 'running'" class="repo-list-item__progress">
+            <LoadingSpinner />
+          </span>
+          <span v-if="r.ingestion_error" class="repo-list-item__error">{{ r.ingestion_error }}</span>
+        </button>
+      </div>
 
-    <div class="repo-main">
-      <div class="repo-graph-wrap">
-        <div v-if="graphLoading" class="repo-loading">
-          <div class="loading-dots"><span></span><span></span><span></span></div>
-          <span>{{ loadingText }}</span>
+      <div class="repositories-detail">
+        <div v-if="!selectedRepo" class="repositories-detail-empty">
+          <p>Select a repository to view its statistics.</p>
         </div>
-        <div v-else-if="graphError" class="repo-empty">
-          <span class="repo-empty__error">{{ graphError }}</span>
-        </div>
-        <div v-else-if="!cyReady && !selectedVersion" class="repo-empty">
-          <div class="repo-empty__icon">
-            <svg viewBox="0 0 16 16" fill="currentColor" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M.81 7.36a1.92 1.92 0 1 1 3.799.572A1.92 1.92 0 0 1 .81 7.36M8.826 3.033a1.92 1.92 0 1 1 3.755.806 1.92 1.92 0 0 1-3.755-.806M7.04 12.585a4.68 4.68 0 0 1-3.19-2.432 2.76 2.76 0 0 1-1.64.202 6.25 6.25 0 0 0 4.498 3.77c.45.098.908.144 1.364.141a2.74 2.74 0 0 1-.562-1.605 5 5 0 0 1-.47-.076M8.394 12.193a1.92 1.92 0 0 1 3.754.805 1.92 1.92 0 1 1-3.754-.805M12.943 11.89a6.3 6.3 0 0 0 1.22-2.587 6.3 6.3 0 0 0-.905-4.782 2.77 2.77 0 0 1-1.08 1.265 4.7 4.7 0 0 1-.154 4.674c.45.37.77.87.919 1.43M2.56 4.892a2.75 2.75 0 0 1 1.603.41 4.68 4.68 0 0 1 3.77-2.015q.012-.218.057-.433c.088-.411.268-.795.525-1.124A6.31 6.31 0 0 0 2.56 4.892"/></svg>
+        <div v-else-if="selectedRepo && isIngesting" class="repo-progress-panel">
+          <div class="repo-progress-header">
+            <h2>{{ selectedRepo }}</h2>
+            <span class="repo-status-badge repo-status-badge--running">ingesting</span>
           </div>
-          <p class="repo-empty__text">Select a repository and version<br>to explore its symbol graph</p>
-        </div>
-
-        <div v-if="searching" class="search-overlay">
-          <div class="search-overlay__panel">
-            <div class="search-overlay__heading">
-              <div class="loading-dots"><span></span><span></span><span></span></div>
-              <span>Searching for "<strong>{{ searchQuery }}</strong>"</span>
+          <div class="repo-progress-body">
+            <div class="repo-progress-spinner">
+              <LoadingSpinner text="Ingesting repository" />
             </div>
-            <div class="search-overlay__calls">
-              <div v-for="(call, i) in searchCalls" :key="i" class="search-overlay__call">
-                <svg v-if="call.done" class="search-overlay__call-icon done" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <polyline points="3 8.5 6.5 12 13 4.5"/>
-                </svg>
-                <svg v-else class="search-overlay__call-icon running" viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                  <circle cx="8" cy="8" r="6" stroke-opacity="0.2"/>
-                  <path d="M8 2 A6 6 0 0 1 14 8" stroke-linecap="round"/>
-                </svg>
-                <span class="search-overlay__call-text">{{ call.label }}</span>
-                <span class="search-overlay__call-status">
-                  <template v-if="call.done && call.count !== null">{{ call.count === 0 ? 'no matches' : `${call.count} match${call.count !== 1 ? 'es' : ''}` }}</template>
-                  <template v-else-if="!call.done">…</template>
+            <div class="repo-progress-lines">
+              <div
+                v-for="(line, i) in progressLines"
+                :key="i"
+                class="repo-progress-line"
+                :class="{ 'repo-progress-line--done': i < progressLines.length - 1 }"
+              >
+                <span class="repo-progress-line__icon">
+                  <svg v-if="i < progressLines.length - 1" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 8.5 6.5 12 13 4.5"/></svg>
+                  <svg v-else class="repo-progress-line__spinner" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><path d="M.81 7.36a1.92 1.92 0 1 1 3.799.572A1.92 1.92 0 0 1 .81 7.36M8.826 3.033a1.92 1.92 0 1 1 3.755.806 1.92 1.92 0 0 1-3.755-.806M7.04 12.585a4.68 4.68 0 0 1-3.19-2.432 2.76 2.76 0 0 1-1.64.202 6.25 6.25 0 0 0 4.498 3.77c.45.098.908.144 1.364.141a2.74 2.74 0 0 1-.562-1.605 5 5 0 0 1-.47-.076M8.394 12.193a1.92 1.92 0 0 1 3.754.805 1.92 1.92 0 1 1-3.754-.805M12.943 11.89a6.3 6.3 0 0 0 1.22-2.587 6.3 6.3 0 0 0-.905-4.782 2.77 2.77 0 0 1-1.08 1.265 4.7 4.7 0 0 1-.154 4.674c.45.37.77.87.919 1.43M2.56 4.892a2.75 2.75 0 0 1 1.603.41 4.68 4.68 0 0 1 3.77-2.015q.012-.218.057-.433c.088-.411.268-.795.525-1.124A6.31 6.31 0 0 0 2.56 4.892"/></svg>
                 </span>
+                <span class="repo-progress-line__text">{{ line }}</span>
               </div>
             </div>
-            <div v-if="searchFoundCount > 0" class="search-overlay__total">
-              {{ searchFoundCount }} unique symbol{{ searchFoundCount !== 1 ? 's' : '' }} found
-            </div>
           </div>
         </div>
+        <div v-else-if="statsLoading" class="repositories-detail-loading">
+          <LoadingSpinner text="Loading statistics…" />
+        </div>
+        <div v-else-if="!stats" class="repositories-detail-empty">
+          <p>No statistics available for this repository.</p>
+        </div>
+        <div v-else class="repo-stats">
+          <div class="repo-stats__header">
+            <div class="repo-stats__title">
+              <h2>{{ stats.repository }}</h2>
+              <a v-if="stats.url" :href="stats.url" target="_blank" rel="noopener" class="repo-stats__url">{{ stats.url }}</a>
+            </div>
+            <div class="repo-stats__toolbar">
+              <div class="repo-version-dropdown">
+                <select id="repo-version-select" v-model="selectedVersion" @change="loadStats">
+                  <option v-for="v in stats.versions" :key="v" :value="v">{{ v }}</option>
+                </select>
+              </div>
+              <button
+                class="repo-toolbar-btn"
+                type="button"
+                aria-label="Resynchronize version"
+                title="Resynchronize this version"
+                :disabled="resyncing"
+                @click="confirmResync"
+              >
+                <svg v-if="!resyncing" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+                <svg v-else class="repo-toolbar-btn__spinning" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              </button>
+              <button
+                class="repo-toolbar-btn"
+                type="button"
+                aria-label="Ingest new versions"
+                title="Ingest new versions"
+                @click="openIngestVersionsModal"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              </button>
+              <button
+                v-if="auth.isAdmin"
+                class="repo-toolbar-btn repo-toolbar-btn--labeled"
+                type="button"
+                :disabled="stats.versions.length <= 1"
+                @click="openDeleteVersionModal"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+                <span>Delete version</span>
+              </button>
+              <button
+                v-if="auth.isAdmin"
+                class="repo-toolbar-btn repo-toolbar-btn--labeled repo-toolbar-btn--danger"
+                type="button"
+                @click="openDeleteRepoModal"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="9" y1="13" x2="15" y2="13"/></svg>
+                <span>Delete repository</span>
+              </button>
+            </div>
+          </div>
 
-        <div ref="cyEl" id="cy" class="repo-graph" />
+          <div class="repo-stats__summary">
+            <div class="repo-stat-card">
+              <span class="repo-stat-card__value">{{ stats.totals.files }}</span>
+              <span class="repo-stat-card__label">Files</span>
+            </div>
+            <div class="repo-stat-card">
+              <span class="repo-stat-card__value">{{ stats.totals.symbols }}</span>
+              <span class="repo-stat-card__label">Symbols</span>
+            </div>
+            <div class="repo-stat-card" v-for="rel in stats.relations" :key="rel.relation">
+              <span class="repo-stat-card__value">{{ rel.count }}</span>
+              <span class="repo-stat-card__label">{{ rel.relation }}</span>
+            </div>
+          </div>
 
-        <div v-if="cyReady" class="graph-legend">
-          <div v-for="(color, kind) in KIND_COLORS" :key="kind" class="graph-legend__item">
-            <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-              <circle cx="5" cy="5" r="4" :fill="color" />
-            </svg>
-            <span>{{ kind }}</span>
-          </div>
-          <div class="graph-legend__divider"></div>
-          <div class="graph-legend__item">
-            <svg width="32" height="10" viewBox="0 0 32 10" aria-hidden="true">
-              <line x1="0" y1="5" x2="25" y2="5" stroke="rgba(124,58,237,0.85)" stroke-width="1.8"/>
-              <polygon points="25,2 32,5 25,8" fill="none" stroke="rgba(124,58,237,0.85)" stroke-width="1.3"/>
-            </svg>
-            <span>inherits</span>
-          </div>
-          <div class="graph-legend__item">
-            <svg width="32" height="10" viewBox="0 0 32 10" aria-hidden="true">
-              <line x1="0" y1="5" x2="25" y2="5" stroke="rgba(8,145,178,0.85)" stroke-width="1.8" stroke-dasharray="5,3"/>
-              <polygon points="25,2 32,5 25,8" fill="none" stroke="rgba(8,145,178,0.85)" stroke-width="1.3"/>
-            </svg>
-            <span>implements</span>
-          </div>
-          <div class="graph-legend__item">
-            <svg width="32" height="10" viewBox="0 0 32 10" aria-hidden="true">
-              <polygon points="0,5 5,2 10,5 5,8" fill="none" stroke="rgba(5,150,105,0.85)" stroke-width="1.3"/>
-              <line x1="10" y1="5" x2="32" y2="5" stroke="rgba(5,150,105,0.7)" stroke-width="1.5"/>
-            </svg>
-            <span>embeds</span>
-          </div>
-          <div class="graph-legend__item">
-            <svg width="32" height="10" viewBox="0 0 32 10" aria-hidden="true">
-              <polygon points="0,5 5,2 10,5 5,8" fill="rgba(139,92,246,0.75)" stroke="rgba(139,92,246,0.75)" stroke-width="1"/>
-              <line x1="10" y1="5" x2="32" y2="5" stroke="rgba(139,92,246,0.55)" stroke-width="1.5"/>
-            </svg>
-            <span>contains</span>
-          </div>
-          <div class="graph-legend__item">
-            <svg width="32" height="10" viewBox="0 0 32 10" aria-hidden="true">
-              <line x1="0" y1="5" x2="25" y2="5" stroke="rgba(217,119,6,0.6)" stroke-width="1.5"/>
-              <polygon points="25,2.5 32,5 25,7.5" fill="rgba(217,119,6,0.75)" stroke="none"/>
-            </svg>
-            <span>uses</span>
-          </div>
-          <div class="graph-legend__item">
-            <svg width="32" height="10" viewBox="0 0 32 10" aria-hidden="true">
-              <line x1="0" y1="5" x2="25" y2="5" stroke="rgba(120,120,120,0.55)" stroke-width="1.5" stroke-dasharray="4,3"/>
-              <polygon points="25,2.5 32,5 25,7.5" fill="rgba(120,120,120,0.55)" stroke="none"/>
-            </svg>
-            <span>calls</span>
-          </div>
+          <section v-if="stats.languages.length" class="repo-stats__section">
+            <h3>Language breakdown</h3>
+            <div class="repo-lang-pie-wrap">
+              <svg class="repo-lang-pie" viewBox="-1.1 -1.1 2.2 2.2" width="180" height="180">
+                <circle cx="0" cy="0" r="1" fill="var(--bg-surface-alt)" />
+                <template v-for="(seg, i) in pieSegments" :key="i">
+                  <path :d="seg.path" :fill="seg.color" stroke="var(--bg-surface)" stroke-width="0.01" />
+                </template>
+                <circle v-if="pieSegments.length" cx="0" cy="0" r="0.5" fill="var(--bg-page)" />
+              </svg>
+              <div class="repo-lang-legend">
+                <div v-for="lang in stats.languages" :key="lang.language" class="repo-lang-legend__item">
+                  <span class="repo-lang-legend__swatch" :style="{ background: langColor(lang.language) }"></span>
+                  <span class="repo-lang-legend__name">{{ lang.language }}</span>
+                  <span class="repo-lang-legend__count">{{ lang.files }} ({{ lang.percentage.toFixed(1) }}%)</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section v-if="stats.symbols.length" class="repo-stats__section">
+            <h3>Symbol types</h3>
+            <div class="repo-symbol-grid">
+              <div v-for="sym in stats.symbols" :key="sym.kind" class="repo-symbol-chip">
+                <span class="repo-symbol-chip__count">{{ sym.count }}</span>
+                <span class="repo-symbol-chip__label">{{ sym.kind }}</span>
+                <span class="repo-symbol-chip__type">{{ sym.type }}</span>
+              </div>
+            </div>
+          </section>
         </div>
       </div>
     </div>
 
-    <div class="repo-source-panel" :class="{ 'is-open': !!sourcePanel, 'is-expanded': panelExpanded }">
-      <div class="repo-source-panel__body">
-        <div class="repo-source-panel__head">
-          <button
-            class="source-panel-expand p-button--base"
-            type="button"
-            :aria-label="panelExpanded ? 'Shrink source panel' : 'Expand source panel'"
-            @click="panelExpanded = !panelExpanded"
-          >
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <polyline v-if="!panelExpanded" points="10.5 3.5 5.5 8 10.5 12.5"/>
-              <polyline v-else               points="5.5 3.5 10.5 8 5.5 12.5"/>
-            </svg>
-          </button>
-          <div class="repo-source-panel__title">
-            <span class="source-symbol-name">{{ sourcePanel?.name }}</span>
-            <span v-if="sourcePanel?.kind" class="source-kind-badge" :class="`source-kind-badge--${(sourcePanel.kind ?? '').toLowerCase()}`">{{ sourcePanel?.kind }}</span>
-          </div>
-          <button class="source-panel-close" type="button" aria-label="Close panel" @click="sourcePanel = null; panelExpanded = false">✕</button>
+    <div v-if="addModalOpen" class="modal" @click.self="closeAddModal">
+      <div class="modal-content modal-content--wide">
+        <button class="modal-close" type="button" @click="closeAddModal">✕</button>
+        <h3>Add repository</h3>
+        <div class="form-group">
+          <label for="add-repo-url">Git URL</label>
+          <input id="add-repo-url" v-model="addForm.url" type="text" placeholder="https://github.com/owner/repo.git" @keydown.enter="verifyUrl" :disabled="verifying" />
+          <span v-if="verifyError" class="auth-error">{{ verifyError }}</span>
         </div>
-        <p v-if="sourcePanel?.file" class="source-symbol-file">{{ sourcePanel.file }}:{{ sourcePanel.start_line }}</p>
-        <div class="source-code-block">
-          <div v-if="sourcePanel?.loading" class="source-loading">
-            <div class="loading-dots"><span></span><span></span><span></span></div>
-          </div>
-          <pre v-else-if="sourcePanel?.highlightedCode"><code class="hljs" v-html="sourcePanel.highlightedCode"></code></pre>
-          <p v-else class="source-no-source">No source available</p>
+        <div v-if="verifying" class="repo-verify-loading">
+          <LoadingSpinner text="Connecting to repository…" />
         </div>
-        <div v-if="sourcePanel?.relations?.length" class="source-relations">
-          <div v-for="section in sourcePanel.relations" :key="section.label" class="source-relations__section">
-            <div class="source-relations__label">{{ section.label }}</div>
-            <div class="source-relations__chips">
-              <button
-                v-for="chip in section.chips"
-                :key="chip.name"
-                class="relation-chip"
-                :title="chip.title"
-                @click="chip.onClick()"
-              >{{ chip.name }}</button>
+        <button
+          v-if="!availableRefs.length && !verifying"
+          class="p-button--positive is-dense"
+          type="button"
+          :disabled="!addForm.url.trim()"
+          @click="verifyUrl"
+        >Next</button>
+
+        <template v-if="availableRefs.length">
+          <div class="form-group">
+            <label for="add-repo-name">Name</label>
+            <input id="add-repo-name" v-model="addForm.name" type="text" placeholder="my-repo" />
+          </div>
+          <div class="form-group">
+            <label>Refs <span class="form-field-hint-inline">(required — select at least one)</span></label>
+            <div class="refs-multiselect">
+              <div class="refs-multiselect__search">
+                <input
+                  v-model="refSearch"
+                  type="search"
+                  placeholder="Search refs…"
+                  autocomplete="off"
+                />
+              </div>
+              <div class="refs-multiselect__list">
+                <label
+                  v-for="r in filteredRefs"
+                  :key="r.name"
+                  class="refs-multiselect__item"
+                  :class="{ 'refs-multiselect__item--selected': selectedRefs.has(r.name) }"
+                >
+                  <input
+                    type="checkbox"
+                    :value="r.name"
+                    :checked="selectedRefs.has(r.name)"
+                    @change="toggleRef(r.name)"
+                  />
+                  <span class="refs-multiselect__item-name">{{ r.name }}</span>
+                  <span class="refs-multiselect__item-sha">{{ r.commit_sha.substring(0, 8) }}</span>
+                </label>
+                <p v-if="!filteredRefs.length" class="refs-multiselect__empty">No refs match "{{ refSearch }}"</p>
+              </div>
+              <div class="refs-multiselect__footer">
+                <span class="refs-multiselect__count">{{ selectedRefs.size }} selected</span>
+                <button type="button" class="p-button--base is-dense" @click="clearRefs">Clear</button>
+              </div>
             </div>
           </div>
+          <p v-if="addError" class="auth-error">{{ addError }}</p>
+          <div class="modal-actions">
+            <button class="p-button--base is-dense" type="button" @click="closeAddModal">Cancel</button>
+            <button
+              class="p-button--positive is-dense"
+              type="button"
+              :disabled="!addForm.name.trim() || !addForm.url.trim() || selectedRefs.size === 0 || adding"
+              @click="submitAdd"
+            >{{ adding ? 'Ingesting…' : 'Ingest' }}</button>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <div v-if="ingestVersionsModalOpen" class="modal" @click.self="closeIngestVersionsModal">
+      <div class="modal-content modal-content--wide">
+        <button class="modal-close" type="button" @click="closeIngestVersionsModal">✕</button>
+        <h3>Ingest new versions — {{ selectedRepo }}</h3>
+        <p class="modal-lede">Harvest will connect to the repository and list all available refs. Select the ones you want to ingest.</p>
+        <div v-if="ingestVerifying" class="repo-verify-loading">
+          <LoadingSpinner text="Connecting to repository…" />
+        </div>
+        <button
+          v-if="!ingestAvailableRefs.length && !ingestVerifying"
+          class="p-button--base is-dense"
+          type="button"
+          @click="verifyForIngestVersions"
+        >Connect & list refs</button>
+        <span v-if="ingestVerifyError" class="auth-error">{{ ingestVerifyError }}</span>
+
+        <template v-if="ingestAvailableRefs.length">
+          <div class="form-group">
+            <label>Refs <span class="form-field-hint-inline">(required — select at least one)</span></label>
+            <div class="refs-multiselect">
+              <div class="refs-multiselect__search">
+                <input
+                  v-model="ingestRefSearch"
+                  type="search"
+                  placeholder="Search refs…"
+                  autocomplete="off"
+                />
+              </div>
+              <div class="refs-multiselect__list">
+                <label
+                  v-for="r in filteredIngestRefs"
+                  :key="r.name"
+                  class="refs-multiselect__item"
+                  :class="{
+                    'refs-multiselect__item--selected': ingestSelectedRefs.has(r.name),
+                    'refs-multiselect__item--disabled': ingestExistingVersions.has(r.name),
+                  }"
+                >
+                  <input
+                    type="checkbox"
+                    :value="r.name"
+                    :checked="ingestSelectedRefs.has(r.name)"
+                    :disabled="ingestExistingVersions.has(r.name)"
+                    @change="toggleIngestRef(r.name)"
+                  />
+                  <span class="refs-multiselect__item-name">{{ r.name }}</span>
+                  <span v-if="ingestExistingVersions.has(r.name)" class="refs-multiselect__item-badge">already ingested</span>
+                  <span v-else class="refs-multiselect__item-sha">{{ r.commit_sha.substring(0, 8) }}</span>
+                </label>
+                <p v-if="!filteredIngestRefs.length" class="refs-multiselect__empty">No refs match "{{ ingestRefSearch }}"</p>
+              </div>
+              <div class="refs-multiselect__footer">
+                <span class="refs-multiselect__count">{{ ingestSelectedRefs.size }} selected</span>
+                <button type="button" class="p-button--base is-dense" @click="clearIngestRefs">Clear</button>
+              </div>
+            </div>
+          </div>
+          <p v-if="ingestVersionsError" class="auth-error">{{ ingestVersionsError }}</p>
+          <div class="modal-actions">
+            <button class="p-button--base is-dense" type="button" @click="closeIngestVersionsModal">Cancel</button>
+            <button
+              class="p-button--positive is-dense"
+              type="button"
+              :disabled="ingestSelectedRefs.size === 0 || ingestVersionsSubmitting"
+              @click="submitIngestVersions"
+            >{{ ingestVersionsSubmitting ? 'Ingesting…' : 'Ingest' }}</button>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <div v-if="deleteRepoModalOpen" class="modal" @click.self="closeDeleteRepoModal">
+      <div class="modal-content">
+        <button class="modal-close" type="button" @click="closeDeleteRepoModal">✕</button>
+        <h3>Delete repository</h3>
+        <p class="modal-lede">Are you sure you want to delete <strong>{{ selectedRepo }}</strong> and all its versions, files, and symbols? This action cannot be undone.</p>
+        <p v-if="deleteError" class="auth-error">{{ deleteError }}</p>
+        <div class="modal-actions">
+          <button class="p-button--base is-dense" type="button" @click="closeDeleteRepoModal">Cancel</button>
+          <button
+            class="p-button--negative is-dense"
+            type="button"
+            :disabled="deletingRepo"
+            @click="confirmDeleteRepo"
+          >{{ deletingRepo ? 'Deleting…' : 'Delete' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="deleteVersionModalOpen" class="modal" @click.self="closeDeleteVersionModal">
+      <div class="modal-content">
+        <button class="modal-close" type="button" @click="closeDeleteVersionModal">✕</button>
+        <h3>Delete version</h3>
+        <p class="modal-lede">Are you sure you want to delete version <strong>{{ selectedVersion }}</strong> from <strong>{{ selectedRepo }}</strong>? This action cannot be undone.</p>
+        <p v-if="deleteVersionError" class="auth-error">{{ deleteVersionError }}</p>
+        <div class="modal-actions">
+          <button class="p-button--base is-dense" type="button" @click="closeDeleteVersionModal">Cancel</button>
+          <button
+            class="p-button--negative is-dense"
+            type="button"
+            :disabled="deletingVersion"
+            @click="confirmDeleteVersion"
+          >{{ deletingVersion ? 'Deleting…' : 'Delete' }}</button>
         </div>
       </div>
     </div>
@@ -193,377 +369,410 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
-import cytoscape from 'cytoscape';
-import fcose     from 'cytoscape-fcose';
-import hljs from 'highlight.js';
-import { kindColor, kindShape, cytoscapeStyle, KIND_COLORS } from '../lib/graph-utils.js';
-import { fetchGraph, queryStream, fetchRepositories, fetchSymbolSource } from '../lib/api.js';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
+import {
+  fetchRepositories, addRepository, verifyRepository, fetchRepositoryStats,
+  streamRepositoryProgress, deleteRepository, deleteVersion, ingestVersions,
+  resyncRepository,
+} from '../lib/api.js';
+import { useAuthStore } from '../stores/auth.js';
+import LoadingSpinner from '../components/deployment/LoadingSpinner.vue';
 
-function guessLanguage(file) {
-  if (!file) return 'plaintext';
-  const ext = (file.split('.').pop() ?? '').toLowerCase();
-  const map = {
-    rs: 'rust', py: 'python', js: 'javascript', ts: 'typescript',
-    jsx: 'javascript', tsx: 'typescript', go: 'go', java: 'java',
-    rb: 'ruby', cpp: 'cpp', cc: 'cpp', cxx: 'cpp', c: 'c',
-    h: 'c', cs: 'csharp', php: 'php', swift: 'swift', kt: 'kotlin',
-    scala: 'scala', sh: 'bash', bash: 'bash', yml: 'yaml', yaml: 'yaml',
-    json: 'json', toml: 'toml', html: 'html', css: 'css', sql: 'sql',
-    lua: 'lua', hs: 'haskell', ex: 'elixir', exs: 'elixir', dart: 'dart',
-  };
-  const lang = map[ext] ?? ext;
-  return hljs.getLanguage(lang) ? lang : 'plaintext';
+const auth = useAuthStore();
+
+const LANG_COLORS = {
+  rust: '#dea584',
+  python: '#3776ab',
+  go: '#00add8',
+  javascript: '#f7df1e',
+  typescript: '#3178c6',
+  c: '#a8b9cc',
+  cpp: '#00599c',
+  'c++': '#00599c',
+};
+const FALLBACK_COLORS = ['#e95420', '#772953', '#5e5e5e', '#06c', '#335c81', '#5b3eb0', '#2d8a3e', '#c7162b'];
+
+function langColor(lang) {
+  if (LANG_COLORS[lang.toLowerCase()]) return LANG_COLORS[lang.toLowerCase()];
+  const hash = [...lang].reduce((a, c) => a + c.charCodeAt(0), 0);
+  return FALLBACK_COLORS[hash % FALLBACK_COLORS.length];
 }
-
-function highlightCode(code, file) {
-  try {
-    return hljs.highlight(code, { language: guessLanguage(file) }).value;
-  } catch {
-    return hljs.highlight(code, { language: 'plaintext' }).value;
-  }
-}
-
-cytoscape.use(fcose);
 
 const repos = ref([]);
-
-const selectedRepo    = ref('');
+const listLoading = ref(true);
+const selectedRepo = ref('');
 const selectedVersion = ref('');
-const graphLoading    = ref(false);
-const graphError      = ref(null);
-const loadingText     = ref('Loading…');
-const cyEl            = ref(null);
-const cyReady         = ref(false);
-const searchQuery     = ref('');
-const searching       = ref(false);
-const searchCalls     = ref([]);
-const searchFoundCount = ref(0);
-const searchStatus    = ref('');
-const searchActive    = ref(false);
-const sourcePanel     = ref(null);
-const panelExpanded   = ref(false);
+const stats = ref(null);
+const statsLoading = ref(false);
+const repoSearch = ref('');
 
-let cy                   = null;
-let activeLayoutWorker   = null;
-let activeSearchMatched  = null;
+const progressLines = ref([]);
+let progressEs = null;
 
-const sortedVersions = computed(() => {
-  const r = repos.value.find(r => r.name === selectedRepo.value);
-  if (!r) return [];
-  return [...r.versions].sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+const addModalOpen = ref(false);
+const addForm = ref({ name: '', url: '' });
+const addError = ref('');
+const adding = ref(false);
+const verifying = ref(false);
+const verifyError = ref('');
+const availableRefs = ref([]);
+const selectedRefs = ref(new Set());
+const refSearch = ref('');
+
+const ingestVersionsModalOpen = ref(false);
+const ingestVerifying = ref(false);
+const ingestVerifyError = ref('');
+const ingestAvailableRefs = ref([]);
+const ingestSelectedRefs = ref(new Set());
+const ingestRefSearch = ref('');
+const ingestExistingVersions = ref(new Set());
+const ingestVersionsError = ref('');
+const ingestVersionsSubmitting = ref(false);
+
+const deleteRepoModalOpen = ref(false);
+const deletingRepo = ref(false);
+const deleteError = ref('');
+
+const deleteVersionModalOpen = ref(false);
+const deletingVersion = ref(false);
+const deleteVersionError = ref('');
+
+const resyncing = ref(false);
+
+let pollTimer = null;
+
+const filteredRepos = computed(() => {
+  const q = repoSearch.value.trim().toLowerCase();
+  if (!q) return repos.value;
+  return repos.value.filter(r => r.name.toLowerCase().includes(q));
 });
 
-function positionKey(repo, ver) { return `harvest:positions:${repo}:${ver}`; }
+const filteredRefs = computed(() => {
+  const q = refSearch.value.trim().toLowerCase();
+  if (!q) return availableRefs.value;
+  return availableRefs.value.filter(r => r.name.toLowerCase().includes(q));
+});
 
-function savePositions() {
-  if (!cy || !selectedRepo.value || !selectedVersion.value) return;
+const filteredIngestRefs = computed(() => {
+  const q = ingestRefSearch.value.trim().toLowerCase();
+  if (!q) return ingestAvailableRefs.value;
+  return ingestAvailableRefs.value.filter(r => r.name.toLowerCase().includes(q));
+});
+
+const selectedRepoInfo = computed(() => repos.value.find(r => r.name === selectedRepo.value));
+const isIngesting = computed(() => selectedRepoInfo.value?.ingestion_status === 'running' || selectedRepoInfo.value?.ingestion_status === 'pending');
+
+const pieSegments = computed(() => {
+  if (!stats.value || !stats.value.languages.length) return [];
+  const langs = stats.value.languages;
+  const total = langs.reduce((s, l) => s + l.files, 0);
+  if (total === 0) return [];
+
+  let cumAngle = -Math.PI / 2;
+  return langs.map(lang => {
+    const fraction = lang.files / total;
+    const angle = fraction * 2 * Math.PI;
+    const startAngle = cumAngle;
+    const endAngle = cumAngle + angle;
+    cumAngle = endAngle;
+
+    const x1 = Math.cos(startAngle);
+    const y1 = Math.sin(startAngle);
+    const x2 = Math.cos(endAngle);
+    const y2 = Math.sin(endAngle);
+    const largeArc = angle > Math.PI ? 1 : 0;
+
+    const path = `M 0 0 L ${x1} ${y1} A 1 1 0 ${largeArc} 1 ${x2} ${y2} Z`;
+
+    return { path, color: langColor(lang.language), name: lang.language };
+  });
+});
+
+async function loadRepos() {
   try {
-    const pos = {};
-    cy.nodes('.symbol-node').forEach(n => { const p = n.position(); pos[n.id()] = { x: Math.round(p.x), y: Math.round(p.y) }; });
-    localStorage.setItem(positionKey(selectedRepo.value, selectedVersion.value), JSON.stringify(pos));
-  } catch {}
+    repos.value = await fetchRepositories();
+  } catch {
+    repos.value = [];
+  } finally {
+    listLoading.value = false;
+  }
 }
 
-function loadPositions(nodes) {
-  try {
-    const raw = localStorage.getItem(positionKey(selectedRepo.value, selectedVersion.value));
-    if (!raw) return null;
-    const pos = JSON.parse(raw);
-    if (nodes.every(n => n.data.id in pos)) return pos;
-    return null;
-  } catch { return null; }
-}
-
-function destroyCy() {
-  if (activeLayoutWorker) { activeLayoutWorker.terminate(); activeLayoutWorker = null; }
-  if (cy) { cy.destroy(); cy = null; }
-  cyReady.value  = false;
-  sourcePanel.value = null;
-  panelExpanded.value = false;
-  clearSearch();
-}
-
-function onRepoChange() {
+function selectRepo(name) {
+  selectedRepo.value = name;
   selectedVersion.value = '';
-  destroyCy();
-  graphError.value = null;
-}
+  stats.value = null;
+  progressLines.value = [];
+  if (progressEs) { progressEs.close(); progressEs = null; }
 
-async function onVersionChange() {
-  if (!selectedVersion.value || !selectedRepo.value) return;
-  destroyCy();
-  graphLoading.value = true;
-  graphError.value   = null;
-  loadingText.value  = 'Loading graph…';
-  try {
-    const data = await fetchGraph(selectedRepo.value, selectedVersion.value);
-    graphLoading.value = false;
-    if (!data.nodes.length) {
-      graphError.value = 'No symbols found for this version.';
-      return;
-    }
-    mountCy(data);
-    if (data.truncated) {
-      searchStatus.value = `Showing ${data.nodes.length.toLocaleString()} of ${data.total_nodes.toLocaleString()} symbols.`;
-    }
-  } catch (e) {
-    graphLoading.value = false;
-    graphError.value   = `Failed to load: ${e.message}`;
-  }
-}
-
-function mountCy(data) {
-  if (!cyEl.value) return;
-
-  const nodeEls = data.nodes.map(n => ({
-    group: 'nodes',
-    classes: `symbol-node kind-${(n.kind ?? 'unknown').toLowerCase()}`,
-    data: {
-      id: n.id, label: n.name, file: n.file, kind: n.kind,
-      start_line: n.start_line, signature: n.signature ?? '',
-      color: kindColor(n.kind), shape: kindShape(n.kind),
-    },
-  }));
-  const edgeEls = data.edges.map(e => ({
-    group: 'edges',
-    data: { id: e.id, source: e.source, target: e.target, relation: e.relation },
-  }));
-
-  cy = cytoscape({
-    container: cyEl.value,
-    elements: [...nodeEls, ...edgeEls],
-    style: cytoscapeStyle(),
-    minZoom: 0.04, maxZoom: 5,
-  });
-  cy.elements().style('opacity', 0);
-  cy.on('tap', 'node.symbol-node', (evt) => {
-    const node = evt.target;
-    highlightNeighborhood(node);
-    openSymbolPanel(node);
-  });
-  cy.on('tap', e => {
-    if (e.target === cy) {
-      clearHighlight();
-      sourcePanel.value = null;
-      panelExpanded.value = false;
-    }
-  });
-
-  const cached = loadPositions(nodeEls);
-  if (cached) {
-    cy.layout({ name: 'preset', positions: n => cached[n.id()] ?? { x: 0, y: 0 }, fit: true, padding: 60 }).run();
-    revealGraph();
-    return;
-  }
-
-  const n = nodeEls.length;
-  loadingText.value = `Computing layout for ${n} symbols…`;
-  graphLoading.value = true;
-
-  const spacing = n < 50  ? { nodeRepulsion: 90000, idealEdgeLength: 1600, gravity: 0.02, tilingPadding: 500 }
-                : n < 150 ? { nodeRepulsion: 60000, idealEdgeLength: 1100, gravity: 0.03, tilingPadding: 300 }
-                : n < 400 ? { nodeRepulsion: 30000, idealEdgeLength: 600,  gravity: 0.08, tilingPadding: 150 }
-                :           { nodeRepulsion: 15000, idealEdgeLength: 320,  gravity: 0.15, tilingPadding: 80  };
-
-  const iterations = n < 100 ? 2500 : n < 300 ? 1000 : n < 700 ? 500 : 250;
-
-  const worker = new Worker(new URL('../lib/layout-worker.js', import.meta.url), { type: 'module' });
-  activeLayoutWorker = worker;
-  worker.onmessage = ({ data: { positions } }) => {
-    if (activeLayoutWorker !== worker) return;
-    activeLayoutWorker = null;
-    worker.terminate();
-    graphLoading.value = false;
-    applyPositions(positions);
-    savePositions();
-  };
-  worker.onerror = () => {
-    if (activeLayoutWorker !== worker) return;
-    activeLayoutWorker = null;
-    worker.terminate();
-    graphLoading.value = false;
-    applyPositions({});
-  };
-  worker.postMessage({ elements: [...nodeEls, ...edgeEls], options: { quality: 'default', randomize: true, nodeDimensionsIncludeLabels: true, uniformNodeDimensions: false, packComponents: true, tile: true, tilingPaddingVertical: spacing.tilingPadding, tilingPaddingHorizontal: spacing.tilingPadding, nodeRepulsion: spacing.nodeRepulsion, idealEdgeLength: spacing.idealEdgeLength, edgeElasticity: 0.45, numIter: iterations, gravity: spacing.gravity, gravityRange: 3.5, initialEnergyOnIncremental: 0.3 } });
-}
-
-function applyPositions(positions) {
-  cy?.nodes().forEach(n => { const p = positions[n.id()]; if (p) n.position(p); });
-  cy?.fit(undefined, 60);
-  revealGraph();
-}
-
-function revealGraph() {
-  cyReady.value = true;
-  cy?.elements().animate({ style: { opacity: 1 }, duration: 500, easing: 'ease-in-out' });
-}
-
-function fitGraph() { cy?.fit(undefined, 40); }
-
-function openSymbolPanel(node) {
-  const name = node.data('label');
-  const file = node.data('file');
-  const rawSig = node.data('signature') || null;
-  sourcePanel.value = {
-    name,
-    kind:            node.data('kind'),
-    file,
-    start_line:      node.data('start_line'),
-    highlightedCode: rawSig ? highlightCode(rawSig, file) : null,
-    relations:       buildRelations(node),
-    loading:         true,
-  };
-  fetchSymbolSource(selectedRepo.value, selectedVersion.value, file, name)
-    .then(src => {
-      if (sourcePanel.value?.name === name && sourcePanel.value?.file === file) {
-        const code = src?.source ?? src?.signature ?? rawSig;
-        sourcePanel.value = {
-          ...sourcePanel.value,
-          highlightedCode: code ? highlightCode(code, file) : null,
-          loading: false,
-        };
-      }
-    })
-    .catch(() => {
-      if (sourcePanel.value?.name === name && sourcePanel.value?.file === file) {
-        sourcePanel.value = { ...sourcePanel.value, loading: false };
-      }
-    });
-}
-
-function buildRelations(node) {
-  const chip = n => ({
-    name: n.data('label'),
-    title: n.data('file'),
-    onClick: () => {
-      highlightNeighborhood(n);
-      openSymbolPanel(n);
-      cy?.animate({ center: { eles: n }, zoom: Math.max(cy.zoom(), 1.2), duration: 350, easing: 'ease-in-out' });
-    },
-  });
-  return [
-    { label: 'Extends',        chips: node.outgoers('edge[relation="inherits"]').targets().map(chip) },
-    { label: 'Subclasses',     chips: node.incomers('edge[relation="inherits"]').sources().map(chip) },
-    { label: 'Implements',     chips: node.outgoers('edge[relation="implements"]').targets().map(chip) },
-    { label: 'Implemented by', chips: node.incomers('edge[relation="implements"]').sources().map(chip) },
-    { label: 'Embeds',         chips: node.outgoers('edge[relation="embeds"]').targets().map(chip) },
-    { label: 'Embedded by',    chips: node.incomers('edge[relation="embeds"]').sources().map(chip) },
-    { label: 'Uses',           chips: node.outgoers('edge[relation="uses"]').targets().map(chip) },
-    { label: 'Used by',        chips: node.incomers('edge[relation="uses"]').sources().map(chip) },
-    { label: 'Member of',      chips: node.incomers('edge[relation="contains"]').sources().map(chip) },
-    { label: 'Methods',        chips: node.outgoers('edge[relation="contains"]').targets().map(chip) },
-    { label: 'Callers',        chips: node.incomers('edge[relation="calls"]').sources().map(chip) },
-    { label: 'Callees',        chips: node.outgoers('edge[relation="calls"]').targets().map(chip) },
-  ].filter(s => s.chips.length > 0);
-}
-
-function highlightNeighborhood(node) {
-  cy?.elements().addClass('dimmed').removeClass('active ring');
-  const hood = node.closedNeighborhood();
-  hood.removeClass('dimmed');
-  hood.filter('.symbol-node').forEach(n => n.parent().removeClass('dimmed').addClass('ring'));
-  node.addClass('ring');
-  node.connectedEdges().addClass('active');
-  node.select();
-}
-
-function clearHighlight() {
-  if (!cy) return;
-  if (activeSearchMatched) {
-    restoreSearchHighlight();
+  const repo = repos.value.find(r => r.name === name);
+  if (repo && (repo.ingestion_status === 'running' || repo.ingestion_status === 'pending')) {
+    connectProgress(name);
   } else {
-    cy.elements().removeClass('dimmed active ring').deselect();
+    loadStats();
   }
 }
 
-function restoreSearchHighlight() {
-  if (!cy || !activeSearchMatched) return;
-  cy.elements().addClass('dimmed').removeClass('ring active').deselect();
-  const matched = cy.nodes('.symbol-node').filter(n => activeSearchMatched.has(n.id()));
-  matched.closedNeighborhood().removeClass('dimmed');
-  matched.forEach(n => { n.addClass('ring'); n.parent().removeClass('dimmed').addClass('ring'); });
+function connectProgress(name) {
+  if (progressEs) { progressEs.close(); progressEs = null; }
+  progressLines.value = [];
+  progressEs = streamRepositoryProgress(name, (event) => {
+    if (event.type === 'progress') {
+      progressLines.value = [...progressLines.value, event.message];
+    } else if (event.type === 'completed') {
+      progressLines.value = [...progressLines.value, 'Ingestion completed successfully.'];
+      if (progressEs) { progressEs.close(); progressEs = null; }
+      loadRepos().then(() => loadStats());
+    } else if (event.type === 'failed') {
+      progressLines.value = [...progressLines.value, `Error: ${event.error}`];
+      if (progressEs) { progressEs.close(); progressEs = null; }
+      loadRepos();
+    } else if (event.type === 'done') {
+      if (progressEs) { progressEs.close(); progressEs = null; }
+      loadRepos().then(() => loadStats());
+    }
+  });
 }
 
-function clearSearch() {
-  activeSearchMatched = null;
-  searchQuery.value  = '';
-  searchActive.value = false;
-  searchStatus.value = '';
-  cy?.elements().removeClass('dimmed ring active').deselect();
-  cy?.animate({ fit: { padding: 40 }, duration: 400, easing: 'ease-in-out' });
+async function loadStats() {
+  if (!selectedRepo.value || isIngesting.value) return;
+  statsLoading.value = true;
+  try {
+    const result = await fetchRepositoryStats(selectedRepo.value, selectedVersion.value || null);
+    stats.value = result;
+    if (result && !selectedVersion.value && result.versions.length) {
+      selectedVersion.value = result.version;
+    }
+  } catch {
+    stats.value = null;
+  } finally {
+    statsLoading.value = false;
+  }
 }
 
-function tryParseJsonArray(text) {
-  if (!text) return null;
-  try { const v = JSON.parse(text); return Array.isArray(v) ? v : null; } catch {}
-  try { const v = JSON.parse(text.trimEnd().replace(/,?\s*$/, ']')); return Array.isArray(v) ? v : null; } catch { return null; }
+function openAddModal() {
+  addForm.value = { name: '', url: '' };
+  addError.value = '';
+  verifyError.value = '';
+  availableRefs.value = [];
+  selectedRefs.value = new Set();
+  refSearch.value = '';
+  addModalOpen.value = true;
 }
 
-async function doSearch() {
-  const q = searchQuery.value.trim();
-  if (!q || !cy) return;
-  searching.value    = true;
-  searchCalls.value  = [];
-  searchFoundCount.value = 0;
-  searchStatus.value = '';
+function closeAddModal() {
+  addModalOpen.value = false;
+}
 
-  const prompt = `In repository "${selectedRepo.value}" version "${selectedVersion.value}", use the search_symbols tool to find functions and classes most related to: "${q}". Try relevant keyword variations.`;
-  const matched = new Set();
+async function verifyUrl() {
+  const url = addForm.value.url.trim();
+  if (!url) return;
+
+  verifying.value = true;
+  verifyError.value = '';
+  availableRefs.value = [];
+  selectedRefs.value = new Set();
 
   try {
-    await queryStream(prompt, null, [], (event) => {
-      if (event.type === 'tool_call') {
-        const keyword = event.input?.query ?? null;
-        const kind    = event.input?.kind && event.input.kind !== 'any' ? event.input.kind : null;
-        const label   = keyword
-          ? `Searching for "${keyword}"${kind ? ` (${kind}s)` : ''}`
-          : event.name.replace(/_/g, ' ');
-        searchCalls.value.unshift({ label, count: null, done: false, isSearch: event.name === 'search_symbols' });
-      } else if (event.type === 'tool_result') {
-        const last = searchCalls.value.find(c => !c.done);
-        if (last) last.done = true;
-        if (event.name === 'search_symbols' && event.preview) {
-          const parsed = tryParseJsonArray(event.preview);
-          if (parsed) {
-            const hits = parsed.filter(r => r.name && r.file);
-            hits.forEach(r => matched.add(`${r.file}:${r.name}`));
-            if (last) last.count = hits.length;
-            searchFoundCount.value = matched.size;
-          }
-        }
-      }
-    });
+    const result = await verifyRepository(url);
+    availableRefs.value = result.refs;
+
+    if (!addForm.value.name.trim()) {
+      const parts = url.replace(/\.git$/, '').split('/');
+      const inferred = parts[parts.length - 1] || '';
+      addForm.value.name = inferred;
+    }
   } catch (e) {
-    searchStatus.value = `Search error: ${e.message}`;
-    searching.value = false;
+    verifyError.value = e.message || 'Failed to connect to repository';
+  } finally {
+    verifying.value = false;
+  }
+}
+
+function toggleRef(name) {
+  const next = new Set(selectedRefs.value);
+  if (next.has(name)) next.delete(name);
+  else next.add(name);
+  selectedRefs.value = next;
+}
+
+function clearRefs() {
+  selectedRefs.value = new Set();
+}
+
+async function submitAdd() {
+  const name = addForm.value.name.trim();
+  const url = addForm.value.url.trim();
+  const refs = [...selectedRefs.value];
+
+  if (!name || !url || refs.length === 0) return;
+
+  adding.value = true;
+  addError.value = '';
+  try {
+    await addRepository({ name, url, refs });
+    addModalOpen.value = false;
+    await loadRepos();
+    selectRepo(name);
+    startPolling();
+  } catch (e) {
+    addError.value = e.message || 'Failed to start ingestion';
+  } finally {
+    adding.value = false;
+  }
+}
+
+function openIngestVersionsModal() {
+  ingestAvailableRefs.value = [];
+  ingestSelectedRefs.value = new Set();
+  ingestRefSearch.value = '';
+  ingestVerifyError.value = '';
+  ingestVersionsError.value = '';
+  ingestExistingVersions.value = new Set(stats.value?.versions ?? []);
+  ingestVersionsModalOpen.value = true;
+}
+
+function closeIngestVersionsModal() {
+  ingestVersionsModalOpen.value = false;
+}
+
+async function verifyForIngestVersions() {
+  if (!stats.value?.url) {
+    ingestVerifyError.value = 'Repository URL not found';
     return;
   }
 
-  searching.value = false;
-  applySearchHighlight(matched, q);
+  ingestVerifying.value = true;
+  ingestVerifyError.value = '';
+  ingestAvailableRefs.value = [];
+  ingestSelectedRefs.value = new Set();
+
+  try {
+    const result = await verifyRepository(stats.value.url);
+    ingestAvailableRefs.value = result.refs;
+  } catch (e) {
+    ingestVerifyError.value = e.message || 'Failed to connect to repository';
+  } finally {
+    ingestVerifying.value = false;
+  }
 }
 
-function applySearchHighlight(matchedIds, query) {
-  if (!cy) return;
-  if (!matchedIds.size) { searchStatus.value = `No symbols found for "${query}"`; return; }
+function toggleIngestRef(name) {
+  if (ingestExistingVersions.value.has(name)) return;
+  const next = new Set(ingestSelectedRefs.value);
+  if (next.has(name)) next.delete(name);
+  else next.add(name);
+  ingestSelectedRefs.value = next;
+}
 
-  activeSearchMatched = matchedIds;
-  searchActive.value  = true;
+function clearIngestRefs() {
+  ingestSelectedRefs.value = new Set();
+}
 
-  cy.elements().addClass('dimmed').removeClass('ring active');
-  const matched = cy.nodes('.symbol-node').filter(n => matchedIds.has(n.id()));
-  const hood = matched.closedNeighborhood();
-  hood.removeClass('dimmed');
-  matched.forEach(n => { n.addClass('ring'); n.parent().removeClass('dimmed').addClass('ring'); });
-  if (matched.length) cy.animate({ fit: { eles: hood, padding: 60 }, duration: 500, easing: 'ease-in-out' });
+async function submitIngestVersions() {
+  const refs = [...ingestSelectedRefs.value];
+  if (refs.length === 0) return;
 
-  searchStatus.value = `Found ${matched.length} symbol${matched.length !== 1 ? 's' : ''} matching "${query}"`;
+  ingestVersionsSubmitting.value = true;
+  ingestVersionsError.value = '';
+  try {
+    await ingestVersions(selectedRepo.value, refs);
+    ingestVersionsModalOpen.value = false;
+    await loadRepos();
+    selectRepo(selectedRepo.value);
+    startPolling();
+  } catch (e) {
+    ingestVersionsError.value = e.message || 'Failed to start ingestion';
+  } finally {
+    ingestVersionsSubmitting.value = false;
+  }
+}
+
+function openDeleteRepoModal() {
+  deleteError.value = '';
+  deleteRepoModalOpen.value = true;
+}
+
+function closeDeleteRepoModal() {
+  deleteRepoModalOpen.value = false;
+}
+
+async function confirmDeleteRepo() {
+  deletingRepo.value = true;
+  deleteError.value = '';
+  try {
+    await deleteRepository(selectedRepo.value);
+    deleteRepoModalOpen.value = false;
+    selectedRepo.value = '';
+    selectedVersion.value = '';
+    stats.value = null;
+    await loadRepos();
+  } catch (e) {
+    deleteError.value = e.message || 'Failed to delete repository';
+  } finally {
+    deletingRepo.value = false;
+  }
+}
+
+function openDeleteVersionModal() {
+  deleteVersionError.value = '';
+  deleteVersionModalOpen.value = true;
+}
+
+function closeDeleteVersionModal() {
+  deleteVersionModalOpen.value = false;
+}
+
+async function confirmDeleteVersion() {
+  deletingVersion.value = true;
+  deleteVersionError.value = '';
+  try {
+    await deleteVersion(selectedRepo.value, selectedVersion.value);
+    deleteVersionModalOpen.value = false;
+    selectedVersion.value = '';
+    await loadRepos();
+    await loadStats();
+  } catch (e) {
+    deleteVersionError.value = e.message || 'Failed to delete version';
+  } finally {
+    deletingVersion.value = false;
+  }
+}
+
+async function confirmResync() {
+  if (!selectedRepo.value || !selectedVersion.value) return;
+  resyncing.value = true;
+  try {
+    await resyncRepository(selectedRepo.value, selectedVersion.value);
+    await loadRepos();
+    selectRepo(selectedRepo.value);
+    startPolling();
+  } catch (e) {
+    resyncing.value = false;
+  }
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    await loadRepos();
+    const hasRunning = repos.value.some(r => r.ingestion_status === 'running' || r.ingestion_status === 'pending');
+    if (!hasRunning) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      resyncing.value = false;
+    }
+  }, 3000);
 }
 
 onMounted(async () => {
-  try { repos.value = await fetchRepositories(); } catch {}
+  await loadRepos();
+  const hasRunning = repos.value.some(r => r.ingestion_status === 'running' || r.ingestion_status === 'pending');
+  if (hasRunning) startPolling();
 });
 
-onUnmounted(() => { destroyCy(); });
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer);
+  if (progressEs) progressEs.close();
+});
 </script>
