@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 
 use knowledge_server::agent::{graph_tools, Agent};
 use knowledge_server::api::{AppState, GraphCache, ProjectAgentBuilder};
+use knowledge_server::ingestion;
 use knowledge_server::skills::SkillStore;
 use knowledge_server::auth;
 use knowledge_server::auth::user_keys::UserKeyStore;
@@ -114,6 +115,10 @@ async fn main() -> Result<()> {
     let state = AppState {
         agent,
         neo4j:            Arc::clone(&neo4j),
+        neo4j_uri:        config.neo4j.uri.clone(),
+        neo4j_user:       config.neo4j.user.clone(),
+        neo4j_password:   config.neo4j.password.clone(),
+        ingestion:        ingestion::new_registry(),
         docs_dir,
         auth:             Arc::new(config.auth),
         ui:               Arc::new(config.ui),

@@ -44,6 +44,9 @@ hex          = "0.4"
 # Graph database
 neo4rs       = "0.7"
 
+# Code ingestion (harvester library)
+knowledge-harvester = { path = "../knowledge-harvester" }
+
 # Text processing
 regex        = "1"
 
