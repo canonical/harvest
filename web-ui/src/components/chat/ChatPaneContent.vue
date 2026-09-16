@@ -344,9 +344,15 @@ function handleProjectEvent(event) {
 
 async function loadConversationList() {
   try {
-    conversations.value = props.projectId
+    const list = props.projectId
       ? await listProjectConversations(props.projectId)
       : await listConversations();
+    const seen = new Set();
+    conversations.value = list.filter(c => {
+      if (seen.has(c.id)) return false;
+      seen.add(c.id);
+      return true;
+    });
   } catch {
     conversations.value = [];
   }
