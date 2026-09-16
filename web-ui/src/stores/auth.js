@@ -4,6 +4,9 @@ import { ref, computed } from 'vue';
 export const useAuthStore = defineStore('auth', () => {
   const user     = ref(null);
   const features = ref({ docs: false, lxd: false });
+  const apiKeyRequired = ref(false);
+  const apiKeyProviderName = ref('');
+  const apiKeyDismissed = ref(false);
 
   const isLoggedIn = computed(() => user.value !== null);
   const isAdmin    = computed(() => user.value?.role === 'admin');
@@ -55,5 +58,5 @@ export const useAuthStore = defineStore('auth', () => {
     return data;
   }
 
-  return { user, features, isLoggedIn, isAdmin, fetchMe, login, register, logout, fetchConfig };
+  return { user, features, isLoggedIn, isAdmin, apiKeyRequired, apiKeyProviderName, apiKeyDismissed, fetchMe, login, register, logout, fetchConfig };
 });
