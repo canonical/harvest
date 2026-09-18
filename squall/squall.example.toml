@@ -1,0 +1,17 @@
+[harvest]
+base_url = "http://localhost:8080"
+email = "qa@example.com"
+password = ""
+# group_id = ""
+
+[[llm]]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+api_key = ""
+id = "anthropic-0"
+priority = 1
+
+[exploration]
+max_iterations = 40
+allow_infra = true
+output_dir = "./squall-reports"
