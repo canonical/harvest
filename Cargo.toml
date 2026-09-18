@@ -4,5 +4,6 @@ members = [
     "knowledge-server",
     "agent",
     "tui",
+    "squall",
 ]
 resolver = "2"
