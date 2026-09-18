@@ -1,5 +1,14 @@
 <template>
   <div class="design-gen" data-testid="design-generation">
+    <div v-if="title" class="design-gen__header">
+      <p v-if="eyebrow" class="design-gen__eyebrow" data-testid="design-eyebrow">{{ eyebrow }}</p>
+      <div class="design-gen__title-row">
+        <h2 class="design-gen__title">{{ title }}</h2>
+        <span v-if="badge" class="p-chip design-gen__badge">{{ badge }}</span>
+      </div>
+      <p v-if="subtitle" class="design-gen__subtitle">{{ subtitle }}</p>
+    </div>
+
     <div class="design-gen__status" data-testid="design-gen-status">
       <LoadingSpinner v-if="!finished" />
       <svg
@@ -37,40 +46,15 @@
       </div>
     </div>
 
-    <div
-      v-if="hasDetails"
-      ref="activityRef"
-      class="design-gen__activity"
-      :class="{ 'design-gen__activity--bounded': streamText }"
-      data-testid="design-gen-activity"
-    >
-      <div v-if="chain.length" class="design-gen__timeline tc-chain" :class="{ 'tc-chain--running': !finished }" data-testid="design-gen-timeline">
-        <template v-for="(step, i) in chain" :key="i">
-          <div v-if="step.type === 'thinking'" class="design-gen__thinking" data-testid="design-gen-thinking">
-            <ThinkingBlock :text="step.text" :streaming="step.streaming" />
-          </div>
-          <ToolCallStep
-            v-else-if="step.type === 'tool_call'"
-            :step="step"
-          />
-        </template>
-      </div>
-    </div>
-
-    <div v-if="streamText" class="design-gen__preview-wrapper">
-      <div class="p-text--small-caps u-text--muted">Live preview</div>
-      <div class="design-gen__preview doc-body" data-testid="design-gen-preview" v-html="renderedStream"></div>
-    </div>
+    <DesignDocumentHero :text="heroText" :thinking="heroIsThinking" :running="!finished" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { computed, onMounted, onUnmounted } from 'vue';
 import { generateDesignStream } from '../../lib/api.js';
-import { renderMarkdown } from '../../lib/markdown.js';
-import { describeToolCall } from '../../lib/tool-render.js';
-import ThinkingBlock from '../chat/ThinkingBlock.vue';
-import ToolCallStep from '../chat/ToolCallStep.vue';
+import { useAgentStream } from '../../lib/agent-stream.js';
+import DesignDocumentHero from './DesignDocumentHero.vue';
 import LoadingSpinner from './LoadingSpinner.vue';
 
 const props = defineProps({
@@ -81,146 +65,35 @@ const props = defineProps({
   preparingText: { type: String, default: 'Preparing your design document…' },
   readyText:     { type: String, default: 'Design document ready' },
   failedText:    { type: String, default: 'Generation failed' },
+  writingText:   { type: String, default: 'Writing the design document…' },
+  eyebrow:       { type: String, default: '' },
+  title:         { type: String, default: '' },
+  subtitle:      { type: String, default: '' },
+  badge:         { type: String, default: '' },
 });
 const emit = defineEmits(['done', 'cancel']);
 
-const activityRef       = ref(null);
-const finished          = ref(false);
-const error             = ref(null);
-const streamText        = ref('');
-const chain             = ref([]);
-const hasDetails        = ref(false);
-const elapsedSeconds    = ref(0);
-
-let timerId    = null;
-let startedAt  = 0;
-
-const renderedStream = computed(() => streamText.value ? renderMarkdown(streamText.value, {}, {}) : '');
-
-const isThinking = computed(() => {
-  const last = chain.value.at(-1);
-  return last?.type === 'thinking' && last.streaming;
+const {
+  finished, error, streamText, thinkingText,
+  statusText, elapsedLabel,
+  handleEvent, reset, stopTimer,
+} = useAgentStream({
+  preparingText: props.preparingText,
+  readyText:     props.readyText,
+  failedText:    props.failedText,
+  writingText:   props.writingText,
 });
 
-const runningStep = computed(() => {
-  for (let i = chain.value.length - 1; i >= 0; i--) {
-    if (chain.value[i].type === 'tool_call' && chain.value[i].status === 'running') return chain.value[i];
-  }
-  return null;
-});
-
-const statusText = computed(() => {
-  if (error.value)         return props.failedText;
-  if (finished.value)      return props.readyText;
-  if (streamText.value)    return 'Writing the design document…';
-  if (runningStep.value)   return `${runningStep.value.description}…`;
-  if (isThinking.value)    return 'Thinking…';
-  return props.preparingText;
-});
-
-const elapsedLabel = computed(() => {
-  const s = elapsedSeconds.value;
-  if (s < 60) return `${s}s`;
-  return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
-});
-
-function scrollToBottom() {
-  const el = activityRef.value;
-  if (!el) return;
-  el.scrollTop = el.scrollHeight;
-}
-
-watch(chain, scrollToBottom, { deep: true, flush: 'post' });
-
-function startTimer() {
-  stopTimer();
-  startedAt = Date.now();
-  elapsedSeconds.value = 0;
-  timerId = setInterval(() => {
-    elapsedSeconds.value = Math.floor((Date.now() - startedAt) / 1000);
-  }, 1000);
-}
-
-function stopTimer() {
-  if (timerId) {
-    clearInterval(timerId);
-    timerId = null;
-  }
-}
-
-function finalizeThinking() {
-  const last = chain.value.at(-1);
-  if (last?.type === 'thinking' && last.streaming) {
-    last.streaming = false;
-  }
-}
-
-function completeToolCall(name, preview) {
-  const idx = chain.value.findIndex(s => s.type === 'tool_call' && s.name === name && s.status === 'running');
-  if (idx !== -1) {
-    chain.value[idx] = { ...chain.value[idx], status: 'done', preview };
-  }
-}
-
-function handleEvent(event) {
-  if (!event) return;
-  switch (event.type) {
-    case 'thinking':
-      finalizeThinking();
-      hasDetails.value = true;
-      chain.value = [...chain.value, { type: 'thinking', text: event.text || '', streaming: false }];
-      break;
-    case 'thinking_delta':
-      hasDetails.value = true;
-      {
-        const last = chain.value.at(-1);
-        if (last?.type === 'thinking' && last.streaming) {
-          last.text += event.text || '';
-        } else {
-          chain.value = [...chain.value, { type: 'thinking', text: event.text || '', streaming: true }];
-        }
-      }
-      break;
-    case 'text_delta':
-      finalizeThinking();
-      streamText.value += event.text || '';
-      break;
-    case 'tool_call':
-      finalizeThinking();
-      hasDetails.value = true;
-      chain.value = [...chain.value, {
-        type: 'tool_call',
-        name: event.name,
-        input: event.input,
-        status: 'running',
-        description: describeToolCall(event.name, event.input ?? {}),
-      }];
-      break;
-    case 'tool_result':
-      completeToolCall(event.name, event.preview);
-      break;
-    case 'done':
-      finished.value = true;
-      stopTimer();
-      emit('done', { answer: event.answer, text: streamText.value });
-      break;
-    case 'error':
-      error.value = event.message || props.failedText;
-      finished.value = true;
-      stopTimer();
-      break;
-  }
-}
+const heroText       = computed(() => streamText.value || thinkingText.value);
+const heroIsThinking = computed(() => !streamText.value && !!thinkingText.value);
 
 async function runGeneration() {
-  finished.value           = false;
-  error.value              = null;
-  streamText.value         = '';
-  chain.value              = [];
-  hasDetails.value         = false;
-  startTimer();
+  reset();
   try {
-    await props.streamFn(props.projectId, props.deploymentId, props.body, handleEvent);
+    await props.streamFn(props.projectId, props.deploymentId, props.body, (event) => {
+      handleEvent(event);
+      if (event?.type === 'done') emit('done', { answer: event.answer, text: streamText.value });
+    });
     if (!finished.value && !error.value) {
       finished.value = true;
       emit('done', { text: streamText.value });

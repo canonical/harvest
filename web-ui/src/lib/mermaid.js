@@ -1,7 +1,5 @@
 import { isDarkTheme } from './theme.js';
 
-const MERMAID_CDN = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-
 let mermaidInstance = null;
 let loadingPromise = null;
 let initializedTheme = null;
@@ -14,7 +12,7 @@ async function loadMermaidModule() {
     return mermaidInstance;
   }
   loadingPromise = (async () => {
-    const mod = await import(/* @vite-ignore */ MERMAID_CDN);
+    const mod = await import('mermaid');
     mermaidInstance = mod.default;
   })();
   await loadingPromise;
@@ -39,8 +37,18 @@ export async function loadMermaid() {
 async function renderInto(wrapperEl, source) {
   const mermaid = await loadMermaid();
   const id = `mermaid-${Math.random().toString(36).slice(2, 10)}`;
-  const { svg } = await mermaid.render(id, source);
-  wrapperEl.innerHTML = svg;
+  const sandbox = document.createElement('div');
+  sandbox.style.position = 'absolute';
+  sandbox.style.top = '-9999px';
+  sandbox.style.left = '-9999px';
+  sandbox.style.visibility = 'hidden';
+  document.body.appendChild(sandbox);
+  try {
+    const { svg } = await mermaid.render(id, source, sandbox);
+    wrapperEl.innerHTML = svg;
+  } finally {
+    sandbox.remove();
+  }
 }
 
 export async function mountMermaidDiagrams(containerEl) {
@@ -57,8 +65,16 @@ export async function mountMermaidDiagrams(containerEl) {
       await renderInto(wrapper, source);
       preEl.replaceWith(wrapper);
       mountedDiagrams.add({ wrapper, source });
-    } catch {
+    } catch (err) {
       codeEl.classList.remove('mermaid-mounted');
+      const alreadyNoted = preEl.previousElementSibling?.classList?.contains('mermaid-error-note');
+      if (!alreadyNoted) {
+        const note = document.createElement('div');
+        note.className = 'mermaid-error-note';
+        note.textContent = 'Diagram failed to render — showing raw source below.';
+        preEl.before(note);
+      }
+      console.error('mermaid diagram failed to render', err);
     }
   }
 }

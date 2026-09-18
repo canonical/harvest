@@ -66,8 +66,8 @@ describe('describeToolCall', () => {
     expect(label.toLowerCase()).toContain('delet');
   });
 
-  it('describes generate_artifact', () => {
-    const label = describeToolCall('generate_artifact', { name: 'config.yml' });
+  it('describes generate_artifact using the title parameter, matching the real tool schema', () => {
+    const label = describeToolCall('generate_artifact', { title: 'config.yml' });
     expect(label).toContain('config.yml');
   });
 

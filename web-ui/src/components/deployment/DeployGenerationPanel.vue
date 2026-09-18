@@ -1,12 +1,15 @@
 <template>
-  <div class="design-gen deploy-gen" data-testid="deploy-generation">
-    <div class="deploy-gen__header">
-      <p class="deploy-gen__eyebrow">Step 2 of 2</p>
-      <h2 class="deploy-gen__title">Generating deployment artifacts</h2>
-      <p class="deploy-gen__subtitle">{{ deploymentName }}</p>
+  <div class="design-gen" data-testid="deploy-generation">
+    <div class="design-gen__header">
+      <p class="design-gen__eyebrow">Deploy</p>
+      <div class="design-gen__title-row">
+        <h2 class="design-gen__title">{{ deploymentName }}</h2>
+        <span class="p-chip design-gen__badge">Step 2 of 2</span>
+      </div>
+      <p class="design-gen__subtitle">Generating deployment artifacts…</p>
     </div>
 
-    <div class="design-gen__status deploy-gen__status">
+    <div class="design-gen__status" data-testid="deploy-gen-status">
       <LoadingSpinner v-if="!finished" data-testid="deploy-gen-spinner" />
       <svg
         v-else-if="error"
@@ -29,226 +32,58 @@
       </svg>
       <span class="design-gen__status-text">{{ statusText }}</span>
       <span v-if="!finished" class="design-gen__elapsed">{{ elapsedLabel }}</span>
-      <span
-        v-if="intent"
-        class="intent-badge deploy-gen__intent"
-        :class="`intent-badge--${intent}`"
-        data-testid="deploy-gen-intent"
-      >{{ intentLabel }}</span>
-      <span v-if="phase" class="deploy-gen__phase" data-testid="deploy-gen-phase">{{ phase }}</span>
     </div>
 
-    <div v-if="error" class="design-gen__error deploy-gen__error" data-testid="deploy-gen-error">
+    <div v-if="error" class="design-gen__error" data-testid="deploy-gen-error">
       <div class="p-notification--negative">
         <div class="p-notification__content">
           <p class="p-notification__message">{{ error }}</p>
         </div>
       </div>
-      <div class="deploy-gen__error-actions">
+      <div class="design-gen__error-actions">
         <button type="button" class="p-button--base is-dense" data-testid="deploy-gen-back" @click="$emit('cancel')">Back</button>
         <button type="button" class="p-button--positive is-dense" data-testid="deploy-gen-retry" @click="retry">Try again</button>
       </div>
     </div>
 
-    <div
-      v-if="hasDetails"
-      ref="activityRef"
-      class="design-gen__activity"
-      :class="{ 'design-gen__activity--bounded': streamText }"
-    >
-      <div v-if="chain.length" class="design-gen__timeline tc-chain" :class="{ 'tc-chain--running': !finished }" data-testid="deploy-gen-timeline">
-        <template v-for="(step, i) in chain" :key="i">
-          <div v-if="step.type === 'thinking'" class="design-gen__thinking" data-testid="deploy-gen-thinking">
-            <ThinkingBlock :text="step.text" :streaming="step.streaming" />
-          </div>
-          <ToolCallStep
-            v-else-if="step.type === 'tool_call'"
-            :step="step"
-          />
-        </template>
-      </div>
-    </div>
-
-    <div v-if="streamText" class="design-gen__preview-wrapper">
-      <div class="deploy-gen__preview-label">Live preview</div>
-      <div class="design-gen__preview doc-body" v-html="renderedStream"></div>
-    </div>
+    <DesignDocumentHero v-if="!files.length" :text="thinkingText" thinking :running="!finished" />
+    <DeployFileTabs v-else :files="files" :active-file-id="activeFileId" :running="!finished" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { onMounted, onUnmounted } from 'vue';
 import { generateProvisionStream } from '../../lib/api.js';
-import { renderMarkdown } from '../../lib/markdown.js';
-import { describeToolCall } from '../../lib/tool-render.js';
-import ThinkingBlock from '../chat/ThinkingBlock.vue';
-import ToolCallStep from '../chat/ToolCallStep.vue';
+import { useAgentStream } from '../../lib/agent-stream.js';
+import DeployFileTabs from './DeployFileTabs.vue';
+import DesignDocumentHero from './DesignDocumentHero.vue';
 import LoadingSpinner from './LoadingSpinner.vue';
 
 const props = defineProps({
-  projectId:       { type: String, required: true },
-  deploymentId:    { type: String, required: true },
-  deploymentName:  { type: String, default: '' },
+  projectId:      { type: String, required: true },
+  deploymentId:   { type: String, required: true },
+  deploymentName: { type: String, default: '' },
 });
 const emit = defineEmits(['done', 'cancel']);
 
-const activityRef         = ref(null);
-const finished            = ref(false);
-const error               = ref(null);
-const intent              = ref(null);
-const phase               = ref('');
-const streamText          = ref('');
-const chain               = ref([]);
-const hasDetails          = ref(false);
-const elapsedSeconds      = ref(0);
-
-let timerId = null;
-let startedAt = 0;
-
-const renderedStream = computed(() => streamText.value ? renderMarkdown(streamText.value, {}, {}) : '');
-
-const isThinking = computed(() => {
-  const last = chain.value.at(-1);
-  return last?.type === 'thinking' && last.streaming;
+const {
+  finished, error, files, activeFileId, thinkingText,
+  statusText, elapsedLabel,
+  handleEvent, reset, stopTimer,
+} = useAgentStream({
+  preparingText: 'Preparing deployment artifacts…',
+  readyText:     'Deployment artifacts ready',
+  failedText:    'Generation failed',
+  writingText:   'Writing deployment artifacts…',
 });
-
-const runningStep = computed(() => {
-  for (let i = chain.value.length - 1; i >= 0; i--) {
-    if (chain.value[i].type === 'tool_call' && chain.value[i].status === 'running') return chain.value[i];
-  }
-  return null;
-});
-
-const statusText = computed(() => {
-  if (error.value)        return 'Generation failed';
-  if (finished.value)     return 'Deployment artifacts ready';
-  if (streamText.value)   return 'Writing deployment artifacts…';
-  if (runningStep.value)  return `${runningStep.value.description}…`;
-  if (isThinking.value)   return 'Thinking…';
-  return 'Preparing deployment artifacts…';
-});
-
-const elapsedLabel = computed(() => {
-  const s = elapsedSeconds.value;
-  if (s < 60) return `${s}s`;
-  return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
-});
-
-const intentLabel = computed(() => {
-  switch (intent.value) {
-    case 'conversational': return 'Answering';
-    case 'research':       return 'Researching';
-    case 'action':         return 'Executing';
-    case 'hybrid':         return 'Researching → Executing';
-    default:               return '';
-  }
-});
-
-function scrollToBottom() {
-  const el = activityRef.value;
-  if (!el) return;
-  el.scrollTop = el.scrollHeight;
-}
-
-watch(chain, scrollToBottom, { deep: true, flush: 'post' });
-
-function startTimer() {
-  stopTimer();
-  startedAt = Date.now();
-  elapsedSeconds.value = 0;
-  timerId = setInterval(() => {
-    elapsedSeconds.value = Math.floor((Date.now() - startedAt) / 1000);
-  }, 1000);
-}
-
-function stopTimer() {
-  if (timerId) {
-    clearInterval(timerId);
-    timerId = null;
-  }
-}
-
-function finalizeThinking() {
-  const last = chain.value.at(-1);
-  if (last?.type === 'thinking' && last.streaming) {
-    last.streaming = false;
-  }
-}
-
-function completeToolCall(name, preview) {
-  const idx = chain.value.findIndex(s => s.type === 'tool_call' && s.name === name && s.status === 'running');
-  if (idx !== -1) {
-    chain.value[idx] = { ...chain.value[idx], status: 'done', preview };
-  }
-}
-
-function handleEvent(event) {
-  if (!event) return;
-  switch (event.type) {
-    case 'intent':
-      intent.value = event.mode;
-      break;
-    case 'phase':
-      phase.value = event.label;
-      break;
-    case 'thinking':
-      finalizeThinking();
-      hasDetails.value = true;
-      chain.value = [...chain.value, { type: 'thinking', text: event.text || '', streaming: false }];
-      break;
-    case 'thinking_delta':
-      hasDetails.value = true;
-      {
-        const last = chain.value.at(-1);
-        if (last?.type === 'thinking' && last.streaming) {
-          last.text += event.text || '';
-        } else {
-          chain.value = [...chain.value, { type: 'thinking', text: event.text || '', streaming: true }];
-        }
-      }
-      break;
-    case 'text_delta':
-      finalizeThinking();
-      streamText.value += event.text || '';
-      break;
-    case 'tool_call':
-      finalizeThinking();
-      hasDetails.value = true;
-      chain.value = [...chain.value, {
-        type: 'tool_call',
-        name: event.name,
-        input: event.input,
-        status: 'running',
-        description: describeToolCall(event.name, event.input ?? {}),
-      }];
-      break;
-    case 'tool_result':
-      completeToolCall(event.name, event.preview);
-      break;
-    case 'done':
-      finished.value = true;
-      stopTimer();
-      emit('done');
-      break;
-    case 'error':
-      error.value = event.message || 'Generation failed';
-      finished.value = true;
-      stopTimer();
-      break;
-  }
-}
 
 async function runGeneration() {
-  finished.value           = false;
-  error.value              = null;
-  intent.value             = null;
-  phase.value              = '';
-  streamText.value         = '';
-  chain.value              = [];
-  hasDetails.value         = false;
-  startTimer();
+  reset();
   try {
-    await generateProvisionStream(props.projectId, props.deploymentId, handleEvent);
+    await generateProvisionStream(props.projectId, props.deploymentId, (event) => {
+      handleEvent(event);
+      if (event?.type === 'done') emit('done');
+    });
     if (!finished.value && !error.value) {
       finished.value = true;
       emit('done');

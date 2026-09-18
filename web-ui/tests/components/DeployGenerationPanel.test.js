@@ -20,8 +20,9 @@ function mountPanel({ projectId = 'proj-1', deploymentId = 'd1', deploymentName 
 
 function makeStreamController() {
   let onEvent;
-  api.generateProvisionStream.mockImplementation(async (_p, _d, cb) => {
+  api.generateProvisionStream.mockImplementation((_p, _d, cb) => {
     onEvent = cb;
+    return new Promise(() => {});
   });
   return { get onEvent() { return onEvent; } };
 }
@@ -39,7 +40,7 @@ describe('DeployGenerationPanel', () => {
     expect(w.text()).toMatch(/generating.*deployment artifacts/i);
   });
 
-  it('shows the deployment name as subtitle', async () => {
+  it('shows the deployment name as the page title', async () => {
     const w = mountPanel({ deploymentName: 'Rollout-42' });
     await flushPromises();
     expect(w.text()).toContain('Rollout-42');
@@ -51,43 +52,99 @@ describe('DeployGenerationPanel', () => {
     expect(api.generateProvisionStream).toHaveBeenCalledWith('proj-1', 'd1', expect.any(Function));
   });
 
-  it('shows phase label when phase event arrives', async () => {
-    const ctl = makeStreamController();
-    const w = mountPanel();
-    await flushPromises();
-    ctl.onEvent({ type: 'phase', label: 'Writing Terraform' });
-    await flushPromises();
-    expect(w.find('[data-testid="deploy-gen-phase"]').text()).toContain('Writing Terraform');
-  });
-
-  it('shows intent badge when intent event arrives', async () => {
+  it('does not show intent or phase badges — the status line alone carries the meaning now', async () => {
     const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
     ctl.onEvent({ type: 'intent', mode: 'action' });
+    ctl.onEvent({ type: 'phase', label: 'Writing Terraform' });
     await flushPromises();
-    expect(w.find('[data-testid="deploy-gen-intent"]').exists()).toBe(true);
+    expect(w.find('[data-testid="deploy-gen-intent"]').exists()).toBe(false);
+    expect(w.find('[data-testid="deploy-gen-phase"]').exists()).toBe(false);
   });
 
-  it('renders tool call steps as a vertical timeline', async () => {
+  it('shows the model\'s thinking in the hero before any artifact has been generated', async () => {
     const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
-    ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: { title: 'Infra' } });
-    ctl.onEvent({ type: 'tool_result', name: 'generate_artifact', preview: '{"id":"a1"}' });
+    ctl.onEvent({ type: 'thinking_delta', text: 'Translating the design into infrastructure.' });
     await flushPromises();
-    const timeline = w.find('[data-testid="deploy-gen-timeline"]');
-    expect(timeline.exists()).toBe(true);
-    expect(timeline.text()).toContain('Generating artifact');
+    const hero = w.find('[data-testid="document-hero"]');
+    expect(hero.exists()).toBe(true);
+    expect(hero.text()).toContain('Translating the design into infrastructure.');
+    expect(hero.classes()).toContain('doc-hero--thinking');
+    expect(w.find('[data-testid="file-tab"]').exists()).toBe(false);
   });
 
-  it('renders thinking blocks when thinking events arrive', async () => {
+  it('switches from the thinking hero to file tabs once the first artifact starts generating', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({ type: 'thinking_delta', text: 'Translating the design into infrastructure.' });
+    ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: { title: 'deploy.sh', kind: 'bash', content: 'echo hi' } });
+    await flushPromises();
+    expect(w.find('[data-testid="document-hero"]').exists()).toBe(false);
+    expect(w.find('[data-testid="file-tab"]').exists()).toBe(true);
+  });
+
+  it('renders a file tab for each generated artifact', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: { title: 'deploy.sh', kind: 'bash', content: 'echo hi' } });
+    await flushPromises();
+    const tabs = w.findAll('[data-testid="file-tab"]');
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0].text()).toContain('deploy.sh');
+    expect(w.find('[data-testid="file-tab-content"]').text()).toContain('echo hi');
+  });
+
+  it('expands a terraform bundle into one tab per file', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({
+      type: 'tool_call', name: 'generate_artifact',
+      input: { title: 'Infra', kind: 'terraform', content: JSON.stringify({ 'main.tf': 'resource "x" {}', 'variables.tf': 'variable "x" {}' }) },
+    });
+    await flushPromises();
+    expect(w.findAll('[data-testid="file-tab"]')).toHaveLength(2);
+  });
+
+  it('marks a file saved once its tool_result arrives', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: { title: 'deploy.sh', kind: 'bash', content: 'echo hi' } });
+    await flushPromises();
+    expect(w.find('[data-testid="file-tab-saving"]').exists()).toBe(true);
+    ctl.onEvent({ type: 'tool_result', name: 'generate_artifact', preview: '{}' });
+    await flushPromises();
+    expect(w.find('[data-testid="file-tab-saved"]').exists()).toBe(true);
+  });
+
+  it('never shows a "how was this made" disclosure — the status line is the only window into activity now', async () => {
     const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
     ctl.onEvent({ type: 'thinking_delta', text: 'Planning the bundle...' });
+    ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: { title: 'Infra' } });
     await flushPromises();
-    expect(w.find('[data-testid="deploy-gen-thinking"]').exists()).toBe(true);
+    expect(w.find('[data-testid="deploy-gen-details"]').exists()).toBe(false);
+    expect(w.find('[data-testid="deploy-gen-activity"]').exists()).toBe(false);
+  });
+
+  it('walks the status line through each tool call as they run', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: { title: 'Infra' } });
+    await flushPromises();
+    expect(w.text()).toContain('Generating artifact Infra');
+    ctl.onEvent({ type: 'tool_result', name: 'generate_artifact', preview: '{"id":"a1"}' });
+    ctl.onEvent({ type: 'tool_call', name: 'set_execution_plan', input: {} });
+    await flushPromises();
+    expect(w.text()).toContain('Setting execution plan');
   });
 
   it('emits done when done event arrives', async () => {
@@ -128,5 +185,18 @@ describe('DeployGenerationPanel', () => {
     const w = mountPanel();
     await flushPromises();
     expect(w.find('[data-testid="deploy-gen-spinner"]').exists()).toBe(true);
+  });
+
+  it('Try again retries generation', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({ type: 'error', message: 'LLM failed' });
+    await flushPromises();
+    await w.find('[data-testid="deploy-gen-back"]').exists();
+    await w.find('[data-testid="deploy-gen-retry"]').trigger('click');
+    await flushPromises();
+    expect(api.generateProvisionStream).toHaveBeenCalledTimes(2);
+    expect(w.find('[data-testid="deploy-gen-error"]').exists()).toBe(false);
   });
 });

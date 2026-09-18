@@ -5,18 +5,15 @@
     </div>
 
     <template v-else-if="deployment">
-      <div v-if="generating" class="design-view-header">
-        <p class="p-text--small-caps u-text--muted" data-testid="design-eyebrow">Design</p>
-        <div class="design-view__title-row">
-          <h2 class="p-heading--3">{{ deployment.name }}</h2>
-          <span v-if="deployment.template" class="p-chip" data-testid="design-template-chip">{{ deployment.template.name }}</span>
-        </div>
-      </div>
       <DesignGenerationPanel
         v-if="generating"
         :project-id="projectId"
         :deployment-id="deployment.id"
         :body="generateBody"
+        eyebrow="Design"
+        :title="deployment.name"
+        subtitle="Generating your design document…"
+        :badge="deployment.template?.name ?? ''"
         @done="onGenerationDone"
         @cancel="onGenerationCancel"
       />
