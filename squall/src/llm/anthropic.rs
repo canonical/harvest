@@ -1,0 +1,1033 @@
+use anyhow::{bail, Result};
+use async_trait::async_trait;
+use futures::StreamExt as _;
+use reqwest::Client;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use tokio::sync::mpsc;
+
+use super::{
+    retry,
+    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, StreamEvent, ToolCall, ToolDefinition, Usage},
+    LlmProvider,
+};
+
+const API_URL: &str = "https://api.anthropic.com/v1/messages";
+const MODELS_URL: &str = "https://api.anthropic.com/v1/models";
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+const MAX_TOKENS: u32 = 65536;
+const OVERLOAD_STATUS_CODES: &[u16] = &[529, 503];
+
+pub struct AnthropicProvider {
+    model: String,
+    api_key: String,
+    client: Client,
+    base_url: String,
+    models_url: String,
+    max_retries: u32,
+    meta: ProviderMeta,
+}
+
+impl AnthropicProvider {
+    pub fn new(model: String, api_key: String, timeout_secs: u64, max_retries: u32, meta: ProviderMeta) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .build()
+            .expect("failed to build HTTP client");
+        Self {
+            model, api_key, client,
+            base_url: API_URL.to_string(),
+            models_url: MODELS_URL.to_string(),
+            max_retries,
+            meta,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_base_url(mut self, url: impl Into<String>) -> Self {
+        self.base_url = url.into();
+        self
+    }
+
+    #[cfg(test)]
+    fn with_models_url(mut self, url: impl Into<String>) -> Self {
+        self.models_url = url.into();
+        self
+    }
+}
+
+#[async_trait]
+impl LlmProvider for AnthropicProvider {
+    fn id(&self) -> &str { &self.meta.id }
+    fn kind(&self) -> &str { "anthropic" }
+    fn default_model(&self) -> &str { &self.model }
+    fn expose_to_ui(&self) -> bool { self.meta.expose_to_ui }
+    fn user_provided_key(&self) -> bool { self.meta.user_provided_key }
+    fn name(&self) -> Option<&str> { self.meta.name.as_deref() }
+    fn configured_models(&self) -> Option<&[String]> { self.meta.models.as_deref() }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let fallback = vec![ModelInfo { id: self.model.clone(), display_name: None }];
+        let req = self.client.get(&self.models_url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION);
+        let Ok(response) = req.send().await else { return Ok(fallback) };
+        if !response.status().is_success() {
+            return Ok(fallback);
+        }
+        let Ok(json) = response.json::<Value>().await else { return Ok(fallback) };
+        let Some(data) = json["data"].as_array() else { return Ok(fallback) };
+        let models: Vec<ModelInfo> = data.iter()
+            .filter_map(|m| m["id"].as_str().map(|id| ModelInfo {
+                id: id.to_string(),
+                display_name: m["display_name"].as_str().map(str::to_string),
+            }))
+            .collect();
+        if models.is_empty() { Ok(fallback) } else { Ok(models) }
+    }
+
+    async fn chat_with(&self, model: Option<&str>, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
+        let body = build_body(model.unwrap_or(&self.model), messages, tools, false);
+
+        let response = retry::send_with_retry(
+            self.max_retries,
+            OVERLOAD_STATUS_CODES,
+            "Anthropic",
+            || self.client
+                .post(&self.base_url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("content-type", "application/json")
+                .json(&body)
+                .send(),
+        ).await?;
+
+        let status = response.status();
+        let body_text = response.text().await?;
+        let json: Value = serde_json::from_str(&body_text)
+            .map_err(|e| anyhow::anyhow!("Anthropic API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+
+        if !status.is_success() {
+            bail!("Anthropic API error {status}: {json}");
+        }
+
+        parse_anthropic_response(json)
+    }
+
+    async fn chat_stream_with(
+        &self,
+        model: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<()> {
+        self.stream(model, messages, tools, tx).await
+    }
+}
+
+fn build_body(model: &str, messages: &[Message], tools: &[ToolDefinition], stream: bool) -> Value {
+    let system_text = messages
+        .iter()
+        .find(|m| matches!(m.role, Role::System))
+        .and_then(|m| match &m.content {
+            MessageContent::Text(t) => Some(t.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let mut api_messages: Vec<Value> = messages
+        .iter()
+        .filter(|m| !matches!(m.role, Role::System))
+        .map(to_anthropic_message)
+        .collect();
+    add_cache_breakpoint_to_last_message(&mut api_messages);
+
+    let api_tools: Vec<Value> = tools.iter().map(to_anthropic_tool).collect();
+
+    let mut body = json!({
+        "model":      model,
+        "system":     [{ "type": "text", "text": system_text, "cache_control": { "type": "ephemeral" } }],
+        "messages":   api_messages,
+        "tools":      api_tools,
+        "max_tokens": MAX_TOKENS,
+    });
+    if stream {
+        body["stream"] = json!(true);
+    }
+    body
+}
+
+fn add_cache_breakpoint_to_last_message(api_messages: &mut [Value]) {
+    let Some(last) = api_messages.last_mut() else { return };
+    let mut blocks = match last["content"].take() {
+        Value::String(s) => vec![json!({ "type": "text", "text": s })],
+        Value::Array(blocks) => blocks,
+        other => vec![other],
+    };
+    if let Some(block) = blocks.last_mut().and_then(Value::as_object_mut) {
+        block.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
+    }
+    last["content"] = Value::Array(blocks);
+}
+
+fn to_anthropic_message(msg: &Message) -> Value {
+    let role = match msg.role {
+        Role::User      => "user",
+        Role::Assistant => "assistant",
+        Role::Tool      => "user",
+        Role::System    => unreachable!("system filtered above"),
+    };
+
+    let content: Value = match &msg.content {
+        MessageContent::Text(t) => Value::String(t.clone()),
+        MessageContent::Parts(parts) => {
+            let items: Vec<Value> = parts.iter().map(|p| match p {
+                ContentPart::Text { text, .. } =>
+                    json!({ "type": "text", "text": text }),
+                ContentPart::ToolUse { id, name, input, .. } =>
+                    json!({ "type": "tool_use", "id": id, "name": name, "input": input }),
+                ContentPart::ToolResult { tool_use_id, content, is_error } =>
+                    json!({ "type": "tool_result", "tool_use_id": tool_use_id,
+                            "content": content, "is_error": is_error }),
+                ContentPart::Image { media_type, data } =>
+                    json!({ "type": "image", "source": {
+                        "type": "base64", "media_type": media_type, "data": data
+                    }}),
+                ContentPart::Document { media_type, data } =>
+                    json!({ "type": "document", "source": {
+                        "type": "base64", "media_type": media_type, "data": data
+                    }}),
+            }).collect();
+            Value::Array(items)
+        }
+    };
+
+    json!({ "role": role, "content": content })
+}
+
+fn to_anthropic_tool(tool: &ToolDefinition) -> Value {
+    json!({
+        "name":         tool.name,
+        "description":  tool.description,
+        "input_schema": tool.parameters,
+    })
+}
+
+fn usage_from_anthropic(json: &Value) -> Usage {
+    let u = &json["usage"];
+    Usage {
+        input_tokens:         u["input_tokens"].as_u64().unwrap_or(0),
+        output_tokens:        u["output_tokens"].as_u64().unwrap_or(0),
+        cache_read_tokens:    u["cache_read_input_tokens"].as_u64().unwrap_or(0),
+        cache_creation_tokens: u["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+        reasoning_tokens:     0,
+    }
+}
+
+fn parse_anthropic_response(json: Value) -> Result<LlmResponse> {
+    let usage = usage_from_anthropic(&json);
+    let stop_reason = json["stop_reason"].as_str().unwrap_or("");
+    let content = json["content"].as_array().cloned().unwrap_or_default();
+
+    if stop_reason == "tool_use" {
+        let calls = content
+            .iter()
+            .filter(|b| b["type"] == "tool_use")
+            .map(|b| ToolCall {
+                id:                b["id"].as_str().unwrap_or("").to_string(),
+                name:              b["name"].as_str().unwrap_or("").to_string(),
+                input:             b["input"].clone(),
+                thought_signature: None,
+            })
+            .collect();
+        let preamble = content
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Ok(LlmResponse::ToolCalls { calls, preamble, usage });
+    }
+
+    let text = content
+        .iter()
+        .filter(|b| b["type"] == "text")
+        .filter_map(|b| b["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(LlmResponse::Message { text, usage })
+}
+
+enum BlockAccum {
+    Text,
+    Thinking,
+    ToolUse { id: String, name: String, json_buf: String },
+}
+
+async fn process_stream_event(
+    event: &Value,
+    blocks: &mut HashMap<usize, BlockAccum>,
+    tx: &mpsc::Sender<StreamEvent>,
+    usage: &mut Usage,
+) -> Result<()> {
+    match event["type"].as_str().unwrap_or("") {
+        "message_start" => {
+            let msg = &event["message"];
+            if let Some(u) = msg.get("usage") {
+                usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0);
+                usage.cache_read_tokens = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                usage.cache_creation_tokens = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+            }
+        }
+        "content_block_start" => {
+            let idx = event["index"].as_u64().unwrap_or(0) as usize;
+            let cb  = &event["content_block"];
+            match cb["type"].as_str().unwrap_or("") {
+                "text"     => { blocks.insert(idx, BlockAccum::Text); }
+                "thinking" => { blocks.insert(idx, BlockAccum::Thinking); }
+                "tool_use" => {
+                    blocks.insert(idx, BlockAccum::ToolUse {
+                        id:       cb["id"].as_str().unwrap_or("").to_string(),
+                        name:     cb["name"].as_str().unwrap_or("").to_string(),
+                        json_buf: String::new(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        "content_block_delta" => {
+            let idx   = event["index"].as_u64().unwrap_or(0) as usize;
+            let delta = &event["delta"];
+            match delta["type"].as_str().unwrap_or("") {
+                "text_delta" => {
+                    let text = delta["text"].as_str().unwrap_or("").to_string();
+                    if !text.is_empty() {
+                        let _ = tx.send(StreamEvent::TextDelta { text }).await;
+                    }
+                }
+                "thinking_delta" => {
+                    let text = delta["thinking"].as_str().unwrap_or("").to_string();
+                    if !text.is_empty() {
+                        let _ = tx.send(StreamEvent::ThinkingDelta { text }).await;
+                    }
+                }
+                "input_json_delta" => {
+                    let partial = delta["partial_json"].as_str().unwrap_or("");
+                    if let Some(BlockAccum::ToolUse { json_buf, .. }) = blocks.get_mut(&idx) {
+                        json_buf.push_str(partial);
+                    }
+                }
+                _ => {}
+            }
+        }
+        "content_block_stop" => {
+            let idx = event["index"].as_u64().unwrap_or(0) as usize;
+            if let Some(BlockAccum::ToolUse { id, name, json_buf }) = blocks.remove(&idx) {
+                let input: Value = serde_json::from_str(&json_buf)
+                    .unwrap_or(Value::Object(serde_json::Map::new()));
+                let _ = tx.send(StreamEvent::ToolCallReady(ToolCall {
+                    id,
+                    name,
+                    input,
+                    thought_signature: None,
+                })).await;
+            }
+        }
+        "message_delta" => {
+            let stop_reason = match event["delta"]["stop_reason"].as_str().unwrap_or("end_turn") {
+                "tool_use" => "tool_use".to_string(),
+                "end_turn" => "end_turn".to_string(),
+                "max_tokens" => "max_tokens".to_string(),
+                other => other.to_string(),
+            };
+            if let Some(u) = event.get("usage") {
+                usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0);
+            }
+            let _ = tx.send(StreamEvent::Done { stop_reason, usage: usage.clone() }).await;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+impl AnthropicProvider {
+    pub async fn stream(
+        &self,
+        model: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<()> {
+        let body = build_body(model.unwrap_or(&self.model), messages, tools, true);
+
+        let response = retry::send_with_retry(
+            self.max_retries,
+            OVERLOAD_STATUS_CODES,
+            "Anthropic",
+            || self.client
+                .post(&self.base_url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("content-type", "application/json")
+                .json(&body)
+                .send(),
+        ).await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await?;
+            bail!("Anthropic API error {status}: {body_text}");
+        }
+
+        let mut byte_stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut blocks: HashMap<usize, BlockAccum> = HashMap::new();
+        let mut usage = Usage::default();
+
+        while let Some(chunk) = byte_stream.next().await {
+            let bytes = chunk?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(pos) = buffer.find("\n\n") {
+                let event_text = buffer[..pos].to_string();
+                buffer.drain(..pos + 2);
+
+                let data_line = event_text
+                    .lines()
+                    .find(|l| l.starts_with("data:"))
+                    .map(|l| l[5..].trim().to_string());
+
+                if let Some(data) = data_line {
+                    if let Ok(json) = serde_json::from_str::<Value>(&data) {
+                        process_stream_event(&json, &mut blocks, &tx, &mut usage).await?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use httpmock::prelude::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_end_turn_returns_message() {
+        let json = json!({
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "Hello!" }]
+        });
+        match parse_anthropic_response(json).unwrap() {
+            LlmResponse::Message { text, .. } => assert_eq!(text, "Hello!"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_use_returns_tool_calls() {
+        let json = json!({
+            "stop_reason": "tool_use",
+            "content": [{
+                "type": "tool_use",
+                "id": "tu_001",
+                "name": "search_symbols",
+                "input": { "query": "alpha" }
+            }]
+        });
+        match parse_anthropic_response(json).unwrap() {
+            LlmResponse::ToolCalls { calls, .. } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id, "tu_001");
+                assert_eq!(calls[0].name, "search_symbols");
+                assert_eq!(calls[0].input["query"], "alpha");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_use_multiple_calls() {
+        let json = json!({
+            "stop_reason": "tool_use",
+            "content": [
+                { "type": "tool_use", "id": "a", "name": "tool_a", "input": {} },
+                { "type": "tool_use", "id": "b", "name": "tool_b", "input": {} }
+            ]
+        });
+        match parse_anthropic_response(json).unwrap() {
+            LlmResponse::ToolCalls { calls, .. } => assert_eq!(calls.len(), 2),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_multi_text_blocks_joined() {
+        let json = json!({
+            "stop_reason": "end_turn",
+            "content": [
+                { "type": "text", "text": "line one" },
+                { "type": "text", "text": "line two" }
+            ]
+        });
+        match parse_anthropic_response(json).unwrap() {
+            LlmResponse::Message { text, .. } => assert_eq!(text, "line one\nline two"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_message_extracts_usage() {
+        let json = json!({
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "hi" }],
+            "usage": {
+                "input_tokens": 120,
+                "output_tokens": 45,
+                "cache_read_input_tokens": 80,
+                "cache_creation_input_tokens": 20
+            }
+        });
+        match parse_anthropic_response(json).unwrap() {
+            LlmResponse::Message { usage, .. } => {
+                assert_eq!(usage.input_tokens, 120);
+                assert_eq!(usage.output_tokens, 45);
+                assert_eq!(usage.cache_read_tokens, 80);
+                assert_eq!(usage.cache_creation_tokens, 20);
+                assert_eq!(usage.reasoning_tokens, 0);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_use_extracts_usage() {
+        let json = json!({
+            "stop_reason": "tool_use",
+            "content": [{ "type": "tool_use", "id": "t1", "name": "search", "input": {} }],
+            "usage": { "input_tokens": 200, "output_tokens": 10 }
+        });
+        match parse_anthropic_response(json).unwrap() {
+            LlmResponse::ToolCalls { usage, .. } => {
+                assert_eq!(usage.input_tokens, 200);
+                assert_eq!(usage.output_tokens, 10);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_missing_usage_defaults_to_zero() {
+        let json = json!({
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "hi" }]
+        });
+        match parse_anthropic_response(json).unwrap() {
+            LlmResponse::Message { usage, .. } => assert_eq!(usage.total_tokens(), 0),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_text_message_serializes_correctly() {
+        let msg = Message::user("hello");
+        let v = to_anthropic_message(&msg);
+        assert_eq!(v["role"], "user");
+        assert_eq!(v["content"], "hello");
+    }
+
+    #[test]
+    fn assistant_tool_use_parts_serialize_correctly() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: MessageContent::Parts(vec![ContentPart::ToolUse {
+                id: "tu_1".into(),
+                name: "my_tool".into(),
+                input: json!({ "k": "v" }),
+                thought_signature: None,
+            }]),
+        };
+        let v = to_anthropic_message(&msg);
+        assert_eq!(v["role"], "assistant");
+        let parts = v["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "tool_use");
+        assert_eq!(parts[0]["id"], "tu_1");
+        assert_eq!(parts[0]["name"], "my_tool");
+        assert_eq!(parts[0]["input"]["k"], "v");
+    }
+
+    #[test]
+    fn user_tool_result_part_serializes_correctly() {
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                tool_use_id: "tu_1".into(),
+                content: "result text".into(),
+                is_error: false,
+            }]),
+        };
+        let v = to_anthropic_message(&msg);
+        assert_eq!(v["role"], "user");
+        let parts = v["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "tool_result");
+        assert_eq!(parts[0]["tool_use_id"], "tu_1");
+        assert_eq!(parts[0]["content"], "result text");
+    }
+
+    #[test]
+    fn image_content_part_serializes_for_anthropic() {
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text { text: "look at this".into(), thought_signature: None },
+                ContentPart::Image { media_type: "image/png".into(), data: "abc123".into() },
+            ]),
+        };
+        let v = to_anthropic_message(&msg);
+        let parts = v["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "image");
+        assert_eq!(parts[1]["source"]["type"], "base64");
+        assert_eq!(parts[1]["source"]["media_type"], "image/png");
+        assert_eq!(parts[1]["source"]["data"], "abc123");
+    }
+
+    #[test]
+    fn document_content_part_serializes_for_anthropic() {
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Document { media_type: "application/pdf".into(), data: "pdfdata".into() },
+            ]),
+        };
+        let v = to_anthropic_message(&msg);
+        let parts = v["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "document");
+        assert_eq!(parts[0]["source"]["type"], "base64");
+        assert_eq!(parts[0]["source"]["media_type"], "application/pdf");
+        assert_eq!(parts[0]["source"]["data"], "pdfdata");
+    }
+
+    #[test]
+    fn tool_definition_uses_input_schema_key() {
+        let def = ToolDefinition {
+            name: "my_tool".into(),
+            description: "does stuff".into(),
+            parameters: json!({ "type": "object", "properties": {} }),
+        };
+        let v = to_anthropic_tool(&def);
+        assert_eq!(v["name"], "my_tool");
+        assert_eq!(v["description"], "does stuff");
+        assert!(v.get("input_schema").is_some(), "must use 'input_schema' key");
+        assert!(v.get("parameters").is_none(), "must NOT use 'parameters' key");
+    }
+
+    fn text_response_body() -> serde_json::Value {
+        json!({
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "all good" }]
+        })
+    }
+
+    fn tool_use_response_body() -> serde_json::Value {
+        json!({
+            "stop_reason": "tool_use",
+            "content": [{
+                "type": "tool_use",
+                "id": "tu_1",
+                "name": "list_repositories",
+                "input": {}
+            }]
+        })
+    }
+
+    #[tokio::test]
+    async fn http_200_end_turn_returns_message() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200).json_body(text_response_body());
+        });
+
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
+            LlmResponse::Message { text, .. } => assert_eq!(text, "all good"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_with_model_override_sends_that_model() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .body_includes(r#""model":"override-model""#);
+            then.status(200).json_body(text_response_body());
+        });
+
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        provider.chat_with(Some("override-model"), &[Message::user("hi")], &[]).await.unwrap();
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn chat_with_none_uses_configured_default_model() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .body_includes(r#""model":"claude-test""#);
+            then.status(200).json_body(text_response_body());
+        });
+
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        provider.chat_with(None, &[Message::user("hi")], &[]).await.unwrap();
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn list_models_parses_anthropic_shape() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("GET").path("/v1/models");
+            then.status(200).json_body(json!({
+                "data": [
+                    { "id": "claude-opus-4-8", "display_name": "Claude Opus 4.8" },
+                    { "id": "claude-sonnet-5", "display_name": "Claude Sonnet 5" },
+                ]
+            }));
+        });
+
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_models_url(server.url("/v1/models"));
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "claude-opus-4-8");
+        assert_eq!(models[0].display_name.as_deref(), Some("Claude Opus 4.8"));
+    }
+
+    #[tokio::test]
+    async fn list_models_falls_back_to_default_on_error_status() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("GET").path("/v1/models");
+            then.status(500);
+        });
+
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_models_url(server.url("/v1/models"));
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models, vec![ModelInfo { id: "claude-test".into(), display_name: None }]);
+    }
+
+    #[test]
+    fn expose_to_ui_reflects_constructor_value() {
+        let visible = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("a"));
+        let hidden  = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "b".into(), expose_to_ui: false, ..Default::default() });
+        assert!(visible.expose_to_ui());
+        assert!(!hidden.expose_to_ui());
+    }
+
+    #[test]
+    fn name_reflects_constructor_value() {
+        let named   = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "a".into(), expose_to_ui: true, name: Some("Claude Direct".into()), ..Default::default() });
+        let unnamed = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("b"));
+        assert_eq!(named.name(), Some("Claude Direct"));
+        assert_eq!(unnamed.name(), None);
+    }
+
+    #[tokio::test]
+    async fn http_200_tool_use_returns_tool_calls() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200).json_body(tool_use_response_body());
+        });
+
+        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
+            LlmResponse::ToolCalls { calls, .. } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].name, "list_repositories");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_4xx_returns_error() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(401).json_body(json!({ "error": "unauthorized" }));
+        });
+
+        let provider = AnthropicProvider::new("claude-test".into(), "bad-key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        assert!(provider.chat(&[Message::user("hi")], &[]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn http_request_carries_api_key_and_version_headers() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .header("x-api-key", "test-key")
+                .header("anthropic-version", ANTHROPIC_VERSION);
+            then.status(200).json_body(text_response_body());
+        });
+
+        let provider = AnthropicProvider::new("claude-test".into(), "test-key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        provider.chat(&[Message::user("hi")], &[]).await.unwrap();
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn system_message_goes_into_system_field_not_messages_array() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST")
+                .path("/v1/messages")
+                .body_includes(r#""text":"be helpful""#);
+            then.status(200).json_body(text_response_body());
+        });
+
+        let provider = AnthropicProvider::new("claude-test".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        let result = provider
+            .chat(&[Message::system("be helpful"), Message::user("hi")], &[])
+            .await
+            .unwrap();
+        mock.assert();
+        match result {
+            LlmResponse::Message { .. } => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_body_puts_a_cache_breakpoint_on_the_system_block() {
+        let body = build_body("m", &[Message::system("be helpful"), Message::user("hi")], &[], false);
+        assert_eq!(body["system"][0]["text"], "be helpful");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn build_body_puts_a_cache_breakpoint_on_the_last_message_block() {
+        let body = build_body("m", &[Message::user("first"), Message::assistant_text("ok"), Message::user("second")], &[], false);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        let last_content = messages.last().unwrap()["content"].as_array().unwrap();
+        assert_eq!(last_content.last().unwrap()["cache_control"]["type"], "ephemeral");
+        assert!(messages[0]["content"].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn build_body_cache_breakpoint_survives_multi_part_message_content() {
+        let msg = Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text { text: "look at this".into(), thought_signature: None },
+                ContentPart::Image { media_type: "image/png".into(), data: "abc".into() },
+            ]),
+        };
+        let body = build_body("m", &[msg], &[], false);
+        let parts = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].get("cache_control").is_none(), "breakpoint belongs on the last block, not the first");
+        assert_eq!(parts[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn build_body_is_a_noop_on_empty_messages() {
+        let body = build_body("m", &[], &[], false);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 0);
+    }
+
+    fn sse_body(events: &[Value]) -> String {
+        events
+            .iter()
+            .map(|e| format!("event: {}\ndata: {}\n\n", e["type"].as_str().unwrap_or(""), e))
+            .collect::<String>()
+    }
+
+    async fn collect_stream_events(provider: &AnthropicProvider) -> Vec<StreamEvent> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        provider.stream(None, &[Message::user("hi")], &[], tx).await.unwrap();
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn stream_text_delta_emits_text_delta_event() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "type": "content_block_start",  "index": 0, "content_block": { "type": "text", "text": "" } }),
+                    json!({ "type": "content_block_delta",  "index": 0, "delta": { "type": "text_delta", "text": "Hello" } }),
+                    json!({ "type": "content_block_delta",  "index": 0, "delta": { "type": "text_delta", "text": " world" } }),
+                    json!({ "type": "content_block_stop",   "index": 0 }),
+                    json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" } }),
+                    json!({ "type": "message_stop" }),
+                ]));
+        });
+
+        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        let events = collect_stream_events(&provider).await;
+
+        let text_deltas: Vec<_> = events.iter().filter_map(|e| match e {
+            StreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(text_deltas, vec!["Hello", " world"]);
+
+        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "end_turn"));
+        assert!(done, "expected Done(end_turn) event");
+    }
+
+    #[tokio::test]
+    async fn stream_thinking_delta_emits_thinking_delta_event() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "type": "content_block_start",  "index": 0, "content_block": { "type": "thinking", "thinking": "" } }),
+                    json!({ "type": "content_block_delta",  "index": 0, "delta": { "type": "thinking_delta", "thinking": "I should search" } }),
+                    json!({ "type": "content_block_stop",   "index": 0 }),
+                    json!({ "type": "content_block_start",  "index": 1, "content_block": { "type": "tool_use", "id": "tu_1", "name": "search", "input": {} } }),
+                    json!({ "type": "content_block_delta",  "index": 1, "delta": { "type": "input_json_delta", "partial_json": "{}" } }),
+                    json!({ "type": "content_block_stop",   "index": 1 }),
+                    json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" } }),
+                ]));
+        });
+
+        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        let events = collect_stream_events(&provider).await;
+
+        let thinking: Vec<_> = events.iter().filter_map(|e| match e {
+            StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(thinking, vec!["I should search"]);
+    }
+
+    #[tokio::test]
+    async fn stream_tool_call_accumulates_partial_json() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": "tu_42", "name": "search_symbols", "input": {} } }),
+                    json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{\"query\":" } }),
+                    json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "\"hello\"}" } }),
+                    json!({ "type": "content_block_stop",  "index": 0 }),
+                    json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" } }),
+                ]));
+        });
+
+        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        let events = collect_stream_events(&provider).await;
+
+        let calls: Vec<_> = events.iter().filter_map(|e| match e {
+            StreamEvent::ToolCallReady(c) => Some(c),
+            _ => None,
+        }).collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id,   "tu_42");
+        assert_eq!(calls[0].name, "search_symbols");
+        assert_eq!(calls[0].input["query"], "hello");
+    }
+
+    #[tokio::test]
+    async fn stream_multiple_tool_calls_in_one_response() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "tool_use", "id": "a", "name": "tool_a", "input": {} } }),
+                    json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "input_json_delta", "partial_json": "{}" } }),
+                    json!({ "type": "content_block_stop",  "index": 0 }),
+                    json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "tool_use", "id": "b", "name": "tool_b", "input": {} } }),
+                    json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "input_json_delta", "partial_json": "{}" } }),
+                    json!({ "type": "content_block_stop",  "index": 1 }),
+                    json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" } }),
+                ]));
+        });
+
+        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        let events = collect_stream_events(&provider).await;
+
+        let call_names: Vec<_> = events.iter().filter_map(|e| match e {
+            StreamEvent::ToolCallReady(c) => Some(c.name.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(call_names, vec!["tool_a", "tool_b"]);
+    }
+
+    #[tokio::test]
+    async fn stream_4xx_returns_error() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(401).body("unauthorized");
+        });
+
+        let provider = AnthropicProvider::new("m".into(), "bad-key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let result = provider.stream(None, &[Message::user("hi")], &[], tx).await;
+        assert!(result.is_err(), "expected error on 4xx");
+    }
+
+    #[tokio::test]
+    async fn stream_ping_events_are_ignored() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/v1/messages");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "type": "ping" }),
+                    json!({ "type": "content_block_start",  "index": 0, "content_block": { "type": "text", "text": "" } }),
+                    json!({ "type": "content_block_delta",  "index": 0, "delta": { "type": "text_delta", "text": "Hi!" } }),
+                    json!({ "type": "content_block_stop",   "index": 0 }),
+                    json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" } }),
+                ]));
+        });
+
+        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
+            .with_base_url(server.url("/v1/messages"));
+        let events = collect_stream_events(&provider).await;
+
+        assert!(events.iter().any(|e| matches!(e, StreamEvent::TextDelta { .. })));
+        assert!(events.iter().any(|e| matches!(e, StreamEvent::Done { .. })));
+        assert_eq!(events.len(), 2, "unexpected extra events: {events:?}");
+    }
+}
