@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::agent::HistoryMessage;
 use crate::auth::jwt::Claims;
-use crate::llm::types::UsedProvider;
+use crate::llm::types::{Usage, UsedProvider};
 use crate::neo4j::Neo4jClient;
 
 const CONVERSATION_TITLE_MAX_CHARS: usize = 60;
@@ -64,6 +64,9 @@ fn build_assistant_message(
     confirm_action: Option<Value>,
     provider_used: Option<&UsedProvider>,
     duration_ms: u64,
+    usage: &Usage,
+    llm_call_count: usize,
+    cost_microusd: i64,
 ) -> Value {
     let mut assistant_message = json!({
         "role": "assistant",
@@ -72,6 +75,9 @@ fn build_assistant_message(
         "chain": chain,
         "tool_calls_made": tool_calls_made,
         "duration_ms": duration_ms,
+        "usage": usage,
+        "llm_call_count": llm_call_count,
+        "cost_microusd": cost_microusd,
     });
     if let Some(question) = question {
         assistant_message["question"] = question;
@@ -106,6 +112,10 @@ pub async fn append_user_turn(
     confirm_action: Option<Value>,
     provider_used: Option<&UsedProvider>,
     duration_ms: u64,
+    usage: &Usage,
+    llm_call_count: usize,
+    turn_id: &str,
+    pricing: &crate::cost::PricingTable,
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     let title = if user_text.len() > CONVERSATION_TITLE_MAX_CHARS {
@@ -113,6 +123,8 @@ pub async fn append_user_turn(
     } else {
         user_text.to_string()
     };
+
+    let cost_microusd = pricing.price_call(usage, provider_used.map(|p| p.kind.as_str()).unwrap_or(""), provider_used.map(|p| p.model.as_str()).unwrap_or(""));
 
     let mut messages = prior_messages;
     messages.push(json!({
@@ -123,6 +135,7 @@ pub async fn append_user_turn(
     }));
     messages.push(build_assistant_message(
         assistant_text, sources, tool_calls_made, chain, question, confirm_action, provider_used, duration_ms,
+        usage, llm_call_count, cost_microusd,
     ));
 
     let messages_json = serde_json::to_string(&messages)?;
@@ -143,6 +156,13 @@ pub async fn append_user_turn(
             "count": message_count, "now": now,
         }),
     ).await?;
+
+    if let Some(record) = crate::cost::build_turn_record(
+        crate::cost::CostScope::Chat, turn_id, user_id, provider_used, usage, llm_call_count, pricing,
+        duration_ms, None, Some(conv_id), None, None, None,
+    ) {
+        let _ = crate::cost::record_llm_call(neo4j, &record).await;
+    }
     Ok(())
 }
 
@@ -261,7 +281,8 @@ pub async fn delete(
 ) -> Result<impl IntoResponse, ApiError> {
     state.neo4j.query_read(
         "MATCH (:User {id: $uid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         DETACH DELETE c RETURN count(c) AS n",
+         OPTIONAL MATCH (c)-[:INCURRED]->(call:LlmCall)
+         DETACH DELETE c, call RETURN count(c) AS n",
         json!({ "uid": user.sub, "cid": conv_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -283,7 +304,7 @@ mod tests {
     #[test]
     fn build_assistant_message_includes_provider_when_present() {
         let used = used_provider();
-        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, Some(&used), 1234);
+        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, Some(&used), 1234, &Usage::default(), 0, 0);
         assert_eq!(msg["provider"]["provider_id"], "anthropic-main");
         assert_eq!(msg["provider"]["kind"], "anthropic");
         assert_eq!(msg["provider"]["model"], "claude-sonnet-5");
@@ -291,20 +312,20 @@ mod tests {
 
     #[test]
     fn build_assistant_message_omits_provider_key_when_none() {
-        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, None, 0);
+        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, None, 0, &Usage::default(), 0, 0);
         assert!(msg.as_object().unwrap().get("provider").is_none());
     }
 
     #[test]
     fn build_assistant_message_includes_duration_ms() {
-        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, None, 4200);
+        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, None, 4200, &Usage::default(), 0, 0);
         assert_eq!(msg["duration_ms"], 4200);
     }
 
     #[test]
     fn build_assistant_message_provider_round_trips_through_json_string() {
         let used = used_provider();
-        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, Some(&used), 1234);
+        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, Some(&used), 1234, &Usage::default(), 0, 0);
         let serialized = serde_json::to_string(&vec![msg]).unwrap();
         let parsed: Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed[0]["provider"]["model"], "claude-sonnet-5");

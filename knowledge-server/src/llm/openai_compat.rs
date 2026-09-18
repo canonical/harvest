@@ -1,11 +1,14 @@
 use anyhow::{bail, Result};
 use async_trait::async_trait;
+use futures::StreamExt as _;
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use tokio::sync::mpsc;
 
 use super::{
     retry,
-    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, ToolCall, ToolDefinition},
+    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, StreamEvent, ToolCall, ToolDefinition, Usage},
     LlmProvider,
 };
 
@@ -61,17 +64,7 @@ impl LlmProvider for OpenAiCompatProvider {
     }
 
     async fn chat_with(&self, model: Option<&str>, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
-        let api_messages: Vec<Value> = messages.iter().map(to_openai_message).collect();
-        let api_tools: Vec<Value> = tools.iter().map(to_openai_function).collect();
-
-        let mut body = json!({
-            "model":    model.unwrap_or(&self.model),
-            "messages": api_messages,
-        });
-        if !api_tools.is_empty() {
-            body["tools"] = Value::Array(api_tools);
-        }
-
+        let body = build_body(model.unwrap_or(&self.model), messages, tools, false);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         let response = retry::send_with_retry(
@@ -97,6 +90,183 @@ impl LlmProvider for OpenAiCompatProvider {
         }
 
         parse_openai_response(json)
+    }
+
+    async fn chat_stream_with(
+        &self,
+        model: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<()> {
+        self.stream(model, messages, tools, tx).await
+    }
+}
+
+fn build_body(model: &str, messages: &[Message], tools: &[ToolDefinition], stream: bool) -> Value {
+    let api_messages: Vec<Value> = messages.iter().map(to_openai_message).collect();
+    let api_tools: Vec<Value> = tools.iter().map(to_openai_function).collect();
+
+    let mut body = json!({
+        "model":    model,
+        "messages": api_messages,
+    });
+    if !api_tools.is_empty() {
+        body["tools"] = Value::Array(api_tools);
+    }
+    if stream {
+        body["stream"] = json!(true);
+    }
+    body
+}
+
+#[derive(Default, Clone)]
+struct ToolCallAccum {
+    id:       String,
+    name:     String,
+    args_buf: String,
+}
+
+fn apply_usage_delta(usage: &mut Usage, u: &Value) {
+    if u.is_null() {
+        return;
+    }
+    if let Some(v) = u["prompt_tokens"].as_u64() { usage.input_tokens = v; }
+    if let Some(v) = u["completion_tokens"].as_u64() { usage.output_tokens = v; }
+    if let Some(v) = u["prompt_tokens_details"]["cached_tokens"].as_u64() { usage.cache_read_tokens = v; }
+    if let Some(v) = u["completion_tokens_details"]["reasoning_tokens"].as_u64() { usage.reasoning_tokens = v; }
+}
+
+async fn process_stream_event(
+    event: &Value,
+    tool_calls: &mut HashMap<usize, ToolCallAccum>,
+    stop_reason: &mut Option<String>,
+    usage: &mut Usage,
+    tx: &mpsc::Sender<StreamEvent>,
+) {
+    apply_usage_delta(usage, &event["usage"]);
+
+    let choice = &event["choices"][0];
+    let delta  = &choice["delta"];
+
+    if let Some(text) = delta["content"].as_str() {
+        if !text.is_empty() {
+            let _ = tx.send(StreamEvent::TextDelta { text: text.to_string() }).await;
+        }
+    }
+
+    let reasoning = delta["reasoning_content"].as_str().or_else(|| delta["reasoning"].as_str());
+    if let Some(text) = reasoning {
+        if !text.is_empty() {
+            let _ = tx.send(StreamEvent::ThinkingDelta { text: text.to_string() }).await;
+        }
+    }
+
+    if let Some(calls) = delta["tool_calls"].as_array() {
+        for tc in calls {
+            let idx = tc["index"].as_u64().unwrap_or(0) as usize;
+            let entry = tool_calls.entry(idx).or_default();
+            if let Some(id) = tc["id"].as_str() {
+                entry.id = id.to_string();
+            }
+            if let Some(name) = tc["function"]["name"].as_str() {
+                entry.name = name.to_string();
+            }
+            if let Some(args) = tc["function"]["arguments"].as_str() {
+                entry.args_buf.push_str(args);
+            }
+        }
+    }
+
+    if let Some(reason) = choice["finish_reason"].as_str() {
+        *stop_reason = Some(match reason {
+            "tool_calls" => "tool_use".to_string(),
+            "stop"       => "end_turn".to_string(),
+            "length"     => "max_tokens".to_string(),
+            other        => other.to_string(),
+        });
+    }
+}
+
+impl OpenAiCompatProvider {
+    async fn stream(
+        &self,
+        model: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<()> {
+        let body = build_body(model.unwrap_or(&self.model), messages, tools, true);
+        let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
+
+        let response = retry::send_with_retry(
+            self.max_retries,
+            OVERLOAD_STATUS_CODES,
+            "OpenAI-compat",
+            || {
+                let mut req = self.client.post(&url).json(&body);
+                if !self.api_key.is_empty() {
+                    req = req.bearer_auth(&self.api_key);
+                }
+                req.send()
+            },
+        ).await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await?;
+            bail!("OpenAI-compat API error {status}: {body_text}");
+        }
+
+        let mut byte_stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut tool_calls: HashMap<usize, ToolCallAccum> = HashMap::new();
+        let mut stop_reason: Option<String> = None;
+        let mut usage = Usage::default();
+
+        'outer: while let Some(chunk) = byte_stream.next().await {
+            let bytes = chunk?;
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(pos) = buffer.find("\n\n") {
+                let event_text = buffer[..pos].to_string();
+                buffer.drain(..pos + 2);
+
+                let data_line = event_text
+                    .lines()
+                    .find(|l| l.starts_with("data:"))
+                    .map(|l| l[5..].trim().to_string());
+
+                let Some(data) = data_line else { continue };
+                if data == "[DONE]" {
+                    break 'outer;
+                }
+                let Ok(json) = serde_json::from_str::<Value>(&data) else { continue };
+                process_stream_event(&json, &mut tool_calls, &mut stop_reason, &mut usage, &tx).await;
+            }
+        }
+
+        let mut ordered: Vec<_> = tool_calls.into_iter().collect();
+        ordered.sort_by_key(|(idx, _)| *idx);
+        let has_tool_calls = !ordered.is_empty();
+
+        for (_, call) in ordered {
+            let input: Value = serde_json::from_str(&call.args_buf)
+                .unwrap_or(Value::Object(serde_json::Map::new()));
+            let _ = tx.send(StreamEvent::ToolCallReady(ToolCall {
+                id:                call.id,
+                name:              call.name,
+                input,
+                thought_signature: None,
+            })).await;
+        }
+
+        let resolved_stop_reason = stop_reason.unwrap_or_else(|| {
+            if has_tool_calls { "tool_use".to_string() } else { "end_turn".to_string() }
+        });
+        let _ = tx.send(StreamEvent::Done { stop_reason: resolved_stop_reason, usage }).await;
+
+        Ok(())
     }
 }
 
@@ -178,10 +348,17 @@ fn to_openai_function(tool: &ToolDefinition) -> Value {
     })
 }
 
+fn usage_from_openai(json: &Value) -> Usage {
+    let mut usage = Usage::default();
+    apply_usage_delta(&mut usage, &json["usage"]);
+    usage
+}
+
 fn parse_openai_response(json: Value) -> Result<LlmResponse> {
     if let Some(err) = json.get("error") {
         bail!("LLM API error: {err}");
     }
+    let usage = usage_from_openai(&json);
     let choice = &json["choices"][0];
     let message = &choice["message"];
     let finish_reason = choice["finish_reason"].as_str().unwrap_or("");
@@ -202,11 +379,11 @@ fn parse_openai_response(json: Value) -> Result<LlmResponse> {
             })
             .collect();
         let preamble = message["content"].as_str().unwrap_or("").to_string();
-        return Ok(LlmResponse::ToolCalls { calls, preamble });
+        return Ok(LlmResponse::ToolCalls { calls, preamble, usage });
     }
 
     let text = message["content"].as_str().unwrap_or("").to_string();
-    Ok(LlmResponse::Message { text })
+    Ok(LlmResponse::Message { text, usage })
 }
 
 #[cfg(test)]
@@ -219,6 +396,216 @@ mod tests {
         OpenAiCompatProvider::new(base_url.into(), "test-key".into(), "test-model".into(), 30, 0, ProviderMeta::new("oai-1"))
     }
 
+    fn sse_body(events: &[Value]) -> String {
+        events.iter().map(|e| format!("data: {e}\n\n")).collect::<String>() + "data: [DONE]\n\n"
+    }
+
+    async fn collect_stream_events(provider: &OpenAiCompatProvider) -> Vec<StreamEvent> {
+        let (tx, mut rx) = mpsc::channel(64);
+        provider.stream(None, &[Message::user("hi")], &[], tx).await.unwrap();
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn stream_text_delta_emits_text_delta_event() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "choices": [{ "index": 0, "delta": { "content": "Hello" } }] }),
+                    json!({ "choices": [{ "index": 0, "delta": { "content": " world" } }] }),
+                    json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }] }),
+                ]));
+        });
+
+        let provider = make_provider(&server.base_url());
+        let events = collect_stream_events(&provider).await;
+
+        let text_deltas: Vec<_> = events.iter().filter_map(|e| match e {
+            StreamEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(text_deltas, vec!["Hello", " world"]);
+
+        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "end_turn"));
+        assert!(done, "expected Done(end_turn) event");
+    }
+
+    #[tokio::test]
+    async fn stream_reasoning_content_emits_thinking_delta_event() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "choices": [{ "index": 0, "delta": { "reasoning_content": "Let me think" } }] }),
+                    json!({ "choices": [{ "index": 0, "delta": { "content": "done" }, "finish_reason": "stop" }] }),
+                ]));
+        });
+
+        let provider = make_provider(&server.base_url());
+        let events = collect_stream_events(&provider).await;
+
+        let thinking: Vec<_> = events.iter().filter_map(|e| match e {
+            StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(thinking, vec!["Let me think"]);
+    }
+
+    #[tokio::test]
+    async fn stream_reasoning_field_also_emits_thinking_delta_event() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "choices": [{ "index": 0, "delta": { "reasoning": "Checking options" } }] }),
+                    json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }] }),
+                ]));
+        });
+
+        let provider = make_provider(&server.base_url());
+        let events = collect_stream_events(&provider).await;
+
+        let thinking: Vec<_> = events.iter().filter_map(|e| match e {
+            StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(thinking, vec!["Checking options"]);
+    }
+
+    #[tokio::test]
+    async fn stream_tool_call_accumulates_partial_arguments() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [
+                        { "index": 0, "id": "call_1", "function": { "name": "search_symbols", "arguments": "" } }
+                    ] } }] }),
+                    json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [
+                        { "index": 0, "function": { "arguments": "{\"query\":" } }
+                    ] } }] }),
+                    json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [
+                        { "index": 0, "function": { "arguments": "\"hello\"}" } }
+                    ] } }] }),
+                    json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }] }),
+                ]));
+        });
+
+        let provider = make_provider(&server.base_url());
+        let events = collect_stream_events(&provider).await;
+
+        let calls: Vec<_> = events.iter().filter_map(|e| match e {
+            StreamEvent::ToolCallReady(c) => Some(c),
+            _ => None,
+        }).collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id,   "call_1");
+        assert_eq!(calls[0].name, "search_symbols");
+        assert_eq!(calls[0].input["query"], "hello");
+
+        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "tool_use"));
+        assert!(done, "expected Done(tool_use) event");
+    }
+
+    #[tokio::test]
+    async fn stream_multiple_tool_calls_by_index() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "choices": [{ "index": 0, "delta": { "tool_calls": [
+                        { "index": 0, "id": "a", "function": { "name": "tool_a", "arguments": "{}" } },
+                        { "index": 1, "id": "b", "function": { "name": "tool_b", "arguments": "{}" } }
+                    ] } }] }),
+                    json!({ "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }] }),
+                ]));
+        });
+
+        let provider = make_provider(&server.base_url());
+        let events = collect_stream_events(&provider).await;
+
+        let call_names: Vec<_> = events.iter().filter_map(|e| match e {
+            StreamEvent::ToolCallReady(c) => Some(c.name.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(call_names, vec!["tool_a", "tool_b"]);
+    }
+
+    #[tokio::test]
+    async fn stream_usage_extracted_from_final_chunk() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/chat/completions");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(sse_body(&[
+                    json!({ "choices": [{ "index": 0, "delta": { "content": "hi" } }] }),
+                    json!({
+                        "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                        "usage": {
+                            "prompt_tokens": 100,
+                            "completion_tokens": 20,
+                            "prompt_tokens_details": { "cached_tokens": 10 },
+                            "completion_tokens_details": { "reasoning_tokens": 5 }
+                        }
+                    }),
+                ]));
+        });
+
+        let provider = make_provider(&server.base_url());
+        let events = collect_stream_events(&provider).await;
+
+        let usage = events.iter().find_map(|e| match e {
+            StreamEvent::Done { usage, .. } => Some(usage.clone()),
+            _ => None,
+        }).expect("expected Done event with usage");
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 20);
+        assert_eq!(usage.cache_read_tokens, 10);
+        assert_eq!(usage.reasoning_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn stream_4xx_returns_error() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/chat/completions");
+            then.status(401).body("unauthorized");
+        });
+
+        let provider = make_provider(&server.base_url());
+        let (tx, _rx) = mpsc::channel(4);
+        let result = provider.stream(None, &[Message::user("hi")], &[], tx).await;
+        assert!(result.is_err(), "expected error on 4xx");
+    }
+
+    #[test]
+    fn build_body_sets_stream_flag_when_streaming() {
+        let body = build_body("m", &[], &[], true);
+        assert_eq!(body["stream"], true);
+    }
+
+    #[test]
+    fn build_body_omits_stream_flag_when_not_streaming() {
+        let body = build_body("m", &[], &[], false);
+        assert!(body.get("stream").is_none());
+    }
+
     #[test]
     fn parse_stop_returns_message() {
         let json = json!({
@@ -228,7 +615,32 @@ mod tests {
             }]
         });
         match parse_openai_response(json).unwrap() {
-            LlmResponse::Message { text } => assert_eq!(text, "Hello!"),
+            LlmResponse::Message { text, .. } => assert_eq!(text, "Hello!"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_message_extracts_usage() {
+        let json = json!({
+            "choices": [{
+                "finish_reason": "stop",
+                "message": { "role": "assistant", "content": "Hi" }
+            }],
+            "usage": {
+                "prompt_tokens": 300,
+                "completion_tokens": 80,
+                "prompt_tokens_details": { "cached_tokens": 40 },
+                "completion_tokens_details": { "reasoning_tokens": 15 }
+            }
+        });
+        match parse_openai_response(json).unwrap() {
+            LlmResponse::Message { usage, .. } => {
+                assert_eq!(usage.input_tokens, 300);
+                assert_eq!(usage.output_tokens, 80);
+                assert_eq!(usage.cache_read_tokens, 40);
+                assert_eq!(usage.reasoning_tokens, 15);
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -430,7 +842,7 @@ mod tests {
 
         let provider = make_provider(&server.base_url());
         match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
-            LlmResponse::Message { text } => assert_eq!(text, "done"),
+            LlmResponse::Message { text, .. } => assert_eq!(text, "done"),
             other => panic!("unexpected: {other:?}"),
         }
     }

@@ -1,3 +1,4 @@
+pub mod cost;
 pub mod docs;
 pub mod graph;
 pub mod llm;
@@ -81,6 +82,7 @@ pub struct QueryState {
     pub max_iterations: usize,
     pub compaction_threshold_chars: usize,
     pub compaction_keep_last: usize,
+    pub pricing: Arc<crate::cost::PricingTable>,
 }
 
 #[derive(Clone)]
@@ -101,6 +103,7 @@ pub struct AppState {
     pub llm_configs:      Arc<Vec<LlmProviderConfig>>,
     pub user_key_store:   Option<Arc<UserKeyStore>>,
     pub lxd:              Option<Arc<LxdClient>>,
+    pub pricing:          Arc<crate::cost::PricingTable>,
 }
 
 #[derive(Clone)]
@@ -361,6 +364,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         max_iterations: state.agent_builder.max_iterations,
         compaction_threshold_chars: state.agent_builder.compaction_threshold_chars,
         compaction_keep_last: state.agent_builder.compaction_keep_last,
+        pricing: Arc::clone(&state.pricing),
     });
     let agent_router = Router::new()
         .route("/query",            post(query::handle_query))
@@ -420,6 +424,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         Arc::clone(&state.llm),
         Arc::clone(&state.llm_configs),
         state.user_key_store.clone(),
+        Arc::clone(&state.pricing),
     ));
 
     let skill_store = Arc::new(SkillStore::new(Arc::clone(&state.neo4j)));
@@ -501,6 +506,12 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                .put(deployment_handlers::update_template)
                .delete(deployment_handlers::delete_template))
         .route("/templates/:tid/download", get(deployment_handlers::download_template))
+        .route("/projects/:pid/cost",               get(cost::project_cost))
+        .route("/projects/:pid/cost/by-model",      get(cost::project_cost_by_model))
+        .route("/projects/:pid/cost/by-user",       get(cost::project_cost_by_user))
+        .route("/projects/:pid/conversations/:cid/cost",   get(cost::conversation_cost))
+        .route("/projects/:pid/deployments/:did/cost",     get(cost::deployment_cost))
+        .route("/projects/:pid/deployments/:did/cost/calls", get(cost::deployment_cost_calls))
         .with_state(project_state);
 
     let machine_state = Arc::new(MachineState {

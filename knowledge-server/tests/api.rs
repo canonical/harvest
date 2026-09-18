@@ -27,7 +27,7 @@ use knowledge_server::{
     auth::jwt::Claims,
     llm::{
         LlmProvider,
-        types::{LlmResponse, Message, ModelInfo, ToolDefinition},
+        types::{LlmResponse, Message, ModelInfo, ToolDefinition, Usage},
     },
     neo4j::Neo4jClient,
 };
@@ -48,7 +48,7 @@ impl LlmProvider for FixedTextLlm {
     fn default_model(&self) -> &str { "mock-model" }
     async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> { Ok(vec![]) }
     async fn chat_with(&self, _model: Option<&str>, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
-        Ok(LlmResponse::Message { text: self.0.clone() })
+        Ok(LlmResponse::Message { text: self.0.clone(), usage: Usage::default() })
     }
 }
 
@@ -68,7 +68,7 @@ impl LlmProvider for ErrorLlm {
 
 fn query_app(agent: Arc<Agent>) -> Router {
     let llm = Arc::clone(agent.llm());
-    let qs = Arc::new(QueryState { agent, neo4j: None, llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6 });
+    let qs = Arc::new(QueryState { agent, neo4j: None, llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6, pricing: Arc::new(knowledge_server::cost::PricingTable::default()) });
     Router::new()
         .route("/query", post(handle_query))
         .route("/query/stream", post(handle_query_stream))
@@ -92,6 +92,10 @@ fn repos_app(neo4j: Arc<Neo4jClient>) -> Router {
     let state = Arc::new(GraphState {
         neo4j,
         cache: Arc::new(RwLock::new(HashMap::new())),
+        ingestion: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        neo4j_uri: String::new(),
+        neo4j_user: String::new(),
+        neo4j_password: String::new(),
     });
     Router::new()
         .route("/repositories", get(handle_list_repositories))
@@ -371,7 +375,7 @@ use knowledge_server::conversations::handlers as conv_handlers;
 
 fn query_app_with_neo4j(agent: Arc<Agent>, neo4j: Arc<Neo4jClient>) -> Router {
     let llm = Arc::clone(agent.llm());
-    let qs = Arc::new(QueryState { agent, neo4j: Some(Arc::clone(&neo4j)), llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6 });
+    let qs = Arc::new(QueryState { agent, neo4j: Some(Arc::clone(&neo4j)), llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6, pricing: Arc::new(knowledge_server::cost::PricingTable::default()) });
     let query_router = Router::new()
         .route("/query/stream", post(handle_query_stream))
         .with_state(qs);

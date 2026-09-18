@@ -60,20 +60,55 @@ pub async fn generate_title(
     ];
 
     let text = match llm.chat(&messages, &[]).await {
-        Ok(crate::llm::types::LlmResponse::Message { text }) => text,
+        Ok(crate::llm::types::LlmResponse::Message { text, .. }) => text,
         _ => return None,
     };
 
-    let title: String = text
+    let cleaned = clean_title_text(&text);
+    let title = if cleaned.is_empty() || looks_like_body_text(&cleaned) {
+        sanitize_title(user_text)
+    } else {
+        truncate_at_word_boundary(&cleaned, TITLE_MAX_CHARS)
+    };
+
+    if title.is_empty() { None } else { Some(title) }
+}
+
+fn clean_title_text(text: &str) -> String {
+    let no_fences = text.replace("```", "");
+    let single_line = no_fences.split_whitespace().collect::<Vec<_>>().join(" ");
+    single_line
         .trim()
         .trim_matches('"')
         .trim_matches('\'')
         .trim()
-        .chars()
-        .take(TITLE_MAX_CHARS)
-        .collect();
+        .to_string()
+}
 
-    if title.is_empty() { None } else { Some(title) }
+fn sanitize_title(text: &str) -> String {
+    truncate_at_word_boundary(&clean_title_text(text), TITLE_MAX_CHARS)
+}
+
+fn truncate_at_word_boundary(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(max_chars).collect();
+    match truncated.rfind(' ') {
+        Some(idx) if idx > 0 => truncated[..idx].to_string(),
+        _ => truncated,
+    }
+}
+
+fn looks_like_body_text(sanitized: &str) -> bool {
+    let starts_like_heading = sanitized.starts_with('#') || sanitized.starts_with('-') || sanitized.starts_with('*');
+    let starts_like_list_item = sanitized
+        .split_whitespace()
+        .next()
+        .map(|w| w.ends_with('.') && w.trim_end_matches('.').chars().all(|c| c.is_ascii_digit()) && !w.trim_end_matches('.').is_empty())
+        .unwrap_or(false);
+    let too_many_words = sanitized.split_whitespace().count() > 12;
+    starts_like_heading || starts_like_list_item || too_many_words
 }
 
 async fn update_title(neo4j: &Neo4jClient, conv_id: &str, title: &str) -> bool {
@@ -119,7 +154,7 @@ mod tests {
         fn default_model(&self) -> &str { "mock-model" }
         async fn list_models(&self) -> Result<Vec<ModelInfo>> { Ok(vec![]) }
         async fn chat_with(&self, _: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
-            Ok(LlmResponse::Message { text: self.0.clone() })
+            Ok(LlmResponse::Message { text: self.0.clone(), usage: crate::llm::types::Usage::default() })
         }
     }
 
@@ -211,6 +246,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generate_title_collapses_newlines_and_strips_code_fences() {
+        let llm = MockLlm("```mermaid\nflowchart TD\n    A[Start: _configure_ovn_external]\n```".into());
+        let result = generate_title(&llm, &[], "q", "a").await;
+        let title = result.expect("title should not be none");
+        assert!(!title.contains('\n'));
+        assert!(!title.contains("```"));
+        assert_eq!(title, "mermaid flowchart TD A[Start: _configure_ovn_external]");
+    }
+
+    #[tokio::test]
     async fn generate_title_truncates_to_60_chars() {
         let long = "A".repeat(100);
         let llm = MockLlm(long);
@@ -225,17 +270,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_title_returns_none_for_empty_response() {
+    async fn generate_title_falls_back_to_question_for_empty_response() {
         let llm = MockLlm("".into());
         let result = generate_title(&llm, &[], "q", "a").await;
+        assert_eq!(result, Some("q".into()));
+    }
+
+    #[tokio::test]
+    async fn generate_title_fallback_truncates_on_word_boundary_not_mid_word() {
+        let llm = MockLlm("".into());
+        let question = "What authentication mechanisms does the harvest knowledge-server support, and how is JWT validation implemented?";
+        let result = generate_title(&llm, &[], question, "a").await;
+        let title = result.expect("title should not be none");
+        assert!(title.len() <= 60);
+        assert_eq!(title, "What authentication mechanisms does the harvest");
+        assert!(!title.ends_with("knowledge-se"));
+    }
+
+    #[tokio::test]
+    async fn generate_title_returns_none_when_question_is_also_empty() {
+        let llm = MockLlm("".into());
+        let result = generate_title(&llm, &[], "", "a").await;
         assert!(result.is_none());
     }
 
     #[tokio::test]
-    async fn generate_title_returns_none_for_whitespace_only() {
+    async fn generate_title_falls_back_to_question_for_whitespace_only() {
         let llm = MockLlm("   ".into());
         let result = generate_title(&llm, &[], "q", "a").await;
-        assert!(result.is_none());
+        assert_eq!(result, Some("q".into()));
+    }
+
+    #[tokio::test]
+    async fn generate_title_falls_back_to_question_for_markdown_body_text() {
+        let llm = MockLlm("### Step 4: The Weigher Pipeline\n1. Once filtering is complete, backends are scored.".into());
+        let result = generate_title(&llm, &[], "How does the scheduler weigh backends?", "a").await;
+        assert_eq!(result, Some("How does the scheduler weigh backends?".into()));
+    }
+
+    #[tokio::test]
+    async fn generate_title_falls_back_to_question_for_long_sentence() {
+        let llm = MockLlm("This is a very long response with way more than twelve words in it describing everything in detail".into());
+        let result = generate_title(&llm, &[], "short question", "a").await;
+        assert_eq!(result, Some("short question".into()));
+    }
+
+    #[tokio::test]
+    async fn generate_title_accepts_a_normal_short_title() {
+        let llm = MockLlm("Rust Async Traits Explained".into());
+        let result = generate_title(&llm, &[], "q", "a").await;
+        assert_eq!(result, Some("Rust Async Traits Explained".into()));
     }
 
     #[tokio::test]

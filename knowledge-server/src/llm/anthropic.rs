@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use super::{
     retry,
-    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, StreamEvent, ToolCall, ToolDefinition},
+    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, StreamEvent, ToolCall, ToolDefinition, Usage},
     LlmProvider,
 };
 
@@ -213,7 +213,19 @@ fn to_anthropic_tool(tool: &ToolDefinition) -> Value {
     })
 }
 
+fn usage_from_anthropic(json: &Value) -> Usage {
+    let u = &json["usage"];
+    Usage {
+        input_tokens:         u["input_tokens"].as_u64().unwrap_or(0),
+        output_tokens:        u["output_tokens"].as_u64().unwrap_or(0),
+        cache_read_tokens:    u["cache_read_input_tokens"].as_u64().unwrap_or(0),
+        cache_creation_tokens: u["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+        reasoning_tokens:     0,
+    }
+}
+
 fn parse_anthropic_response(json: Value) -> Result<LlmResponse> {
+    let usage = usage_from_anthropic(&json);
     let stop_reason = json["stop_reason"].as_str().unwrap_or("");
     let content = json["content"].as_array().cloned().unwrap_or_default();
 
@@ -234,7 +246,7 @@ fn parse_anthropic_response(json: Value) -> Result<LlmResponse> {
             .filter_map(|b| b["text"].as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        return Ok(LlmResponse::ToolCalls { calls, preamble });
+        return Ok(LlmResponse::ToolCalls { calls, preamble, usage });
     }
 
     let text = content
@@ -244,7 +256,7 @@ fn parse_anthropic_response(json: Value) -> Result<LlmResponse> {
         .collect::<Vec<_>>()
         .join("\n");
 
-    Ok(LlmResponse::Message { text })
+    Ok(LlmResponse::Message { text, usage })
 }
 
 enum BlockAccum {
@@ -257,8 +269,17 @@ async fn process_stream_event(
     event: &Value,
     blocks: &mut HashMap<usize, BlockAccum>,
     tx: &mpsc::Sender<StreamEvent>,
+    usage: &mut Usage,
 ) -> Result<()> {
     match event["type"].as_str().unwrap_or("") {
+        "message_start" => {
+            let msg = &event["message"];
+            if let Some(u) = msg.get("usage") {
+                usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0);
+                usage.cache_read_tokens = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                usage.cache_creation_tokens = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+            }
+        }
         "content_block_start" => {
             let idx = event["index"].as_u64().unwrap_or(0) as usize;
             let cb  = &event["content_block"];
@@ -320,7 +341,10 @@ async fn process_stream_event(
                 "max_tokens" => "max_tokens".to_string(),
                 other => other.to_string(),
             };
-            let _ = tx.send(StreamEvent::Done { stop_reason }).await;
+            if let Some(u) = event.get("usage") {
+                usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0);
+            }
+            let _ = tx.send(StreamEvent::Done { stop_reason, usage: usage.clone() }).await;
         }
         _ => {}
     }
@@ -359,6 +383,7 @@ impl AnthropicProvider {
         let mut byte_stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut blocks: HashMap<usize, BlockAccum> = HashMap::new();
+        let mut usage = Usage::default();
 
         while let Some(chunk) = byte_stream.next().await {
             let bytes = chunk?;
@@ -375,7 +400,7 @@ impl AnthropicProvider {
 
                 if let Some(data) = data_line {
                     if let Ok(json) = serde_json::from_str::<Value>(&data) {
-                        process_stream_event(&json, &mut blocks, &tx).await?;
+                        process_stream_event(&json, &mut blocks, &tx, &mut usage).await?;
                     }
                 }
             }
@@ -398,7 +423,7 @@ mod tests {
             "content": [{ "type": "text", "text": "Hello!" }]
         });
         match parse_anthropic_response(json).unwrap() {
-            LlmResponse::Message { text } => assert_eq!(text, "Hello!"),
+            LlmResponse::Message { text, .. } => assert_eq!(text, "Hello!"),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -450,7 +475,59 @@ mod tests {
             ]
         });
         match parse_anthropic_response(json).unwrap() {
-            LlmResponse::Message { text } => assert_eq!(text, "line one\nline two"),
+            LlmResponse::Message { text, .. } => assert_eq!(text, "line one\nline two"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_message_extracts_usage() {
+        let json = json!({
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "hi" }],
+            "usage": {
+                "input_tokens": 120,
+                "output_tokens": 45,
+                "cache_read_input_tokens": 80,
+                "cache_creation_input_tokens": 20
+            }
+        });
+        match parse_anthropic_response(json).unwrap() {
+            LlmResponse::Message { usage, .. } => {
+                assert_eq!(usage.input_tokens, 120);
+                assert_eq!(usage.output_tokens, 45);
+                assert_eq!(usage.cache_read_tokens, 80);
+                assert_eq!(usage.cache_creation_tokens, 20);
+                assert_eq!(usage.reasoning_tokens, 0);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_use_extracts_usage() {
+        let json = json!({
+            "stop_reason": "tool_use",
+            "content": [{ "type": "tool_use", "id": "t1", "name": "search", "input": {} }],
+            "usage": { "input_tokens": 200, "output_tokens": 10 }
+        });
+        match parse_anthropic_response(json).unwrap() {
+            LlmResponse::ToolCalls { usage, .. } => {
+                assert_eq!(usage.input_tokens, 200);
+                assert_eq!(usage.output_tokens, 10);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_missing_usage_defaults_to_zero() {
+        let json = json!({
+            "stop_reason": "end_turn",
+            "content": [{ "type": "text", "text": "hi" }]
+        });
+        match parse_anthropic_response(json).unwrap() {
+            LlmResponse::Message { usage, .. } => assert_eq!(usage.total_tokens(), 0),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -579,7 +656,7 @@ mod tests {
         let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
             .with_base_url(server.url("/v1/messages"));
         match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
-            LlmResponse::Message { text } => assert_eq!(text, "all good"),
+            LlmResponse::Message { text, .. } => assert_eq!(text, "all good"),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -817,7 +894,7 @@ mod tests {
         }).collect();
         assert_eq!(text_deltas, vec!["Hello", " world"]);
 
-        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason } if stop_reason == "end_turn"));
+        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "end_turn"));
         assert!(done, "expected Done(end_turn) event");
     }
 

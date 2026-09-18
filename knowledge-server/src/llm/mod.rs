@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod gemini;
 pub mod openai_compat;
+pub mod pricing;
 pub mod types;
 mod retry;
 
@@ -10,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::config::LlmProviderConfig;
-use types::{LlmResponse, Message, ModelInfo, ProviderMeta, ProviderSelection, StreamEvent, ToolDefinition, UsedProvider};
+use types::{LlmResponse, Message, ModelInfo, ProviderMeta, ProviderSelection, StreamEvent, ToolDefinition, Usage, UsedProvider};
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -66,18 +67,18 @@ pub trait LlmProvider: Send + Sync {
     ) -> Result<()> {
         let response = self.chat_with(model, messages, tools).await?;
         match response {
-            LlmResponse::Message { text } => {
+            LlmResponse::Message { text, usage } => {
                 let _ = tx.send(StreamEvent::TextDelta { text }).await;
-                let _ = tx.send(StreamEvent::Done { stop_reason: "end_turn".into() }).await;
+                let _ = tx.send(StreamEvent::Done { stop_reason: "end_turn".into(), usage }).await;
             }
-            LlmResponse::ToolCalls { calls, preamble } => {
+            LlmResponse::ToolCalls { calls, preamble, usage } => {
                 if !preamble.is_empty() {
                     let _ = tx.send(StreamEvent::TextDelta { text: preamble }).await;
                 }
                 for call in calls {
                     let _ = tx.send(StreamEvent::ToolCallReady(call)).await;
                 }
-                let _ = tx.send(StreamEvent::Done { stop_reason: "tool_use".into() }).await;
+                let _ = tx.send(StreamEvent::Done { stop_reason: "tool_use".into(), usage }).await;
             }
         }
         Ok(())
@@ -105,12 +106,16 @@ pub trait LlmProvider: Send + Sync {
         selection: Option<&ProviderSelection>,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> Result<(LlmResponse, UsedProvider)> {
+    ) -> Result<(LlmResponse, UsedProvider, Usage)> {
         let model = selection
             .filter(|s| s.provider_id == self.id())
             .and_then(|s| s.model.as_deref());
         let response = self.chat_with(model, messages, tools).await?;
-        Ok((response, self.used(model)))
+        let usage = match &response {
+            LlmResponse::Message { usage, .. } => usage.clone(),
+            LlmResponse::ToolCalls { usage, .. } => usage.clone(),
+        };
+        Ok((response, self.used(model), usage))
     }
 
     async fn chat_stream_routed(
@@ -222,12 +227,18 @@ impl LlmProvider for FallbackProvider {
         selection: Option<&ProviderSelection>,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> Result<(LlmResponse, UsedProvider)> {
+    ) -> Result<(LlmResponse, UsedProvider, Usage)> {
         let order = self.ordered_for(selection);
         let mut last_err = anyhow::anyhow!("no LLM providers configured");
         for (provider, model_override) in order {
             match provider.chat_with(model_override.as_deref(), messages, tools).await {
-                Ok(response) => return Ok((response, provider.used(model_override.as_deref()))),
+                Ok(response) => {
+                    let usage = match &response {
+                        LlmResponse::Message { usage, .. } => usage.clone(),
+                        LlmResponse::ToolCalls { usage, .. } => usage.clone(),
+                    };
+                    return Ok((response, provider.used(model_override.as_deref()), usage));
+                }
                 Err(e) if Self::is_rate_limited(&e) => {
                     tracing::warn!(error = %e, provider = provider.id(), "LLM provider rate limited — trying next provider");
                     last_err = e;
@@ -371,7 +382,7 @@ mod tests {
             })
         }
         fn ok(text: &str) -> Result<LlmResponse> {
-            Ok(LlmResponse::Message { text: text.into() })
+            Ok(LlmResponse::Message { text: text.into(), usage: Usage::default() })
         }
         fn rate_limited() -> Result<LlmResponse> {
             Err(anyhow!("provider error 429 Too Many Requests"))
@@ -430,7 +441,7 @@ mod tests {
     async fn single_provider_returns_its_response() {
         let p = fallback(vec![MockProvider::new(vec![MockProvider::ok("hello")])]);
         let r = p.chat(&[], &[]).await.unwrap();
-        assert!(matches!(r, LlmResponse::Message { text } if text == "hello"));
+        assert!(matches!(r, LlmResponse::Message { text, .. } if text == "hello"));
     }
 
     #[tokio::test]
@@ -439,7 +450,7 @@ mod tests {
         let p2 = MockProvider::new(vec![MockProvider::ok("from second")]);
         let fb = fallback(vec![p1, p2]);
         let r = fb.chat(&[], &[]).await.unwrap();
-        assert!(matches!(r, LlmResponse::Message { text } if text == "from second"));
+        assert!(matches!(r, LlmResponse::Message { text, .. } if text == "from second"));
     }
 
     #[tokio::test]
@@ -466,7 +477,7 @@ mod tests {
         let p2 = MockProvider::new(vec![]);
         let fb = fallback(vec![p1, p2]);
         let r = fb.chat(&[], &[]).await.unwrap();
-        assert!(matches!(r, LlmResponse::Message { text } if text == "first wins"));
+        assert!(matches!(r, LlmResponse::Message { text, .. } if text == "first wins"));
     }
 
     #[tokio::test]
@@ -509,6 +520,7 @@ mod tests {
             name:         None,
             models:       None,
             user_provided_key: false,
+            pricing: None,
         }];
         let _ = from_config(&cfg);
     }
@@ -519,8 +531,8 @@ mod tests {
         let p2 = MockProvider::with_id("p2", vec![]);
         let fb = fallback(vec![p1, p2]);
 
-        let (response, used) = fb.chat_routed(None, &[], &[]).await.unwrap();
-        assert!(matches!(response, LlmResponse::Message { text } if text == "from p1"));
+        let (response, used, _) = fb.chat_routed(None, &[], &[]).await.unwrap();
+        assert!(matches!(response, LlmResponse::Message { text, .. } if text == "from p1"));
         assert_eq!(used.provider_id, "p1");
         assert_eq!(used.model, "mock-model");
     }
@@ -532,9 +544,9 @@ mod tests {
         let fb = fallback(vec![p1.clone(), p2]);
 
         let selection = ProviderSelection { provider_id: "p2".into(), model: Some("custom-model".into()) };
-        let (response, used) = fb.chat_routed(Some(&selection), &[], &[]).await.unwrap();
+        let (response, used, _) = fb.chat_routed(Some(&selection), &[], &[]).await.unwrap();
 
-        assert!(matches!(response, LlmResponse::Message { text } if text == "from p2"));
+        assert!(matches!(response, LlmResponse::Message { text, .. } if text == "from p2"));
         assert_eq!(used.provider_id, "p2");
         assert_eq!(used.model, "custom-model");
         assert_eq!(p1.last_model(), None, "p1 should never have been called");
@@ -547,9 +559,9 @@ mod tests {
         let fb = fallback(vec![p1, p2]);
 
         let selection = ProviderSelection { provider_id: "p2".into(), model: None };
-        let (response, used) = fb.chat_routed(Some(&selection), &[], &[]).await.unwrap();
+        let (response, used, _) = fb.chat_routed(Some(&selection), &[], &[]).await.unwrap();
 
-        assert!(matches!(response, LlmResponse::Message { text } if text == "from p1"));
+        assert!(matches!(response, LlmResponse::Message { text, .. } if text == "from p1"));
         assert_eq!(used.provider_id, "p1", "should report the provider that actually answered");
     }
 
@@ -560,9 +572,9 @@ mod tests {
         let fb = fallback(vec![p1, p2]);
 
         let selection = ProviderSelection { provider_id: "does-not-exist".into(), model: None };
-        let (response, used) = fb.chat_routed(Some(&selection), &[], &[]).await.unwrap();
+        let (response, used, _) = fb.chat_routed(Some(&selection), &[], &[]).await.unwrap();
 
-        assert!(matches!(response, LlmResponse::Message { text } if text == "from p1"));
+        assert!(matches!(response, LlmResponse::Message { text, .. } if text == "from p1"));
         assert_eq!(used.provider_id, "p1");
     }
 

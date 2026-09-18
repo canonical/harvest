@@ -148,6 +148,32 @@ impl Default for AgentBehaviorConfig {
     }
 }
 
+#[derive(Deserialize, Clone, Default)]
+pub struct PricingConfig {
+    #[serde(default)]
+    pub input_per_1k: i64,
+    #[serde(default)]
+    pub cache_read_per_1k: i64,
+    #[serde(default)]
+    pub cache_creation_per_1k: i64,
+    #[serde(default)]
+    pub output_per_1k: i64,
+    #[serde(default)]
+    pub reasoning_per_1k: i64,
+}
+
+impl PricingConfig {
+    pub fn to_pricing(&self) -> crate::llm::pricing::ModelPricing {
+        crate::llm::pricing::ModelPricing {
+            input_per_1k: self.input_per_1k,
+            cache_read_per_1k: self.cache_read_per_1k,
+            cache_creation_per_1k: self.cache_creation_per_1k,
+            output_per_1k: self.output_per_1k,
+            reasoning_per_1k: self.reasoning_per_1k,
+        }
+    }
+}
+
 #[derive(Deserialize, Clone)]
 #[serde(tag = "provider", rename_all = "kebab-case")]
 pub enum LlmProviderConfig {
@@ -170,6 +196,8 @@ pub enum LlmProviderConfig {
         models: Option<Vec<String>>,
         #[serde(default)]
         user_provided_key: bool,
+        #[serde(default)]
+        pricing: Option<PricingConfig>,
     },
     Gemini {
         model: String,
@@ -190,6 +218,8 @@ pub enum LlmProviderConfig {
         models: Option<Vec<String>>,
         #[serde(default)]
         user_provided_key: bool,
+        #[serde(default)]
+        pricing: Option<PricingConfig>,
     },
     #[serde(rename = "openai-compatible")]
     OpenAiCompat {
@@ -212,6 +242,8 @@ pub enum LlmProviderConfig {
         models: Option<Vec<String>>,
         #[serde(default)]
         user_provided_key: bool,
+        #[serde(default)]
+        pricing: Option<PricingConfig>,
     },
 }
 
@@ -308,6 +340,22 @@ impl LlmProviderConfig {
         match self {
             Self::OpenAiCompat { base_url, .. } => Some(base_url),
             _ => None,
+        }
+    }
+
+    pub fn pricing(&self) -> Option<&PricingConfig> {
+        match self {
+            Self::Anthropic    { pricing, .. } => pricing.as_ref(),
+            Self::Gemini       { pricing, .. } => pricing.as_ref(),
+            Self::OpenAiCompat { pricing, .. } => pricing.as_ref(),
+        }
+    }
+
+    pub fn model(&self) -> &str {
+        match self {
+            Self::Anthropic    { model, .. } => model,
+            Self::Gemini       { model, .. } => model,
+            Self::OpenAiCompat { model, .. } => model,
         }
     }
 }
