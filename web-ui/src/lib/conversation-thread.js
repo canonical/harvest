@@ -24,11 +24,12 @@ export function createConversationThreadState() {
       sources: [], tool_calls_made: 0, provider_used: null,
       intent: null, phase: null,
       startedAt: Date.now(), durationMs: null,
+      usage: null, llm_call_count: 0, cost_microusd: 0,
     });
     loading.value = true;
   }
 
-  function finalizeAssistantMessage({ answer, sources, tool_calls_made, provider_used, duration_ms }) {
+  function finalizeAssistantMessage({ answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, cost_microusd }) {
     const msg = lastAssistant();
     if (!msg) return;
     msg.status = 'done';
@@ -41,6 +42,9 @@ export function createConversationThreadState() {
     msg.tool_calls_made = tool_calls_made ?? 0;
     msg.provider_used = provider_used ?? null;
     msg.durationMs = duration_ms ?? (msg.startedAt ? Date.now() - msg.startedAt : null);
+    msg.usage = usage ?? null;
+    msg.llm_call_count = llm_call_count ?? 0;
+    msg.cost_microusd = cost_microusd ?? 0;
     loading.value = false;
   }
 
@@ -244,6 +248,9 @@ export function createConversationThreadState() {
           tool_calls: chain.filter(c => c.type === 'tool_call'),
           tool_calls_made: m.tool_calls_made ?? 0,
           duration_ms: m.durationMs ?? 0,
+          usage: m.usage ?? null,
+          llm_call_count: m.llm_call_count ?? 0,
+          cost_microusd: m.cost_microusd ?? 0,
         };
         if (m.provider_used) saved.provider = m.provider_used;
         if (m.intent) saved.intent = m.intent;
@@ -298,6 +305,9 @@ export function createConversationThreadState() {
           intent: m.intent ?? null,
           phase: m.phase ?? null,
           durationMs: m.duration_ms ?? null,
+          usage: m.usage ?? null,
+          llm_call_count: m.llm_call_count ?? 0,
+          cost_microusd: m.cost_microusd ?? 0,
         };
         if (m.question) msg.question = m.question;
         messages.value.push(msg);

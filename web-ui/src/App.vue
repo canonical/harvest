@@ -154,6 +154,25 @@
                 </ul>
               </div>
 
+              <div v-if="projectCostLabel" class="nav-cost-block is-fading-when-collapsed">
+                <div class="nav-cost-block__row">
+                  <span class="nav-cost-block__label">Chat spend</span>
+                  <span class="nav-cost-block__value">{{ chatCostLabel }}</span>
+                </div>
+                <div class="nav-cost-block__row">
+                  <span class="nav-cost-block__label">Design spend</span>
+                  <span class="nav-cost-block__value">{{ designCostLabel }}</span>
+                </div>
+                <div class="nav-cost-block__row">
+                  <span class="nav-cost-block__label">Deploy spend</span>
+                  <span class="nav-cost-block__value">{{ deployCostLabel }}</span>
+                </div>
+                <div class="nav-cost-block__row nav-cost-block__row--total">
+                  <span class="nav-cost-block__label nav-cost-block__label--total">Total project spend</span>
+                  <span class="nav-cost-block__value nav-cost-block__value--total">{{ projectCostLabel }}</span>
+                </div>
+              </div>
+
               <div class="p-side-navigation--icons sidenav-bottom-container">
                 <ul class="p-side-navigation__list">
                   <li v-if="auth.isAdmin" class="p-side-navigation__item">
@@ -258,13 +277,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore }    from './stores/auth.js';
 import { useThemeStore }   from './stores/theme.js';
 import { useProjectStore } from './stores/project.js';
 import { useLlmStore }    from './stores/llm.js';
-import { fetchLlmProviders, fetchLlmUserKeys } from './lib/api.js';
+import { fetchLlmProviders, fetchLlmUserKeys, fetchProjectCost } from './lib/api.js';
 
 const auth    = useAuthStore();
 const theme   = useThemeStore();
@@ -283,6 +302,52 @@ const newProjectGroupId    = ref('');
 const createProjectError   = ref('');
 const creatingProject      = ref(false);
 const availableGroups      = ref([]);
+const projectCostMicrousd  = ref(0);
+const chatCostMicrousd     = ref(0);
+const designCostMicrousd   = ref(0);
+const deployCostMicrousd   = ref(0);
+let   costRefreshTimer     = null;
+
+function formatMicrousd(microusd) {
+  if (microusd <= 0) return '$0.00';
+  const dollars = microusd / 1_000_000;
+  if (dollars < 0.01) return `$${dollars.toFixed(6)}`;
+  if (dollars < 1) return `$${dollars.toFixed(4)}`;
+  return `$${dollars.toFixed(2)}`;
+}
+
+const chatCostLabel   = computed(() => formatMicrousd(chatCostMicrousd.value));
+const designCostLabel = computed(() => formatMicrousd(designCostMicrousd.value));
+const deployCostLabel = computed(() => formatMicrousd(deployCostMicrousd.value));
+
+const projectCostLabel = computed(() => {
+  if (projectCostMicrousd.value <= 0 && chatCostMicrousd.value <= 0 && designCostMicrousd.value <= 0 && deployCostMicrousd.value <= 0) return null;
+  return formatMicrousd(projectCostMicrousd.value);
+});
+
+async function refreshProjectCost() {
+  if (!project.selectedProjectId) {
+    projectCostMicrousd.value = 0;
+    chatCostMicrousd.value = 0;
+    designCostMicrousd.value = 0;
+    deployCostMicrousd.value = 0;
+    return;
+  }
+  try {
+    const data = await fetchProjectCost(project.selectedProjectId);
+    projectCostMicrousd.value = data?.total?.total_cost_microusd ?? 0;
+    const scopes = data?.by_scope ?? {};
+    chatCostMicrousd.value   = scopes.chat?.total_cost_microusd ?? 0;
+    designCostMicrousd.value = (scopes.design?.total_cost_microusd ?? 0) + (scopes.proposal?.total_cost_microusd ?? 0) * (scopes.proposal ? 0 : 0);
+    designCostMicrousd.value = scopes.design?.total_cost_microusd ?? 0;
+    deployCostMicrousd.value = (scopes.provision?.total_cost_microusd ?? 0) + (scopes.proposal?.total_cost_microusd ?? 0);
+  } catch {
+    projectCostMicrousd.value = 0;
+    chatCostMicrousd.value = 0;
+    designCostMicrousd.value = 0;
+    deployCostMicrousd.value = 0;
+  }
+}
 
 const isAuthRoute = computed(() =>
   route.path === '/login' || route.path === '/register' || route.path.startsWith('/authenticate/')
@@ -380,6 +445,8 @@ onMounted(async () => {
       if (auth.user?.last_project_id) project.selectProjectById(auth.user.last_project_id);
       await project.fetchProjects();
       await checkApiKeys();
+      refreshProjectCost();
+      costRefreshTimer = setInterval(refreshProjectCost, 30_000);
     }
   } finally {
     project.markReady();
@@ -420,9 +487,17 @@ watch(() => auth.isLoggedIn, async (loggedIn) => {
   }
 });
 
+watch(() => project.selectedProjectId, () => {
+  refreshProjectCost();
+});
+
 watch(() => llm.userKeyProviders, async () => {
   if (auth.isLoggedIn) {
     await checkApiKeys();
   }
 }, { deep: true });
+
+onUnmounted(() => {
+  if (costRefreshTimer) clearInterval(costRefreshTimer);
+});
 </script>

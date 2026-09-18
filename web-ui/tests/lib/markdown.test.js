@@ -1,5 +1,42 @@
 import { describe, it, expect } from 'vitest';
-import { renderMarkdown, buildFileUrl, buildCitationIndex } from '../../src/lib/markdown.js';
+import { renderMarkdown, buildFileUrl, buildCitationIndex, substituteCitations } from '../../src/lib/markdown.js';
+
+describe('substituteCitations', () => {
+  const sources = [{ repo: 'acme/repo', version: 'main', file: 'src/lib.rs', line: 42 }];
+  const citationIndex = buildCitationIndex(sources);
+
+  it('replaces a known citation with an anchor tag', () => {
+    const out = substituteCitations('See [acme/repo:main:src/lib.rs:42]', { 'acme/repo': 'https://github.com/acme/repo' }, citationIndex);
+    expect(out).toContain('<a href="https://github.com/acme/repo/blob/main/src/lib.rs#L42"');
+  });
+
+  it('leaves text with no citations untouched', () => {
+    expect(substituteCitations('plain text', {}, {})).toBe('plain text');
+  });
+
+  it('splits two citations combined in one bracket into two separate links', () => {
+    const twoSources = [
+      { repo: 'acme/repo', version: 'main', file: 'a.rs', line: 1 },
+      { repo: 'acme/repo', version: 'main', file: 'b.rs', line: 2 },
+    ];
+    const twoIndex = buildCitationIndex(twoSources);
+    const out = substituteCitations(
+      'See [acme/repo:main:a.rs:1, acme/repo:main:b.rs:2]',
+      { 'acme/repo': 'https://github.com/acme/repo' },
+      twoIndex,
+    );
+    expect(out).toContain('href="https://github.com/acme/repo/blob/main/a.rs#L1"');
+    expect(out).toContain('href="https://github.com/acme/repo/blob/main/b.rs#L2"');
+    expect(out).not.toContain('[acme/repo:main:a.rs:1, acme/repo:main:b.rs:2]');
+  });
+
+  it('is what renderMarkdown uses internally, producing identical citation HTML', () => {
+    const text = 'See [acme/repo:main:src/lib.rs:42]';
+    const repoUrlMap = { 'acme/repo': 'https://github.com/acme/repo' };
+    const substituted = substituteCitations(text, repoUrlMap, citationIndex);
+    expect(renderMarkdown(text, repoUrlMap, citationIndex)).toBe(renderMarkdown(substituted, {}, {}));
+  });
+});
 
 describe('buildFileUrl', () => {
   it('builds a single-line GitHub URL', () => {

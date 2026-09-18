@@ -6,7 +6,21 @@ import { escapeHtml as esc } from './utils.js';
 // The line number (and range) is optional: a citation can point at a whole
 // file ([repo:version:file]) rather than one location, matching how the
 // backend's parse_citations treats a missing line as "no specific line".
-const CITATION_RE = /\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+)(?::(\d+(?:[–-]\d+)?(?:,\d+(?:[–-]\d+)?)*))?\]/g;
+const BRACKET_RE = /\[([^\[\]]+)\]/g;
+const CITATION_ONE_RE = /^([^:\s]+):([^:\s]+):([^:\s]+)(?::(\d+(?:[–-]\d+)?(?:,\d+(?:[–-]\d+)?)*))?$/;
+
+function splitCitationBody(body) {
+  const groups = [];
+  for (const piece of body.split(',')) {
+    const trimmed = piece.trim();
+    if ((trimmed.match(/:/g) || []).length >= 2 || groups.length === 0) {
+      groups.push(trimmed);
+    } else {
+      groups[groups.length - 1] = `${groups[groups.length - 1]},${trimmed}`;
+    }
+  }
+  return groups;
+}
 
 marked.use(
   markedHighlight({
@@ -45,29 +59,39 @@ marked.use({
 
 const LINE_RANGE_RE = /^(\d+)(?:[–-](\d+))?/;
 
-export function renderMarkdown(text, repoUrlMap = {}, citationIndex = {}) {
-  const withCitations = text.replace(CITATION_RE, (match, repo, version, file, lineRaw) => {
-    let startLine = 0, endLine = null;
-    if (lineRaw) {
-      const [, startStr, endStr] = lineRaw.match(LINE_RANGE_RE);
-      startLine = parseInt(startStr, 10);
-      endLine = endStr ? parseInt(endStr, 10) : null;
-    }
-    const key = `${repo}:${version}:${file}:${startLine}`;
-    const n = citationIndex[key];
-    const rawLabel = lineRaw ? `${repo}:${version}:${file}:${lineRaw}` : `${repo}:${version}:${file}`;
-    const label = n != null ? `${n}` : rawLabel;
-    const title = lineRaw ? `${repo} ${version} · ${file}:${lineRaw}` : `${repo} ${version} · ${file}`;
-    const repoUrl = repoUrlMap[repo];
-    const fileUrl = repoUrl ? buildFileUrl(repoUrl, version, file, startLine, endLine) : null;
-    if (fileUrl) {
-      return `<a href="${esc(fileUrl)}" class="citation" target="_blank" rel="noopener noreferrer" title="${esc(title)}">${esc(label)}</a>`;
-    }
-    const escapedMatch = match.replace(/[<>"&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '"': '&quot;', '&': '&amp;' }[c]));
-    return `<span class="citation" data-citation="${escapedMatch}" title="${esc(title)}">${esc(label)}</span>`;
-  });
+function renderOneCitation(repo, version, file, lineRaw, repoUrlMap, citationIndex) {
+  let startLine = 0, endLine = null;
+  if (lineRaw) {
+    const [, startStr, endStr] = lineRaw.match(LINE_RANGE_RE);
+    startLine = parseInt(startStr, 10);
+    endLine = endStr ? parseInt(endStr, 10) : null;
+  }
+  const key = `${repo}:${version}:${file}:${startLine}`;
+  const n = citationIndex[key];
+  const rawLabel = lineRaw ? `${repo}:${version}:${file}:${lineRaw}` : `${repo}:${version}:${file}`;
+  const label = n != null ? `${n}` : rawLabel;
+  const title = lineRaw ? `${repo} ${version} · ${file}:${lineRaw}` : `${repo} ${version} · ${file}`;
+  const repoUrl = repoUrlMap[repo];
+  const fileUrl = repoUrl ? buildFileUrl(repoUrl, version, file, startLine, endLine) : null;
+  if (fileUrl) {
+    return `<a href="${esc(fileUrl)}" class="citation" target="_blank" rel="noopener noreferrer" title="${esc(title)}">${esc(label)}</a>`;
+  }
+  const escapedMatch = `[${repo}:${version}:${file}${lineRaw ? `:${lineRaw}` : ''}]`.replace(/[<>"&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '"': '&quot;', '&': '&amp;' }[c]));
+  return `<span class="citation" data-citation="${escapedMatch}" title="${esc(title)}">${esc(label)}</span>`;
+}
 
-  return marked.parse(withCitations, { async: false });
+export function substituteCitations(text, repoUrlMap = {}, citationIndex = {}) {
+  return text.replace(BRACKET_RE, (match, body) => {
+    const groups = splitCitationBody(body).map((g) => g.match(CITATION_ONE_RE));
+    if (groups.some((g) => !g)) return match;
+    return groups
+      .map(([, repo, version, file, lineRaw]) => renderOneCitation(repo, version, file, lineRaw, repoUrlMap, citationIndex))
+      .join(', ');
+  });
+}
+
+export function renderMarkdown(text, repoUrlMap = {}, citationIndex = {}) {
+  return marked.parse(substituteCitations(text, repoUrlMap, citationIndex), { async: false });
 }
 
 // `line` falsy (0/null/undefined) means "no specific line" — link to the bare
@@ -112,11 +136,15 @@ export function parseCitations(text) {
   const seen = new Set();
   const results = [];
 
-  for (const match of text.matchAll(CITATION_RE)) {
-    const [full, repo, version, file, lineStr] = match;
-    if (seen.has(full)) continue;
-    seen.add(full);
-    results.push({ repo, version, file, line: parseInt(lineStr, 10) });
+  for (const bracketMatch of text.matchAll(BRACKET_RE)) {
+    for (const group of splitCitationBody(bracketMatch[1])) {
+      const m = group.match(CITATION_ONE_RE);
+      if (!m) continue;
+      const [full, repo, version, file, lineStr] = m;
+      if (seen.has(full)) continue;
+      seen.add(full);
+      results.push({ repo, version, file, line: parseInt(lineStr, 10) });
+    }
   }
 
   return results;

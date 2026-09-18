@@ -706,3 +706,10 @@ export const updateUserGroups    = (id, groupIds) => adminFetch(`/admin/users/${
 export const createAdminGroup    = (name, desc)   => adminFetch('/admin/groups', { method: 'POST', body: JSON.stringify({ name, description: desc }) });
 export const deleteAdminGroup    = (id)           => adminFetch(`/admin/groups/${encodeURIComponent(id)}`, { method: 'DELETE' });
 export const setGroupDefault     = (id, isDefault) => adminFetch(`/admin/groups/${encodeURIComponent(id)}/default`, { method: 'PUT', body: JSON.stringify({ is_default: isDefault }) });
+
+export const fetchProjectCost          = (projectId)            => projectFetch(`${projectUrl(projectId)}/cost`);
+export const fetchProjectCostByModel   = (projectId)            => projectFetch(`${projectUrl(projectId)}/cost/by-model`);
+export const fetchProjectCostByUser    = (projectId)            => projectFetch(`${projectUrl(projectId)}/cost/by-user`);
+export const fetchConversationCost     = (projectId, convId)    => projectFetch(`${projectUrl(projectId)}/conversations/${encodeURIComponent(convId)}/cost`);
+export const fetchDeploymentCost       = (projectId, depId)     => projectFetch(`${deploymentUrl(projectId, depId)}/cost`);
+export const fetchDeploymentCostCalls  = (projectId, depId)     => projectFetch(`${deploymentUrl(projectId, depId)}/cost/calls`);

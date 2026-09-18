@@ -18,9 +18,6 @@ function mountPanel({ projectId = 'proj-1', deploymentId = 'd1', body = {} } = {
   });
 }
 
-// The real endpoint stays open until the stream naturally ends; done/error are
-// conveyed as events, not by resolving the fetch promise. Mirror that here so
-// tests control completion purely through emitted events.
 function makeStreamController() {
   let onEvent;
   api.generateDesignStream.mockImplementation((_p, _d, _b, cb) => {
@@ -94,59 +91,100 @@ describe('DesignGenerationPanel', () => {
     expect(w.find('[data-testid="design-gen-status-text"]').text()).toMatch(/writing/i);
   });
 
-  it('streams text deltas into a live markdown preview', async () => {
+  it('does not show intent, phase, or tool-count badges — the status line alone carries the meaning now', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({ type: 'intent', mode: 'research' });
+    ctl.onEvent({ type: 'phase', label: 'Gathering context' });
+    ctl.onEvent({ type: 'tool_call', name: 'list_repositories', input: {} });
+    await flushPromises();
+    expect(w.find('[data-testid="design-gen-intent"]').exists()).toBe(false);
+    expect(w.find('[data-testid="design-gen-phase"]').exists()).toBe(false);
+    expect(w.find('[data-testid="design-gen-tool-count"]').exists()).toBe(false);
+  });
+
+  it('streams text into the document hero as it arrives', async () => {
     const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
     ctl.onEvent({ type: 'text_delta', text: '# Design\n' });
     ctl.onEvent({ type: 'text_delta', text: 'Single VM.' });
     await flushPromises();
-    const preview = w.find('[data-testid="design-gen-preview"]');
-    expect(preview.exists()).toBe(true);
-    expect(preview.html()).toContain('<h1');
-    expect(preview.text()).toContain('Single VM.');
+    const hero = w.find('[data-testid="document-hero"]');
+    expect(hero.exists()).toBe(true);
+    expect(hero.html()).toContain('<h1');
+    expect(hero.text()).toContain('Single VM.');
   });
 
-  it('shows no activity section until there is activity to show', async () => {
+  it('shows the model\'s thinking in the hero, styled distinctly, before any real content streams', async () => {
+    const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
-    expect(w.find('[data-testid="design-gen-activity"]').exists()).toBe(false);
+    ctl.onEvent({ type: 'thinking_delta', text: 'Looking at the requested topology.' });
+    await flushPromises();
+    const hero = w.find('[data-testid="document-hero"]');
+    expect(hero.text()).toContain('Looking at the requested topology.');
+    expect(hero.classes()).toContain('doc-hero--thinking');
   });
 
-  it('shows the activity log, permanently, once there is something to show', async () => {
+  it('keeps showing thinking across a tool call, joined into one transcript', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({ type: 'thinking_delta', text: 'First thought.' });
+    ctl.onEvent({ type: 'tool_call', name: 'list_repositories', input: {} });
+    ctl.onEvent({ type: 'thinking_delta', text: 'Second thought.' });
+    await flushPromises();
+    const hero = w.find('[data-testid="document-hero"]');
+    expect(hero.text()).toContain('First thought.');
+    expect(hero.text()).toContain('Second thought.');
+  });
+
+  it('switches the hero from thinking to the real document once it starts streaming', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({ type: 'thinking_delta', text: 'Looking at the requested topology.' });
+    ctl.onEvent({ type: 'text_delta', text: '# Design\n' });
+    await flushPromises();
+    const hero = w.find('[data-testid="document-hero"]');
+    expect(hero.text()).not.toContain('Looking at the requested topology.');
+    expect(hero.classes()).not.toContain('doc-hero--thinking');
+    expect(hero.html()).toContain('<h1');
+  });
+
+  it('shows the document hero with just a caret before any text has streamed', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    expect(w.find('[data-testid="document-hero"]').exists()).toBe(true);
+    expect(w.find('[data-testid="document-hero-block"]').exists()).toBe(false);
+  });
+
+  it('never shows a "how was this made" disclosure — the status line is the only window into activity now', async () => {
     const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
     ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: { title: 'Design' } });
-    await flushPromises();
-    expect(w.find('[data-testid="design-gen-activity"]').exists()).toBe(true);
-    expect(w.find('[data-testid="design-gen-timeline"]').text()).toContain('Generating artifact');
-  });
-
-  it('reveals thinking blocks inside the details panel as soon as they arrive', async () => {
-    const ctl = makeStreamController();
-    const w = mountPanel();
-    await flushPromises();
     ctl.onEvent({ type: 'thinking_delta', text: 'Let me think...' });
     await flushPromises();
-    expect(w.find('[data-testid="design-gen-thinking"]').exists()).toBe(true);
+    expect(w.find('[data-testid="design-gen-details"]').exists()).toBe(false);
+    expect(w.find('[data-testid="design-gen-activity"]').exists()).toBe(false);
   });
 
-  it('auto-scrolls the activity region to the bottom when new tool calls arrive', async () => {
+  it('walks the status line through each tool call as they run, so the latest one is always visible', async () => {
     const ctl = makeStreamController();
     const w = mountPanel();
     await flushPromises();
-    ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: {} });
-    await flushPromises();
 
-    const activity = w.find('[data-testid="design-gen-activity"]').element;
-    Object.defineProperty(activity, 'scrollHeight', { configurable: true, get: () => 500 });
-    Object.defineProperty(activity, 'clientHeight', { configurable: true, get: () => 200 });
-    for (let i = 0; i < 5; i++) {
-      ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: {} });
-      await flushPromises();
-    }
-    expect(activity.scrollTop).toBe(500);
+    ctl.onEvent({ type: 'tool_call', name: 'list_repositories', input: {} });
+    await flushPromises();
+    expect(w.find('[data-testid="design-gen-status-text"]').text()).toContain('Discovering available repositories');
+
+    ctl.onEvent({ type: 'tool_result', name: 'list_repositories', preview: '[]' });
+    ctl.onEvent({ type: 'tool_call', name: 'generate_artifact', input: { title: 'Design' } });
+    await flushPromises();
+    expect(w.find('[data-testid="design-gen-status-text"]').text()).toContain('Generating artifact Design');
   });
 
   it('shows a ready state and emits done when the done event arrives', async () => {
@@ -172,6 +210,16 @@ describe('DesignGenerationPanel', () => {
     expect(w.find('[data-testid="design-gen-back"]').exists()).toBe(true);
     expect(w.find('[data-testid="design-gen-retry"]').exists()).toBe(true);
     expect(w.emitted('done')).toBeFalsy();
+  });
+
+  it('keeps any partial document visible underneath the error banner', async () => {
+    const ctl = makeStreamController();
+    const w = mountPanel();
+    await flushPromises();
+    ctl.onEvent({ type: 'text_delta', text: '# Design\n' });
+    ctl.onEvent({ type: 'error', message: 'LLM failed' });
+    await flushPromises();
+    expect(w.find('[data-testid="document-hero"]').text()).toContain('Design');
   });
 
   it('shows an error when the stream promise rejects, without auto-navigating away', async () => {
@@ -246,5 +294,25 @@ describe('DesignGenerationPanel', () => {
     ctl.onEvent({ type: 'done', answer: '# Design' });
     await flushPromises();
     expect(w.find('[data-testid="design-gen-status-text"]').text()).toMatch(/ready/i);
+  });
+
+  it('shows the header when eyebrow/title/badge are provided', async () => {
+    const w = mount(DesignGenerationPanel, {
+      props: {
+        projectId: 'proj-1', deploymentId: 'd1', body: {},
+        eyebrow: 'Design', title: 'AirBank53', subtitle: 'Generating your design document…', badge: 'Gateway',
+      },
+    });
+    await flushPromises();
+    expect(w.find('[data-testid="design-eyebrow"]').text()).toBe('Design');
+    expect(w.text()).toContain('AirBank53');
+    expect(w.text()).toContain('Gateway');
+    expect(w.text()).toContain('Generating your design document…');
+  });
+
+  it('shows no header when no title is provided, as used inline for propose-a-change', async () => {
+    const w = mountPanel();
+    await flushPromises();
+    expect(w.find('[data-testid="design-eyebrow"]').exists()).toBe(false);
   });
 });

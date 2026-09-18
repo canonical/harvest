@@ -48,7 +48,7 @@ export function describeToolCall(name, input, { hostname } = {}) {
     case 'delete_port_forward':
       return `Deleting port forward ${input.id ?? ''}`.trim();
     case 'generate_artifact':
-      return `Generating artifact ${input.name ?? ''}`.trim();
+      return `Generating artifact ${input.title ?? ''}`.trim();
     case 'read_provision_bundle':
       return 'Reading provision bundle';
     case 'set_execution_plan':

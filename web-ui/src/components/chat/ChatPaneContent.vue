@@ -15,26 +15,35 @@
           >{{ initials(u.name) }}</div>
         </div>
 
-        <div ref="messagesEl" class="messages">
-          <div v-if="!projectId && !chat.messages.length" class="no-project-state chat-empty-state">
-            <p>Select a project to start chatting, or use the global query below.</p>
-          </div>
+        <div class="messages-wrap">
+          <div ref="messagesEl" class="messages" @scroll="onMessagesScroll">
+            <div v-if="!projectId && !chat.messages.length" class="no-project-state chat-empty-state">
+              <p>Select a project to start chatting, or use the global query below.</p>
+            </div>
 
-          <div v-else-if="projectId && !chat.messages.length" class="chat-empty-state">
-            <p>Ask anything about codebases or control agents</p>
-          </div>
+            <div v-else-if="projectId && !chat.messages.length" class="chat-empty-state">
+              <p>Ask anything about codebases or control agents</p>
+            </div>
 
-          <ChatMessage
-            v-for="(msg, i) in chat.messages"
-            :key="i"
-            :msg="msg"
-            :is-last="i === chat.messages.length - 1"
-            :repo-url-map="repoUrlMap"
-            @choice="sendWithChoice"
-            @confirm="handleConfirmAction"
-            @deny="handleDenyAction"
-            @confirm-all="handleConfirmAllActions"
-          />
+            <ChatMessage
+              v-for="(msg, i) in chat.messages"
+              :key="i"
+              :msg="msg"
+              :is-last="i === chat.messages.length - 1"
+              :repo-url-map="repoUrlMap"
+              @choice="sendWithChoice"
+              @confirm="handleConfirmAction"
+              @deny="handleDenyAction"
+              @confirm-all="handleConfirmAllActions"
+            />
+          </div>
+          <button
+            v-if="!stuck"
+            type="button"
+            class="jump-latest-btn"
+            data-testid="chat-jump-latest"
+            @click="jumpToLatest(messagesEl)"
+          >Jump to latest</button>
         </div>
 
         <div class="input-area">
@@ -158,6 +167,7 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useAuthStore }    from '../../stores/auth.js';
 import { useLlmStore }     from '../../stores/llm.js';
 import { useChatInstance } from '../../composables/useChatInstance.js';
+import { useStickyScroll } from '../../composables/useStickyScroll.js';
 import ChatMessage         from './ChatMessage.vue';
 import LlmModelPicker      from './LlmModelPicker.vue';
 import { describeToolCall } from '../../lib/tool-render.js';
@@ -199,6 +209,8 @@ const repoUrlMap     = ref({});
 const fileInput      = ref(null);
 const inputEl        = ref(null);
 const messagesEl     = ref(null);
+
+const { stuck, handleScroll, follow, jumpToLatest } = useStickyScroll();
 
 const remoteLocked   = ref(false);
 const lockedBy       = ref('');
@@ -332,14 +344,13 @@ function handleProjectEvent(event) {
     case 'done':
     case 'error': {
       if (event.conv_id !== activeConvId.value) break;
-      const stick = isNearBottom();
       handleChatEvent(event);
-      if (event.type === 'done') { if (stick) scrollToLastMessage(); return; }
-      if (stick) scrollToBottom();
+      if (event.type === 'done') { if (stuck.value) scrollToLastMessage(); return; }
+      nextTick(() => follow(messagesEl.value));
       return;
     }
   }
-  scrollToBottom();
+  nextTick(() => follow(messagesEl.value));
 }
 
 async function loadConversationList() {
@@ -369,7 +380,7 @@ async function loadConversation(id) {
     historyOpen.value = false;
     openEventStream();
     await nextTick();
-    scrollToBottom();
+    jumpToLatest(messagesEl.value);
   } catch {}
 }
 
@@ -453,7 +464,7 @@ async function sendQuery() {
 
   chat.addUserMessage(text, null, attachments);
   chat.startAssistantMessage();
-  await nextTick(); scrollToBottom();
+  await nextTick(); jumpToLatest(messagesEl.value);
 
   try {
     if (!activeConvId.value) {
@@ -466,10 +477,9 @@ async function sendQuery() {
       }
     }
     await queryStream(text, activeConvId.value, attachments, (event) => {
-      const stick = isNearBottom();
       handleStreamEvent(event);
-      if (event.type === 'done') { if (stick) scrollToLastMessage(); }
-      else if (stick) scrollToBottom();
+      if (event.type === 'done') { if (stuck.value) scrollToLastMessage(); }
+      else nextTick(() => follow(messagesEl.value));
     }, llm.selection);
   } catch (err) {
     chat.setError(err.message);
@@ -551,6 +561,8 @@ function handleChatEvent(event) {
       chat.finalizeAssistantMessage({
         answer: event.answer, sources: event.sources, tool_calls_made: event.tool_calls_made,
         provider_used: event.provider_used, duration_ms: event.duration_ms,
+        usage: event.usage, llm_call_count: event.llm_call_count,
+        cost_microusd: event.cost_microusd,
       });
       updateConvTitle();
       break;
@@ -586,18 +598,8 @@ function onFileSelect(e) {
   e.target.value = '';
 }
 
-function isNearBottom(threshold = 80) {
-  const el = messagesEl.value;
-  if (!el) return true;
-  return el.scrollHeight - el.scrollTop - el.clientHeight <= threshold;
-}
-
-function scrollToBottom() {
-  nextTick(() => {
-    if (messagesEl.value) {
-      messagesEl.value.scrollTop = messagesEl.value.scrollHeight;
-    }
-  });
+function onMessagesScroll() {
+  handleScroll(messagesEl.value);
 }
 
 function scrollToLastMessage() {
