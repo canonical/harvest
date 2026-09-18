@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 
 use super::{
     retry,
-    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, StreamEvent, ToolCall, ToolDefinition},
+    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, StreamEvent, ToolCall, ToolDefinition, Usage},
     LlmProvider,
 };
 
@@ -174,6 +174,7 @@ impl GeminiProvider {
         let mut buffer = String::new();
         let mut saw_tool_call = false;
         let mut finish_reason: Option<String> = None;
+        let mut usage = Usage::default();
 
         while let Some(chunk) = byte_stream.next().await {
             let bytes = chunk?;
@@ -192,7 +193,7 @@ impl GeminiProvider {
 
                 let Some(data) = data_line else { continue };
                 let Ok(json) = serde_json::from_str::<Value>(&data) else { continue };
-                process_stream_event(&json, &mut saw_tool_call, &mut finish_reason, &tx).await?;
+                process_stream_event(&json, &mut saw_tool_call, &mut finish_reason, &mut usage, &tx).await?;
             }
         }
 
@@ -201,7 +202,7 @@ impl GeminiProvider {
         } else {
             finish_reason.unwrap_or_else(|| "end_turn".to_string())
         };
-        let _ = tx.send(StreamEvent::Done { stop_reason }).await;
+        let _ = tx.send(StreamEvent::Done { stop_reason, usage }).await;
 
         Ok(())
     }
@@ -244,10 +245,18 @@ async fn process_stream_event(
     event: &Value,
     saw_tool_call: &mut bool,
     finish_reason: &mut Option<String>,
+    usage: &mut Usage,
     tx: &mpsc::Sender<StreamEvent>,
 ) -> Result<()> {
     if let Some(err) = event.get("error") {
         bail!("Gemini API error: {err}");
+    }
+
+    if let Some(u) = event.get("usageMetadata") {
+        usage.input_tokens = u["promptTokenCount"].as_u64().unwrap_or(0);
+        usage.output_tokens = u["candidatesTokenCount"].as_u64().unwrap_or(0);
+        usage.cache_read_tokens = u["cachedContentTokenCount"].as_u64().unwrap_or(0);
+        usage.reasoning_tokens = u["thoughtsTokenCount"].as_u64().unwrap_or(0);
     }
 
     let candidate = &event["candidates"][0];
@@ -342,11 +351,26 @@ fn to_gemini_tool(tool: &ToolDefinition) -> Value {
     })
 }
 
+fn usage_from_gemini(json: &Value) -> Usage {
+    let u = &json["usageMetadata"];
+    if u.is_null() {
+        return Usage::default();
+    }
+    Usage {
+        input_tokens:         u["promptTokenCount"].as_u64().unwrap_or(0),
+        output_tokens:        u["candidatesTokenCount"].as_u64().unwrap_or(0),
+        cache_read_tokens:    u["cachedContentTokenCount"].as_u64().unwrap_or(0),
+        cache_creation_tokens: 0,
+        reasoning_tokens:     u["thoughtsTokenCount"].as_u64().unwrap_or(0),
+    }
+}
+
 fn parse_gemini_response(json: Value) -> Result<LlmResponse> {
     if let Some(err) = json.get("error") {
         bail!("Gemini API error: {err}");
     }
 
+    let usage = usage_from_gemini(&json);
     let parts = json["candidates"][0]["content"]["parts"]
         .as_array()
         .cloned()
@@ -372,7 +396,7 @@ fn parse_gemini_response(json: Value) -> Result<LlmResponse> {
             .filter_map(|p| p["text"].as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        return Ok(LlmResponse::ToolCalls { calls, preamble });
+        return Ok(LlmResponse::ToolCalls { calls, preamble, usage });
     }
 
     let text = parts.iter()
@@ -381,7 +405,7 @@ fn parse_gemini_response(json: Value) -> Result<LlmResponse> {
         .collect::<Vec<_>>()
         .join("\n");
 
-    Ok(LlmResponse::Message { text })
+    Ok(LlmResponse::Message { text, usage })
 }
 
 #[cfg(test)]
@@ -407,7 +431,32 @@ mod tests {
             }]
         });
         match parse_gemini_response(json).unwrap() {
-            LlmResponse::Message { text } => assert_eq!(text, "Hello!"),
+            LlmResponse::Message { text, .. } => assert_eq!(text, "Hello!"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_message_extracts_usage() {
+        let json = json!({
+            "candidates": [{
+                "content": { "parts": [{ "text": "hi" }], "role": "model" },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 500,
+                "candidatesTokenCount": 120,
+                "cachedContentTokenCount": 50,
+                "thoughtsTokenCount": 30
+            }
+        });
+        match parse_gemini_response(json).unwrap() {
+            LlmResponse::Message { usage, .. } => {
+                assert_eq!(usage.input_tokens, 500);
+                assert_eq!(usage.output_tokens, 120);
+                assert_eq!(usage.cache_read_tokens, 50);
+                assert_eq!(usage.reasoning_tokens, 30);
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -527,7 +576,7 @@ mod tests {
             }]
         });
         match parse_gemini_response(json).unwrap() {
-            LlmResponse::Message { text } => assert_eq!(text, "line one\nline two"),
+            LlmResponse::Message { text, .. } => assert_eq!(text, "line one\nline two"),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -691,7 +740,7 @@ mod tests {
 
         let provider = make_provider(&server.base_url());
         match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
-            LlmResponse::Message { text } => assert_eq!(text, "all good"),
+            LlmResponse::Message { text, .. } => assert_eq!(text, "all good"),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -922,7 +971,7 @@ mod tests {
             }]
         });
         match parse_gemini_response(json).unwrap() {
-            LlmResponse::ToolCalls { preamble, calls } => {
+            LlmResponse::ToolCalls { preamble, calls, .. } => {
                 assert_eq!(calls.len(), 1);
                 assert!(preamble.contains("Let me think about this."),
                     "thought text should appear in preamble, got: {preamble:?}");
@@ -992,7 +1041,7 @@ mod tests {
             }]
         });
         match parse_gemini_response(json).unwrap() {
-            LlmResponse::Message { text } => {
+            LlmResponse::Message { text, .. } => {
                 assert!(!text.contains("Internal reasoning here."),
                     "thought text must not appear in final message");
                 assert!(text.contains("Here is the answer."));
@@ -1072,7 +1121,7 @@ mod tests {
         }).collect();
         assert_eq!(text_deltas, vec!["Hello", " world"]);
 
-        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason } if stop_reason == "end_turn"));
+        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "end_turn"));
         assert!(done, "expected Done(end_turn) event");
     }
 
@@ -1098,7 +1147,7 @@ mod tests {
         }).collect();
         assert_eq!(thinking, vec!["I should search"]);
 
-        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason } if stop_reason == "tool_use"));
+        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "tool_use"));
         assert!(done, "expected Done(tool_use) event since a tool call was streamed");
     }
 

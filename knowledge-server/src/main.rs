@@ -48,7 +48,9 @@ async fn main() -> Result<()> {
     neo4j.run("CREATE CONSTRAINT port_forward_id IF NOT EXISTS FOR (f:PortForward) REQUIRE f.id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT artifact_id    IF NOT EXISTS FOR (a:Artifact)     REQUIRE a.id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT template_id    IF NOT EXISTS FOR (t:ProductTemplate) REQUIRE t.id IS UNIQUE").await?;
-    neo4j.run("CREATE CONSTRAINT user_llm_key_pid IF NOT EXISTS FOR (k:UserLlmKey) REQUIRE k.provider_id IS UNIQUE").await?;
+    neo4j.run("CREATE CONSTRAINT user_llm_key_id IF NOT EXISTS FOR (k:UserLlmKey) REQUIRE k.key_id IS UNIQUE").await?;
+
+    knowledge_server::cost::setup_constraints(&neo4j).await?;
 
     knowledge_server::skills::seed_defaults_if_needed(&neo4j).await?;
 
@@ -112,6 +114,8 @@ async fn main() -> Result<()> {
         compaction_keep_last,
     });
 
+    let pricing = Arc::new(knowledge_server::cost::PricingTable::from_configs(&config.llm));
+
     let state = AppState {
         agent,
         neo4j:            Arc::clone(&neo4j),
@@ -129,6 +133,7 @@ async fn main() -> Result<()> {
         llm_configs,
         user_key_store,
         lxd,
+        pricing,
     };
 
     let cache: Arc<GraphCache> = Arc::new(RwLock::new(HashMap::new()));

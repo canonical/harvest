@@ -35,7 +35,7 @@ use knowledge_server::{
     },
     llm::{
         LlmProvider,
-        types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, Role, ToolCall, ToolDefinition},
+        types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, Role, ToolCall, ToolDefinition, Usage},
     },
     machines::{CommandResult, ConnectedAgent, MachineRegistry, ServerToAgent, TerraformAction},
     neo4j::Neo4jClient,
@@ -54,7 +54,7 @@ impl LlmProvider for FixedTextLlm {
     fn default_model(&self) -> &str { "mock-model" }
     async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> { Ok(vec![]) }
     async fn chat_with(&self, _model: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> anyhow::Result<LlmResponse> {
-        Ok(LlmResponse::Message { text: self.0.clone() })
+        Ok(LlmResponse::Message { text: self.0.clone(), usage: Usage::default() })
     }
 }
 
@@ -76,13 +76,14 @@ impl LlmProvider for ScriptedLlm {
 }
 
 fn text_response(text: &str) -> LlmResponse {
-    LlmResponse::Message { text: text.to_string() }
+    LlmResponse::Message { text: text.to_string(), usage: Usage::default() }
 }
 
 fn tool_call_response(name: &str, input: Value) -> LlmResponse {
     LlmResponse::ToolCalls {
         calls: vec![ToolCall { id: Uuid::new_v4().to_string(), name: name.to_string(), input, thought_signature: None }],
         preamble: String::new(),
+    usage: Usage::default(),
     }
 }
 
@@ -160,7 +161,7 @@ fn deployments_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn LlmProvider>) 
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,
     });
-    let project_state = Arc::new(ProjectState::new(Arc::clone(&neo4j), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None));
+    let project_state = Arc::new(ProjectState::new(Arc::clone(&neo4j), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
 
     let project_routes = Router::new()
         .route("/projects", route_post(create_project))
@@ -1228,6 +1229,7 @@ async fn generate_design_stream_persists_synthesis_not_narration_when_max_iterat
                     thought_signature: None,
                 }],
                 preamble: format!("Wait, let's write out the full diagram {}:", rounds + 1),
+            usage: Usage::default(),
             }
         } else {
             text_response(synthesis_doc)
@@ -1275,6 +1277,7 @@ async fn generate_design_stream_does_not_persist_generic_fallback_as_design_doc(
                 thought_signature: None,
             }],
             preamble: String::new(),
+        usage: Usage::default(),
         }
     });
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);

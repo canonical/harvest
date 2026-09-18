@@ -20,7 +20,7 @@ use knowledge_server::{
     auth::{self, jwt},
     llm::{
         LlmProvider,
-        types::{LlmResponse, Message, ModelInfo, ToolDefinition},
+        types::{LlmResponse, Message, ModelInfo, ToolDefinition, Usage},
     },
     machines::MachineRegistry,
     neo4j::Neo4jClient,
@@ -49,7 +49,7 @@ impl LlmProvider for FixedTextLlm {
     fn default_model(&self) -> &str { "mock-model" }
     async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> { Ok(vec![]) }
     async fn chat_with(&self, _model: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> anyhow::Result<LlmResponse> {
-        Ok(LlmResponse::Message { text: self.0.clone() })
+        Ok(LlmResponse::Message { text: self.0.clone(), usage: Usage::default() })
     }
 }
 
@@ -86,7 +86,7 @@ fn skills_app(neo4j: Arc<Neo4jClient>) -> Router {
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,
     });
-    let project_state = Arc::new(ProjectState::new(Arc::clone(&neo4j), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None));
+    let project_state = Arc::new(ProjectState::new(Arc::clone(&neo4j), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
 
     let project_routes = Router::new()
         .route("/projects", route_post(create_project))

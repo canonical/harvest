@@ -23,7 +23,7 @@ use tokio::sync::Semaphore;
 use crate::llm::{
     types::{
         ContentPart, LlmResponse, Message, MessageContent, ProviderSelection, StreamEvent,
-        ToolCall, ToolDefinition, UsedProvider,
+        ToolCall, ToolDefinition, Usage, UsedProvider,
     },
     LlmProvider,
 };
@@ -61,6 +61,9 @@ pub struct QueryResponse {
     pub tool_calls_made: usize,
     pub provider_used: Option<UsedProvider>,
     pub duration_ms: u64,
+    pub usage: Usage,
+    pub llm_call_count: usize,
+    pub cost_microusd: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +107,8 @@ pub enum AgentEvent {
         provider_used: Option<UsedProvider>,
         duration_ms: u64,
         hit_max_iterations: bool,
+        usage: Usage,
+        llm_call_count: usize,
     },
     Error { message: String },
     Question { question: String, choices: Vec<String> },
@@ -129,14 +134,16 @@ pub enum AgentEvent {
 }
 
 enum LoopOutcome {
-    Finished { text: String, iterations: usize, provider_used: Option<UsedProvider>, hit_max_iterations: bool },
-    EndedWithQuestion { text: String, iterations: usize, provider_used: Option<UsedProvider> },
+    Finished { text: String, tool_summary: String, iterations: usize, provider_used: Option<UsedProvider>, hit_max_iterations: bool, usage: Usage, llm_call_count: usize },
+    EndedWithQuestion { text: String, iterations: usize, provider_used: Option<UsedProvider>, usage: Usage, llm_call_count: usize },
     Paused {
         messages: Vec<Message>,
         iterations: usize,
         text_buf: String,
         pending: Vec<PendingConfirmCall>,
         provider_used: Option<UsedProvider>,
+        usage: Usage,
+        llm_call_count: usize,
     },
 }
 
@@ -275,7 +282,7 @@ impl Agent {
         );
 
         let summary = match self.llm.chat(&[Message::user(prompt)], &[]).await {
-            Ok(LlmResponse::Message { text }) => text,
+            Ok(LlmResponse::Message { text, .. }) => text,
             _ => {
                 tracing::warn!("compaction LLM call failed — using full history");
                 return history.to_vec();
@@ -294,6 +301,45 @@ impl Agent {
         result
     }
 
+    async fn compact_messages_mid_turn(&self, messages: Vec<Message>, protected_prefix_len: usize) -> Vec<Message> {
+        let trace_len = messages.len().saturating_sub(protected_prefix_len);
+        if trace_len <= MID_TURN_COMPACTION_KEEP_LAST {
+            return messages;
+        }
+        if estimate_messages_chars(&messages[protected_prefix_len..]) <= MID_TURN_COMPACTION_CHAR_THRESHOLD {
+            return messages;
+        }
+
+        let split_at = protected_prefix_len + (trace_len - MID_TURN_COMPACTION_KEEP_LAST);
+        let old = &messages[protected_prefix_len..split_at];
+        let old_text = old.iter().map(describe_message_for_compaction).collect::<Vec<_>>().join("\n");
+        let prompt = format!(
+            "Summarize the following tool-use trace from an ongoing investigation. \
+             Preserve concrete facts, file paths, function names, and findings. \
+             This summary replaces the detailed trace as context for continuing the work.\n\n{old_text}"
+        );
+
+        let summary = match self.llm.chat(&[Message::user(prompt)], &[]).await {
+            Ok(LlmResponse::Message { text, .. }) => text,
+            _ => {
+                tracing::warn!("mid-turn compaction LLM call failed — using full trace");
+                return messages;
+            }
+        };
+
+        tracing::info!(
+            old_messages = old.len(),
+            kept_messages = MID_TURN_COMPACTION_KEEP_LAST,
+            "compacted mid-turn tool trace"
+        );
+
+        let mut result = Vec::with_capacity(protected_prefix_len + 1 + MID_TURN_COMPACTION_KEEP_LAST);
+        result.extend_from_slice(&messages[..protected_prefix_len]);
+        result.push(Message::user(format!("[Summary of earlier tool investigation]\n{summary}")));
+        result.extend_from_slice(&messages[split_at..]);
+        result
+    }
+
     pub async fn query(
         &self,
         user_query: &str,
@@ -309,8 +355,8 @@ impl Agent {
             let mut error = None;
             while let Some(event) = receiver.recv().await {
                 match event {
-                    AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. } => {
-                        response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms });
+                    AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, .. } => {
+                        response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, cost_microusd: 0 });
                     }
                     AgentEvent::Error { message } => {
                         error = Some(anyhow::anyhow!(message));
@@ -343,8 +389,8 @@ impl Agent {
             while let Some(event) = receiver.recv().await {
                 let _ = progress.send(event.clone()).await;
                 match event {
-                    AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. } => {
-                        response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms });
+                    AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, .. } => {
+                        response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, cost_microusd: 0 });
                     }
                     AgentEvent::Error { message } => {
                         error = Some(anyhow::anyhow!(message));
@@ -417,7 +463,7 @@ impl Agent {
                 role: crate::llm::types::Role::User,
                 content: MessageContent::Parts(vec![ContentPart::ToolResult {
                     tool_use_id: r.tool_call_id,
-                    content:     r.content,
+                    content:     cap_tool_result(r.content),
                     is_error:    r.is_error,
                 }]),
             });
@@ -439,8 +485,8 @@ impl Agent {
     ) -> Option<PausedTurn> {
         let duration_ms = elapsed_before_ms + start.elapsed().as_millis() as u64;
         match outcome {
-            LoopOutcome::Finished { text, iterations, provider_used, hit_max_iterations } => {
-                let answer = if text.is_empty() { last_resort_fallback() } else { strip_answer_preamble(&text) };
+            LoopOutcome::Finished { text, tool_summary, iterations, provider_used, hit_max_iterations, usage, llm_call_count } => {
+                let answer = if text.is_empty() { last_resort_fallback_with_summary(&tool_summary) } else { strip_answer_preamble(&text) };
                 let sources = parse_citations(&answer);
                 let _ = event_sender.send(AgentEvent::Done {
                     answer,
@@ -449,10 +495,12 @@ impl Agent {
                     provider_used,
                     duration_ms,
                     hit_max_iterations,
+                    usage,
+                    llm_call_count,
                 }).await;
                 None
             }
-            LoopOutcome::EndedWithQuestion { text, iterations, provider_used } => {
+            LoopOutcome::EndedWithQuestion { text, iterations, provider_used, usage, llm_call_count } => {
                 let answer = if text.is_empty() { question_fallback() } else { text };
                 let sources = parse_citations(&answer);
                 let _ = event_sender.send(AgentEvent::Done {
@@ -462,10 +510,12 @@ impl Agent {
                     provider_used,
                     duration_ms,
                     hit_max_iterations: false,
+                    usage,
+                    llm_call_count,
                 }).await;
                 None
             }
-            LoopOutcome::Paused { messages, iterations, text_buf, pending, provider_used } => {
+            LoopOutcome::Paused { messages, iterations, text_buf, pending, provider_used, usage, llm_call_count } => {
                 let answer = if text_buf.is_empty() { question_fallback() } else { text_buf };
                 let _ = event_sender.send(AgentEvent::Done {
                     answer,
@@ -474,6 +524,8 @@ impl Agent {
                     provider_used,
                     duration_ms,
                     hit_max_iterations: false,
+                    usage,
+                    llm_call_count,
                 }).await;
                 Some(PausedTurn { messages, iterations, pending, elapsed_ms: duration_ms })
             }
@@ -495,6 +547,9 @@ impl Agent {
         let mut accumulated_text = String::new();
         let mut accumulated_answer = String::new();
         let mut consecutive_searches: usize = 0;
+        let mut total_usage = Usage::default();
+        let mut llm_call_count: usize = 0;
+        let protected_prefix_len = messages.len();
         loop {
             if iterations >= max_iterations {
                 tracing::warn!(max_iterations, "agent hit max_iterations — requesting synthesis");
@@ -508,24 +563,28 @@ impl Agent {
                 messages.push(Message::user(synthesis_prompt));
                 let _synthesis_permit = self.llm_concurrency.acquire().await;
                 let text = match self.llm.chat_routed(selection, &messages, &[]).await {
-                    Ok((LlmResponse::Message { text }, used)) => {
+                    Ok((LlmResponse::Message { text, usage }, used, _)) => {
                         last_provider_used = Some(used);
+                        total_usage += usage;
+                        llm_call_count += 1;
                         text
                     }
-                    Ok((LlmResponse::ToolCalls { preamble, .. }, used)) => {
+                    Ok((LlmResponse::ToolCalls { preamble, usage, .. }, used, _)) => {
                         last_provider_used = Some(used);
+                        total_usage += usage;
+                        llm_call_count += 1;
                         if !preamble.is_empty() { preamble }
                         else if !accumulated_answer.is_empty() { accumulated_answer }
                         else if !accumulated_text.is_empty() { accumulated_text }
-                        else { last_resort_fallback() }
+                        else { last_resort_fallback_with_summary(&tool_summary) }
                     }
                     Err(_) => {
                         if !accumulated_answer.is_empty() { accumulated_answer }
                         else if !accumulated_text.is_empty() { accumulated_text }
-                        else { last_resort_fallback() }
+                        else { last_resort_fallback_with_summary(&tool_summary) }
                     }
                 };
-                return LoopOutcome::Finished { text, iterations, provider_used: last_provider_used, hit_max_iterations: true };
+                return LoopOutcome::Finished { text, tool_summary, iterations, provider_used: last_provider_used, hit_max_iterations: true, usage: total_usage, llm_call_count };
             }
 
             let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(64);
@@ -555,8 +614,10 @@ impl Agent {
                     StreamEvent::ToolCallReady(call) => {
                         tool_calls.push(call);
                     }
-                    StreamEvent::Done { stop_reason: sr } => {
+                    StreamEvent::Done { stop_reason: sr, usage } => {
                         stop_reason = sr;
+                        total_usage += usage;
+                        llm_call_count += 1;
                     }
                 }
             }
@@ -589,6 +650,7 @@ impl Agent {
                     let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
                     return LoopOutcome::EndedWithQuestion {
                         text: answer_text, iterations, provider_used: last_provider_used,
+                        usage: total_usage.clone(), llm_call_count,
                     };
                 }
                 let final_text = if accumulated_answer.is_empty() {
@@ -597,7 +659,15 @@ impl Agent {
                     accumulated_answer.push_str(&text_buf);
                     accumulated_answer
                 };
-                return LoopOutcome::Finished { text: final_text, iterations, provider_used: last_provider_used, hit_max_iterations: false };
+                return LoopOutcome::Finished {
+                    text: final_text,
+                    tool_summary: collect_tool_result_summary(&messages),
+                    iterations,
+                    provider_used: last_provider_used,
+                    hit_max_iterations: false,
+                    usage: total_usage.clone(),
+                    llm_call_count,
+                };
             }
 
             iterations += 1;
@@ -631,6 +701,7 @@ impl Agent {
                 let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
                 return LoopOutcome::EndedWithQuestion {
                     text: answer_text, iterations, provider_used: last_provider_used,
+                    usage: total_usage.clone(), llm_call_count,
                 };
             }
 
@@ -692,7 +763,7 @@ impl Agent {
                             role: crate::llm::types::Role::User,
                             content: MessageContent::Parts(vec![ContentPart::ToolResult {
                                 tool_use_id: call.id.clone(),
-                                content:     result,
+                                content:     cap_tool_result(result),
                                 is_error:    false,
                             }]),
                         });
@@ -704,7 +775,7 @@ impl Agent {
                 } else {
                     accumulated_text.clone()
                 };
-                return LoopOutcome::Paused { messages, iterations, text_buf: paused_text, pending, provider_used: last_provider_used };
+                return LoopOutcome::Paused { messages, iterations, text_buf: paused_text, pending, provider_used: last_provider_used, usage: total_usage.clone(), llm_call_count };
             }
 
             let phase = derive_phase(&tool_calls);
@@ -752,11 +823,13 @@ impl Agent {
                     role: crate::llm::types::Role::User,
                     content: MessageContent::Parts(vec![ContentPart::ToolResult {
                         tool_use_id: call.id.clone(),
-                        content:     result,
+                        content:     cap_tool_result(result),
                         is_error:    false,
                     }]),
                 });
             }
+
+            messages = self.compact_messages_mid_turn(messages, protected_prefix_len).await;
         }
     }
 
@@ -804,9 +877,11 @@ impl Agent {
             )
         })).await;
 
-        let total_iterations: usize = leads.iter().map(|(_, iters)| iters).sum();
+        let total_iterations: usize = leads.iter().map(|(_, iters, _, _)| iters).sum();
+        let sub_usage: Usage = leads.iter().map(|(_, _, u, _)| u.clone()).fold(Usage::default(), |a, b| a + b);
+        let sub_call_count: usize = leads.iter().map(|(_, _, _, c)| *c).sum();
         let findings = subtasks.iter().zip(leads.iter())
-            .map(|(subtask, (text, _))| format!("### Lead: {subtask}\n{text}"))
+            .map(|(subtask, (text, _, _, _))| format!("### Lead: {subtask}\n{text}"))
             .collect::<Vec<_>>()
             .join("\n\n");
 
@@ -839,7 +914,22 @@ impl Agent {
         )));
 
         let start_at = total_iterations.min(self.max_iterations.saturating_sub(1));
-        self.run_loop(messages, start_at, tool_defs, tool_map, selection, event_sender, self.max_iterations, depth).await
+        let mut outcome = self.run_loop(messages, start_at, tool_defs, tool_map, selection, event_sender, self.max_iterations, depth).await;
+        match &mut outcome {
+            LoopOutcome::Finished { usage, llm_call_count, .. } => {
+                *usage = std::mem::take(usage) + sub_usage.clone();
+                *llm_call_count += sub_call_count;
+            }
+            LoopOutcome::EndedWithQuestion { usage, llm_call_count, .. } => {
+                *usage = std::mem::take(usage) + sub_usage.clone();
+                *llm_call_count += sub_call_count;
+            }
+            LoopOutcome::Paused { usage, llm_call_count, .. } => {
+                *usage = std::mem::take(usage) + sub_usage.clone();
+                *llm_call_count += sub_call_count;
+            }
+        }
+        outcome
     }
 
     async fn run_research_subtask(
@@ -852,7 +942,7 @@ impl Agent {
         selection: Option<&ProviderSelection>,
         depth: usize,
         event_sender: &mpsc::Sender<AgentEvent>,
-    ) -> (String, usize) {
+    ) -> (String, usize, Usage, usize) {
         let lead_start = Instant::now();
         let (sub_tx, mut sub_rx) = mpsc::channel::<AgentEvent>(64);
         let sender_clone = event_sender.clone();
@@ -864,10 +954,10 @@ impl Agent {
         let outcome = self.run_loop(messages, 0, tool_defs, tool_map, selection, &sub_tx, max_iterations, depth).await;
         drop(sub_tx);
         let _ = forward_handle.await;
-        let (text, iterations) = match outcome {
-            LoopOutcome::Finished { text, iterations, .. } => (text, iterations),
-            LoopOutcome::EndedWithQuestion { text, iterations, .. } => (text, iterations),
-            LoopOutcome::Paused { text_buf, iterations, .. } => (text_buf, iterations),
+        let (text, iterations, usage, llm_call_count) = match outcome {
+            LoopOutcome::Finished { text, iterations, usage, llm_call_count, .. } => (text, iterations, usage, llm_call_count),
+            LoopOutcome::EndedWithQuestion { text, iterations, usage, llm_call_count, .. } => (text, iterations, usage, llm_call_count),
+            LoopOutcome::Paused { text_buf, iterations, usage, llm_call_count, .. } => (text_buf, iterations, usage, llm_call_count),
         };
         let preview: String = text.chars().take(280).collect();
         let _ = event_sender.send(AgentEvent::ParallelResearchLeadDone {
@@ -876,7 +966,7 @@ impl Agent {
             preview,
             duration_ms: lead_start.elapsed().as_millis() as u64,
         }).await;
-        (text, iterations)
+        (text, iterations, usage, llm_call_count)
     }
 
     async fn execute_tool_call(
@@ -924,8 +1014,8 @@ impl Agent {
         synth_messages.push(Message::user(prompt));
         let _synth_permit = self.llm_concurrency.acquire().await;
         match self.llm.chat_routed(selection, &synth_messages, &[]).await {
-            Ok((LlmResponse::Message { text }, _)) if !text.is_empty() => Some(text),
-            Ok((LlmResponse::ToolCalls { preamble, .. }, _)) if !preamble.is_empty() => Some(preamble),
+            Ok((LlmResponse::Message { text, .. }, _, _)) if !text.is_empty() => Some(text),
+            Ok((LlmResponse::ToolCalls { preamble, .. }, _, _)) if !preamble.is_empty() => Some(preamble),
             _ => None,
         }
     }
@@ -1000,6 +1090,16 @@ pub(crate) fn last_resort_fallback() -> String {
     "I reached the tool-call limit before completing my analysis. \
      Please ask a more specific question or try again."
         .to_string()
+}
+
+pub(crate) fn last_resort_fallback_with_summary(tool_summary: &str) -> String {
+    if tool_summary.is_empty() || tool_summary == "No tool results were collected." {
+        return last_resort_fallback();
+    }
+    format!(
+        "I reached the tool-call limit before completing my analysis. \
+         Here is what I found so far:\n\n{tool_summary}"
+    )
 }
 
 pub(crate) fn question_fallback() -> String {
@@ -1079,6 +1179,17 @@ pub(crate) fn build_user_message(text: &str, attachments: &[Attachment]) -> Mess
 
 const MAX_PARALLEL_LEADS: usize = 6;
 const MAX_PARALLEL_RESEARCH_DEPTH: usize = 2;
+const MAX_TOOL_RESULT_CHARS: usize = 15_000;
+
+fn cap_tool_result(content: String) -> String {
+    if content.chars().count() <= MAX_TOOL_RESULT_CHARS {
+        return content;
+    }
+    let omitted = content.chars().count() - MAX_TOOL_RESULT_CHARS;
+    let mut capped: String = content.chars().take(MAX_TOOL_RESULT_CHARS).collect();
+    capped.push_str(&format!("\n\n[truncated, {omitted} more characters omitted]"));
+    capped
+}
 
 fn propose_parallel_research_tool_def() -> ToolDefinition {
     ToolDefinition {
@@ -1140,6 +1251,55 @@ pub(crate) fn estimate_history_chars(history: &[HistoryMessage]) -> usize {
     history.iter().map(|m| m.text.len()).sum()
 }
 
+const MID_TURN_COMPACTION_CHAR_THRESHOLD: usize = 150_000;
+const MID_TURN_COMPACTION_KEEP_LAST: usize = 6;
+
+fn estimate_messages_chars(messages: &[Message]) -> usize {
+    messages.iter().map(message_chars).sum()
+}
+
+fn message_chars(message: &Message) -> usize {
+    match &message.content {
+        MessageContent::Text(text) => text.len(),
+        MessageContent::Parts(parts) => parts.iter().map(content_part_chars).sum(),
+    }
+}
+
+fn content_part_chars(part: &ContentPart) -> usize {
+    match part {
+        ContentPart::Text { text, .. } => text.len(),
+        ContentPart::ToolUse { input, .. } => input.to_string().len(),
+        ContentPart::ToolResult { content, .. } => content.len(),
+        ContentPart::Image { data, .. } => data.len(),
+        ContentPart::Document { data, .. } => data.len(),
+    }
+}
+
+fn describe_message_for_compaction(message: &Message) -> String {
+    let role = match message.role {
+        crate::llm::types::Role::System => "System",
+        crate::llm::types::Role::User => "User",
+        crate::llm::types::Role::Assistant => "Assistant",
+        crate::llm::types::Role::Tool => "Tool",
+    };
+    match &message.content {
+        MessageContent::Text(text) => format!("{role}: {text}"),
+        MessageContent::Parts(parts) => {
+            let rendered: Vec<String> = parts.iter().map(|part| match part {
+                ContentPart::Text { text, .. } => text.clone(),
+                ContentPart::ToolUse { name, input, .. } => format!("[called {name} with {input}]"),
+                ContentPart::ToolResult { content, is_error, .. } => {
+                    let label = if *is_error { "tool error" } else { "tool result" };
+                    format!("[{label}: {content}]")
+                }
+                ContentPart::Image { .. } => "[image attachment]".to_string(),
+                ContentPart::Document { .. } => "[document attachment]".to_string(),
+            }).collect();
+            format!("{role}: {}", rendered.join(" "))
+        }
+    }
+}
+
 fn history_to_messages(history: &[HistoryMessage]) -> Vec<Message> {
     history.iter().map(|entry| {
         let attachments = entry.attachments.as_deref().unwrap_or(&[]);
@@ -1159,28 +1319,45 @@ fn parse_line_range(raw: &str) -> (u32, Option<u32>) {
     (start, end)
 }
 
+fn split_citation_body(body: &str) -> Vec<String> {
+    let mut groups: Vec<String> = Vec::new();
+    for piece in body.split(',') {
+        let trimmed = piece.trim();
+        if trimmed.matches(':').count() >= 2 || groups.is_empty() {
+            groups.push(trimmed.to_string());
+        } else if let Some(last) = groups.last_mut() {
+            last.push(',');
+            last.push_str(trimmed);
+        }
+    }
+    groups
+}
+
 fn parse_citations(text: &str) -> Vec<Source> {
     // The line number (and range) is optional: a model sometimes cites a whole
     // file rather than a specific location (e.g. [repo:v1.0:src/lib.rs] to
     // support a claim about the file's overall purpose). Line 0 doubles as the
     // "no specific line" sentinel, matching how an explicit ":0" already parses.
-    let re = Regex::new(r"\[([^:\]\s]+):([^:\]\s]+):([^:\]\s]+)(?::(\d+(?:[–-]\d+)?(?:,\d+(?:[–-]\d+)?)*))?\]").unwrap();
+    let bracket_re = Regex::new(r"\[([^\[\]]+)\]").unwrap();
+    let citation_re = Regex::new(r"^([^:\s]+):([^:\s]+):([^:\s]+)(?::(\d+(?:[–-]\d+)?(?:,\d+(?:[–-]\d+)?)*))?$").unwrap();
     let mut seen = HashSet::new();
     let mut sources = Vec::new();
 
-    for cap in re.captures_iter(text) {
-        let key = cap[0].to_string();
-        if seen.insert(key) {
-            let (line, end_line) = cap.get(4)
-                .map(|m| parse_line_range(m.as_str()))
-                .unwrap_or((0, None));
-            sources.push(Source {
-                repo: cap[1].to_string(),
-                version: cap[2].to_string(),
-                file: cap[3].to_string(),
-                line,
-                end_line,
-            });
+    for bracket in bracket_re.captures_iter(text) {
+        for group in split_citation_body(&bracket[1]) {
+            let Some(cap) = citation_re.captures(&group) else { continue };
+            if seen.insert(group.clone()) {
+                let (line, end_line) = cap.get(4)
+                    .map(|m| parse_line_range(m.as_str()))
+                    .unwrap_or((0, None));
+                sources.push(Source {
+                    repo: cap[1].to_string(),
+                    version: cap[2].to_string(),
+                    file: cap[3].to_string(),
+                    line,
+                    end_line,
+                });
+            }
         }
     }
     sources
@@ -1300,6 +1477,7 @@ mod tests {
         LlmResponse::ToolCalls {
             calls: vec![ToolCall { id: "tc_1".into(), name: name.into(), input: serde_json::json!({}), thought_signature: None }],
             preamble: String::new(),
+            usage: Usage::default(),
         }
     }
 
@@ -1314,6 +1492,7 @@ mod tests {
                 ToolCall { id: "tc_2".into(), name: b.into(), input: serde_json::json!({}), thought_signature: None },
             ],
             preamble: String::new(),
+            usage: Usage::default(),
         }
     }
 
@@ -1326,11 +1505,12 @@ mod tests {
                 thought_signature: None,
             }],
             preamble: String::new(),
+            usage: Usage::default(),
         }
     }
 
     fn text(s: &str) -> LlmResponse {
-        LlmResponse::Message { text: s.into() }
+        LlmResponse::Message { text: s.into(), usage: Usage::default() }
     }
 
     fn agent_with(llm: Arc<dyn LlmProvider>, tools: Vec<Box<dyn Tool>>, max: usize) -> Agent {
@@ -1491,11 +1671,11 @@ mod tests {
             vec![
                 StreamEvent::TextDelta { text: "Hello ".into() },
                 StreamEvent::TextDelta { text: "world".into() },
-                StreamEvent::Done { stop_reason: "max_tokens".into() },
+                StreamEvent::Done { stop_reason: "max_tokens".into(), usage: Usage::default() },
             ],
             vec![
                 StreamEvent::TextDelta { text: " continued".into() },
-                StreamEvent::Done { stop_reason: "end_turn".into() },
+                StreamEvent::Done { stop_reason: "end_turn".into(), usage: Usage::default() },
             ],
         ]);
         let agent = Arc::new(agent_with(llm, vec![], 5));
@@ -1514,7 +1694,7 @@ mod tests {
         let llm = MockStreamingLlm::new(vec![
             vec![
                 StreamEvent::TextDelta { text: "partial text".into() },
-                StreamEvent::Done { stop_reason: "max_tokens".into() },
+                StreamEvent::Done { stop_reason: "max_tokens".into(), usage: Usage::default() },
             ],
         ]);
         let agent = Arc::new(agent_with(llm, vec![], 1));
@@ -1534,7 +1714,7 @@ mod tests {
             round1.push(StreamEvent::ThinkingDelta { text: format!("thinking chunk {i} ") });
         }
         round1.push(StreamEvent::TextDelta { text: "final answer".into() });
-        round1.push(StreamEvent::Done { stop_reason: "end_turn".into() });
+        round1.push(StreamEvent::Done { stop_reason: "end_turn".into(), usage: Usage::default() });
         let llm = MockStreamingLlm::new(vec![round1]);
         let agent = agent_with(llm, vec![], 5);
         let resp = agent.query("hi", &[], &[], None).await.unwrap();
@@ -1563,11 +1743,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn normal_completion_with_empty_text_uses_tool_summary_not_bare_fallback() {
+        let llm = MockLlm::new(vec![
+            tool_call("my_tool"),
+            text(""),
+        ]);
+        let agent = agent_with(llm, vec![MockTool::new("my_tool", "found something useful")], 5);
+        let resp = agent.query("hi", &[], &[], None).await.unwrap();
+        assert!(resp.tool_calls_made < 5, "should finish before hitting max_iterations, got {}", resp.tool_calls_made);
+        assert!(resp.answer.contains("found something useful"), "answer should surface tool results, got: {}", resp.answer);
+    }
+
+    #[tokio::test]
     async fn max_iterations_preserves_accumulated_text() {
         let llm = MockLlm::new(vec![
             LlmResponse::ToolCalls {
                 calls: vec![ToolCall { id: "tc_1".into(), name: "my_tool".into(), input: serde_json::json!({}), thought_signature: None }],
                 preamble: "I found something".into(),
+            usage: Usage::default(),
             },
         ]);
         let agent = agent_with(llm, vec![MockTool::new("my_tool", "result")], 1);
@@ -2091,6 +2284,21 @@ mod tests {
     }
 
     #[test]
+    fn cap_tool_result_leaves_short_content_untouched() {
+        let content = "a short tool result".to_string();
+        assert_eq!(cap_tool_result(content.clone()), content);
+    }
+
+    #[test]
+    fn cap_tool_result_truncates_long_content_with_marker() {
+        let content = "x".repeat(MAX_TOOL_RESULT_CHARS + 500);
+        let capped = cap_tool_result(content);
+        assert!(capped.len() < MAX_TOOL_RESULT_CHARS + 500);
+        assert!(capped.contains("truncated"));
+        assert!(capped.contains("500 more characters omitted"));
+    }
+
+    #[test]
     fn single_citation_parsed() {
         let sources = parse_citations("see [myrepo:v1.0:src/lib.rs:42]");
         assert_eq!(sources.len(), 1);
@@ -2106,6 +2314,27 @@ mod tests {
             "from [repo:v1:a.rs:1] and also [repo:v2:b.rs:99]"
         );
         assert_eq!(sources.len(), 2);
+    }
+
+    #[test]
+    fn two_citations_combined_in_one_bracket_parsed_separately() {
+        let sources = parse_citations("[repo:v1:a.rs:1, repo:v1:b.rs:2]");
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].file, "a.rs");
+        assert_eq!(sources[0].line, 1);
+        assert_eq!(sources[1].file, "b.rs");
+        assert_eq!(sources[1].line, 2);
+    }
+
+    #[test]
+    fn combined_bracket_with_multi_range_first_citation_still_splits() {
+        let sources = parse_citations("[repo:v1:a.rs:32-48,77-86, repo:v1:b.rs:5]");
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].file, "a.rs");
+        assert_eq!(sources[0].line, 32);
+        assert_eq!(sources[0].end_line, Some(48));
+        assert_eq!(sources[1].file, "b.rs");
+        assert_eq!(sources[1].line, 5);
     }
 
     #[test]
@@ -2265,6 +2494,71 @@ mod tests {
         assert_eq!(result[2].text, "msg 4");
     }
 
+    fn tool_result_message(id: &str, content: String) -> Message {
+        Message {
+            role: crate::llm::types::Role::User,
+            content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                tool_use_id: id.into(),
+                content,
+                is_error: false,
+            }]),
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_messages_mid_turn_returns_unchanged_under_threshold() {
+        let agent = agent_with(MockLlm::new(vec![]), vec![], 5);
+        let messages = vec![
+            Message::system("system prompt"),
+            Message::user("question"),
+            tool_result_message("tc_1", "short result".into()),
+        ];
+        let result = agent.compact_messages_mid_turn(messages.clone(), 2).await;
+        assert_eq!(result.len(), messages.len());
+    }
+
+    #[tokio::test]
+    async fn compact_messages_mid_turn_compacts_when_over_threshold() {
+        let agent = agent_with(MockLlm::new(vec![text("condensed summary of the trace")]), vec![], 5);
+        let protected = vec![Message::system("system prompt"), Message::user("question")];
+        let big_result = "x".repeat(20_000);
+        let mut messages = protected.clone();
+        for i in 0..10 {
+            messages.push(tool_result_message(&format!("tc_{i}"), big_result.clone()));
+        }
+        let result = agent.compact_messages_mid_turn(messages.clone(), protected.len()).await;
+
+        assert_eq!(result.len(), protected.len() + 1 + MID_TURN_COMPACTION_KEEP_LAST);
+        match &result[protected.len()].content {
+            MessageContent::Text(text) => assert!(text.contains("condensed summary of the trace")),
+            other => panic!("expected summary text message, got {other:?}"),
+        }
+        let kept_start = messages.len() - MID_TURN_COMPACTION_KEEP_LAST;
+        for (kept, original) in result[protected.len() + 1..].iter().zip(&messages[kept_start..]) {
+            match (&kept.content, &original.content) {
+                (MessageContent::Parts(a), MessageContent::Parts(b)) => {
+                    let ContentPart::ToolResult { tool_use_id: a_id, .. } = &a[0] else { panic!("expected tool result") };
+                    let ContentPart::ToolResult { tool_use_id: b_id, .. } = &b[0] else { panic!("expected tool result") };
+                    assert_eq!(a_id, b_id);
+                }
+                other => panic!("expected matching tool-result parts, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_messages_mid_turn_falls_back_on_llm_failure() {
+        let agent = agent_with(MockLlm::new(vec![]), vec![], 5);
+        let protected = vec![Message::system("system prompt"), Message::user("question")];
+        let big_result = "x".repeat(20_000);
+        let mut messages = protected.clone();
+        for i in 0..10 {
+            messages.push(tool_result_message(&format!("tc_{i}"), big_result.clone()));
+        }
+        let result = agent.compact_messages_mid_turn(messages.clone(), protected.len()).await;
+        assert_eq!(result.len(), messages.len());
+    }
+
     #[tokio::test]
     async fn query_compacts_history_over_threshold() {
         let agent = Agent::new(
@@ -2397,6 +2691,7 @@ mod tests {
             LlmResponse::ToolCalls {
                 calls: vec![ToolCall { id: "t".into(), name: "my_tool".into(), input: serde_json::json!({}), thought_signature: None }],
                 preamble: "Let me check that".into(),
+            usage: Usage::default(),
             },
             text("done"),
         ]);
@@ -2440,11 +2735,11 @@ mod tests {
                 StreamEvent::ToolCallReady(ToolCall {
                     id: "tc_1".into(), name: "my_tool".into(), input: serde_json::json!({}), thought_signature: None,
                 }),
-                StreamEvent::Done { stop_reason: "tool_use".into() },
+                StreamEvent::Done { stop_reason: "tool_use".into(), usage: Usage::default() },
             ],
             vec![
                 StreamEvent::TextDelta { text: "done".into() },
-                StreamEvent::Done { stop_reason: "end_turn".into() },
+                StreamEvent::Done { stop_reason: "end_turn".into(), usage: Usage::default() },
             ],
         ]);
         let agent = Arc::new(agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5));
@@ -2494,6 +2789,7 @@ mod tests {
             LlmResponse::ToolCalls {
                 calls: vec![ToolCall { id: "tc_1".into(), name: "create_lxd_agent".into(), input: serde_json::json!({}), thought_signature: None }],
                 preamble: "Provisioning a small container named build-runner".into(),
+            usage: Usage::default(),
             },
         ]);
         let agent = Arc::new(agent_with(
@@ -2688,6 +2984,7 @@ mod tests {
                     thought_signature: None,
                 }],
                 preamble: String::new(),
+            usage: Usage::default(),
             },
         ]);
         let agent = Arc::new(agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5));
@@ -2767,6 +3064,7 @@ mod tests {
                     thought_signature: None,
                 }],
                 preamble: "I found some relevant code.".into(),
+            usage: Usage::default(),
             },
             // Iteration 2: ask_user with NO preamble text
             LlmResponse::ToolCalls {
@@ -2777,6 +3075,7 @@ mod tests {
                     thought_signature: None,
                 }],
                 preamble: String::new(),
+            usage: Usage::default(),
             },
         ]);
         let agent = Arc::new(agent_with(llm, vec![MockTool::new("my_tool", "ok")], 5));
@@ -2803,6 +3102,7 @@ mod tests {
                     thought_signature: None,
                 }],
                 preamble: String::new(),
+            usage: Usage::default(),
             },
             // Iteration 2: ask_user with no text preamble
             LlmResponse::ToolCalls {
@@ -2813,6 +3113,7 @@ mod tests {
                     thought_signature: None,
                 }],
                 preamble: String::new(),
+            usage: Usage::default(),
             },
             // Synthesis response (Fix 4)
             text("Here is what I found: the tool returned ok."),
@@ -2846,6 +3147,19 @@ mod tests {
         assert!(fb.to_lowercase().contains("tool-call limit"), "last_resort_fallback should still mention tool-call limit");
     }
 
+    #[test]
+    fn last_resort_fallback_with_summary_includes_tool_results() {
+        let fb = last_resort_fallback_with_summary("- [result] found the handler in foo.rs");
+        assert!(fb.contains("found the handler in foo.rs"));
+        assert!(fb.to_lowercase().contains("tool-call limit"));
+    }
+
+    #[test]
+    fn last_resort_fallback_with_summary_falls_back_when_no_tool_results() {
+        let fb = last_resort_fallback_with_summary("No tool results were collected.");
+        assert_eq!(fb, last_resort_fallback());
+    }
+
     // ── Fix 6: synthesis ToolCalls with preamble uses preamble ──
 
     #[tokio::test]
@@ -2859,11 +3173,13 @@ mod tests {
                     thought_signature: None,
                 }],
                 preamble: String::new(),
+                usage: Usage::default(),
             },
             // Synthesis returns ToolCalls with preamble
             LlmResponse::ToolCalls {
                 calls: vec![],
                 preamble: "Here's what I found from the tools.".into(),
+                usage: Usage::default(),
             },
         ]);
         let agent = agent_with(llm, vec![MockTool::new("my_tool", "ok")], 1);

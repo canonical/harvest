@@ -21,7 +21,7 @@ use tokio_stream::{wrappers::BroadcastStream, Stream};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentEvent, Attachment, HistoryMessage, PausedTurn, PendingConfirmCall, Source, ToolResumeResult};
-use crate::llm::types::{Message, ProviderSelection, UsedProvider};
+use crate::llm::types::{Message, ProviderSelection, Usage, UsedProvider};
 use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::api::ProjectAgentBuilder;
 use crate::auth::jwt::Claims;
@@ -134,6 +134,7 @@ pub struct ProjectState {
     pub llm:           Arc<dyn crate::llm::LlmProvider>,
     pub llm_configs:   Arc<Vec<crate::config::LlmProviderConfig>>,
     pub user_key_store: Option<Arc<crate::auth::user_keys::UserKeyStore>>,
+    pub pricing:       Arc<crate::cost::PricingTable>,
     pub locks:     Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
     pub channels:  Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
     pub presence:  Arc<RwLock<HashMap<String, HashMap<String, UserPresence>>>>,
@@ -155,6 +156,7 @@ impl ProjectState {
         llm: Arc<dyn crate::llm::LlmProvider>,
         llm_configs: Arc<Vec<crate::config::LlmProviderConfig>>,
         user_key_store: Option<Arc<crate::auth::user_keys::UserKeyStore>>,
+        pricing: Arc<crate::cost::PricingTable>,
     ) -> Self {
         Self {
             neo4j,
@@ -163,6 +165,7 @@ impl ProjectState {
             llm,
             llm_configs,
             user_key_store,
+            pricing,
             locks:     Arc::new(RwLock::new(HashMap::new())),
             channels:  Arc::new(Mutex::new(HashMap::new())),
             presence:  Arc::new(RwLock::new(HashMap::new())),
@@ -413,6 +416,11 @@ async fn save_project_turn(
     question: Option<Value>,
     provider_used: Option<&UsedProvider>,
     duration_ms: u64,
+    usage: &Usage,
+    llm_call_count: usize,
+    turn_id: &str,
+    user_id: &str,
+    pricing: &crate::cost::PricingTable,
 ) {
     let mut messages = prior_messages;
     messages.push(json!({
@@ -428,6 +436,9 @@ async fn save_project_turn(
         "chain": chain,
         "tool_calls_made": tool_calls_made,
         "duration_ms": duration_ms,
+        "usage": usage,
+        "llm_call_count": llm_call_count,
+        "cost_microusd": pricing.price_call(usage, provider_used.map(|p| p.kind.as_str()).unwrap_or(""), provider_used.map(|p| p.model.as_str()).unwrap_or("")),
     });
     if let Some(question) = question {
         assistant_message["question"] = question;
@@ -457,6 +468,13 @@ async fn save_project_turn(
             "messages": messages_json, "count": count, "now": now,
         }),
     ).await;
+
+    if let Some(record) = crate::cost::build_turn_record(
+        crate::cost::CostScope::Chat, turn_id, user_id, provider_used, usage, llm_call_count, pricing,
+        duration_ms, Some(project_id), Some(conv_id), None, None, None,
+    ) {
+        let _ = crate::cost::record_llm_call(neo4j, &record).await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -472,6 +490,11 @@ async fn update_last_assistant_turn(
     question: Option<Value>,
     provider_used: Option<&UsedProvider>,
     duration_ms: u64,
+    usage: &Usage,
+    llm_call_count: usize,
+    turn_id: &str,
+    user_id: &str,
+    pricing: &crate::cost::PricingTable,
 ) {
     let mut messages = load_project_messages_raw(neo4j, project_id, conv_id).await;
     let Some(last) = messages.last_mut() else { return; };
@@ -484,6 +507,9 @@ async fn update_last_assistant_turn(
     last["chain"] = json!(chain);
     last["tool_calls_made"] = json!(tool_calls_made);
     last["duration_ms"] = json!(duration_ms);
+    last["usage"] = json!(usage);
+    last["llm_call_count"] = json!(llm_call_count);
+    last["cost_microusd"] = json!(pricing.price_call(usage, provider_used.map(|p| p.kind.as_str()).unwrap_or(""), provider_used.map(|p| p.model.as_str()).unwrap_or("")));
     match question {
         Some(question) => last["question"] = question,
         None => { if let Some(obj) = last.as_object_mut() { obj.remove("question"); } }
@@ -512,6 +538,13 @@ async fn update_last_assistant_turn(
             "messages": messages_json, "count": count, "now": now,
         }),
     ).await;
+
+    if let Some(record) = crate::cost::build_turn_record(
+        crate::cost::CostScope::Chat, turn_id, user_id, provider_used, usage, llm_call_count, pricing,
+        duration_ms, Some(project_id), Some(conv_id), None, None, None,
+    ) {
+        let _ = crate::cost::record_llm_call(neo4j, &record).await;
+    }
 }
 
 async fn mark_confirm_action_statuses(
@@ -591,6 +624,9 @@ async fn drive_turn(
     selection:  Option<ProviderSelection>,
     mut agent_rx: mpsc::Receiver<AgentEvent>,
     paused_rx: tokio::sync::oneshot::Receiver<Option<PausedTurn>>,
+    user_id:    String,
+    pricing:    Arc<crate::cost::PricingTable>,
+    turn_id:    String,
 ) {
     let mut chain_builder = crate::agent::chain::ChainBuilder::new();
     let mut pending_question: Option<Value> = None;
@@ -684,13 +720,19 @@ async fn drive_turn(
                     AgentEvent::ParallelResearchMergeStarted { duration_ms } => Some(json!({
                         "type": "parallel_research_merge_started", "conv_id": &conv_id, "duration_ms": duration_ms,
                     })),
-                    AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. } => Some(json!({
-                        "type": "done", "conv_id": &conv_id,
-                        "answer": answer, "sources": sources,
-                        "tool_calls_made": tool_calls_made,
-                        "provider_used": provider_used,
-                        "duration_ms": duration_ms,
-                    })),
+                    AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, .. } => {
+                        let cost_microusd = pricing.price_call(usage, provider_used.as_ref().map(|p| p.kind.as_str()).unwrap_or(""), provider_used.as_ref().map(|p| p.model.as_str()).unwrap_or(""));
+                        Some(json!({
+                            "type": "done", "conv_id": &conv_id,
+                            "answer": answer, "sources": sources,
+                            "tool_calls_made": tool_calls_made,
+                            "provider_used": provider_used,
+                            "duration_ms": duration_ms,
+                            "usage": usage,
+                            "llm_call_count": llm_call_count,
+                            "cost_microusd": cost_microusd,
+                        }))
+                    }
                     AgentEvent::Question { question, choices } => Some(json!({
                         "type": "question", "conv_id": &conv_id,
                         "question": question, "choices": choices,
@@ -703,7 +745,7 @@ async fn drive_turn(
             }
         }
 
-        if let AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. } = &event {
+        if let AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, .. } = &event {
             let save_now = chrono::Utc::now().to_rfc3339();
             let chain = std::mem::take(&mut chain_builder).finish();
             match &persist {
@@ -714,6 +756,7 @@ async fn drive_turn(
                         prior_messages.clone(),
                         answer, sources, *tool_calls_made,
                         chain, pending_question.clone(), provider_used.as_ref(), *duration_ms,
+                        usage, *llm_call_count, &turn_id, &user_id, &pricing,
                     ).await;
                 }
                 TurnPersist::Continuation => {
@@ -721,6 +764,7 @@ async fn drive_turn(
                         &neo4j, &project_id, &conv_id, &save_now,
                         answer, sources, *tool_calls_made,
                         chain, pending_question.clone(), provider_used.as_ref(), *duration_ms,
+                        usage, *llm_call_count, &turn_id, &user_id, &pricing,
                     ).await;
                 }
             }
@@ -880,6 +924,9 @@ pub async fn project_query_stream(
         .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
         .collect();
     let prior_messages_for_save = raw_messages;
+    let pricing = Arc::clone(&state.pricing);
+    let user_id = user.sub.clone();
+    let turn_id = uuid::Uuid::new_v4().to_string();
 
     in_flight.write().await
         .entry(project_id.clone())
@@ -909,6 +956,7 @@ pub async fn project_query_stream(
             TurnPersist::New { prior_messages: prior_messages_for_save, attachment_meta },
             selection,
             agent_rx, paused_rx,
+            user_id, pricing, turn_id,
         ).await;
     });
 
@@ -1327,6 +1375,9 @@ pub async fn resume_confirm_action(
     let paused_confirmations = Arc::clone(&state.paused_confirmations);
     let project_id_owned = project_id.clone();
     let conv_id_owned    = conv_id.clone();
+    let pricing = Arc::clone(&state.pricing);
+    let user_id = user.sub.clone();
+    let turn_id = uuid::Uuid::new_v4().to_string();
 
     let selection = paused.selection.clone();
 
@@ -1349,6 +1400,7 @@ pub async fn resume_confirm_action(
             TurnPersist::Continuation,
             selection,
             agent_rx, paused_rx,
+            user_id, pricing, turn_id,
         ).await;
     });
 
@@ -1507,7 +1559,8 @@ pub async fn delete_conversation(
     }
     state.neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         DETACH DELETE c",
+         OPTIONAL MATCH (c)-[:INCURRED]->(call:LlmCall)
+         DETACH DELETE c, call",
         json!({ "pid": project_id, "cid": conv_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
