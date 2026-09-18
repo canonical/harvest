@@ -971,8 +971,15 @@ pub async fn generate_design(
     let response = agent.query(&prompt, &[], &[], None).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    save_design_doc(&state.neo4j, &project_id, &deployment_id, &response.answer).await
+    let artifact_id = save_design_doc(&state.neo4j, &project_id, &deployment_id, &response.answer).await
         .map_err(|message| err(StatusCode::INTERNAL_SERVER_ERROR, &message))?;
+
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    crate::cost::record_deployment_turn(
+        &state.neo4j, &state.pricing, crate::cost::CostScope::Design, &turn_id, &user.sub,
+        &project_id, &deployment_id, None, Some(&artifact_id),
+        response.provider_used.as_ref(), &response.usage, response.llm_call_count, response.duration_ms,
+    ).await;
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
@@ -1095,21 +1102,32 @@ pub async fn generate_design_stream(
     let neo4j          = Arc::clone(&state.neo4j);
     let project_id_bg  = project_id.clone();
     let deployment_id_bg = deployment_id.clone();
+    let pricing        = Arc::clone(&state.pricing);
+    let user_id_bg     = user.sub.clone();
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         tokio::spawn(async move {
             agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
         });
         while let Some(event) = agent_rx.recv().await {
-            if let AgentEvent::Done { answer, .. } = &event {
-                if let Err(message) = save_design_doc(&neo4j, &project_id_bg, &deployment_id_bg, answer).await {
-                    tracing::warn!(
-                        project_id = %project_id_bg, deployment_id = %deployment_id_bg, %message,
-                        "design generation failed to save",
-                    );
-                    let _ = tx.send(AgentEvent::Error { message }).await;
-                    continue;
-                }
+            if let AgentEvent::Done { answer, provider_used, duration_ms, usage, llm_call_count, .. } = &event {
+                let artifact_id = match save_design_doc(&neo4j, &project_id_bg, &deployment_id_bg, answer).await {
+                    Ok(id) => id,
+                    Err(message) => {
+                        tracing::warn!(
+                            project_id = %project_id_bg, deployment_id = %deployment_id_bg, %message,
+                            "design generation failed to save",
+                        );
+                        let _ = tx.send(AgentEvent::Error { message }).await;
+                        continue;
+                    }
+                };
+                let turn_id = uuid::Uuid::new_v4().to_string();
+                crate::cost::record_deployment_turn(
+                    &neo4j, &pricing, crate::cost::CostScope::Design, &turn_id, &user_id_bg,
+                    &project_id_bg, &deployment_id_bg, None, Some(&artifact_id),
+                    provider_used.as_ref(), usage, *llm_call_count, *duration_ms,
+                ).await;
             }
             let _ = tx.send(event).await;
         }
@@ -1137,7 +1155,7 @@ async fn save_design_doc(
     project_id:    &str,
     deployment_id: &str,
     answer:        &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let content = format!("{}\n", answer.trim());
     if content.trim().is_empty()
         || content.trim() == crate::agent::last_resort_fallback()
@@ -1167,7 +1185,8 @@ async fn save_design_doc(
     let created = create_artifact(neo4j, project_id, ArtifactKind::Markdown, &title, &content, "assistant").await
         .map_err(|e| format!("failed to save the design document: {e}"))?;
     let artifact_id = created["id"].as_str()
-        .ok_or_else(|| "artifact creation returned no id".to_string())?;
+        .ok_or_else(|| "artifact creation returned no id".to_string())?
+        .to_string();
 
     neo4j.query_read(
         "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
@@ -1182,7 +1201,7 @@ async fn save_design_doc(
     crate::deployments::design_cache::schedule_regeneration(
         Arc::clone(neo4j), project_id.to_string(), deployment_id.to_string(),
     );
-    Ok(())
+    Ok(artifact_id)
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1358,12 +1377,25 @@ pub async fn propose_design_change_stream(
     let (agent, prompt) = prepare_design_change_proposal(&state, &user, &project_id, &deployment_id, &body).await?;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
+    let neo4j          = Arc::clone(&state.neo4j);
+    let pricing        = Arc::clone(&state.pricing);
+    let project_id_bg  = project_id.clone();
+    let deployment_id_bg = deployment_id.clone();
+    let user_id_bg     = user.sub.clone();
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         tokio::spawn(async move {
             agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
         });
         while let Some(event) = agent_rx.recv().await {
+            if let AgentEvent::Done { provider_used, duration_ms, usage, llm_call_count, .. } = &event {
+                let turn_id = uuid::Uuid::new_v4().to_string();
+                crate::cost::record_deployment_turn(
+                    &neo4j, &pricing, crate::cost::CostScope::Proposal, &turn_id, &user_id_bg,
+                    &project_id_bg, &deployment_id_bg, None, None,
+                    provider_used.as_ref(), usage, *llm_call_count, *duration_ms,
+                ).await;
+            }
             let _ = tx.send(event).await;
         }
     });
@@ -1467,8 +1499,15 @@ pub async fn generate_provision(
     let (agent, prompt) = prepare_provision_generation(&state, &user, &project_id, &deployment_id).await?;
 
     let progress_tx = spawn_progress_relay(&state, &project_id, &deployment_id);
-    agent.query_with_progress(&prompt, &[], &[], None, progress_tx).await
+    let response = agent.query_with_progress(&prompt, &[], &[], None, progress_tx).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    crate::cost::record_deployment_turn(
+        &state.neo4j, &state.pricing, crate::cost::CostScope::Provision, &turn_id, &user.sub,
+        &project_id, &deployment_id, None, None,
+        response.provider_used.as_ref(), &response.usage, response.llm_call_count, response.duration_ms,
+    ).await;
 
     let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
@@ -1482,12 +1521,25 @@ pub async fn generate_provision_stream(
     let (agent, prompt) = prepare_provision_generation(&state, &user, &project_id, &deployment_id).await?;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
+    let neo4j          = Arc::clone(&state.neo4j);
+    let pricing        = Arc::clone(&state.pricing);
+    let project_id_bg  = project_id.clone();
+    let deployment_id_bg = deployment_id.clone();
+    let user_id_bg     = user.sub.clone();
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         tokio::spawn(async move {
             agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
         });
         while let Some(event) = agent_rx.recv().await {
+            if let AgentEvent::Done { provider_used, duration_ms, usage, llm_call_count, .. } = &event {
+                let turn_id = uuid::Uuid::new_v4().to_string();
+                crate::cost::record_deployment_turn(
+                    &neo4j, &pricing, crate::cost::CostScope::Provision, &turn_id, &user_id_bg,
+                    &project_id_bg, &deployment_id_bg, None, None,
+                    provider_used.as_ref(), usage, *llm_call_count, *duration_ms,
+                ).await;
+            }
             let _ = tx.send(event).await;
         }
     });
@@ -1622,6 +1674,13 @@ pub async fn propose_provision_change(
     let response = agent.query(&prompt, &[], &[], None).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    crate::cost::record_deployment_turn(
+        &state.neo4j, &state.pricing, crate::cost::CostScope::Proposal, &turn_id, &user.sub,
+        &project_id, &deployment_id, None, body.artifact_id.as_deref(),
+        response.provider_used.as_ref(), &response.usage, response.llm_call_count, response.duration_ms,
+    ).await;
+
     let proposed_files = extract_json_block(&response.answer)
         .ok_or_else(|| generation_failed(&response.answer))?;
 
@@ -1646,12 +1705,26 @@ pub async fn propose_provision_change_stream(
     let (agent, prompt) = prepare_provision_proposal(&state, &user, &project_id, &deployment_id, &body).await?;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
+    let neo4j          = Arc::clone(&state.neo4j);
+    let pricing        = Arc::clone(&state.pricing);
+    let project_id_bg  = project_id.clone();
+    let deployment_id_bg = deployment_id.clone();
+    let user_id_bg     = user.sub.clone();
+    let artifact_id_bg = body.artifact_id.clone();
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         tokio::spawn(async move {
             agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
         });
         while let Some(event) = agent_rx.recv().await {
+            if let AgentEvent::Done { provider_used, duration_ms, usage, llm_call_count, .. } = &event {
+                let turn_id = uuid::Uuid::new_v4().to_string();
+                crate::cost::record_deployment_turn(
+                    &neo4j, &pricing, crate::cost::CostScope::Proposal, &turn_id, &user_id_bg,
+                    &project_id_bg, &deployment_id_bg, None, artifact_id_bg.as_deref(),
+                    provider_used.as_ref(), usage, *llm_call_count, *duration_ms,
+                ).await;
+            }
             let _ = tx.send(event).await;
         }
     });

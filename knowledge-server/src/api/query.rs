@@ -63,11 +63,13 @@ pub async fn handle_query(
                 let att_meta: Vec<_> = attachments.iter()
                     .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
                     .collect();
+                let turn_id = uuid::Uuid::new_v4().to_string();
                 let _ = append_user_turn(
                     neo4j, &user.sub, cid,
                     &req.query, &user.name, &att_meta, raw_messages,
                     &response.answer, &response.sources, response.tool_calls_made,
                     vec![], None, None, response.provider_used.as_ref(), response.duration_ms,
+                    &response.usage, response.llm_call_count, &turn_id, &qs.pricing,
                 ).await;
 
                 let msg_count = compacted.len() + 2;
@@ -83,6 +85,12 @@ pub async fn handle_query(
                     ).await;
                 });
             }
+            let mut response = response;
+            response.cost_microusd = qs.pricing.price_call(
+                &response.usage,
+                response.provider_used.as_ref().map(|p| p.kind.as_str()).unwrap_or(""),
+                response.provider_used.as_ref().map(|p| p.model.as_str()).unwrap_or(""),
+            );
             Json(response).into_response()
         }
         Err(e) => {
@@ -172,17 +180,19 @@ pub async fn handle_query_stream(
             }
 
             if let (
-                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, .. },
+                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, .. },
                 Some(cid),
                 Some(neo4j),
             ) = (&event, &conv_id, &neo4j) {
                 let chain = std::mem::take(&mut chain_builder).finish();
+                let turn_id = uuid::Uuid::new_v4().to_string();
                 let _ = append_user_turn(
                     neo4j, &user_id, cid,
                     &query, &username, &att_meta, raw_messages.clone(),
                     answer, sources, *tool_calls_made,
                     chain, pending_question.clone(), pending_confirm_action.clone(),
                     provider_used.as_ref(), *duration_ms,
+                    usage, *llm_call_count, &turn_id, &qs_ctx.pricing,
                 ).await;
 
                 let msg_count = compacted.len() + 2;
@@ -206,8 +216,23 @@ pub async fn handle_query_stream(
         }
     });
 
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(|event| {
-        let data = serde_json::to_string(&event).unwrap_or_default();
+    let pricing_for_stream = Arc::clone(&qs.pricing);
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(move |event| {
+        let mut value = serde_json::to_value(&event).unwrap_or_default();
+        if value.get("type").and_then(|v| v.as_str()) == Some("done") {
+            if let Some(usage) = value.get("usage").cloned() {
+                let kind = value.get("provider_used").and_then(|p| p.get("kind")).and_then(|v| v.as_str()).unwrap_or("");
+                let model = value.get("provider_used").and_then(|p| p.get("model")).and_then(|v| v.as_str()).unwrap_or("");
+                let cost = pricing_for_stream.price_call(
+                    &serde_json::from_value::<crate::llm::types::Usage>(usage).unwrap_or_default(),
+                    kind, model,
+                );
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("cost_microusd".to_string(), json!(cost));
+                }
+            }
+        }
+        let data = serde_json::to_string(&value).unwrap_or_default();
         Ok::<Event, Infallible>(Event::default().data(data))
     });
 

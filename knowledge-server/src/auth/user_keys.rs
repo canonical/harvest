@@ -18,11 +18,14 @@ impl UserKeyStore {
     pub async fn upsert(&self, user_id: &str, provider_id: &str, api_key: &str) -> Result<()> {
         let (ciphertext, nonce) = self.crypto.encrypt(api_key)?;
         let now = chrono::Utc::now().to_rfc3339();
+        let key_id = format!("{user_id}:{provider_id}");
         self.neo4j.query_read(
-            "MERGE (u:User {id: $uid})-[:HAS_LLM_KEY]->(k:UserLlmKey {provider_id: $pid})
-             SET k.key_ciphertext = $ct, k.key_nonce = $nonce, k.updated_at = $now",
+            "MATCH (u:User {id: $uid})
+             MERGE (u)-[:HAS_LLM_KEY]->(k:UserLlmKey {key_id: $key_id})
+             SET k.provider_id = $pid, k.key_ciphertext = $ct, k.key_nonce = $nonce, k.updated_at = $now",
             json!({
                 "uid": user_id,
+                "key_id": key_id,
                 "pid": provider_id,
                 "ct": ciphertext,
                 "nonce": nonce,

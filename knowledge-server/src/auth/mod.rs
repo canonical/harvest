@@ -40,6 +40,7 @@ pub struct AuthState {
 }
 
 pub async fn setup_constraints(neo4j: &Neo4jClient) -> Result<()> {
+    neo4j.run("CREATE CONSTRAINT user_id IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT user_email IF NOT EXISTS FOR (u:User) REQUIRE u.email IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT user_google_id IF NOT EXISTS FOR (u:User) REQUIRE u.google_id IS UNIQUE").await?;
     neo4j.run("CREATE CONSTRAINT user_oidc_sub IF NOT EXISTS FOR (u:User) REQUIRE u.oidc_sub IS UNIQUE").await?;

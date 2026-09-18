@@ -21,7 +21,7 @@ use knowledge_server::{
     auth::{self, jwt},
     llm::{
         LlmProvider,
-        types::{LlmResponse, Message, ModelInfo, ToolCall, ToolDefinition},
+        types::{LlmResponse, Message, ModelInfo, ToolCall, ToolDefinition, Usage},
     },
     machines::MachineRegistry,
     neo4j::Neo4jClient,
@@ -45,7 +45,7 @@ impl LlmProvider for FixedTextLlm {
     fn default_model(&self) -> &str { "mock-model" }
     async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> { Ok(vec![]) }
     async fn chat_with(&self, _model: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
-        Ok(LlmResponse::Message { text: self.0.clone() })
+        Ok(LlmResponse::Message { text: self.0.clone(), usage: Usage::default() })
     }
 }
 
@@ -88,7 +88,7 @@ fn projects_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn knowledge_server:
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,
     });
-    let state = Arc::new(ProjectState::new(neo4j, agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None));
+    let state = Arc::new(ProjectState::new(neo4j, agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
 
     Router::new()
         .route("/projects",     route_get(list_projects).post(create_project))
@@ -696,8 +696,9 @@ async fn tool_call_chain_persists_with_preview() {
                 input: json!({}), thought_signature: None,
             }],
             preamble: "Checking connected agents".into(),
+        usage: Usage::default(),
         },
-        LlmResponse::Message { text: "No agents are connected.".into() },
+        LlmResponse::Message { text: "No agents are connected.".into(), usage: Usage::default() },
     ]);
     let app = projects_app_with_llm(Arc::clone(&neo4j), llm);
     let (_, project) = send(app.clone(),
@@ -742,6 +743,7 @@ async fn ask_user_question_persists_across_reload() {
                 thought_signature: None,
             }],
             preamble: String::new(),
+        usage: Usage::default(),
         },
     ]);
     let app = projects_app_with_llm(Arc::clone(&neo4j), llm);
@@ -780,8 +782,9 @@ async fn confirm_action_persists_pending_then_resume_continues_the_turn() {
                 thought_signature: None,
             }],
             preamble: String::new(),
+        usage: Usage::default(),
         },
-        LlmResponse::Message { text: "Deleted bogus-agent as requested".into() },
+        LlmResponse::Message { text: "Deleted bogus-agent as requested".into(), usage: Usage::default() },
     ]);
     let app = projects_app_with_llm(Arc::clone(&neo4j), llm);
     let (_, project) = send(app.clone(),

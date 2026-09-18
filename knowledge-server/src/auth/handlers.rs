@@ -106,12 +106,24 @@ pub async fn register(
 }
 
 async fn assign_default_groups(state: &AuthState, user_id: &str) -> Result<(), ApiError> {
-    state.neo4j.query_read(
+    let rows = state.neo4j.query_read(
         "MATCH (u:User {id: $id})
          MATCH (g:Group {is_default: true})
          MERGE (u)-[:MEMBER_OF]->(g)
          RETURN u.id AS id",
         json!({ "id": user_id }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    if !rows.is_empty() {
+        return Ok(());
+    }
+
+    let group_id = Uuid::new_v4().to_string();
+    state.neo4j.query_read(
+        "MATCH (u:User {id: $uid})
+         CREATE (g:Group {id: $gid, name: u.name + \"'s workspace\", description: '', is_default: false})
+         CREATE (u)-[:MEMBER_OF]->(g)
+         RETURN g.id AS id",
+        json!({ "uid": user_id, "gid": group_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(())
 }
