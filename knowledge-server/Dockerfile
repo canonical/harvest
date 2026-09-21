@@ -19,10 +19,10 @@ COPY Cargo.toml Cargo.lock ./
 # static.rust-lang.org to sync the channel manifest, which fails in restricted
 # or slow network environments.
 #
-# The `tui` workspace member is a front-end CLI tool and is not built or
-# shipped in this image. Strip it from the workspace manifest so cargo can
-# resolve the remaining members without its Cargo.toml.
-RUN sed -i '/^\s*"tui",$/d' Cargo.toml
+# The `tui` and `squall` workspace members are standalone CLI tools and are
+# not built or shipped in this image. Strip them from the workspace manifest
+# so cargo can resolve the remaining members without their Cargo.toml files.
+RUN sed -i -e '/^\s*"tui",$/d' -e '/^\s*"squall",$/d' Cargo.toml
 COPY knowledge-server/Cargo.toml    knowledge-server/Cargo.toml
 COPY knowledge-harvester/Cargo.toml knowledge-harvester/Cargo.toml
 COPY agent/Cargo.toml               agent/Cargo.toml
