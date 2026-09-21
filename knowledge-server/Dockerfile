@@ -7,11 +7,11 @@ ENV CARGO_HTTP_TIMEOUT=300
 
 WORKDIR /build
 
-# perl (full, not just perl-base): git2's vendored-openssl feature builds
-# OpenSSL from source, whose Configure script needs core modules like
-# FindBin.pm that Debian's slim perl-base image omits.
+# perl (full, not just perl-base) and make: git2's vendored-openssl feature
+# builds OpenSSL from source, and its Configure/Makefile need core Perl
+# modules (FindBin.pm) and make, neither of which rust:slim-bookworm ships.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends cmake pkg-config libssl-dev perl \
+ && apt-get install -y --no-install-recommends cmake pkg-config libssl-dev perl make \
  && rm -rf /var/lib/apt/lists/*
 
 # Workspace manifests first — lets Docker cache the (slow) dep-compilation
