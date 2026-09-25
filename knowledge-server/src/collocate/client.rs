@@ -187,6 +187,19 @@ impl CollocateHandle {
             .map_err(|e| anyhow!("collocate logs {target}: {e}"))
     }
 
+    pub async fn wait_ready(&self, target: &str, timeout: std::time::Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            if self.exec_simple(target, &["true"]).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
     pub async fn wait(&self, target: &str) -> Result<i32> {
         let mut c = self.inner.lock().await;
         c.wait(target)
@@ -259,11 +272,13 @@ mod tests {
             client_key: None,
             project: "harvest".into(),
             default_image: "ubuntu:24.04".into(),
+            default_user: "root".into(),
             default_idle_timeout_secs: 600,
             max_containers: 20,
             ca_cert: None,
             insecure: false,
             server_fingerprint: None,
+            image_presets: std::collections::HashMap::new(),
         }
     }
 
