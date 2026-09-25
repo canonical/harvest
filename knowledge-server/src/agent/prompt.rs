@@ -618,4 +618,59 @@ mod tests {
         assert!(prompt.contains("written in your own words"));
     }
 
+    #[test]
+    fn collocate_prompt_contains_image_selection_guidance() {
+        let prompt = system_prompt(true);
+        assert!(prompt.contains("Choosing the container image"));
+        assert!(prompt.contains("ubuntu:24.04"));
+    }
+
+    #[test]
+    fn collocate_prompt_contains_command_batching_guidance() {
+        let prompt = system_prompt(true);
+        assert!(prompt.contains("Batching commands"));
+        assert!(prompt.contains("sh"));
+    }
+
+    #[test]
+    fn collocate_prompt_contains_error_recovery_guidance() {
+        let prompt = system_prompt(true);
+        assert!(prompt.contains("Handling failures"));
+        assert!(prompt.contains("fix it and retry"));
+    }
+
+    #[test]
+    fn collocate_prompt_contains_verification_requirement() {
+        let prompt = system_prompt(true);
+        assert!(prompt.contains("Verify results"));
+        assert!(prompt.contains("not a recipe"));
+    }
+
+    #[test]
+    fn collocate_prompt_contains_run_vs_session_decision_rule() {
+        let prompt = system_prompt(true);
+        assert!(prompt.contains("Choosing between run and create_session"));
+        assert!(prompt.contains("collocate_run"));
+        assert!(prompt.contains("collocate_create_session"));
+    }
+
+    #[test]
+    fn collocate_prompt_contains_container_reuse_guidance() {
+        let prompt = system_prompt(true);
+        assert!(prompt.contains("Container reuse"));
+        assert!(prompt.contains("collocate_list_containers"));
+    }
+
+    #[test]
+    fn collocate_prompt_mentions_script_parameter() {
+        let prompt = system_prompt(true);
+        assert!(prompt.contains("script"));
+    }
+
+    #[test]
+    fn collocate_prompt_disabled_when_collocate_off() {
+        let prompt = system_prompt(false);
+        assert!(!prompt.contains("## Collocate Containers"));
+    }
+
 }
