@@ -89,22 +89,27 @@ impl Tool for CollocateRunTool {
                         "description": "Execution timeout in seconds (default 120, max 600)",
                         "default": 120
                     }
-                },
-                "required": ["command"]
+                }
             }),
         }
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        let command = params["command"]
+        let script = optional_str(&params, "script");
+        let command: Vec<String> = params["command"]
             .as_array()
-            .ok_or_else(|| anyhow!("command must be an array"))?
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect::<Vec<_>>();
-        if command.is_empty() {
-            anyhow::bail!("command must not be empty");
-        }
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let argv: Vec<String> = if let Some(s) = &script {
+            if !command.is_empty() {
+                anyhow::bail!("provide either 'command' or 'script', not both");
+            }
+            vec!["sh".into(), "-c".into(), s.clone()]
+        } else if command.is_empty() {
+            anyhow::bail!("either 'command' or 'script' is required");
+        } else {
+            command
+        };
         let image = optional_str(&params, "image");
         let workdir = optional_str(&params, "workdir");
         let env: Vec<(String, String)> = params["env"]
@@ -134,7 +139,7 @@ impl Tool for CollocateRunTool {
         let id = self.handle.create_container(&name, opts).await?;
         let id_str = id.to_string();
         self.handle.wait_ready(&id_str, std::time::Duration::from_secs(15)).await;
-        let argv_refs: Vec<&str> = command.iter().map(|s| s.as_str()).collect();
+        let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
         let exec_opts = ExecOptions {
             timeout_secs: Some(timeout_secs),
             ..ExecOptions::new()
@@ -190,7 +195,11 @@ impl Tool for CollocateCreateSessionTool {
                     "command": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Command to run as the container's main process. Omit for a sleep/idle container."
+                        "description": "The command to execute as argv array. Mutually exclusive with 'script'."
+                    },
+                    "script": {
+                        "type": "string",
+                        "description": "A shell script to run with sh -c. Use this instead of 'command' when you need to chain multiple commands (&&, pipes, loops). Example: \"apt-get update && apt-get install -y git && make test\". Mutually exclusive with 'command'."
                     },
                     "env": {
                         "type": "object",
