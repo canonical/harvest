@@ -36,7 +36,7 @@ use crate::machines::{
     },
     MachineRegistry,
 };
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 use crate::projects::handlers::{self as proj_handlers, ProjectState};
 use crate::auth::user_keys::UserKeyStore;
 use crate::ingestion::IngestionRegistry;
@@ -64,18 +64,15 @@ pub async fn resolve_user_llm(
 
 #[derive(Clone)]
 pub struct GraphState {
-    pub neo4j: Arc<Neo4jClient>,
+    pub db: Arc<Db>,
     pub cache: Arc<GraphCache>,
     pub ingestion: IngestionRegistry,
-    pub neo4j_uri: String,
-    pub neo4j_user: String,
-    pub neo4j_password: String,
 }
 
 #[derive(Clone)]
 pub struct QueryState {
     pub agent: Arc<Agent>,
-    pub neo4j: Option<Arc<Neo4jClient>>,
+    pub db: Option<Arc<Db>>,
     pub llm: Arc<dyn LlmProvider>,
     pub llm_configs: Arc<Vec<LlmProviderConfig>>,
     pub user_key_store: Option<Arc<UserKeyStore>>,
@@ -88,10 +85,7 @@ pub struct QueryState {
 #[derive(Clone)]
 pub struct AppState {
     pub agent:            Arc<Agent>,
-    pub neo4j:            Arc<Neo4jClient>,
-    pub neo4j_uri:        String,
-    pub neo4j_user:       String,
-    pub neo4j_password:   String,
+    pub db:               Arc<Db>,
     pub ingestion:        IngestionRegistry,
     pub docs_dir:         Option<Arc<PathBuf>>,
     pub auth:             Arc<AuthConfig>,
@@ -103,16 +97,19 @@ pub struct AppState {
     pub llm_configs:      Arc<Vec<LlmProviderConfig>>,
     pub user_key_store:   Option<Arc<UserKeyStore>>,
     pub lxd:              Option<Arc<LxdClient>>,
+    pub collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
     pub pricing:          Arc<crate::cost::PricingTable>,
 }
 
 #[derive(Clone)]
 pub struct ProjectAgentBuilder {
     pub llm:                        Arc<dyn LlmProvider>,
-    pub neo4j:                      Arc<Neo4jClient>,
+    pub db:                         Arc<Db>,
     pub registry:                   Arc<MachineRegistry>,
     pub skills:                     Arc<SkillStore>,
     pub lxd:                        Option<Arc<LxdClient>>,
+    pub collocate:                  Option<crate::collocate::client::CollocateHandle>,
+    pub collocate_registry:         Arc<crate::collocate::sessions::SessionContainerRegistry>,
     pub server_url:                 String,
     pub max_iterations:             usize,
     pub compaction_threshold_chars: usize,
@@ -120,8 +117,8 @@ pub struct ProjectAgentBuilder {
 }
 
 impl ProjectAgentBuilder {
-    fn base_tools(&self, project_id: String) -> Vec<Box<dyn tool::Tool>> {
-        let mut tools = graph_tools::all_tools(Arc::clone(&self.neo4j));
+    fn base_tools(&self, project_id: String, conversation_id: String) -> Vec<Box<dyn tool::Tool>> {
+        let mut tools = graph_tools::all_tools(Arc::clone(&self.db));
         tools.push(Box::new(machine_tools::ListAgentsTool {
             registry:   Arc::clone(&self.registry),
             project_id: project_id.clone(),
@@ -140,54 +137,89 @@ impl ProjectAgentBuilder {
         }));
         if let Some(lxd) = &self.lxd {
             tools.push(Box::new(lxd_tools::CreateLxdAgentTool {
-                neo4j:      Arc::clone(&self.neo4j),
+                db:      Arc::clone(&self.db),
                 lxd:        Arc::clone(lxd),
                 server_url: self.server_url.clone(),
                 project_id: project_id.clone(),
             }));
         }
         tools.push(Box::new(lxd_tools::DeleteAgentTool {
-            neo4j:      Arc::clone(&self.neo4j),
+            db:      Arc::clone(&self.db),
             lxd:        self.lxd.clone(),
             registry:   Arc::clone(&self.registry),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(port_forward_tools::ListPortForwardsTool {
-            neo4j:      Arc::clone(&self.neo4j),
+            db:      Arc::clone(&self.db),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(port_forward_tools::CreatePortForwardTool {
-            neo4j:      Arc::clone(&self.neo4j),
+            db:      Arc::clone(&self.db),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(port_forward_tools::UpdatePortForwardTool {
-            neo4j:      Arc::clone(&self.neo4j),
+            db:      Arc::clone(&self.db),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(port_forward_tools::DeletePortForwardTool {
-            neo4j:      Arc::clone(&self.neo4j),
+            db:      Arc::clone(&self.db),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(artifact_tools::GenerateArtifactTool {
-            neo4j:      Arc::clone(&self.neo4j),
+            db:      Arc::clone(&self.db),
             project_id: project_id.clone(),
             server_url: self.server_url.clone(),
         }));
         tools.push(Box::new(terraform_tools::RunTerraformPlanTool {
-            neo4j:      Arc::clone(&self.neo4j),
+            db:      Arc::clone(&self.db),
             registry:   Arc::clone(&self.registry),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(terraform_tools::RunTerraformApplyTool {
-            neo4j:      Arc::clone(&self.neo4j),
+            db:      Arc::clone(&self.db),
             registry:   Arc::clone(&self.registry),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(terraform_tools::RunTerraformDestroyTool {
-            neo4j:      Arc::clone(&self.neo4j),
+            db:      Arc::clone(&self.db),
             registry:   Arc::clone(&self.registry),
             project_id: project_id.clone(),
         }));
+        if let Some(handle) = &self.collocate {
+            tools.push(Box::new(crate::collocate::tools::CollocateRunTool {
+                handle: handle.clone(),
+                project_id: project_id.clone(),
+            }));
+            tools.push(Box::new(crate::collocate::tools::CollocateCreateSessionTool {
+                handle: handle.clone(),
+                registry: Arc::clone(&self.collocate_registry),
+                project_id: project_id.clone(),
+                conversation_id: conversation_id.clone(),
+            }));
+            tools.push(Box::new(crate::collocate::tools::CollocateExecTool {
+                handle: handle.clone(),
+                registry: Arc::clone(&self.collocate_registry),
+                project_id: project_id.clone(),
+                conversation_id: conversation_id.clone(),
+            }));
+            tools.push(Box::new(crate::collocate::tools::CollocateDeleteSessionTool {
+                handle: handle.clone(),
+                registry: Arc::clone(&self.collocate_registry),
+                project_id: project_id.clone(),
+                conversation_id: conversation_id.clone(),
+            }));
+            tools.push(Box::new(crate::collocate::tools::CollocateListContainersTool {
+                registry: Arc::clone(&self.collocate_registry),
+                project_id: project_id.clone(),
+                conversation_id: conversation_id.clone(),
+            }));
+            tools.push(Box::new(crate::collocate::tools::CollocateTransferFileTool {
+                handle: handle.clone(),
+                registry: Arc::clone(&self.collocate_registry),
+                project_id: project_id.clone(),
+                conversation_id: conversation_id.clone(),
+            }));
+        }
         tools
     }
 
@@ -196,7 +228,24 @@ impl ProjectAgentBuilder {
     }
 
     pub fn build_with_llm(&self, project_id: String, llm: Arc<dyn LlmProvider>) -> Arc<Agent> {
-        let tools = self.base_tools(project_id);
+        self.build_for_conversation_with_llm(project_id, String::new(), llm)
+    }
+
+    pub fn build_for_conversation(
+        &self,
+        project_id: String,
+        conversation_id: String,
+    ) -> Arc<Agent> {
+        self.build_for_conversation_with_llm(project_id, conversation_id, Arc::clone(&self.llm))
+    }
+
+    pub fn build_for_conversation_with_llm(
+        &self,
+        project_id: String,
+        conversation_id: String,
+        llm: Arc<dyn LlmProvider>,
+    ) -> Arc<Agent> {
+        let tools = self.base_tools(project_id, conversation_id);
         Arc::new(
             Agent::new(llm, tools, self.max_iterations)
                 .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
@@ -220,19 +269,19 @@ impl ProjectAgentBuilder {
         ctx:        &deployments::DeploymentContext,
         llm:        Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        let mut tools = self.base_tools(project_id.clone());
+        let mut tools = self.base_tools(project_id.clone(), String::new());
         tools.push(Box::new(deployment_tools::LinkDeploymentArtifactTool {
-            neo4j:         Arc::clone(&self.neo4j),
+            db:         Arc::clone(&self.db),
             project_id:    project_id.clone(),
             deployment_id: ctx.deployment_id.clone(),
         }));
         tools.push(Box::new(deployment_tools::UpdateProductTemplateTool {
-            neo4j:         Arc::clone(&self.neo4j),
+            db:         Arc::clone(&self.db),
             group_id,
             deployment_id: ctx.deployment_id.clone(),
         }));
         tools.push(Box::new(deployment_tools::SetExecutionPlanTool {
-            neo4j:         Arc::clone(&self.neo4j),
+            db:         Arc::clone(&self.db),
             project_id:    project_id.clone(),
             deployment_id: ctx.deployment_id.clone(),
         }));
@@ -277,7 +326,7 @@ impl ProjectAgentBuilder {
         ctx:        &deployments::DeploymentContext,
         llm:        Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        let mut tools = graph_tools::all_tools(Arc::clone(&self.neo4j));
+        let mut tools = graph_tools::all_tools(Arc::clone(&self.db));
         tools.push(Box::new(skill_tools::ListSkillsTool {
             store:      Arc::clone(&self.skills),
             project_id: project_id.clone(),
@@ -297,12 +346,9 @@ impl ProjectAgentBuilder {
 
 pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Router {
     let graph_state = Arc::new(GraphState {
-        neo4j: Arc::clone(&state.neo4j),
+        db: Arc::clone(&state.db),
         cache,
         ingestion: Arc::clone(&state.ingestion),
-        neo4j_uri: state.neo4j_uri.clone(),
-        neo4j_user: state.neo4j_user.clone(),
-        neo4j_password: state.neo4j_password.clone(),
     });
 
     let http = reqwest::Client::new();
@@ -321,7 +367,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         None
     };
     let auth_state = Arc::new(AuthState {
-        neo4j:          Arc::clone(&state.neo4j),
+        db:          Arc::clone(&state.db),
         config:         Arc::clone(&state.auth),
         ui:             Arc::clone(&state.ui),
         http,
@@ -334,11 +380,11 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let jwt_secret = Arc::new(state.auth.jwt_secret.clone());
 
     let conv_state = Arc::new(ConvState {
-        neo4j: Arc::clone(&state.neo4j),
+        db: Arc::clone(&state.db),
     });
 
     let chat_layout_state = Arc::new(ChatLayoutState {
-        neo4j: Arc::clone(&state.neo4j),
+        db: Arc::clone(&state.db),
     });
 
     let public_router = Router::new()
@@ -357,7 +403,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
 
     let query_state = Arc::new(QueryState {
         agent: Arc::clone(&state.agent),
-        neo4j: Some(Arc::clone(&state.neo4j)),
+        db: Some(Arc::clone(&state.db)),
         llm: Arc::clone(&state.llm),
         llm_configs: Arc::clone(&state.llm_configs),
         user_key_store: state.user_key_store.clone(),
@@ -418,16 +464,17 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .with_state(Arc::clone(&chat_layout_state));
 
     let project_state = Arc::new(ProjectState::new(
-        Arc::clone(&state.neo4j),
+        Arc::clone(&state.db),
         Arc::clone(&state.agent),
         Arc::clone(&state.agent_builder),
         Arc::clone(&state.llm),
         Arc::clone(&state.llm_configs),
         state.user_key_store.clone(),
         Arc::clone(&state.pricing),
+        Arc::clone(&state.collocate_registry),
     ));
 
-    let skill_store = Arc::new(SkillStore::new(Arc::clone(&state.neo4j)));
+    let skill_store = Arc::new(SkillStore::new(Arc::clone(&state.db)));
 
     let project_router = Router::new()
         .route("/groups",       get(proj_handlers::list_my_groups))
@@ -516,7 +563,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
 
     let machine_state = Arc::new(MachineState {
         registry:    Arc::clone(&state.machine_registry),
-        neo4j:       Some(Arc::clone(&state.neo4j)),
+        db:       Some(Arc::clone(&state.db)),
         binary_path: state.binary_path.clone(),
         server_url,
         lxd:         state.lxd.clone(),
@@ -530,7 +577,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .route("/skills/:id", get(skill_handlers::get_global_skill))
         .with_state(Arc::clone(&skill_store));
 
-    let artifact_state = Arc::new(ArtifactState { neo4j: Arc::clone(&state.neo4j) });
+    let artifact_state = Arc::new(ArtifactState { db: Arc::clone(&state.db) });
     let artifact_router = Router::new()
         .route("/artifacts/:id",
                get(artifact_handlers::get_artifact)
