@@ -24,7 +24,7 @@ Confirmations before significant actions ("Shall I …?") use `["Yes", "No"]`.
 Prefer searching the knowledge graph before asking; ask only when the graph cannot resolve it."#
 }
 
-pub fn system_prompt() -> String {
+pub fn system_prompt(collocate_enabled: bool) -> String {
     format!(r#"You are a code analysis assistant. You have access to a Neo4j knowledge graph
 containing the parsed structure of one or more versioned software repositories.
 
@@ -184,6 +184,8 @@ text rather than guessing.
 
 {}
 
+{}
+
 ## Inline Graph Snippets
 
 When an answer would benefit from a visual overview of how a few symbols relate
@@ -218,7 +220,47 @@ Format (JSON inside the fence):
 
 Valid `kind` values: function, method, class, struct, trait, interface, enum, module, impl, type.
 Valid `relation` values: calls, uses, inherits, implements, contains, embeds.
-"#, ask_user_guidance())
+"#, collocate_prompt_section(collocate_enabled), ask_user_guidance())
+}
+
+fn collocate_prompt_section(enabled: bool) -> &'static str {
+    if enabled {
+        r##"## Collocate Containers
+
+You have access to collocate tools that run containers directly on the Collocate
+daemon — you do NOT need connected agents, LXD, or Docker. When the user asks
+to run, start, or test something in a container, use collocate tools directly
+instead of generating Docker scripts, bash artifacts, or searching for agents.
+
+- `collocate_run` — run a single command in an ephemeral container that is created and removed for this call. Use for one-off tasks (build, lint, test, curl verification).
+- `collocate_create_session` — create a session container that stays alive across multiple `collocate_exec` calls. Use for persistent services (web servers, databases) or multi-step builds. Set `persistent=true` for long-lived services. Returns the container ID, IP address, and published ports.
+- `collocate_exec` — run a command inside an existing session container. Requires a `container_id` from `collocate_create_session`.
+- `collocate_delete_session` — delete a session container when done. Non-persistent containers are auto-deleted at the end of the response.
+- `collocate_list_containers` — list all session containers in this conversation.
+- `collocate_transfer_file` — write content into a container (`direction: "to"`) or read a file back (`direction: "from"`). Use to copy source files into a container before testing.
+
+Use `publish` to expose container ports (e.g. `["8080:80"]`). Published ports are
+reachable at the Collocate host's IP on the host port. Use `user: "root"` when
+you need to install packages.
+
+**Workflow: Start and verify a service**
+1. `collocate_create_session` with the service image, the service command, and
+   `publish` to expose the port (e.g. nginx with `["8080:80"]`).
+2. `collocate_run` with a curl/image to verify: `["curl", "-s", "http://<host_ip>:<host_port>"]`.
+   The host IP is the Collocate daemon's address.
+3. `collocate_delete_session` when done (or leave persistent if the user wants
+   it running).
+
+**Workflow: Test code from the graph**
+1. Retrieve source with `get_symbol_source`.
+2. `collocate_create_session` with an appropriate image.
+3. `collocate_transfer_file` to write the source files into the container.
+4. `collocate_exec` to compile or run tests.
+5. `collocate_delete_session` when done.
+"##
+    } else {
+        ""
+    }
 }
 
 fn deployment_context_sections(ctx: &crate::deployments::DeploymentContext) -> (String, String, String) {
@@ -360,28 +402,28 @@ mod tests {
 
     #[test]
     fn system_prompt_contains_context_reuse_rule() {
-        let prompt = system_prompt();
+        let prompt = system_prompt(false);
         assert!(prompt.contains("check whether the conversation history already contains"));
         assert!(prompt.contains("answer directly from context"));
     }
 
     #[test]
     fn system_prompt_contains_parallel_research_guidance() {
-        let prompt = system_prompt();
+        let prompt = system_prompt(false);
         assert!(prompt.contains("propose_parallel_research"));
         assert!(prompt.contains("INDEPENDENT"));
     }
 
     #[test]
     fn system_prompt_contains_anti_narration_rule() {
-        let prompt = system_prompt();
+        let prompt = system_prompt(false);
         assert!(prompt.contains("Never mention tool"));
         assert!(prompt.contains("Never narrate which tool you are about to call"));
     }
 
     #[test]
     fn system_prompt_pre_tool_call_rule_does_not_mention_why() {
-        let prompt = system_prompt();
+        let prompt = system_prompt(false);
         assert!(prompt.contains("what you are looking for or trying to accomplish"));
         assert!(!prompt.contains("explaining what you are looking for and why"));
     }
