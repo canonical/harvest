@@ -120,35 +120,33 @@ impl Tool for CollocateRunTool {
             .unwrap_or(120)
             .min(MAX_EXEC_TIMEOUT_SECS);
 
-        let image_for_opts = image.clone().or_else(|| Some(self.handle.config().default_image.clone()));
+        let resolved_image = image.clone().unwrap_or_else(|| self.handle.config().default_image.clone());
         let name = format!("hv-ephemeral-{}", Utc::now().timestamp_millis());
         let opts = CreateContainerOpts {
-            image: image_for_opts,
-            command,
+            image: Some(resolved_image.clone()),
+            command: vec!["sleep".into(), "infinity".into()],
             env,
             workdir,
+            user: Some(self.handle.config().default_user.clone()),
             ..Default::default()
         };
 
         let id = self.handle.create_container(&name, opts).await?;
-        let argv: Vec<String> = params["command"]
-            .as_array()
-            .ok_or_else(|| anyhow!("command must be an array"))?
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
-        let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+        let id_str = id.to_string();
+        self.handle.wait_ready(&id_str, std::time::Duration::from_secs(15)).await;
+        let argv_refs: Vec<&str> = command.iter().map(|s| s.as_str()).collect();
         let exec_opts = ExecOptions {
             timeout_secs: Some(timeout_secs),
             ..ExecOptions::new()
         };
-        let result = self.handle.exec(&id.to_string(), &argv_refs, &exec_opts, Vec::new()).await;
-        let _ = self.handle.rm_force(&id.to_string()).await;
+        let result = self.handle.exec(&id_str, &argv_refs, &exec_opts, Vec::new()).await;
+        let _ = self.handle.rm_force(&id_str).await;
         let result = result?;
         Ok(serde_json::to_string_pretty(&json!({
             "stdout": result.stdout,
             "stderr": result.stderr,
             "exit_code": result.exit_code,
+            "image_used": resolved_image,
         }))?)
     }
 
