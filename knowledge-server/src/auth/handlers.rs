@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::{jwt, oidc, password, AuthState, OAuthSession, TOKEN_COOKIE};
 use crate::config::{GoogleConfig, OidcConfig};
+use harvest_db::Db;
 
 const SESSION_TTL_SECS: u64 = 600; // 10 minutes
 
@@ -76,22 +77,17 @@ pub async fn register(
 
     let hash = password::hash(&body.password).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
 
-    let rows = state.neo4j.query_read(
-        "MATCH (existing:User)
-         WITH count(existing) AS n
-         CREATE (u:User {
-           id: $id, email: $email, name: $name,
-           password_hash: $password_hash, provider: 'local',
-           role: CASE WHEN n = 0 THEN 'admin' ELSE 'regular' END,
-           created_at: $created_at
-         })
-         RETURN u.id AS id, u.email AS email, u.name AS name, u.role AS role",
+    let rows = insert_user(&state.db,
+        "INSERT INTO users (id, email, name, password_hash, provider, role, created_at)
+         VALUES ($id, $email, $name, $password_hash, 'local',
+                 CASE WHEN EXISTS (SELECT 1 FROM users) THEN 'regular' ELSE 'admin' END, $created_at)
+         RETURNING id, email, name, role",
         json!({ "id": id, "email": body.email, "name": body.name,
                 "password_hash": hash, "created_at": now }),
     ).await.map_err(|e| {
-        if e.to_string().contains("already exists") || e.to_string().contains("ConstraintValidationFailed") {
+        if harvest_db::is_unique_violation(&e) {
             err(StatusCode::CONFLICT, "email already registered")
         } else {
             err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
@@ -105,12 +101,24 @@ pub async fn register(
     Ok((jar.add(make_token_cookie(token)), Json(json!({ "ok": true }))))
 }
 
+/// Serialises user creation so exactly one account can become the first admin.
+async fn insert_user(db: &Db, sql: &str, params: Value) -> anyhow::Result<Vec<Value>> {
+    let tx = db.begin().await?;
+    tx.execute("SELECT pg_advisory_xact_lock(hashtext('harvest:first-user'))", json!({})).await?;
+    let rows = tx.query(sql, params).await?;
+    tx.commit().await?;
+    Ok(rows)
+}
+
 async fn assign_default_groups(state: &AuthState, user_id: &str) -> Result<(), ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (u:User {id: $id})
-         MATCH (g:Group {is_default: true})
-         MERGE (u)-[:MEMBER_OF]->(g)
-         RETURN u.id AS id",
+    let rows = state.db.query(
+        "WITH defaults AS (SELECT id FROM groups WHERE is_default),
+         inserted AS (
+             INSERT INTO user_groups (user_id, group_id)
+             SELECT u.id, d.id FROM users u CROSS JOIN defaults d WHERE u.id = $id
+             ON CONFLICT DO NOTHING
+         )
+         SELECT id FROM defaults",
         json!({ "id": user_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if !rows.is_empty() {
@@ -118,11 +126,14 @@ async fn assign_default_groups(state: &AuthState, user_id: &str) -> Result<(), A
     }
 
     let group_id = Uuid::new_v4().to_string();
-    state.neo4j.query_read(
-        "MATCH (u:User {id: $uid})
-         CREATE (g:Group {id: $gid, name: u.name + \"'s workspace\", description: '', is_default: false})
-         CREATE (u)-[:MEMBER_OF]->(g)
-         RETURN g.id AS id",
+    state.db.query(
+        "WITH g AS (
+             INSERT INTO groups (id, name, description, is_default, created_at)
+             SELECT $gid, u.name || '''s workspace', '', false, now() FROM users u WHERE u.id = $uid
+             RETURNING id
+         )
+         INSERT INTO user_groups (user_id, group_id) SELECT $uid, id FROM g
+         RETURNING group_id AS id",
         json!({ "uid": user_id, "gid": group_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(())
@@ -142,10 +153,9 @@ pub async fn login(
     if !state.config.allow_local_login {
         return Err(err(StatusCode::FORBIDDEN, "local login is disabled"));
     }
-    let rows = state.neo4j.query_read(
-        "MATCH (u:User {email: $email, provider: 'local'})
-         RETURN u.id AS id, u.email AS email, u.name AS name,
-                u.role AS role, u.password_hash AS password_hash",
+    let rows = state.db.query(
+        "SELECT id, email, name, role, password_hash
+         FROM users WHERE email = $email AND provider = 'local'",
         json!({ "email": body.email }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -182,11 +192,9 @@ pub async fn me(
     jar: CookieJar,
 ) -> Result<impl IntoResponse, ApiError> {
     let claims = extract_claims(&state.config.jwt_secret, &jar)?;
-    let rows = state.neo4j.query_read(
-        "MATCH (u:User {id: $id})
-         RETURN u.last_project_id AS last_project_id,
-                u.last_llm_provider_id AS last_llm_provider_id,
-                u.last_llm_model AS last_llm_model",
+    let rows = state.db.query(
+        "SELECT last_project_id, last_llm_provider_id, last_llm_model
+         FROM users WHERE id = $id",
         json!({ "id": claims.sub }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next();
@@ -219,27 +227,19 @@ pub async fn update_me(
 ) -> Result<impl IntoResponse, ApiError> {
     let claims = extract_claims(&state.config.jwt_secret, &jar)?;
 
-    let mut sets = Vec::new();
-    let mut params = json!({ "id": claims.sub });
-
-    if let Some(pid) = body.last_project_id {
-        sets.push("u.last_project_id = $pid");
-        params["pid"] = json!(pid);
-    }
-    if let Some(provider_id) = body.last_llm_provider_id {
-        sets.push("u.last_llm_provider_id = $provider_id");
-        params["provider_id"] = json!(provider_id);
-    }
-    if let Some(model) = body.last_llm_model {
-        sets.push("u.last_llm_model = $model");
-        params["model"] = json!(model);
-    }
-
-    if !sets.is_empty() {
-        let cypher = format!("MATCH (u:User {{id: $id}}) SET {} RETURN u.id", sets.join(", "));
-        state.neo4j.query_read(&cypher, params).await
-            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    }
+    state.db.execute(
+        "UPDATE users SET
+             last_project_id      = COALESCE($pid, last_project_id),
+             last_llm_provider_id = COALESCE($provider_id, last_llm_provider_id),
+             last_llm_model       = COALESCE($model, last_llm_model)
+         WHERE id = $id",
+        json!({
+            "id": claims.sub,
+            "pid": body.last_project_id,
+            "provider_id": body.last_llm_provider_id,
+            "model": body.last_llm_model,
+        }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -300,17 +300,14 @@ pub async fn google_callback(
         .map_err(|_| err(StatusCode::BAD_GATEWAY, "failed to fetch Google user info"))?;
 
     let id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
 
-    let rows = state.neo4j.query_read(
-        "MATCH (existing:User)
-         WITH count(existing) AS n
-         MERGE (u:User {google_id: $google_id})
-         ON CREATE SET u.id = $id, u.email = $email, u.name = $name,
-           u.provider = 'google', u.created_at = $created_at,
-           u.role = CASE WHEN n = 0 THEN 'admin' ELSE 'regular' END
-         ON MATCH SET u.email = $email, u.name = $name
-         RETURN u.id AS id, u.email AS email, u.name AS name, u.role AS role, u.id = $id AS is_new",
+    let rows = insert_user(&state.db,
+        "INSERT INTO users (id, google_id, email, name, provider, created_at, role)
+         VALUES ($id, $google_id, $email, $name, 'google', $created_at,
+                 CASE WHEN EXISTS (SELECT 1 FROM users) THEN 'regular' ELSE 'admin' END)
+         ON CONFLICT (google_id) DO UPDATE SET email = EXCLUDED.email, name = EXCLUDED.name
+         RETURNING id, email, name, role, (id = $id) AS is_new",
         json!({
             "google_id": google_user.id,
             "id": id,
@@ -431,18 +428,14 @@ pub async fn oidc_callback(
     });
 
     let id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
 
-    let rows = state.neo4j.query_read(
-        "MATCH (existing:User)
-         WITH count(existing) AS n
-         MERGE (u:User {email: $email})
-         ON CREATE SET u.id = $id, u.name = $name,
-           u.provider = 'oidc', u.created_at = $created_at,
-           u.role = CASE WHEN n = 0 THEN 'admin' ELSE 'regular' END
-         ON MATCH SET u.name = $name
-         SET u.oidc_sub = $oidc_sub
-         RETURN u.id AS id, u.email AS email, u.name AS name, u.role AS role, u.id = $id AS is_new",
+    let rows = insert_user(&state.db,
+        "INSERT INTO users (id, email, name, provider, created_at, role, oidc_sub)
+         VALUES ($id, $email, $name, 'oidc', $created_at,
+                 CASE WHEN EXISTS (SELECT 1 FROM users) THEN 'regular' ELSE 'admin' END, $oidc_sub)
+         ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, oidc_sub = EXCLUDED.oidc_sub
+         RETURNING id, email, name, role, (id = $id) AS is_new",
         serde_json::json!({
             "oidc_sub": user_info.sub,
             "id": id,

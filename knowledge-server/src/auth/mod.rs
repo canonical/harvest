@@ -5,7 +5,6 @@ pub mod password;
 pub mod tui;
 pub mod user_keys;
 
-use anyhow::Result;
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::IntoResponse, Json};
 use dashmap::DashMap;
 use serde_json::json;
@@ -13,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::config::{AuthConfig, UiConfig};
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 
 pub use oidc::OidcEndpoints;
 pub use tui::TuiAuthMap;
@@ -29,7 +28,7 @@ pub type OAuthSessions = Arc<DashMap<String, OAuthSession>>;
 
 #[derive(Clone)]
 pub struct AuthState {
-    pub neo4j:          Arc<Neo4jClient>,
+    pub db:          Arc<Db>,
     pub config:         Arc<AuthConfig>,
     pub ui:             Arc<UiConfig>,
     pub http:           reqwest::Client,
@@ -37,15 +36,6 @@ pub struct AuthState {
     pub oauth_sessions: OAuthSessions,
     pub lxd_enabled:    bool,
     pub tui_auth:       TuiAuthMap,
-}
-
-pub async fn setup_constraints(neo4j: &Neo4jClient) -> Result<()> {
-    neo4j.run("CREATE CONSTRAINT user_id IF NOT EXISTS FOR (u:User) REQUIRE u.id IS UNIQUE").await?;
-    neo4j.run("CREATE CONSTRAINT user_email IF NOT EXISTS FOR (u:User) REQUIRE u.email IS UNIQUE").await?;
-    neo4j.run("CREATE CONSTRAINT user_google_id IF NOT EXISTS FOR (u:User) REQUIRE u.google_id IS UNIQUE").await?;
-    neo4j.run("CREATE CONSTRAINT user_oidc_sub IF NOT EXISTS FOR (u:User) REQUIRE u.oidc_sub IS UNIQUE").await?;
-    neo4j.run("CREATE CONSTRAINT group_id IF NOT EXISTS FOR (g:Group) REQUIRE g.id IS UNIQUE").await?;
-    Ok(())
 }
 
 fn token_from_request(req: &Request) -> Option<String> {
