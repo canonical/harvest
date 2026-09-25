@@ -512,8 +512,9 @@ impl Tool for CollocateListContainersTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "collocate_list_containers".into(),
-            description: "List all collocate session containers in this conversation. Returns \
-                          container IDs, names, IP addresses, states, and published ports."
+            description: "List all collocate session containers in this conversation. Call this \
+                          BEFORE creating a new container to check if an existing one can be reused. \
+                          Returns container IDs, names, IP addresses, states, and published ports."
                 .into(),
             parameters: json!({
                 "type": "object",
