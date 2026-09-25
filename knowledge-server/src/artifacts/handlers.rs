@@ -10,7 +10,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::jwt::Claims;
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 use super::bundle;
 
 type ApiError = (StatusCode, Json<Value>);
@@ -21,7 +21,7 @@ fn err(status: StatusCode, msg: &str) -> ApiError {
 
 #[derive(Clone)]
 pub struct ArtifactState {
-    pub neo4j: Arc<Neo4jClient>,
+    pub db: Arc<Db>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,18 +92,19 @@ pub(crate) fn sanitize_filename(title: &str) -> String {
 }
 
 pub async fn require_artifact_access(
-    neo4j: &Neo4jClient,
+    db: &Db,
     user_id: &str,
     user_role: &str,
     artifact_id: &str,
 ) -> Result<Value, ApiError> {
-    let rows = neo4j.query_read(
-        "MATCH (g:Group)-[:HAS_PROJECT]->(p:Project)-[:HAS_ARTIFACT]->(a:Artifact {id: $aid})
-         WHERE $role = 'admin'
-            OR EXISTS { MATCH (:User {id: $uid})-[:MEMBER_OF]->(g) }
-         RETURN a.id AS id, a.title AS title, a.kind AS kind, a.content AS content,
-                a.created_by AS created_by, a.created_at AS created_at, a.updated_at AS updated_at,
-                p.id AS project_id",
+    let rows = db.query(
+        "SELECT a.id, a.title, a.kind, a.content, a.created_by, a.created_at, a.updated_at,
+                p.id AS project_id
+         FROM artifacts a
+         JOIN projects p ON p.id = a.project_id
+         WHERE a.id = $aid
+           AND ($role = 'admin' OR EXISTS (
+                 SELECT 1 FROM user_groups ug WHERE ug.user_id = $uid AND ug.group_id = p.group_id))",
         json!({ "aid": artifact_id, "uid": user_id, "role": user_role }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -112,7 +113,7 @@ pub async fn require_artifact_access(
 }
 
 pub async fn create_artifact(
-    neo4j: &Neo4jClient,
+    db: &Db,
     project_id: &str,
     kind: ArtifactKind,
     title: &str,
@@ -123,15 +124,11 @@ pub async fn create_artifact(
     anyhow::ensure!(!title.is_empty(), "title is required");
     validate_content_for_kind(kind, content).map_err(|e| anyhow::anyhow!(e))?;
     let id  = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "MATCH (p:Project {id: $pid})
-         CREATE (a:Artifact {
-             id: $id, title: $title, kind: $kind, content: $content,
-             created_by: $created_by, created_at: $now, updated_at: $now
-         })
-         CREATE (p)-[:HAS_ARTIFACT]->(a)
-         RETURN a.id AS id",
+    let now = harvest_db::now_rfc3339();
+    db.query(
+        "INSERT INTO artifacts (id, project_id, title, kind, content, created_by, created_at, updated_at)
+         VALUES ($id, $pid, $title, $kind, $content, $created_by, $now, $now)
+         RETURNING id",
         json!({
             "pid": project_id, "id": id, "title": title, "kind": kind.as_str(),
             "content": content, "created_by": created_by, "now": now,
@@ -141,7 +138,7 @@ pub async fn create_artifact(
 }
 
 pub async fn update_artifact(
-    neo4j: &Neo4jClient,
+    db: &Db,
     artifact_id: &str,
     existing_kind: ArtifactKind,
     kind: ArtifactKind,
@@ -149,11 +146,11 @@ pub async fn update_artifact(
     content: &str,
 ) -> anyhow::Result<Value> {
     let title = validate_update(existing_kind, kind, title, content).map_err(|e| anyhow::anyhow!(e))?;
-    let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "MATCH (:Project)-[:HAS_ARTIFACT]->(a:Artifact {id: $id})
-         SET a.title = $title, a.content = $content, a.updated_at = $now
-         RETURN a.id AS id",
+    let now = harvest_db::now_rfc3339();
+    db.query(
+        "UPDATE artifacts SET title = $title, content = $content, updated_at = $now
+         WHERE id = $id
+         RETURNING id",
         json!({ "id": artifact_id, "title": title, "content": content, "now": now }),
     ).await?;
     Ok(json!({ "id": artifact_id, "title": title, "kind": kind.as_str(), "updated_at": now }))
@@ -172,25 +169,25 @@ pub async fn update_artifact_route(
     Path(artifact_id): Path<String>,
     Json(body): Json<UpdateArtifactBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let row = require_artifact_access(&state.neo4j, &user.sub, &user.role, &artifact_id).await?;
+    let row = require_artifact_access(&state.db, &user.sub, &user.role, &artifact_id).await?;
     let existing_kind = ArtifactKind::parse(row["kind"].as_str().unwrap_or(""))
         .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let kind = ArtifactKind::parse(&body.kind)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "kind must be 'markdown', 'pdf', 'terraform', 'terragrunt', or 'bash'"))?;
-    let result = update_artifact(&state.neo4j, &artifact_id, existing_kind, kind, &body.title, &body.content)
+    let result = update_artifact(&state.db, &artifact_id, existing_kind, kind, &body.title, &body.content)
         .await
         .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
     Ok(Json(result))
 }
 
 pub async fn get_artifact_in_project(
-    neo4j: &Neo4jClient,
+    db: &Db,
     project_id: &str,
     artifact_id: &str,
 ) -> anyhow::Result<Option<Value>> {
-    let rows = neo4j.query_read(
-        "MATCH (p:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact {id: $aid})
-         RETURN a.id AS id, a.title AS title, a.kind AS kind, a.content AS content",
+    let rows = db.query(
+        "SELECT id, title, kind, content FROM artifacts
+         WHERE id = $aid AND project_id = $pid",
         json!({ "pid": project_id, "aid": artifact_id }),
     ).await?;
     Ok(rows.into_iter().next())
@@ -201,7 +198,7 @@ pub async fn get_artifact(
     State(state): State<Arc<ArtifactState>>,
     Path(artifact_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let row = require_artifact_access(&state.neo4j, &user.sub, &user.role, &artifact_id).await?;
+    let row = require_artifact_access(&state.db, &user.sub, &user.role, &artifact_id).await?;
     Ok(Json(row))
 }
 
@@ -210,9 +207,9 @@ pub async fn delete_artifact(
     State(state): State<Arc<ArtifactState>>,
     Path(artifact_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_artifact_access(&state.neo4j, &user.sub, &user.role, &artifact_id).await?;
-    state.neo4j.query_read(
-        "MATCH (:Project)-[:HAS_ARTIFACT]->(a:Artifact {id: $aid}) DETACH DELETE a",
+    require_artifact_access(&state.db, &user.sub, &user.role, &artifact_id).await?;
+    state.db.query(
+        "DELETE FROM artifacts WHERE id = $aid",
         json!({ "aid": artifact_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(StatusCode::NO_CONTENT)
@@ -229,7 +226,7 @@ pub async fn download_artifact(
     Path(artifact_id): Path<String>,
     Query(query): Query<DownloadArtifactQuery>,
 ) -> Response {
-    let row = match require_artifact_access(&state.neo4j, &user.sub, &user.role, &artifact_id).await {
+    let row = match require_artifact_access(&state.db, &user.sub, &user.role, &artifact_id).await {
         Ok(row) => row,
         Err(e) => return e.into_response(),
     };

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::jwt::Claims;
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 
 type ApiError = (StatusCode, Json<Value>);
 
@@ -29,7 +29,7 @@ fn scope_id(project_id: Option<String>) -> String {
 
 #[derive(Clone)]
 pub struct ChatLayoutState {
-    pub neo4j: Arc<Neo4jClient>,
+    pub db: Arc<Db>,
 }
 
 fn parse_tree(row: &Value) -> Value {
@@ -44,11 +44,11 @@ pub async fn get_current(
     State(state): State<Arc<ChatLayoutState>>,
     Query(params): Query<ProjectScopeParams>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (:User {id: $uid})-[:HAS_CHAT_LAYOUT]->(l:ChatLayout {kind: 'current', project_id: $pid})
-         RETURN l.tree AS tree, l.updated_at AS updated_at",
+    let rows = state.db.query(
+        "SELECT tree, updated_at FROM chat_layouts
+         WHERE user_id = $uid AND kind = 'current' AND project_id = $pid",
         json!({ "uid": user.sub, "pid": scope_id(params.project_id) }),
-    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: neo4j query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
+    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: db query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
 
     let Some(row) = rows.into_iter().next() else {
         return Ok(Json(Value::Null));
@@ -71,20 +71,20 @@ pub async fn put_current(
     Query(params): Query<ProjectScopeParams>,
     Json(body): Json<SaveCurrentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let now       = chrono::Utc::now().to_rfc3339();
+    let now       = harvest_db::now_rfc3339();
     let id        = Uuid::new_v4().to_string();
     let tree_json = serde_json::to_string(&body.tree)
         .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid tree"))?;
 
-    state.neo4j.query_read(
-        "MATCH (u:User {id: $uid})
-         MERGE (u)-[:HAS_CHAT_LAYOUT]->(l:ChatLayout {kind: 'current', project_id: $pid})
-         ON CREATE SET l.id = $id, l.tree = $tree, l.created_at = $now, l.updated_at = $now
-         ON MATCH  SET l.tree = $tree, l.updated_at = $now
-         RETURN l.id AS id",
+    state.db.query(
+        "INSERT INTO chat_layouts (id, user_id, kind, project_id, tree, created_at, updated_at)
+         VALUES ($id, $uid, 'current', $pid, $tree, $now, $now)
+         ON CONFLICT (user_id, project_id) WHERE kind = 'current'
+             DO UPDATE SET tree = EXCLUDED.tree, updated_at = EXCLUDED.updated_at
+         RETURNING id",
         json!({ "uid": user.sub, "id": id, "pid": scope_id(params.project_id), "tree": tree_json, "now": now }),
     ).await.map_err(|e| {
-        tracing::error!(error = %e, "put_current: neo4j query failed");
+        tracing::error!(error = %e, "put_current: db query failed");
         err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
     })?;
 
@@ -96,12 +96,12 @@ pub async fn list_named(
     State(state): State<Arc<ChatLayoutState>>,
     Query(params): Query<ProjectScopeParams>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (:User {id: $uid})-[:HAS_CHAT_LAYOUT]->(l:ChatLayout {kind: 'named', project_id: $pid})
-         RETURN l.id AS id, l.name AS name, l.tree AS tree, l.updated_at AS updated_at
-         ORDER BY l.updated_at DESC",
+    let rows = state.db.query(
+        "SELECT id, name, tree, updated_at FROM chat_layouts
+         WHERE user_id = $uid AND kind = 'named' AND project_id = $pid
+         ORDER BY updated_at DESC",
         json!({ "uid": user.sub, "pid": scope_id(params.project_id) }),
-    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: neo4j query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
+    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: db query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
 
     let layouts: Vec<Value> = rows.iter().map(|row| json!({
         "id": row.get("id"),
@@ -126,23 +126,19 @@ pub async fn create_named(
     Json(body): Json<CreateNamedBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let id        = Uuid::new_v4().to_string();
-    let now       = chrono::Utc::now().to_rfc3339();
+    let now       = harvest_db::now_rfc3339();
     let tree_json = serde_json::to_string(&body.tree)
         .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid tree"))?;
 
-    state.neo4j.query_read(
-        "MATCH (u:User {id: $uid})
-         CREATE (l:ChatLayout {
-           id: $id, kind: 'named', name: $name, tree: $tree, project_id: $pid,
-           created_at: $now, updated_at: $now
-         })
-         CREATE (u)-[:HAS_CHAT_LAYOUT]->(l)
-         RETURN l.id AS id",
+    state.db.query(
+        "INSERT INTO chat_layouts (id, user_id, kind, name, tree, project_id, created_at, updated_at)
+         VALUES ($id, $uid, 'named', $name, $tree, $pid, $now, $now)
+         RETURNING id",
         json!({
             "uid": user.sub, "id": id, "name": body.name, "tree": tree_json,
             "pid": scope_id(body.project_id), "now": now,
         }),
-    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: neo4j query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
+    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: db query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
 
     Ok((StatusCode::CREATED, Json(json!({ "id": id, "name": body.name, "created_at": now }))))
 }
@@ -152,12 +148,11 @@ pub async fn get_named(
     State(state): State<Arc<ChatLayoutState>>,
     Path(layout_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (:User {id: $uid})-[:HAS_CHAT_LAYOUT]->(l:ChatLayout {id: $lid, kind: 'named'})
-         RETURN l.id AS id, l.name AS name, l.tree AS tree,
-                l.created_at AS created_at, l.updated_at AS updated_at",
+    let rows = state.db.query(
+        "SELECT id, name, tree, created_at, updated_at FROM chat_layouts
+         WHERE id = $lid AND user_id = $uid AND kind = 'named'",
         json!({ "uid": user.sub, "lid": layout_id }),
-    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: neo4j query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
+    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: db query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
 
     let row = rows.into_iter().next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
@@ -183,16 +178,16 @@ pub async fn update_named(
     Path(layout_id): Path<String>,
     Json(body): Json<UpdateNamedBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let now       = chrono::Utc::now().to_rfc3339();
+    let now       = harvest_db::now_rfc3339();
     let tree_json = serde_json::to_string(&body.tree)
         .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid tree"))?;
 
-    state.neo4j.query_read(
-        "MATCH (:User {id: $uid})-[:HAS_CHAT_LAYOUT]->(l:ChatLayout {id: $lid, kind: 'named'})
-         SET l.name = $name, l.tree = $tree, l.updated_at = $now
-         RETURN l.id AS id",
+    state.db.query(
+        "UPDATE chat_layouts SET name = $name, tree = $tree, updated_at = $now
+         WHERE id = $lid AND user_id = $uid AND kind = 'named'
+         RETURNING id",
         json!({ "uid": user.sub, "lid": layout_id, "name": body.name, "tree": tree_json, "now": now }),
-    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: neo4j query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
+    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: db query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -202,11 +197,10 @@ pub async fn delete_named(
     State(state): State<Arc<ChatLayoutState>>,
     Path(layout_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.neo4j.query_read(
-        "MATCH (:User {id: $uid})-[:HAS_CHAT_LAYOUT]->(l:ChatLayout {id: $lid, kind: 'named'})
-         DETACH DELETE l RETURN count(l) AS n",
+    state.db.query(
+        "DELETE FROM chat_layouts WHERE id = $lid AND user_id = $uid AND kind = 'named'",
         json!({ "uid": user.sub, "lid": layout_id }),
-    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: neo4j query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
+    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: db query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
 
     Ok(Json(json!({ "ok": true })))
 }
