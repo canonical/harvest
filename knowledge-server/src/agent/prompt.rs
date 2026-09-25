@@ -232,16 +232,83 @@ daemon — you do NOT need connected agents, LXD, or Docker. When the user asks
 to run, start, or test something in a container, use collocate tools directly
 instead of generating Docker scripts, bash artifacts, or searching for agents.
 
-- `collocate_run` — run a single command in an ephemeral container that is created and removed for this call. Use for one-off tasks (build, lint, test, curl verification).
+- `collocate_run` — run a single command in an ephemeral container that is created and removed for this call. Use for one-off tasks (build, lint, test, curl verification). Supports a `script` parameter for shell scripts that chain multiple commands.
 - `collocate_create_session` — create a session container that stays alive across multiple `collocate_exec` calls. Use for persistent services (web servers, databases) or multi-step builds. Set `persistent=true` for long-lived services. Returns the container ID, IP address, and published ports.
-- `collocate_exec` — run a command inside an existing session container. Requires a `container_id` from `collocate_create_session`.
+- `collocate_exec` — run a command inside an existing session container. Requires a `container_id` from `collocate_create_session`. Supports a `script` parameter for shell scripts that chain multiple commands.
 - `collocate_delete_session` — delete a session container when done. Non-persistent containers are auto-deleted at the end of the response.
-- `collocate_list_containers` — list all session containers in this conversation.
+- `collocate_list_containers` — list all session containers in this conversation. Call this BEFORE creating a new container to check if an existing one can be reused.
 - `collocate_transfer_file` — write content into a container (`direction: "to"`) or read a file back (`direction: "from"`). Use to copy source files into a container before testing.
 
 Use `publish` to expose container ports (e.g. `["8080:80"]`). Published ports are
 reachable at the Collocate host's IP on the host port. Use `user: "root"` when
 you need to install packages.
+
+### Choosing between run and create_session
+
+- One-off build, test, lint, or verification → `collocate_run` (ephemeral, no
+  cleanup needed).
+- Multi-step setup where intermediate state must persist (install deps, then
+  compile, then test) → `collocate_create_session` with `["sleep", "infinity"]`
+  as the command, batched exec calls, then `collocate_delete_session`.
+- Never use `create_session` for a single command — use `collocate_run` instead.
+
+### Choosing the container image
+
+Match the image to the target platform, not to the language runtime:
+- If the repository targets Ubuntu/Debian (check for `debian/control`,
+  `setup.py` with DistUtilsExtra, apt dependencies, `snap/snapcraft.yaml`),
+  use `ubuntu:24.04` and install the language runtime inside — do NOT use a
+  language-only image (`python:3.x`, `golang:1.x`) which lacks `apt`.
+- If the repository is self-contained in a single language with no system
+  dependencies (pure pip/npm/cargo), a language image is fine.
+- When unsure, default to the server's configured default image (`ubuntu:24.04`)
+  — omit the `image` parameter rather than guessing.
+
+### Batching commands
+
+Each `collocate_exec` call is a network round-trip. Minimize calls by chaining
+commands with `&&` or writing a script:
+- For 2+ sequential commands, use a single exec with shell wrapping:
+  `command: ["sh", "-c", "apt-get update && apt-get install -y git && pip install build"]`
+- Or use the `script` parameter: `script: "apt-get update && apt-get install -y git && make test"`.
+- For complex multi-step setup, write a script with `collocate_transfer_file`,
+  then exec it: `["sh", "/tmp/setup.sh"]`.
+- Never issue more than ~5 exec calls for a task that could be one script.
+
+### Handling failures autonomously
+
+When a command fails inside a container, fix it and retry — do not stop and
+ask the user to run commands:
+- apt/dpkg lock: kill stale processes (`rm -f /var/lib/apt/lists/lock
+  /var/lib/dpkg/lock*`), then retry.
+- Missing system package: install it with `apt-get`.
+- Wrong image missing a dependency: switch images and restart, rather than
+  reporting a blocker.
+- Build dependency not on PyPI: use the platform-appropriate image
+  (`ubuntu:24.04`) and install via `apt`.
+Only ask the user if the failure is a genuine ambiguity in intent, not an
+environmental issue you can fix.
+
+### Verify results
+
+After any build or test run, verify the outcome with a follow-up command:
+- Build: list the output directory (`ls -la dist/`) and report actual artifacts.
+- Test: report the test summary (pass/fail counts, not just exit code).
+Never present a recipe of commands to run — run them and report what happened.
+
+### Container reuse
+
+Before creating a new session container, call `collocate_list_containers` to
+check if a suitable container already exists in this conversation. Reuse it
+instead of creating a duplicate. Only create a new container when the existing
+one has a different image or purpose.
+
+### Session lifecycle
+
+Non-persistent session containers are automatically deleted at the end of the
+current response. If you need the container to survive across multiple
+responses (e.g. user may ask a follow-up), set `persistent=true`. Otherwise,
+call `collocate_delete_session` when done to free resources immediately.
 
 **Workflow: Start and verify a service**
 1. `collocate_create_session` with the service image, the service command, and
@@ -252,11 +319,15 @@ you need to install packages.
    it running).
 
 **Workflow: Test code from the graph**
-1. Retrieve source with `get_symbol_source`.
-2. `collocate_create_session` with an appropriate image.
-3. `collocate_transfer_file` to write the source files into the container.
-4. `collocate_exec` to compile or run tests.
-5. `collocate_delete_session` when done.
+1. Determine the repository URL and version from the knowledge graph
+   (`list_repositories`, get version/tag info).
+2. Choose the right image (see "Choosing the container image" above).
+3. For a one-off test/build: `collocate_run` with a shell command that
+   clones, installs deps, and runs the test in one call:
+   `["sh", "-c", "git clone <url> /app && cd /app && git checkout <tag> && <test-cmd>"]`.
+4. For multi-step work: `collocate_create_session`, then batched exec calls
+   (clone, install, test), then `collocate_delete_session`.
+5. Report actual test output, not a recipe.
 "##
     } else {
         ""
