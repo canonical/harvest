@@ -28,7 +28,7 @@ async fn body_json(resp: axum::response::Response) -> Value {
 fn make_state(registry: Arc<MachineRegistry>) -> Arc<MachineState> {
     Arc::new(MachineState {
         registry,
-        neo4j:       None,
+        db:       None,
         binary_path: None,
         server_url:  "https://harvest.example.com".into(),
         lxd:         None,
@@ -234,17 +234,17 @@ async fn agent_ping_invalid_token_returns_401() {
 }
 
 #[cfg(test)]
-mod docker_tests {
+mod db_tests {
     use super::*;
-    use knowledge_server::neo4j::Neo4jClient;
-    use neo4j_testcontainers::{prelude::*, runners::AsyncRunner as _, Neo4j, Neo4jImageExt as _};
+    use harvest_db::Db;
+    use harvest_db::test_support::TestDb;
     use std::future::IntoFuture as _;
     use tokio::net::TcpListener;
 
-    async fn spawn_server(neo4j: Arc<Neo4jClient>) -> std::net::SocketAddr {
+    async fn spawn_server(db: Arc<Db>) -> std::net::SocketAddr {
         let state = Arc::new(MachineState {
             registry:    MachineRegistry::new(),
-            neo4j:       Some(neo4j),
+            db:       Some(db),
             binary_path: None,
             server_url:  "http://localhost".into(),
             lxd:         None,
@@ -256,28 +256,31 @@ mod docker_tests {
         addr
     }
 
-    async fn seed_project(neo4j: &Neo4jClient, install_token: &str) -> String {
+    async fn seed_project(db: &Db, install_token: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string();
-        neo4j.query_read(
-            "CREATE (p:Project {id: $id, install_token: $tok, name: 'test', group_id: 'g1', created_by: 'u1', created_at: '2026-01-01'}) RETURN p.id AS id",
+        db.query(
+            "WITH g AS (
+                 INSERT INTO groups (id, name) VALUES ('g1', 'g1') ON CONFLICT (id) DO UPDATE SET name = groups.name
+                 RETURNING id
+             )
+             INSERT INTO projects (id, install_token, name, group_id, created_by, created_at)
+             SELECT $id, $tok, 'test', g.id, 'u1', '2026-01-01T00:00:00+00:00' FROM g
+             RETURNING id",
             json!({ "id": id, "tok": install_token }),
         ).await.unwrap();
         id
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn sse_agent_registers_with_install_token_and_receives_permanent_token() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
         let install_token = "test-install-token-sse";
-        seed_project(&neo4j, install_token).await;
+        seed_project(&db, install_token).await;
 
-        let addr = spawn_server(neo4j).await;
+        let addr = spawn_server(db).await;
         let url  = format!("http://127.0.0.1:{}/agent/events?hostname=test-host", addr.port());
 
         let client = reqwest::Client::new();
@@ -313,15 +316,12 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn sse_invalid_token_returns_401() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let addr = spawn_server(neo4j).await;
+        let addr = spawn_server(db).await;
         let url  = format!("http://127.0.0.1:{}/agent/events?hostname=attacker", addr.port());
 
         let client = reqwest::Client::new();
@@ -333,18 +333,15 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn ping_updates_last_seen_and_returns_200() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
         let install_token = "ping-test-install-tok";
-        seed_project(&neo4j, install_token).await;
+        seed_project(&db, install_token).await;
 
-        let addr = spawn_server(Arc::clone(&neo4j)).await;
+        let addr = spawn_server(Arc::clone(&db)).await;
         let base = format!("http://127.0.0.1:{}", addr.port());
 
         let client = reqwest::Client::new();
@@ -380,8 +377,8 @@ mod docker_tests {
         assert_eq!(ping_resp.status(), 200);
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let rows = neo4j.query_read(
-            "MATCH (m:Machine {hostname: 'ping-host'}) RETURN m.last_seen AS last_seen",
+        let rows = db.query(
+            "SELECT last_seen FROM machines WHERE hostname = 'ping-host'",
             json!({}),
         ).await.unwrap();
         assert!(!rows.is_empty(), "machine not in DB");
@@ -389,26 +386,21 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn lxd_marker_tags_new_machine_as_lxd_managed() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
         let install_token = "lxd-marker-install-tok";
-        let project_id = seed_project(&neo4j, install_token).await;
+        let project_id = seed_project(&db, install_token).await;
 
-        neo4j.query_read(
-            "CREATE (:LxdInstance {
-                 project_id: $pid, hostname: $h, lxd_project: 'harvest',
-                 description: 'test agent', created_at: '2026-01-01'
-             })",
+        db.query(
+            "INSERT INTO lxd_pending_instances (project_id, hostname, lxd_project, description, created_at)
+                 VALUES ($pid, $h, 'harvest', 'test agent', '2026-01-01T00:00:00+00:00')",
             json!({ "pid": project_id, "h": "agent-lxd-host" }),
         ).await.unwrap();
 
-        let addr = spawn_server(Arc::clone(&neo4j)).await;
+        let addr = spawn_server(Arc::clone(&db)).await;
         let url  = format!("http://127.0.0.1:{}/agent/events?hostname=agent-lxd-host", addr.port());
 
         let client = reqwest::Client::new();
@@ -428,9 +420,9 @@ mod docker_tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let rows = neo4j.query_read(
-            "MATCH (m:Machine {project_id: $pid, hostname: $h})
-             RETURN m.provider AS provider, m.lxd_instance AS lxd_instance, m.description AS description",
+        let rows = db.query(
+            "SELECT provider, lxd_instance, description FROM machines
+             WHERE project_id = $pid AND hostname = $h",
             json!({ "pid": project_id, "h": "agent-lxd-host" }),
         ).await.unwrap();
         let m = rows.into_iter().next().expect("machine not created");
@@ -438,26 +430,23 @@ mod docker_tests {
         assert_eq!(m["lxd_instance"], "agent-lxd-host");
         assert_eq!(m["description"], "test agent");
 
-        let marker_rows = neo4j.query_read(
-            "MATCH (li:LxdInstance {project_id: $pid, hostname: $h}) RETURN li",
+        let marker_rows = db.query(
+            "SELECT hostname FROM lxd_pending_instances WHERE project_id = $pid AND hostname = $h",
             json!({ "pid": project_id, "h": "agent-lxd-host" }),
         ).await.unwrap();
         assert!(marker_rows.is_empty(), "LxdInstance marker should be consumed");
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn manually_installed_machine_has_no_lxd_provider() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
         let install_token = "manual-install-tok";
-        let project_id = seed_project(&neo4j, install_token).await;
+        let project_id = seed_project(&db, install_token).await;
 
-        let addr = spawn_server(Arc::clone(&neo4j)).await;
+        let addr = spawn_server(Arc::clone(&db)).await;
         let url  = format!("http://127.0.0.1:{}/agent/events?hostname=manual-host", addr.port());
 
         let client = reqwest::Client::new();
@@ -477,8 +466,8 @@ mod docker_tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let rows = neo4j.query_read(
-            "MATCH (m:Machine {project_id: $pid, hostname: $h}) RETURN m.provider AS provider",
+        let rows = db.query(
+            "SELECT provider FROM machines WHERE project_id = $pid AND hostname = $h",
             json!({ "pid": project_id, "h": "manual-host" }),
         ).await.unwrap();
         let m = rows.into_iter().next().expect("machine not created");
@@ -499,10 +488,10 @@ mod docker_tests {
         next.run(req).await
     }
 
-    async fn spawn_protected_server(neo4j: Arc<Neo4jClient>, lxd: Option<Arc<LxdClient>>) -> std::net::SocketAddr {
+    async fn spawn_protected_server(db: Arc<Db>, lxd: Option<Arc<LxdClient>>) -> std::net::SocketAddr {
         let state = Arc::new(MachineState {
             registry:    MachineRegistry::new(),
-            neo4j:       Some(neo4j),
+            db:       Some(db),
             binary_path: None,
             server_url:  "http://localhost".into(),
             lxd,
@@ -514,29 +503,23 @@ mod docker_tests {
         addr
     }
 
-    async fn seed_machine(neo4j: &Neo4jClient, project_id: &str, agent_id: &str, provider: Option<&str>) {
-        neo4j.query_read(
-            "MATCH (p:Project {id: $pid})
-             CREATE (m:Machine {
-                 id: $aid, project_id: $pid, hostname: 'seeded-host',
-                 provider: $provider, lxd_instance: 'seeded-instance',
-                 created_at: '2026-01-01', last_seen: '2026-01-01'
-             })",
+    async fn seed_machine(db: &Db, project_id: &str, agent_id: &str, provider: Option<&str>) {
+        db.query(
+            "INSERT INTO machines (id, project_id, hostname, provider, lxd_instance, created_at, last_seen)
+             VALUES ($aid, $pid, 'seeded-host', $provider, 'seeded-instance',
+                     '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
             json!({ "pid": project_id, "aid": agent_id, "provider": provider }),
         ).await.unwrap();
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn start_agent_returns_404_for_missing_agent() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let project_id = seed_project(&neo4j, "start-404-tok").await;
-        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+        let project_id = seed_project(&db, "start-404-tok").await;
+        let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
         let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/nonexistent/start", addr.port()))
@@ -545,17 +528,14 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn start_agent_returns_400_for_non_lxd_agent() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let project_id = seed_project(&neo4j, "start-400-tok").await;
-        seed_machine(&neo4j, &project_id, "manual-agent", None).await;
-        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+        let project_id = seed_project(&db, "start-400-tok").await;
+        seed_machine(&db, &project_id, "manual-agent", None).await;
+        let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
         let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/manual-agent/start", addr.port()))
@@ -564,17 +544,14 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn restart_agent_returns_503_when_lxd_not_configured() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let project_id = seed_project(&neo4j, "restart-503-tok").await;
-        seed_machine(&neo4j, &project_id, "lxd-agent", Some("lxd")).await;
-        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+        let project_id = seed_project(&db, "restart-503-tok").await;
+        seed_machine(&db, &project_id, "lxd-agent", Some("lxd")).await;
+        let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
         let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/lxd-agent/restart", addr.port()))
@@ -583,17 +560,14 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn create_port_forward_returns_created_forward_with_url() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let project_id = seed_project(&neo4j, "pf-create-tok").await;
-        seed_machine(&neo4j, &project_id, "agent-1", None).await;
-        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+        let project_id = seed_project(&db, "pf-create-tok").await;
+        seed_machine(&db, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
         let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
@@ -608,17 +582,14 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn create_port_forward_rejects_invalid_port() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let project_id = seed_project(&neo4j, "pf-invalid-port-tok").await;
-        seed_machine(&neo4j, &project_id, "agent-1", None).await;
-        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+        let project_id = seed_project(&db, "pf-invalid-port-tok").await;
+        seed_machine(&db, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
         let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
@@ -628,17 +599,14 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn create_port_forward_rejects_duplicate_route_name() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let project_id = seed_project(&neo4j, "pf-dup-tok").await;
-        seed_machine(&neo4j, &project_id, "agent-1", None).await;
-        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+        let project_id = seed_project(&db, "pf-dup-tok").await;
+        seed_machine(&db, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
         let url = format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port());
@@ -648,18 +616,15 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn list_port_forwards_returns_only_this_agents_forwards() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let project_id = seed_project(&neo4j, "pf-list-tok").await;
-        seed_machine(&neo4j, &project_id, "agent-1", None).await;
-        seed_machine(&neo4j, &project_id, "agent-2", None).await;
-        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+        let project_id = seed_project(&db, "pf-list-tok").await;
+        seed_machine(&db, &project_id, "agent-1", None).await;
+        seed_machine(&db, &project_id, "agent-2", None).await;
+        let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
         client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
@@ -677,17 +642,14 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn update_port_forward_changes_fields() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let project_id = seed_project(&neo4j, "pf-update-tok").await;
-        seed_machine(&neo4j, &project_id, "agent-1", None).await;
-        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+        let project_id = seed_project(&db, "pf-update-tok").await;
+        seed_machine(&db, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
         let create_resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
@@ -705,17 +667,14 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn update_port_forward_returns_404_for_unknown_id() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let project_id = seed_project(&neo4j, "pf-update-404-tok").await;
-        seed_machine(&neo4j, &project_id, "agent-1", None).await;
-        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+        let project_id = seed_project(&db, "pf-update-404-tok").await;
+        seed_machine(&db, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
         let resp = client.put(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards/nonexistent", addr.port()))
@@ -725,17 +684,14 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn delete_port_forward_removes_it() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let project_id = seed_project(&neo4j, "pf-delete-tok").await;
-        seed_machine(&neo4j, &project_id, "agent-1", None).await;
-        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+        let project_id = seed_project(&db, "pf-delete-tok").await;
+        seed_machine(&db, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
         let create_resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
@@ -754,17 +710,14 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn port_forwards_rejects_reserved_route_name() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let project_id = seed_project(&neo4j, "pf-reserved-tok").await;
-        seed_machine(&neo4j, &project_id, "agent-1", None).await;
-        let addr = spawn_protected_server(Arc::clone(&neo4j), None).await;
+        let project_id = seed_project(&db, "pf-reserved-tok").await;
+        seed_machine(&db, &project_id, "agent-1", None).await;
+        let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
         let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
@@ -773,10 +726,10 @@ mod docker_tests {
         assert_eq!(resp.status(), 400);
     }
 
-    async fn spawn_console_server(neo4j: Arc<Neo4jClient>) -> std::net::SocketAddr {
+    async fn spawn_console_server(db: Arc<Db>) -> std::net::SocketAddr {
         let state = Arc::new(MachineState {
             registry:    MachineRegistry::new(),
-            neo4j:       Some(neo4j),
+            db:       Some(db),
             binary_path: None,
             server_url:  "http://localhost".into(),
             lxd:         None,
@@ -823,21 +776,18 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn console_relay_bridges_browser_and_agent_bidirectionally() {
         use futures_util::{SinkExt as _, StreamExt as _};
         use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
         let install_token = "console-relay-install-tok";
-        let project_id = seed_project(&neo4j, install_token).await;
+        let project_id = seed_project(&db, install_token).await;
 
-        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let addr = spawn_console_server(Arc::clone(&db)).await;
         let base = format!("http://127.0.0.1:{}", addr.port());
         let ws_base = format!("ws://127.0.0.1:{}", addr.port());
 
@@ -857,8 +807,8 @@ mod docker_tests {
         let perm_token = registered["agent_token"].as_str().unwrap().to_string();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let rows = neo4j.query_read(
-            "MATCH (m:Machine {hostname: 'console-relay-host'}) RETURN m.id AS id",
+        let rows = db.query(
+            "SELECT id FROM machines WHERE hostname = 'console-relay-host'",
             json!({}),
         ).await.unwrap();
         let agent_id = rows[0]["id"].as_str().unwrap().to_string();
@@ -916,15 +866,12 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn console_open_rejects_unauthorized_project_access() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let addr = spawn_console_server(Arc::clone(&db)).await;
         let base = format!("http://127.0.0.1:{}", addr.port());
 
         let client = reqwest::Client::new();
@@ -934,18 +881,15 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn console_claim_rejects_wrong_agent_token() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
         let install_token = "console-claim-mismatch-tok";
-        let project_id = seed_project(&neo4j, install_token).await;
+        let project_id = seed_project(&db, install_token).await;
 
-        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let addr = spawn_console_server(Arc::clone(&db)).await;
         let base = format!("http://127.0.0.1:{}", addr.port());
 
         let http = reqwest::Client::new();
@@ -963,8 +907,8 @@ mod docker_tests {
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let rows = neo4j.query_read(
-            "MATCH (m:Machine {hostname: 'console-claim-host'}) RETURN m.id AS id",
+        let rows = db.query(
+            "SELECT id FROM machines WHERE hostname = 'console-claim-host'",
             json!({}),
         ).await.unwrap();
         let agent_id = rows[0]["id"].as_str().unwrap().to_string();
@@ -1050,19 +994,16 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn port_forward_proxy_forwards_request_to_agent_port() {
 
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
         let install_token = "pf-proxy-install-tok";
-        let project_id = seed_project(&neo4j, install_token).await;
+        let project_id = seed_project(&db, install_token).await;
 
-        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let addr = spawn_console_server(Arc::clone(&db)).await;
         let base = format!("http://127.0.0.1:{}", addr.port());
         let ws_base = format!("ws://127.0.0.1:{}", addr.port());
 
@@ -1081,8 +1022,8 @@ mod docker_tests {
         let perm_token = registered["agent_token"].as_str().unwrap().to_string();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let rows = neo4j.query_read(
-            "MATCH (m:Machine {hostname: 'pf-proxy-host'}) RETURN m.id AS id",
+        let rows = db.query(
+            "SELECT id FROM machines WHERE hostname = 'pf-proxy-host'",
             json!({}),
         ).await.unwrap();
         let agent_id = rows[0]["id"].as_str().unwrap().to_string();
@@ -1115,19 +1056,16 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn port_forward_proxy_forwards_subpath() {
 
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
         let install_token = "pf-subpath-install-tok";
-        let project_id = seed_project(&neo4j, install_token).await;
+        let project_id = seed_project(&db, install_token).await;
 
-        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let addr = spawn_console_server(Arc::clone(&db)).await;
         let base = format!("http://127.0.0.1:{}", addr.port());
         let ws_base = format!("ws://127.0.0.1:{}", addr.port());
 
@@ -1146,8 +1084,8 @@ mod docker_tests {
         let perm_token = registered["agent_token"].as_str().unwrap().to_string();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let rows = neo4j.query_read(
-            "MATCH (m:Machine {hostname: 'pf-subpath-host'}) RETURN m.id AS id",
+        let rows = db.query(
+            "SELECT id FROM machines WHERE hostname = 'pf-subpath-host'",
             json!({}),
         ).await.unwrap();
         let agent_id = rows[0]["id"].as_str().unwrap().to_string();
@@ -1179,18 +1117,15 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn port_forward_proxy_returns_502_when_agent_not_connected() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let project_id = seed_project(&neo4j, "pf-offline-tok").await;
-        seed_machine(&neo4j, &project_id, "offline-agent", None).await;
+        let project_id = seed_project(&db, "pf-offline-tok").await;
+        seed_machine(&db, &project_id, "offline-agent", None).await;
 
-        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let addr = spawn_console_server(Arc::clone(&db)).await;
         let base = format!("http://127.0.0.1:{}", addr.port());
 
         let http = reqwest::Client::new();
@@ -1203,20 +1138,17 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn port_forward_proxy_forwards_request_with_trailing_slash() {
         use futures_util::{SinkExt as _, StreamExt as _};
 
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
         let install_token = "pf-trailing-slash-install-tok";
-        let project_id = seed_project(&neo4j, install_token).await;
+        let project_id = seed_project(&db, install_token).await;
 
-        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let addr = spawn_console_server(Arc::clone(&db)).await;
         let base = format!("http://127.0.0.1:{}", addr.port());
         let ws_base = format!("ws://127.0.0.1:{}", addr.port());
 
@@ -1235,8 +1167,8 @@ mod docker_tests {
         let perm_token = registered["agent_token"].as_str().unwrap().to_string();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let rows = neo4j.query_read(
-            "MATCH (m:Machine {hostname: 'pf-trailing-slash-host'}) RETURN m.id AS id",
+        let rows = db.query(
+            "SELECT id FROM machines WHERE hostname = 'pf-trailing-slash-host'",
             json!({}),
         ).await.unwrap();
         let agent_id = rows[0]["id"].as_str().unwrap().to_string();
@@ -1268,18 +1200,15 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn port_forward_proxy_returns_404_for_unknown_route() {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
-        let project_id = seed_project(&neo4j, "pf-404-tok").await;
-        seed_machine(&neo4j, &project_id, "some-agent", None).await;
+        let project_id = seed_project(&db, "pf-404-tok").await;
+        seed_machine(&db, &project_id, "some-agent", None).await;
 
-        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let addr = spawn_console_server(Arc::clone(&db)).await;
         let base = format!("http://127.0.0.1:{}", addr.port());
 
         let http = reqwest::Client::new();
@@ -1288,19 +1217,16 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn port_forward_proxy_returns_502_when_agent_side_connection_refused() {
 
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j");
-        let pass = container.image().password().unwrap_or("neo");
-        let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+        let test_db = TestDb::new().await;
+        let db = Arc::new(test_db.db.clone());
 
         let install_token = "pf-refused-install-tok";
-        let project_id = seed_project(&neo4j, install_token).await;
+        let project_id = seed_project(&db, install_token).await;
 
-        let addr = spawn_console_server(Arc::clone(&neo4j)).await;
+        let addr = spawn_console_server(Arc::clone(&db)).await;
         let base = format!("http://127.0.0.1:{}", addr.port());
         let ws_base = format!("ws://127.0.0.1:{}", addr.port());
 
@@ -1319,8 +1245,8 @@ mod docker_tests {
         let perm_token = registered["agent_token"].as_str().unwrap().to_string();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let rows = neo4j.query_read(
-            "MATCH (m:Machine {hostname: 'pf-refused-host'}) RETURN m.id AS id",
+        let rows = db.query(
+            "SELECT id FROM machines WHERE hostname = 'pf-refused-host'",
             json!({}),
         ).await.unwrap();
         let agent_id = rows[0]["id"].as_str().unwrap().to_string();

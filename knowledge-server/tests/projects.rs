@@ -1,3 +1,4 @@
+use harvest_db::Db;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -10,7 +11,7 @@ use axum::{
     Router,
 };
 use http_body_util::BodyExt as _;
-use neo4j_testcontainers::{prelude::*, runners::AsyncRunner as _, Neo4j};
+use harvest_db::test_support::TestDb;
 use serde_json::{json, Value};
 use tower::ServiceExt as _;
 use uuid::Uuid;
@@ -24,7 +25,7 @@ use knowledge_server::{
         types::{LlmResponse, Message, ModelInfo, ToolCall, ToolDefinition, Usage},
     },
     machines::MachineRegistry,
-    neo4j::Neo4jClient,
+
     projects::handlers::{
         ProjectState,
         create_conversation, create_project, delete_conversation, delete_project,
@@ -69,26 +70,26 @@ impl LlmProvider for ScriptedLlm {
 
 const JWT_SECRET: &str = "test-projects-secret";
 
-fn projects_app(neo4j: Arc<Neo4jClient>) -> Router {
-    projects_app_with_llm(neo4j, FixedTextLlm::new("stub answer"))
+fn projects_app(db: Arc<Db>) -> Router {
+    projects_app_with_llm(db, FixedTextLlm::new("stub answer"))
 }
 
-fn projects_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn knowledge_server::llm::LlmProvider>) -> Router {
+fn projects_app_with_llm(db: Arc<Db>, llm: Arc<dyn knowledge_server::llm::LlmProvider>) -> Router {
     let secret   = Arc::new(JWT_SECRET.to_string());
     let agent    = Arc::new(Agent::new(Arc::clone(&llm), vec![], 4));
     let registry = MachineRegistry::new();
     let builder  = Arc::new(ProjectAgentBuilder {
         llm:                        Arc::clone(&llm),
-        neo4j:                      Arc::clone(&neo4j),
+        db:                      Arc::clone(&db),
         registry:                   Arc::clone(&registry),
-        skills:                     Arc::new(knowledge_server::skills::SkillStore::new(Arc::clone(&neo4j))),
+        skills:                     Arc::new(knowledge_server::skills::SkillStore::new(Arc::clone(&db))),
         lxd:                        None,
         server_url:                 "http://localhost".into(),
         max_iterations:             4,
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,
     });
-    let state = Arc::new(ProjectState::new(neo4j, agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
+    let state = Arc::new(ProjectState::new(db, agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
 
     Router::new()
         .route("/projects",     route_get(list_projects).post(create_project))
@@ -106,37 +107,31 @@ fn projects_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn knowledge_server:
         .layer(from_fn_with_state(secret, auth::require_auth))
 }
 
-async fn setup_constraints(neo4j: &Neo4jClient) {
-    auth::setup_constraints(neo4j).await.unwrap();
-    neo4j.run("CREATE CONSTRAINT project_id IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE").await.unwrap();
-    neo4j.run("CREATE CONSTRAINT conversation_id IF NOT EXISTS FOR (c:Conversation) REQUIRE c.id IS UNIQUE").await.unwrap();
-}
-
-async fn make_user(neo4j: &Neo4jClient, email: &str, name: &str, role: &str) -> (String, String) {
+async fn make_user(db: &Db, email: &str, name: &str, role: &str) -> (String, String) {
     let id  = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "CREATE (:User {id:$id,email:$email,name:$name,role:$role,\
-                        provider:'password',created_at:$now}) RETURN 1",
+    db.query(
+        "INSERT INTO users (id, email, name, role, provider, created_at)
+                        VALUES ($id, $email, $name, $role, 'password', $now)",
         json!({"id":id,"email":email,"name":name,"role":role,"now":now}),
     ).await.unwrap();
     let token = jwt::issue(JWT_SECRET, &id, email, name, role).unwrap();
     (id, token)
 }
 
-async fn make_group(neo4j: &Neo4jClient, name: &str) -> String {
+async fn make_group(db: &Db, name: &str) -> String {
     let id  = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "CREATE (:Group {id:$id,name:$name,description:'',created_at:$now}) RETURN 1",
+    db.query(
+        "INSERT INTO groups (id, name, description, created_at) VALUES ($id, $name, '', $now)",
         json!({"id":id,"name":name,"now":now}),
     ).await.unwrap();
     id
 }
 
-async fn join_group(neo4j: &Neo4jClient, user_id: &str, group_id: &str) {
-    neo4j.query_read(
-        "MATCH (u:User{id:$uid}),(g:Group{id:$gid}) MERGE (u)-[:MEMBER_OF]->(g) RETURN 1",
+async fn join_group(db: &Db, user_id: &str, group_id: &str) {
+    db.query(
+        "INSERT INTO user_groups (user_id, group_id) VALUES ($uid, $gid) ON CONFLICT DO NOTHING",
         json!({"uid":user_id,"gid":group_id}),
     ).await.unwrap();
 }
@@ -246,36 +241,32 @@ mod auth_guards {
     }
 }
 
-macro_rules! neo4j {
-    ($c:ident, $neo4j:ident) => {
-        let $c = Neo4j::default().start().await;
-        let uri  = $c.image().bolt_uri_ipv4();
-        let user = $c.image().user().unwrap_or("neo4j");
-        let pass = $c.image().password().unwrap_or("neo");
-        let $neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
-        setup_constraints(&$neo4j).await;
+macro_rules! db {
+    ($c:ident, $db:ident) => {
+        let $c = TestDb::new().await;
+        let $db = Arc::new($c.db.clone());
     };
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_projects_empty_for_new_user() {
-    neo4j!(c, neo4j);
-    let (_, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (status, body) = send(projects_app(neo4j), req_get("/projects", &tok)).await;
+    db!(c, db);
+    let (_, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (status, body) = send(projects_app(db), req_get("/projects", &tok)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!([]));
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_succeeds_for_group_member() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
 
-    let (status, body) = send(projects_app(neo4j),
+    let (status, body) = send(projects_app(db),
         req_post("/projects", &tok, json!({"name":"My Project","group_id":gid,"description":"desc"}))).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["name"], "My Project");
@@ -285,54 +276,54 @@ async fn create_project_succeeds_for_group_member() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_blocked_for_non_member() {
-    neo4j!(c, neo4j);
-    let (_, tok) = make_user(&neo4j, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
+    db!(c, db);
+    let (_, tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
+    let gid = make_group(&db, "eng").await;
 
-    let (status, _) = send(projects_app(neo4j),
+    let (status, _) = send(projects_app(db),
         req_post("/projects", &tok, json!({"name":"Sneaky","group_id":gid}))).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_returns_400_for_empty_name() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
 
-    let (status, body) = send(projects_app(neo4j),
+    let (status, body) = send(projects_app(db),
         req_post("/projects", &tok, json!({"name":"   ","group_id":gid}))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap_or("").contains("name"));
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_returns_404_for_unknown_group() {
-    neo4j!(c, neo4j);
-    let (_, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
+    db!(c, db);
+    let (_, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
 
-    let (status, _) = send(projects_app(neo4j),
+    let (status, _) = send(projects_app(db),
         req_post("/projects", &tok, json!({"name":"X","group_id":"nonexistent"}))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_projects_shows_only_own_group_projects() {
-    neo4j!(c, neo4j);
-    let (alice_id, alice_tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (bob_id,   bob_tok)   = make_user(&neo4j, "b@x.com", "Bob",   "regular").await;
-    let g_eng  = make_group(&neo4j, "eng").await;
-    let g_data = make_group(&neo4j, "data").await;
-    join_group(&neo4j, &alice_id, &g_eng).await;
-    join_group(&neo4j, &bob_id,   &g_data).await;
+    db!(c, db);
+    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (bob_id,   bob_tok)   = make_user(&db, "b@x.com", "Bob",   "regular").await;
+    let g_eng  = make_group(&db, "eng").await;
+    let g_data = make_group(&db, "data").await;
+    join_group(&db, &alice_id, &g_eng).await;
+    join_group(&db, &bob_id,   &g_data).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     send(app.clone(), req_post("/projects", &alice_tok, json!({"name":"Eng Project","group_id":g_eng}))).await;
     send(app.clone(), req_post("/projects", &bob_tok,   json!({"name":"Data Project","group_id":g_data}))).await;
 
@@ -344,15 +335,15 @@ async fn list_projects_shows_only_own_group_projects() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_project_returns_404_for_non_member() {
-    neo4j!(c, neo4j);
-    let (alice_id, alice_tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (_, bob_tok)          = make_user(&neo4j, "b@x.com", "Bob",   "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &alice_id, &gid).await;
+    db!(c, db);
+    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_, bob_tok)          = make_user(&db, "b@x.com", "Bob",   "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &alice_id, &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     let (_, created) = send(app.clone(),
         req_post("/projects", &alice_tok, json!({"name":"Secret","group_id":gid}))).await;
     let pid = created["id"].as_str().unwrap().to_string();
@@ -362,16 +353,16 @@ async fn get_project_returns_404_for_non_member() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn update_project_succeeds_for_any_group_member() {
-    neo4j!(c, neo4j);
-    let (alice_id, alice_tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (bob_id,   bob_tok)   = make_user(&neo4j, "b@x.com", "Bob",   "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &alice_id, &gid).await;
-    join_group(&neo4j, &bob_id,   &gid).await;
+    db!(c, db);
+    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (bob_id,   bob_tok)   = make_user(&db, "b@x.com", "Bob",   "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &alice_id, &gid).await;
+    join_group(&db, &bob_id,   &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     let (_, created) = send(app.clone(),
         req_post("/projects", &alice_tok, json!({"name":"Original","group_id":gid}))).await;
     let pid = created["id"].as_str().unwrap().to_string();
@@ -385,14 +376,14 @@ async fn update_project_succeeds_for_any_group_member() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn delete_project_removes_it_for_group_member() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     let (_, created) = send(app.clone(),
         req_post("/projects", &tok, json!({"name":"Temp","group_id":gid}))).await;
     let pid = created["id"].as_str().unwrap().to_string();
@@ -405,15 +396,15 @@ async fn delete_project_removes_it_for_group_member() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn admin_can_list_all_projects() {
-    neo4j!(c, neo4j);
-    let (alice_id, alice_tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (_, admin_tok)        = make_user(&neo4j, "z@x.com", "Admin", "admin").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &alice_id, &gid).await;
+    db!(c, db);
+    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_, admin_tok)        = make_user(&db, "z@x.com", "Admin", "admin").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &alice_id, &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     send(app.clone(), req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid}))).await;
 
     let (status, body) = send(app, req_get("/projects", &admin_tok)).await;
@@ -422,15 +413,15 @@ async fn admin_can_list_all_projects() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn admin_can_access_project_in_any_group() {
-    neo4j!(c, neo4j);
-    let (alice_id, alice_tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (_, admin_tok)        = make_user(&neo4j, "z@x.com", "Admin", "admin").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &alice_id, &gid).await;
+    db!(c, db);
+    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_, admin_tok)        = make_user(&db, "z@x.com", "Admin", "admin").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &alice_id, &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     let (_, created) = send(app.clone(),
         req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid}))).await;
     let pid = created["id"].as_str().unwrap().to_string();
@@ -440,15 +431,15 @@ async fn admin_can_access_project_in_any_group() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_project_conversations_returns_404_for_non_member() {
-    neo4j!(c, neo4j);
-    let (alice_id, alice_tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (_, bob_tok)          = make_user(&neo4j, "b@x.com", "Bob",   "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &alice_id, &gid).await;
+    db!(c, db);
+    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_, bob_tok)          = make_user(&db, "b@x.com", "Bob",   "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &alice_id, &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     let (_, project) = send(app.clone(),
         req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid}))).await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -459,16 +450,16 @@ async fn list_project_conversations_returns_404_for_non_member() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_conversation_visible_to_all_group_members() {
-    neo4j!(c, neo4j);
-    let (alice_id, alice_tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (bob_id,   bob_tok)   = make_user(&neo4j, "b@x.com", "Bob",   "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &alice_id, &gid).await;
-    join_group(&neo4j, &bob_id,   &gid).await;
+    db!(c, db);
+    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (bob_id,   bob_tok)   = make_user(&db, "b@x.com", "Bob",   "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &alice_id, &gid).await;
+    join_group(&db, &bob_id,   &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     let (_, project) = send(app.clone(),
         req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid}))).await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -491,14 +482,14 @@ async fn create_project_conversation_visible_to_all_group_members() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn project_conversation_stores_created_by() {
-    neo4j!(c, neo4j);
-    let (alice_id, alice_tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &alice_id, &gid).await;
+    db!(c, db);
+    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &alice_id, &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     let (_, project) = send(app.clone(),
         req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid}))).await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -514,16 +505,16 @@ async fn project_conversation_stores_created_by() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn any_group_member_can_update_project_conversation() {
-    neo4j!(c, neo4j);
-    let (alice_id, alice_tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (bob_id,   bob_tok)   = make_user(&neo4j, "b@x.com", "Bob",   "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &alice_id, &gid).await;
-    join_group(&neo4j, &bob_id,   &gid).await;
+    db!(c, db);
+    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (bob_id,   bob_tok)   = make_user(&db, "b@x.com", "Bob",   "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &alice_id, &gid).await;
+    join_group(&db, &bob_id,   &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     let (_, project) = send(app.clone(),
         req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid}))).await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -547,16 +538,16 @@ async fn any_group_member_can_update_project_conversation() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn only_creator_can_delete_project_conversation() {
-    neo4j!(c, neo4j);
-    let (alice_id, alice_tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (bob_id,   bob_tok)   = make_user(&neo4j, "b@x.com", "Bob",   "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &alice_id, &gid).await;
-    join_group(&neo4j, &bob_id,   &gid).await;
+    db!(c, db);
+    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (bob_id,   bob_tok)   = make_user(&db, "b@x.com", "Bob",   "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &alice_id, &gid).await;
+    join_group(&db, &bob_id,   &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     let (_, project) = send(app.clone(),
         req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid}))).await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -579,15 +570,15 @@ async fn only_creator_can_delete_project_conversation() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn admin_can_delete_any_project_conversation() {
-    neo4j!(c, neo4j);
-    let (alice_id, alice_tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (_, admin_tok)        = make_user(&neo4j, "z@x.com", "Admin", "admin").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &alice_id, &gid).await;
+    db!(c, db);
+    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_, admin_tok)        = make_user(&db, "z@x.com", "Admin", "admin").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &alice_id, &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     let (_, project) = send(app.clone(),
         req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid}))).await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -602,15 +593,15 @@ async fn admin_can_delete_any_project_conversation() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn project_query_returns_404_for_non_member() {
-    neo4j!(c, neo4j);
-    let (alice_id, alice_tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (_, bob_tok)          = make_user(&neo4j, "b@x.com", "Bob",   "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &alice_id, &gid).await;
+    db!(c, db);
+    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_, bob_tok)          = make_user(&db, "b@x.com", "Bob",   "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &alice_id, &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     let (_, project) = send(app.clone(),
         req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid}))).await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -621,14 +612,14 @@ async fn project_query_returns_404_for_non_member() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn project_query_succeeds_for_group_member() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     let (_, project) = send(app.clone(),
         req_post("/projects", &tok, json!({"name":"P","group_id":gid}))).await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -641,15 +632,15 @@ async fn project_query_succeeds_for_group_member() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn second_turn_preserves_first_turns_sources_and_chain() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
 
     let llm = FixedTextLlm::new("see [myrepo:v1.0:src/lib.rs:42]");
-    let app = projects_app_with_llm(Arc::clone(&neo4j), llm);
+    let app = projects_app_with_llm(Arc::clone(&db), llm);
     let (_, project) = send(app.clone(),
         req_post("/projects", &tok, json!({"name":"P","group_id":gid}))).await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -682,12 +673,12 @@ async fn second_turn_preserves_first_turns_sources_and_chain() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn tool_call_chain_persists_with_preview() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
 
     let llm = ScriptedLlm::new(vec![
         LlmResponse::ToolCalls {
@@ -700,7 +691,7 @@ async fn tool_call_chain_persists_with_preview() {
         },
         LlmResponse::Message { text: "No agents are connected.".into(), usage: Usage::default() },
     ]);
-    let app = projects_app_with_llm(Arc::clone(&neo4j), llm);
+    let app = projects_app_with_llm(Arc::clone(&db), llm);
     let (_, project) = send(app.clone(),
         req_post("/projects", &tok, json!({"name":"P","group_id":gid}))).await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -725,12 +716,12 @@ async fn tool_call_chain_persists_with_preview() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn ask_user_question_persists_across_reload() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
 
     let llm = ScriptedLlm::new(vec![
         LlmResponse::ToolCalls {
@@ -746,7 +737,7 @@ async fn ask_user_question_persists_across_reload() {
         usage: Usage::default(),
         },
     ]);
-    let app = projects_app_with_llm(Arc::clone(&neo4j), llm);
+    let app = projects_app_with_llm(Arc::clone(&db), llm);
     let (_, project) = send(app.clone(),
         req_post("/projects", &tok, json!({"name":"P","group_id":gid}))).await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -767,12 +758,12 @@ async fn ask_user_question_persists_across_reload() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn confirm_action_persists_pending_then_resume_continues_the_turn() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
 
     let llm = ScriptedLlm::new(vec![
         LlmResponse::ToolCalls {
@@ -786,7 +777,7 @@ async fn confirm_action_persists_pending_then_resume_continues_the_turn() {
         },
         LlmResponse::Message { text: "Deleted bogus-agent as requested".into(), usage: Usage::default() },
     ]);
-    let app = projects_app_with_llm(Arc::clone(&neo4j), llm);
+    let app = projects_app_with_llm(Arc::clone(&db), llm);
     let (_, project) = send(app.clone(),
         req_post("/projects", &tok, json!({"name":"P","group_id":gid}))).await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -828,14 +819,14 @@ async fn confirm_action_persists_pending_then_resume_continues_the_turn() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn resume_confirm_action_404s_without_pending_action() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
 
-    let app = projects_app(Arc::clone(&neo4j));
+    let app = projects_app(Arc::clone(&db));
     let (_, project) = send(app.clone(),
         req_post("/projects", &tok, json!({"name":"P","group_id":gid}))).await;
     let pid = project["id"].as_str().unwrap().to_string();

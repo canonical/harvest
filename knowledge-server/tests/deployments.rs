@@ -1,3 +1,4 @@
+use harvest_db::Db;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -10,7 +11,7 @@ use axum::{
 };
 use chrono::Utc;
 use http_body_util::BodyExt as _;
-use neo4j_testcontainers::{prelude::*, runners::AsyncRunner as _, Neo4j};
+use harvest_db::test_support::TestDb;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tower::ServiceExt as _;
@@ -38,7 +39,7 @@ use knowledge_server::{
         types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, Role, ToolCall, ToolDefinition, Usage},
     },
     machines::{CommandResult, ConnectedAgent, MachineRegistry, ServerToAgent, TerraformAction},
-    neo4j::Neo4jClient,
+
     projects::handlers::{create_project, ProjectState},
     skills::SkillStore,
 };
@@ -141,18 +142,18 @@ impl LlmProvider for ClosureLlm {
 
 const JWT_SECRET: &str = "test-deployments-secret";
 
-fn deployments_app(neo4j: Arc<Neo4jClient>) -> (Router, Arc<MachineRegistry>) {
-    deployments_app_with_llm(neo4j, FixedTextLlm::new("stub"))
+fn deployments_app(db: Arc<Db>) -> (Router, Arc<MachineRegistry>) {
+    deployments_app_with_llm(db, FixedTextLlm::new("stub"))
 }
 
-fn deployments_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn LlmProvider>) -> (Router, Arc<MachineRegistry>) {
+fn deployments_app_with_llm(db: Arc<Db>, llm: Arc<dyn LlmProvider>) -> (Router, Arc<MachineRegistry>) {
     let secret      = Arc::new(JWT_SECRET.to_string());
-    let skill_store = Arc::new(SkillStore::new(Arc::clone(&neo4j)));
+    let skill_store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let agent    = Arc::new(Agent::new(Arc::clone(&llm), vec![], 2));
     let registry = MachineRegistry::new();
     let builder  = Arc::new(ProjectAgentBuilder {
         llm:                        Arc::clone(&llm),
-        neo4j:                      Arc::clone(&neo4j),
+        db:                      Arc::clone(&db),
         registry:                   Arc::clone(&registry),
         skills:                     Arc::clone(&skill_store),
         lxd:                        None,
@@ -161,7 +162,7 @@ fn deployments_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn LlmProvider>) 
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,
     });
-    let project_state = Arc::new(ProjectState::new(Arc::clone(&neo4j), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
+    let project_state = Arc::new(ProjectState::new(Arc::clone(&db), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
 
     let project_routes = Router::new()
         .route("/projects", route_post(create_project))
@@ -205,51 +206,38 @@ fn deployments_app_with_llm(neo4j: Arc<Neo4jClient>, llm: Arc<dyn LlmProvider>) 
     (Router::new().merge(project_routes), registry)
 }
 
-async fn setup_constraints(neo4j: &Neo4jClient) {
-    auth::setup_constraints(neo4j).await.unwrap();
-    neo4j.run("CREATE CONSTRAINT project_id IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE").await.unwrap();
-    neo4j.run("CREATE CONSTRAINT deployment_id IF NOT EXISTS FOR (d:Deployment) REQUIRE d.id IS UNIQUE").await.unwrap();
-    neo4j.run("CREATE CONSTRAINT template_id IF NOT EXISTS FOR (t:ProductTemplate) REQUIRE t.id IS UNIQUE").await.unwrap();
-    neo4j.run("CREATE CONSTRAINT issue_id IF NOT EXISTS FOR (i:Issue) REQUIRE i.id IS UNIQUE").await.unwrap();
-    neo4j.run("CREATE CONSTRAINT proposal_id IF NOT EXISTS FOR (p:Proposal) REQUIRE p.id IS UNIQUE").await.unwrap();
-}
-
-macro_rules! neo4j {
-    ($c:ident, $neo4j:ident) => {
-        let $c = Neo4j::default().start().await;
-        let uri  = $c.image().bolt_uri_ipv4();
-        let user = $c.image().user().unwrap_or("neo4j");
-        let pass = $c.image().password().unwrap_or("neo");
-        let $neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
-        setup_constraints(&$neo4j).await;
+macro_rules! db {
+    ($c:ident, $db:ident) => {
+        let $c = TestDb::new().await;
+        let $db = Arc::new($c.db.clone());
     };
 }
 
-async fn make_user(neo4j: &Neo4jClient, email: &str, name: &str, role: &str) -> (String, String) {
+async fn make_user(db: &Db, email: &str, name: &str, role: &str) -> (String, String) {
     let id  = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "CREATE (:User {id:$id,email:$email,name:$name,role:$role,\
-                        provider:'password',created_at:$now}) RETURN 1",
+    db.query(
+        "INSERT INTO users (id, email, name, role, provider, created_at)
+                        VALUES ($id, $email, $name, $role, 'password', $now)",
         json!({"id":id,"email":email,"name":name,"role":role,"now":now}),
     ).await.unwrap();
     let token = jwt::issue(JWT_SECRET, &id, email, name, role).unwrap();
     (id, token)
 }
 
-async fn make_group(neo4j: &Neo4jClient, name: &str) -> String {
+async fn make_group(db: &Db, name: &str) -> String {
     let id  = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "CREATE (:Group {id:$id,name:$name,description:'',created_at:$now}) RETURN 1",
+    db.query(
+        "INSERT INTO groups (id, name, description, created_at) VALUES ($id, $name, '', $now)",
         json!({"id":id,"name":name,"now":now}),
     ).await.unwrap();
     id
 }
 
-async fn join_group(neo4j: &Neo4jClient, user_id: &str, group_id: &str) {
-    neo4j.query_read(
-        "MATCH (u:User{id:$uid}),(g:Group{id:$gid}) MERGE (u)-[:MEMBER_OF]->(g) RETURN 1",
+async fn join_group(db: &Db, user_id: &str, group_id: &str) {
+    db.query(
+        "INSERT INTO user_groups (user_id, group_id) VALUES ($uid, $gid) ON CONFLICT DO NOTHING",
         json!({"uid":user_id,"gid":group_id}),
     ).await.unwrap();
 }
@@ -323,8 +311,8 @@ fn parse_sse_events(body: &str) -> Vec<Value> {
         .collect()
 }
 
-async fn count_nodes(neo4j: &Neo4jClient, label: &str) -> usize {
-    let rows = neo4j.query_read(&format!("MATCH (n:{label}) RETURN count(n) AS n"), json!({})).await.unwrap();
+async fn count_rows(db: &Db, table: &str) -> usize {
+    let rows = db.query(&format!("SELECT count(*) AS n FROM {table}"), json!({})).await.unwrap();
     rows.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) as usize
 }
 
@@ -409,49 +397,47 @@ fn spawn_dag_fake_agent(
     });
 }
 
-async fn seed_terraform_artifact(neo4j: &Neo4jClient, project_id: &str, content: &str) -> String {
-    let created = create_artifact(neo4j, project_id, ArtifactKind::Terraform, "Infra", content, "system")
+async fn seed_terraform_artifact(db: &Db, project_id: &str, content: &str) -> String {
+    let created = create_artifact(db, project_id, ArtifactKind::Terraform, "Infra", content, "system")
         .await.unwrap();
     created["id"].as_str().unwrap().to_string()
 }
 
-async fn seed_bash_artifact(neo4j: &Neo4jClient, project_id: &str, content: &str) -> String {
-    let created = create_artifact(neo4j, project_id, ArtifactKind::Bash, "Script", content, "system")
+async fn seed_bash_artifact(db: &Db, project_id: &str, content: &str) -> String {
+    let created = create_artifact(db, project_id, ArtifactKind::Bash, "Script", content, "system")
         .await.unwrap();
     created["id"].as_str().unwrap().to_string()
 }
 
-async fn seed_bash_artifact_titled(neo4j: &Neo4jClient, project_id: &str, title: &str, content: &str) -> String {
-    let created = create_artifact(neo4j, project_id, ArtifactKind::Bash, title, content, "system")
+async fn seed_bash_artifact_titled(db: &Db, project_id: &str, title: &str, content: &str) -> String {
+    let created = create_artifact(db, project_id, ArtifactKind::Bash, title, content, "system")
         .await.unwrap();
     created["id"].as_str().unwrap().to_string()
 }
 
-async fn link_bash_step(neo4j: &Neo4jClient, deployment_id: &str, artifact_id: &str, phase: &str, action: &str) {
+async fn link_bash_step(db: &Db, deployment_id: &str, artifact_id: &str, phase: &str, action: &str) {
     let step_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "MATCH (d:Deployment {id: $did}), (a:Artifact {id: $aid})
-         CREATE (s:ExecutionStep {id: $sid, phase: $phase, action: $action, label: $label, step_index: 0, created_at: $now})
-         CREATE (d)-[:HAS_EXECUTION_STEP]->(s)
-         CREATE (s)-[:RUNS]->(a)",
+    db.query(
+        "INSERT INTO execution_steps (id, deployment_id, phase, action, label, step_index, artifact_id, created_at)
+         VALUES ($sid, $did, $phase, $action, $label, 0, $aid, $now)",
         json!({ "did": deployment_id, "aid": artifact_id, "sid": step_id, "phase": phase, "action": action, "label": artifact_id, "now": now }),
     ).await.unwrap();
 }
 
-async fn link_terraform_bundle(neo4j: &Neo4jClient, deployment_id: &str, artifact_id: &str) {
-    neo4j.query_read(
-        "MATCH (d:Deployment {id: $did}), (a:Artifact {id: $aid}) CREATE (d)-[:HAS_TERRAFORM_BUNDLE]->(a)",
+async fn link_terraform_bundle(db: &Db, deployment_id: &str, artifact_id: &str) {
+    db.query(
+        "UPDATE deployments SET terraform_bundle_id = $aid WHERE id = $did",
         json!({ "did": deployment_id, "aid": artifact_id }),
     ).await.unwrap();
 }
 
-async fn seed_design_doc(neo4j: &Neo4jClient, project_id: &str, deployment_id: &str, content: &str) -> String {
-    let created = create_artifact(neo4j, project_id, ArtifactKind::Markdown, "Design", content, "system")
+async fn seed_design_doc(db: &Db, project_id: &str, deployment_id: &str, content: &str) -> String {
+    let created = create_artifact(db, project_id, ArtifactKind::Markdown, "Design", content, "system")
         .await.unwrap();
     let aid = created["id"].as_str().unwrap().to_string();
-    neo4j.query_read(
-        "MATCH (d:Deployment {id: $did}), (a:Artifact {id: $aid}) CREATE (d)-[:HAS_DESIGN_DOC]->(a)",
+    db.query(
+        "UPDATE deployments SET design_doc_id = $aid WHERE id = $did",
         json!({ "did": deployment_id, "aid": aid }),
     ).await.unwrap();
     aid
@@ -468,13 +454,13 @@ async fn create_deployment_raw(app: &Router, token: &str, project_id: &str, _nam
 // ---- ProductTemplate CRUD ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_template_returns_201_and_is_listed() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
 
     let (status, body) = send(
         app.clone(),
@@ -492,13 +478,13 @@ async fn create_template_returns_201_and_is_listed() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn template_visible_from_two_different_projects_in_the_same_group() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
 
     let pid1 = seed_project(&app, &tok, &gid, "Customer A").await;
     let pid2 = seed_project(&app, &tok, &gid, "Customer B").await;
@@ -534,13 +520,13 @@ async fn template_visible_from_two_different_projects_in_the_same_group() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn update_template_replaces_content() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
 
     let (_, created) = send(
         app.clone(),
@@ -561,13 +547,13 @@ async fn update_template_replaces_content() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn delete_template_removes_it() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
 
     let (_, created) = send(
         app.clone(),
@@ -585,13 +571,13 @@ async fn delete_template_removes_it() {
 // ---- Deployment creation ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_deployment_without_template_creates_deployment() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
 
     let (status, body) = send(
@@ -603,9 +589,8 @@ async fn create_deployment_without_template_creates_deployment() {
     assert_eq!(status, StatusCode::CREATED);
     assert!(body["id"].is_string());
 
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         RETURN d.infra_state AS infra_state",
+    let rows = db.query(
+        "SELECT infra_state FROM deployments WHERE id = $did AND project_id = $pid",
         json!({ "pid": pid, "did": body["id"] }),
     ).await.unwrap();
     assert_eq!(rows.len(), 1);
@@ -613,13 +598,13 @@ async fn create_deployment_without_template_creates_deployment() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_deployment_with_template_links_uses_template_edge() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
 
     let (_, created_template) = send(
@@ -641,13 +626,13 @@ async fn create_deployment_with_template_links_uses_template_edge() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_deployment_rejects_empty_name() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
 
     let (status, _) = send(
@@ -662,13 +647,13 @@ async fn create_deployment_rejects_empty_name() {
 // ---- Deployment list/get/update/delete ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_deployments_orders_by_updated_at_desc() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
 
     let (_, first) = send(
@@ -691,13 +676,13 @@ async fn list_deployments_orders_by_updated_at_desc() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn update_deployment_changes_environment_description() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
 
     let (_, created) = send(
@@ -719,13 +704,13 @@ async fn update_deployment_changes_environment_description() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn delete_deployment_removes_deployment() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
 
     let (_, created) = send(
@@ -735,25 +720,25 @@ async fn delete_deployment_removes_deployment() {
         })),
     ).await;
     let did = created["id"].as_str().unwrap();
-    assert_eq!(count_nodes(&neo4j, "Deployment").await, 1);
+    assert_eq!(count_rows(&db, "deployments").await, 1);
 
     let (status, _) = send(app.clone(), req_del(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(count_nodes(&neo4j, "Deployment").await, 0);
+    assert_eq!(count_rows(&db, "deployments").await, 0);
 
     let (status, _) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_deployment_rejected_for_user_outside_the_project_group() {
-    neo4j!(c, neo4j);
-    let (uid, tok)     = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (_, other_tok) = make_user(&neo4j, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok)     = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_, other_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
 
     let (_, created) = send(
@@ -771,35 +756,35 @@ async fn get_deployment_rejected_for_user_outside_the_project_group() {
 // ---- record_run_and_update_state / last_applied_bundle_for_artifact ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn record_run_and_update_state_no_ops_for_artifact_not_linked_to_a_deployment() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"v1"}"#).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
 
     let new_state = record_run_and_update_state(
-        &neo4j, &pid, &aid, TerraformAction::Apply, Some(0), "out", "", Some(r#"{"main.tf":"v1"}"#), "agent", None,
+        &db, &pid, &aid, TerraformAction::Apply, Some(0), "out", "", Some(r#"{"main.tf":"v1"}"#), "agent", None,
     ).await.unwrap();
     assert_eq!(new_state, None);
-    assert_eq!(count_nodes(&neo4j, "DeploymentRun").await, 0);
+    assert_eq!(count_rows(&db, "deployment_runs").await, 0);
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn record_run_and_update_state_covers_all_action_success_combinations() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"v1"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
 
     let cases = [
         (TerraformAction::Plan, true, None),
@@ -812,37 +797,37 @@ async fn record_run_and_update_state_covers_all_action_success_combinations() {
     for (action, success, expected) in cases {
         let exit_code = if success { Some(0) } else { Some(1) };
         let new_state = record_run_and_update_state(
-            &neo4j, &pid, &aid, action, exit_code, "out", "err", Some(r#"{"main.tf":"v1"}"#), "agent", None,
+            &db, &pid, &aid, action, exit_code, "out", "err", Some(r#"{"main.tf":"v1"}"#), "agent", None,
         ).await.unwrap();
         assert_eq!(new_state.as_deref(), expected, "action={action:?} success={success}");
     }
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn record_run_and_update_state_only_sets_last_applied_on_successful_apply() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"v1"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
 
-    assert_eq!(last_applied_bundle_for_artifact(&neo4j, &pid, &aid).await.unwrap(), None);
+    assert_eq!(last_applied_bundle_for_artifact(&db, &pid, &aid).await.unwrap(), None);
 
     record_run_and_update_state(
-        &neo4j, &pid, &aid, TerraformAction::Apply, Some(1), "", "boom", None, "agent", None,
+        &db, &pid, &aid, TerraformAction::Apply, Some(1), "", "boom", None, "agent", None,
     ).await.unwrap();
-    assert_eq!(last_applied_bundle_for_artifact(&neo4j, &pid, &aid).await.unwrap(), None);
+    assert_eq!(last_applied_bundle_for_artifact(&db, &pid, &aid).await.unwrap(), None);
 
     record_run_and_update_state(
-        &neo4j, &pid, &aid, TerraformAction::Apply, Some(0), "ok", "", Some(r#"{"main.tf":"v1"}"#), "agent", None,
+        &db, &pid, &aid, TerraformAction::Apply, Some(0), "ok", "", Some(r#"{"main.tf":"v1"}"#), "agent", None,
     ).await.unwrap();
     assert_eq!(
-        last_applied_bundle_for_artifact(&neo4j, &pid, &aid).await.unwrap(),
+        last_applied_bundle_for_artifact(&db, &pid, &aid).await.unwrap(),
         Some(r#"{"main.tf":"v1"}"#.to_string()),
     );
 }
@@ -850,17 +835,17 @@ async fn record_run_and_update_state_only_sets_last_applied_on_successful_apply(
 // ---- deploy / redeploy / destroy ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn deploy_runs_apply_and_marks_infra_up() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"v1"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
 
     let rx = register_agent(&registry, "agent-1", &pid);
     spawn_fake_agent_always_succeeds(rx, Arc::clone(&registry));
@@ -877,17 +862,17 @@ async fn deploy_runs_apply_and_marks_infra_up() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn redeploy_applies_directly_when_infra_is_already_clean() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"v1"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
 
     let rx = register_agent(&registry, "agent-1", &pid);
     let mut sent = spawn_fake_agent_always_succeeds(rx, Arc::clone(&registry));
@@ -906,23 +891,23 @@ async fn redeploy_applies_directly_when_infra_is_already_clean() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn redeploy_destroys_first_when_infra_is_broken() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"v1"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
 
     record_run_and_update_state(
-        &neo4j, &pid, &aid, TerraformAction::Apply, Some(1), "", "boom", None, "agent", None,
+        &db, &pid, &aid, TerraformAction::Apply, Some(1), "", "boom", None, "agent", None,
     ).await.unwrap();
-    neo4j.query_read(
-        "MATCH (d:Deployment {id: $did}) SET d.last_applied_content = $c, d.last_applied_artifact_id = $aid",
+    db.query(
+        "UPDATE deployments SET last_applied_content = $c, last_applied_artifact_id = $aid WHERE id = $did",
         json!({ "did": did, "c": r#"{"main.tf":"v0"}"#, "aid": aid }),
     ).await.unwrap();
 
@@ -941,22 +926,22 @@ async fn redeploy_destroys_first_when_infra_is_broken() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn redeploy_resets_to_none_when_broken_and_never_applied() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"v1"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
 
     // First-ever apply failed: infra_state becomes "broken" but nothing was ever applied,
     // so there's no last_applied_content snapshot to destroy.
     record_run_and_update_state(
-        &neo4j, &pid, &aid, TerraformAction::Apply, Some(1), "", "boom", None, "agent", None,
+        &db, &pid, &aid, TerraformAction::Apply, Some(1), "", "boom", None, "agent", None,
     ).await.unwrap();
 
     register_agent(&registry, "agent-1", &pid);
@@ -973,20 +958,20 @@ async fn redeploy_resets_to_none_when_broken_and_never_applied() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn destroy_resets_to_none_when_broken_and_never_applied() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"v1"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
 
     record_run_and_update_state(
-        &neo4j, &pid, &aid, TerraformAction::Apply, Some(1), "", "boom", None, "agent", None,
+        &db, &pid, &aid, TerraformAction::Apply, Some(1), "", "boom", None, "agent", None,
     ).await.unwrap();
 
     register_agent(&registry, "agent-1", &pid);
@@ -1003,17 +988,17 @@ async fn destroy_resets_to_none_when_broken_and_never_applied() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn destroy_rejected_when_nothing_was_ever_applied() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"v1"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
     register_agent(&registry, "agent-1", &pid);
 
     let (status, _) = send(
@@ -1024,17 +1009,17 @@ async fn destroy_rejected_when_nothing_was_ever_applied() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn destroy_targets_the_last_applied_snapshot_not_unapplied_edits() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"content-A"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"content-A"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
 
     let rx = register_agent(&registry, "agent-1", &pid);
     let mut sent = spawn_fake_agent_always_succeeds(rx, Arc::clone(&registry));
@@ -1048,8 +1033,8 @@ async fn destroy_targets_the_last_applied_snapshot_not_unapplied_edits() {
     assert_eq!(apply_action, TerraformAction::Apply);
     assert_eq!(apply_files, r#"{"main.tf":"content-A"}"#);
 
-    neo4j.query_read(
-        "MATCH (a:Artifact {id: $aid}) SET a.content = $content",
+    db.query(
+        "UPDATE artifacts SET content = $content WHERE id = $aid",
         json!({ "aid": aid, "content": r#"{"main.tf":"content-B-never-applied"}"# }),
     ).await.unwrap();
 
@@ -1069,17 +1054,17 @@ async fn destroy_targets_the_last_applied_snapshot_not_unapplied_edits() {
 // ---- run history ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_deployment_runs_returns_runs_ordered_newest_first() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"v1"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
 
     let rx = register_agent(&registry, "agent-1", &pid);
     spawn_fake_agent_with_script(rx, Arc::clone(&registry), |_| 0);
@@ -1098,16 +1083,16 @@ async fn list_deployment_runs_returns_runs_ordered_newest_first() {
 // ---- environment questions ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_environment_questions_returns_parsed_questions() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
     let llm = ScriptedLlm::new(vec![text_response(
         "Here are some questions:\n```json\n[{\"id\":\"racks\",\"text\":\"How many racks?\"}]\n```",
     )]);
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1120,14 +1105,14 @@ async fn generate_environment_questions_returns_parsed_questions() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_environment_questions_returns_422_when_unparseable() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
     let llm = ScriptedLlm::new(vec![text_response("Sorry, I don't understand the request.")]);
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1142,13 +1127,13 @@ fn design_generation_llm() -> Arc<ClosureLlm> {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_saves_the_document_deterministically() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), design_generation_llm());
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1159,13 +1144,13 @@ async fn generate_design_saves_the_document_deterministically() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_stream_returns_event_stream_content_type() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), design_generation_llm());
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1178,15 +1163,15 @@ async fn generate_design_stream_returns_event_stream_content_type() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_stream_emits_text_delta_and_done_and_saves_document() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "s@x.com", "Sue", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "s@x.com", "Sue", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
     let design_doc = "# Design\nUse a single VM.";
     let llm = ClosureLlm::new(move |_messages| text_response(design_doc));
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
     let pid = seed_project(&app, &tok, &gid, "Customer S").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1211,12 +1196,12 @@ async fn generate_design_stream_emits_text_delta_and_done_and_saves_document() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_stream_persists_synthesis_not_narration_when_max_iterations_hit() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "m@x.com", "Max", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "m@x.com", "Max", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
     let synthesis_doc = "# Design\nFinal clean synthesis.";
     let llm = ClosureLlm::new(move |messages| {
         let rounds = tool_result_contents(messages).len();
@@ -1235,7 +1220,7 @@ async fn generate_design_stream_persists_synthesis_not_narration_when_max_iterat
             text_response(synthesis_doc)
         }
     });
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
     let pid = seed_project(&app, &tok, &gid, "Customer M").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1252,7 +1237,7 @@ async fn generate_design_stream_persists_synthesis_not_narration_when_max_iterat
         .expect("design_doc should be persisted as a fallback artifact")
         .to_string();
 
-    let artifact = get_artifact_in_project(&neo4j, &pid, &aid).await.unwrap().unwrap();
+    let artifact = get_artifact_in_project(&db, &pid, &aid).await.unwrap().unwrap();
     let content = artifact["content"].as_str().unwrap();
     assert_eq!(content, synthesis_doc);
     assert!(
@@ -1262,12 +1247,12 @@ async fn generate_design_stream_persists_synthesis_not_narration_when_max_iterat
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_stream_does_not_persist_generic_fallback_as_design_doc() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "z@x.com", "Zoe", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "z@x.com", "Zoe", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
     let llm = ClosureLlm::new(move |_messages| {
         LlmResponse::ToolCalls {
             calls: vec![ToolCall {
@@ -1280,7 +1265,7 @@ async fn generate_design_stream_does_not_persist_generic_fallback_as_design_doc(
         usage: Usage::default(),
         }
     });
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
     let pid = seed_project(&app, &tok, &gid, "Customer Z").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1300,13 +1285,13 @@ async fn generate_design_stream_does_not_persist_generic_fallback_as_design_doc(
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_includes_selected_artifacts_and_links_template() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let setup_app = deployments_app(Arc::clone(&neo4j)).0;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let setup_app = deployments_app(Arc::clone(&db)).0;
     let pid = seed_project(&setup_app, &tok, &gid, "Customer B").await;
     let did = create_deployment_raw(&setup_app, &tok, &pid, "Rollout").await;
 
@@ -1320,9 +1305,9 @@ async fn generate_design_includes_selected_artifacts_and_links_template() {
     assert_eq!(tpl_status, StatusCode::CREATED);
     let tpl_id = tpl_body["id"].as_str().unwrap().to_string();
 
-    let a1 = create_artifact(&neo4j, &pid, ArtifactKind::Markdown, "Requirements", "We need 3 VMs across two zones", "system").await.unwrap();
+    let a1 = create_artifact(&db, &pid, ArtifactKind::Markdown, "Requirements", "We need 3 VMs across two zones", "system").await.unwrap();
     let a1_id = a1["id"].as_str().unwrap().to_string();
-    let a2 = create_artifact(&neo4j, &pid, ArtifactKind::Markdown, "Constraints", "No public IPs are allowed", "system").await.unwrap();
+    let a2 = create_artifact(&db, &pid, ArtifactKind::Markdown, "Constraints", "No public IPs are allowed", "system").await.unwrap();
     let a2_id = a2["id"].as_str().unwrap().to_string();
 
     let captured = Arc::new(std::sync::Mutex::new(None::<(String, String)>));
@@ -1331,7 +1316,7 @@ async fn generate_design_includes_selected_artifacts_and_links_template() {
         captured_for_llm.lock().unwrap().replace(captured_prompt_for_design(messages));
         text_response("# Design\nUse a single VM.")
     });
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
 
     let (status, body) = send(
         app,
@@ -1353,20 +1338,20 @@ async fn generate_design_includes_selected_artifacts_and_links_template() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_ignores_artifacts_belonging_to_other_projects() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "c@x.com", "Carol", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let setup_app = deployments_app(Arc::clone(&neo4j)).0;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "c@x.com", "Carol", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let setup_app = deployments_app(Arc::clone(&db)).0;
     let pid = seed_project(&setup_app, &tok, &gid, "Customer C").await;
     let did = create_deployment_raw(&setup_app, &tok, &pid, "Rollout").await;
     let other_pid = seed_project(&setup_app, &tok, &gid, "Customer D").await;
 
-    let own = create_artifact(&neo4j, &pid, ArtifactKind::Markdown, "Own", "OWN-MARKER-keep", "system").await.unwrap();
+    let own = create_artifact(&db, &pid, ArtifactKind::Markdown, "Own", "OWN-MARKER-keep", "system").await.unwrap();
     let own_id = own["id"].as_str().unwrap().to_string();
-    let foreign = create_artifact(&neo4j, &other_pid, ArtifactKind::Markdown, "Foreign", "FOREIGN-MARKER-leak", "system").await.unwrap();
+    let foreign = create_artifact(&db, &other_pid, ArtifactKind::Markdown, "Foreign", "FOREIGN-MARKER-leak", "system").await.unwrap();
     let foreign_id = foreign["id"].as_str().unwrap().to_string();
 
     let captured = Arc::new(std::sync::Mutex::new(None::<String>));
@@ -1375,7 +1360,7 @@ async fn generate_design_ignores_artifacts_belonging_to_other_projects() {
         captured_for_llm.lock().unwrap().replace(captured_prompt_for_design(messages).1);
         text_response("# Design\n")
     });
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
 
     let (status, _body) = send(
         app,
@@ -1391,13 +1376,13 @@ async fn generate_design_ignores_artifacts_belonging_to_other_projects() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_decisions_requires_existing_design_doc() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1406,13 +1391,13 @@ async fn generate_design_decisions_requires_existing_design_doc() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_decisions_returns_parsed_decisions() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), design_generation_llm());
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     send(app.clone(), req_post(&format!("/projects/{pid}/deployments/{did}/design/generate"), &tok, json!({}))).await;
@@ -1420,7 +1405,7 @@ async fn generate_design_decisions_returns_parsed_decisions() {
     let decisions_llm = ScriptedLlm::new(vec![text_response(
         "```json\n[{\"id\":\"sizing\",\"text\":\"Confirm VM size\",\"suggested\":\"medium\"}]\n```",
     )]);
-    let (app2, _registry2) = deployments_app_with_llm(Arc::clone(&neo4j), decisions_llm);
+    let (app2, _registry2) = deployments_app_with_llm(Arc::clone(&db), decisions_llm);
     let (status, body) = send(app2, req_post(&format!("/projects/{pid}/deployments/{did}/design/decisions"), &tok, json!({}))).await;
     assert_eq!(status, StatusCode::OK);
     let decisions = body["decisions"].as_array().unwrap();
@@ -1428,13 +1413,13 @@ async fn generate_design_decisions_returns_parsed_decisions() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn revise_design_requires_decisions_or_instructions() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1446,13 +1431,13 @@ async fn revise_design_requires_decisions_or_instructions() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn revise_design_updates_existing_design_doc_in_place() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), design_generation_llm());
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let (_, created) = send(app.clone(), req_post(&format!("/projects/{pid}/deployments/{did}/design/generate"), &tok, json!({}))).await;
@@ -1473,7 +1458,7 @@ async fn revise_design_updates_existing_design_doc_in_place() {
             _ => text_response("Design revised."),
         }
     });
-    let (app2, _registry2) = deployments_app_with_llm(Arc::clone(&neo4j), revise_llm);
+    let (app2, _registry2) = deployments_app_with_llm(Arc::clone(&db), revise_llm);
     let (status, body) = send(
         app2,
         req_post(&format!("/projects/{pid}/deployments/{did}/design/revise"), &tok, json!({
@@ -1483,34 +1468,34 @@ async fn revise_design_updates_existing_design_doc_in_place() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["design_doc"]["id"], design_id);
 
-    let revised = get_artifact_content(&neo4j, &design_id).await;
+    let revised = get_artifact_content(&db, &design_id).await;
     assert!(revised.contains("Design v2"), "expected revised content, got: {revised}");
 }
 
-async fn get_artifact_content(neo4j: &Neo4jClient, artifact_id: &str) -> String {
-    let rows = neo4j.query_read(
-        "MATCH (a:Artifact {id: $id}) RETURN a.content AS content",
+async fn get_artifact_content(db: &Db, artifact_id: &str) -> String {
+    let rows = db.query(
+        "SELECT content FROM artifacts WHERE id = $id",
         json!({ "id": artifact_id }),
     ).await.unwrap();
     rows[0]["content"].as_str().unwrap_or_default().to_string()
 }
 
-async fn get_artifact_updated_at(neo4j: &Neo4jClient, artifact_id: &str) -> String {
-    let rows = neo4j.query_read(
-        "MATCH (a:Artifact {id: $id}) RETURN a.updated_at AS updated_at",
+async fn get_artifact_updated_at(db: &Db, artifact_id: &str) -> String {
+    let rows = db.query(
+        "SELECT updated_at FROM artifacts WHERE id = $id",
         json!({ "id": artifact_id }),
     ).await.unwrap();
     rows[0]["updated_at"].as_str().unwrap_or_default().to_string()
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_design_pdf_returns_bad_request_without_design_doc() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), design_generation_llm());
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1519,21 +1504,21 @@ async fn get_design_pdf_returns_bad_request_without_design_doc() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_design_pdf_serves_seeded_ready_cache_without_rerendering() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), design_generation_llm());
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let design_id = seed_design_doc(&neo4j, &pid, &did, "# Design\nContent.").await;
-    let updated_at = get_artifact_updated_at(&neo4j, &design_id).await;
+    let design_id = seed_design_doc(&db, &pid, &did, "# Design\nContent.").await;
+    let updated_at = get_artifact_updated_at(&db, &design_id).await;
 
     let fake_bytes = b"%PDF-1.4 not a real render, just a cache probe".to_vec();
     design_cache::store_ready(
-        &neo4j, &pid, &did,
+        &db, &pid, &did,
         &design_cache::DesignVersion { artifact_id: design_id.clone(), updated_at },
         &fake_bytes,
     ).await.unwrap();
@@ -1546,21 +1531,21 @@ async fn get_design_pdf_serves_seeded_ready_cache_without_rerendering() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn update_design_content_persists_new_content_and_marks_cache_stale() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), design_generation_llm());
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let design_id = seed_design_doc(&neo4j, &pid, &did, "# Design v1").await;
+    let design_id = seed_design_doc(&db, &pid, &did, "# Design v1").await;
     let old_version = design_cache::DesignVersion {
         artifact_id: design_id.clone(),
-        updated_at:  get_artifact_updated_at(&neo4j, &design_id).await,
+        updated_at:  get_artifact_updated_at(&db, &design_id).await,
     };
-    design_cache::store_ready(&neo4j, &pid, &did, &old_version, b"old bytes").await.unwrap();
+    design_cache::store_ready(&db, &pid, &did, &old_version, b"old bytes").await.unwrap();
 
     let (status, body) = send(
         app.clone(),
@@ -1571,28 +1556,28 @@ async fn update_design_content_persists_new_content_and_marks_cache_stale() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["design_doc"]["id"], design_id);
 
-    let content = get_artifact_content(&neo4j, &design_id).await;
+    let content = get_artifact_content(&db, &design_id).await;
     assert!(content.contains("Design v2"), "expected updated content, got: {content}");
 
-    let cache = design_cache::load_cache_state(&neo4j, &pid, &did).await.unwrap();
+    let cache = design_cache::load_cache_state(&db, &pid, &did).await.unwrap();
     let current = design_cache::DesignVersion {
         artifact_id: design_id.clone(),
-        updated_at:  get_artifact_updated_at(&neo4j, &design_id).await,
+        updated_at:  get_artifact_updated_at(&db, &design_id).await,
     };
     assert_ne!(cache.ready.unwrap().version, current);
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_design_pdf_generates_and_caches_on_first_request() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), design_generation_llm());
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let design_id = seed_design_doc(&neo4j, &pid, &did, "# Design\n\nSome content.").await;
+    let design_id = seed_design_doc(&db, &pid, &did, "# Design\n\nSome content.").await;
 
     let resp = app.clone().oneshot(req_get(&format!("/projects/{pid}/deployments/{did}/design/pdf"), &tok)).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -1600,10 +1585,10 @@ async fn get_design_pdf_generates_and_caches_on_first_request() {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     assert!(!bytes.is_empty());
 
-    let cache = design_cache::load_cache_state(&neo4j, &pid, &did).await.unwrap();
+    let cache = design_cache::load_cache_state(&db, &pid, &did).await.unwrap();
     let current = design_cache::DesignVersion {
         artifact_id: design_id.clone(),
-        updated_at:  get_artifact_updated_at(&neo4j, &design_id).await,
+        updated_at:  get_artifact_updated_at(&db, &design_id).await,
     };
     assert_eq!(cache.ready.unwrap().version, current);
 }
@@ -1627,13 +1612,13 @@ fn provision_generation_llm() -> Arc<ClosureLlm> {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_provision_requires_existing_design_doc() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1642,16 +1627,16 @@ async fn generate_provision_requires_existing_design_doc() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_provision_creates_and_links_terraform_bundle() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), provision_generation_llm());
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), provision_generation_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    seed_design_doc(&neo4j, &pid, &did, "# Design\nSingle VM.").await;
+    seed_design_doc(&db, &pid, &did, "# Design\nSingle VM.").await;
 
     let (status, body) = send(app, req_post(&format!("/projects/{pid}/deployments/{did}/provision/generate"), &tok, json!({}))).await;
     assert_eq!(status, StatusCode::OK);
@@ -1660,13 +1645,13 @@ async fn generate_provision_creates_and_links_terraform_bundle() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_provision_stream_requires_existing_design_doc() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "ps@x.com", "Pete", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "ps@x.com", "Pete", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1678,16 +1663,16 @@ async fn generate_provision_stream_requires_existing_design_doc() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_provision_stream_returns_event_stream_content_type() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "ps@x.com", "Pam", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), provision_generation_llm());
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "ps@x.com", "Pam", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), provision_generation_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    seed_design_doc(&neo4j, &pid, &did, "# Design\nSingle VM.").await;
+    seed_design_doc(&db, &pid, &did, "# Design\nSingle VM.").await;
 
     let (status, ct, _body) = send_sse(
         app,
@@ -1698,16 +1683,16 @@ async fn generate_provision_stream_returns_event_stream_content_type() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_provision_stream_emits_text_delta_tool_events_and_done() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "ps2@x.com", "Pria", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), provision_generation_llm());
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "ps2@x.com", "Pria", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), provision_generation_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer S").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    seed_design_doc(&neo4j, &pid, &did, "# Design\nSingle VM.").await;
+    seed_design_doc(&db, &pid, &did, "# Design\nSingle VM.").await;
 
     let (status, _ct, body) = send_sse(
         app.clone(),
@@ -1729,13 +1714,13 @@ async fn generate_provision_stream_emits_text_delta_tool_events_and_done() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_provision_change_requires_instructions_or_error_context() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1747,13 +1732,13 @@ async fn propose_provision_change_requires_instructions_or_error_context() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_provision_change_requires_existing_bundle() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -1767,20 +1752,20 @@ async fn propose_provision_change_requires_existing_bundle() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_provision_change_does_not_modify_the_artifact() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
     let llm = ScriptedLlm::new(vec![text_response(
         "Here's a proposal:\n```json\n{\"main.tf\":\"resource \\\"y\\\" {}\"}\n```",
     )]);
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
 
     let (status, body) = send(
         app,
@@ -1792,23 +1777,23 @@ async fn propose_provision_change_does_not_modify_the_artifact() {
     assert_eq!(body["proposed_files"]["main.tf"], "resource \"y\" {}");
     assert_eq!(body["current_files"]["main.tf"], "resource \"x\" {}");
 
-    let content = get_artifact_content(&neo4j, &aid).await;
+    let content = get_artifact_content(&db, &aid).await;
     assert_eq!(content, r#"{"main.tf":"resource \"x\" {}"}"#, "propose-change must not persist anything");
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_provision_change_returns_422_when_unparseable() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
     let llm = ScriptedLlm::new(vec![text_response("I couldn't figure out a fix.")]);
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
 
     let (status, _) = send(
         app,
@@ -1820,17 +1805,17 @@ async fn propose_provision_change_returns_422_when_unparseable() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn apply_provision_change_updates_the_artifact_content() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
 
     let (status, body) = send(
         app,
@@ -1841,23 +1826,23 @@ async fn apply_provision_change_updates_the_artifact_content() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["terraform_bundle"]["id"], aid);
 
-    let content = get_artifact_content(&neo4j, &aid).await;
+    let content = get_artifact_content(&db, &aid).await;
     let parsed: Value = serde_json::from_str(&content).unwrap();
     assert_eq!(parsed["main.tf"], "resource \"y\" {}");
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn apply_provision_change_rejects_unsafe_paths() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
-    link_terraform_bundle(&neo4j, &did, &aid).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
+    link_terraform_bundle(&db, &did, &aid).await;
 
     let (status, _) = send(
         app,
@@ -1869,23 +1854,23 @@ async fn apply_provision_change_rejects_unsafe_paths() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_provision_change_for_bash_loads_both_deploy_and_destroy() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
     let llm = ScriptedLlm::new(vec![text_response(
         "Here's the updated pair:\n```json\n{\"deploy-prep.sh\":\"#!/bin/bash\\necho new deploy\",\"destroy-prep.sh\":\"#!/bin/bash\\necho new destroy\"}\n```",
     )]);
-    let (app, _registry) = deployments_app_with_llm(Arc::clone(&neo4j), llm);
+    let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
-    let deploy_aid = seed_bash_artifact_titled(&neo4j, &pid, "deploy-prep.sh", "#!/bin/bash\necho deploy").await;
-    let destroy_aid = seed_bash_artifact_titled(&neo4j, &pid, "destroy-prep.sh", "#!/bin/bash\necho destroy").await;
-    link_bash_step(&neo4j, &did, &deploy_aid, "deploy", "run").await;
-    link_bash_step(&neo4j, &did, &destroy_aid, "destroy", "destroy").await;
+    let deploy_aid = seed_bash_artifact_titled(&db, &pid, "deploy-prep.sh", "#!/bin/bash\necho deploy").await;
+    let destroy_aid = seed_bash_artifact_titled(&db, &pid, "destroy-prep.sh", "#!/bin/bash\necho destroy").await;
+    link_bash_step(&db, &did, &deploy_aid, "deploy", "run").await;
+    link_bash_step(&db, &did, &destroy_aid, "destroy", "destroy").await;
 
     let (status, body) = send(
         app,
@@ -1898,27 +1883,27 @@ async fn propose_provision_change_for_bash_loads_both_deploy_and_destroy() {
     assert_eq!(body["proposed_files"]["deploy-prep.sh"], "new deploy");
     assert_eq!(body["proposed_files"]["destroy-prep.sh"], "new destroy");
 
-    let deploy_content = get_artifact_content(&neo4j, &deploy_aid).await;
+    let deploy_content = get_artifact_content(&db, &deploy_aid).await;
     assert_eq!(deploy_content, "#!/bin/bash\necho deploy", "propose must not persist");
-    let destroy_content = get_artifact_content(&neo4j, &destroy_aid).await;
+    let destroy_content = get_artifact_content(&db, &destroy_aid).await;
     assert_eq!(destroy_content, "#!/bin/bash\necho destroy", "propose must not persist");
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn apply_provision_change_for_bash_updates_both_scripts() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
-    let deploy_aid = seed_bash_artifact_titled(&neo4j, &pid, "deploy-prep.sh", "#!/bin/bash\necho old deploy").await;
-    let destroy_aid = seed_bash_artifact_titled(&neo4j, &pid, "destroy-prep.sh", "#!/bin/bash\necho old destroy").await;
-    link_bash_step(&neo4j, &did, &deploy_aid, "deploy", "run").await;
-    link_bash_step(&neo4j, &did, &destroy_aid, "destroy", "destroy").await;
+    let deploy_aid = seed_bash_artifact_titled(&db, &pid, "deploy-prep.sh", "#!/bin/bash\necho old deploy").await;
+    let destroy_aid = seed_bash_artifact_titled(&db, &pid, "destroy-prep.sh", "#!/bin/bash\necho old destroy").await;
+    link_bash_step(&db, &did, &deploy_aid, "deploy", "run").await;
+    link_bash_step(&db, &did, &destroy_aid, "destroy", "destroy").await;
 
     let (status, _) = send(
         app,
@@ -1932,25 +1917,25 @@ async fn apply_provision_change_for_bash_updates_both_scripts() {
     ).await;
     assert_eq!(status, StatusCode::OK);
 
-    let deploy_content = get_artifact_content(&neo4j, &deploy_aid).await;
+    let deploy_content = get_artifact_content(&db, &deploy_aid).await;
     assert_eq!(deploy_content, "#!/bin/bash\necho new deploy");
-    let destroy_content = get_artifact_content(&neo4j, &destroy_aid).await;
+    let destroy_content = get_artifact_content(&db, &destroy_aid).await;
     assert_eq!(destroy_content, "#!/bin/bash\necho new destroy");
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn apply_provision_change_for_bash_creates_missing_destroy_script() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
-    let deploy_aid = seed_bash_artifact_titled(&neo4j, &pid, "deploy-prep.sh", "#!/bin/bash\necho old deploy").await;
-    link_bash_step(&neo4j, &did, &deploy_aid, "deploy", "run").await;
+    let deploy_aid = seed_bash_artifact_titled(&db, &pid, "deploy-prep.sh", "#!/bin/bash\necho old deploy").await;
+    link_bash_step(&db, &did, &deploy_aid, "deploy", "run").await;
 
     let (status, body) = send(
         app,
@@ -1964,12 +1949,11 @@ async fn apply_provision_change_for_bash_creates_missing_destroy_script() {
     ).await;
     assert_eq!(status, StatusCode::OK);
 
-    let deploy_content = get_artifact_content(&neo4j, &deploy_aid).await;
+    let deploy_content = get_artifact_content(&db, &deploy_aid).await;
     assert_eq!(deploy_content, "#!/bin/bash\necho new deploy");
 
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact {kind: 'bash', title: 'destroy-prep.sh'})
-         RETURN a.content AS content",
+    let rows = db.query(
+        "SELECT content FROM artifacts WHERE project_id = $pid AND kind = 'bash' AND title = 'destroy-prep.sh'",
         json!({ "pid": pid }),
     ).await.unwrap();
     assert_eq!(rows[0]["content"], "#!/bin/bash\necho new destroy");
@@ -1978,18 +1962,18 @@ async fn apply_provision_change_for_bash_creates_missing_destroy_script() {
 // ---- DAG run orchestration ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn run_dag_executes_steps_in_topological_order_and_sets_infra_up() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo prep").await;
-    let bash_destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo teardown").await;
-    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+    let bash_aid = seed_bash_artifact(&db, &pid, "echo prep").await;
+    let bash_destroy_aid = seed_bash_artifact(&db, &pid, "echo teardown").await;
+    let tf_aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"..."}"#).await;
 
     let agent_id = "agent-1";
     let _rx = register_agent(&registry, agent_id, &pid);
@@ -2030,18 +2014,18 @@ async fn run_dag_executes_steps_in_topological_order_and_sets_infra_up() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn run_dag_halts_downstream_on_failure_and_sets_infra_broken() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo prep").await;
-    let bash_destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo teardown").await;
-    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+    let bash_aid = seed_bash_artifact(&db, &pid, "echo prep").await;
+    let bash_destroy_aid = seed_bash_artifact(&db, &pid, "echo teardown").await;
+    let tf_aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"..."}"#).await;
 
     let agent_id = "agent-1";
     let _rx = register_agent(&registry, agent_id, &pid);
@@ -2078,13 +2062,13 @@ async fn run_dag_halts_downstream_on_failure_and_sets_infra_broken() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn run_dag_400_when_no_plan_set() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -2102,17 +2086,17 @@ async fn run_dag_400_when_no_plan_set() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn run_dag_404_when_agent_not_in_project() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
-    let bash_destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo bye").await;
+    let bash_aid = seed_bash_artifact(&db, &pid, "echo hi").await;
+    let bash_destroy_aid = seed_bash_artifact(&db, &pid, "echo bye").await;
 
     let (_, _) = send(
         app.clone(),
@@ -2134,18 +2118,18 @@ async fn run_dag_404_when_agent_not_in_project() {
 // ---- Destroy DAG ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn run_destroy_dag_executes_destroy_steps_and_sets_infra_destroyed() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let bash_deploy_aid = seed_bash_artifact(&neo4j, &pid, "echo deploy").await;
-    let bash_destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo destroy").await;
-    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+    let bash_deploy_aid = seed_bash_artifact(&db, &pid, "echo deploy").await;
+    let bash_destroy_aid = seed_bash_artifact(&db, &pid, "echo destroy").await;
+    let tf_aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"..."}"#).await;
 
     let agent_id = "agent-1";
     let _rx = register_agent(&registry, agent_id, &pid);
@@ -2193,16 +2177,16 @@ async fn run_destroy_dag_executes_destroy_steps_and_sets_infra_destroyed() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn run_destroy_dag_400_when_no_destroy_steps() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
+    let bash_aid = seed_bash_artifact(&db, &pid, "echo hi").await;
 
     let agent_id = "agent-1";
     let _rx = register_agent(&registry, agent_id, &pid);
@@ -2226,17 +2210,17 @@ async fn run_destroy_dag_400_when_no_destroy_steps() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn deploy_destroy_deploy_cycle_is_idempotent() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let bash_deploy_aid = seed_bash_artifact(&neo4j, &pid, "echo deploy").await;
-    let bash_destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo destroy").await;
+    let bash_deploy_aid = seed_bash_artifact(&db, &pid, "echo deploy").await;
+    let bash_destroy_aid = seed_bash_artifact(&db, &pid, "echo destroy").await;
 
     let agent_id = "agent-1";
     let _rx = register_agent(&registry, agent_id, &pid);
@@ -2283,16 +2267,16 @@ async fn deploy_destroy_deploy_cycle_is_idempotent() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_rejects_bash_run_without_destroy() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
+    let bash_aid = seed_bash_artifact(&db, &pid, "echo hi").await;
 
     let (status, body) = send(
         app,
@@ -2306,17 +2290,17 @@ async fn set_execution_plan_rejects_bash_run_without_destroy() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_accepts_bash_run_with_bash_destroy() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let bash_deploy_aid = seed_bash_artifact(&neo4j, &pid, "echo deploy").await;
-    let bash_destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo destroy").await;
+    let bash_deploy_aid = seed_bash_artifact(&db, &pid, "echo deploy").await;
+    let bash_destroy_aid = seed_bash_artifact(&db, &pid, "echo destroy").await;
 
     let (status, _body) = send(
         app,
@@ -2335,13 +2319,13 @@ async fn set_execution_plan_accepts_bash_run_with_bash_destroy() {
 // ---- Context artifacts ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn add_context_artifact_creates_and_links_and_lists_in_deployment() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -2360,13 +2344,13 @@ async fn add_context_artifact_creates_and_links_and_lists_in_deployment() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn add_context_artifact_rejects_empty_title() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -2381,13 +2365,13 @@ async fn add_context_artifact_rejects_empty_title() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn add_context_artifact_rejects_unknown_kind() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -2402,13 +2386,13 @@ async fn add_context_artifact_rejects_unknown_kind() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn add_context_artifact_accepts_bash_kind() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -2423,16 +2407,16 @@ async fn add_context_artifact_accepts_bash_kind() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn link_context_artifact_links_existing_project_artifact() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"..."}"#).await;
 
     let (status, body) = send(
         app.clone(),
@@ -2446,17 +2430,17 @@ async fn link_context_artifact_links_existing_project_artifact() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn link_context_artifact_rejects_artifact_from_other_project() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
     let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
     let did_b = create_deployment_raw(&app, &tok, &pid_b, "Rollout B").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid_a, r#"{"main.tf":"..."}"#).await;
+    let aid = seed_terraform_artifact(&db, &pid_a, r#"{"main.tf":"..."}"#).await;
 
     let (status, _body) = send(
         app,
@@ -2468,13 +2452,13 @@ async fn link_context_artifact_rejects_artifact_from_other_project() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn remove_context_artifact_unlinks_and_drops_from_list() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -2502,13 +2486,13 @@ async fn remove_context_artifact_unlinks_and_drops_from_list() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn remove_context_artifact_404_when_not_linked() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -2522,16 +2506,16 @@ async fn remove_context_artifact_404_when_not_linked() {
 // ---- Generic proposals ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_artifact_change_creates_pending_proposal_targeting_artifact() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"old"}"#).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"old"}"#).await;
 
     let (status, body) = send(
         app.clone(),
@@ -2549,13 +2533,13 @@ async fn propose_artifact_change_creates_pending_proposal_targeting_artifact() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_artifact_change_rejects_missing_explanation() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -2571,17 +2555,17 @@ async fn propose_artifact_change_rejects_missing_explanation() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_artifact_change_rejects_artifact_from_other_project() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
     let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
     let did_b = create_deployment_raw(&app, &tok, &pid_b, "Rollout B").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid_a, r#"{"main.tf":"..."}"#).await;
+    let aid = seed_terraform_artifact(&db, &pid_a, r#"{"main.tf":"..."}"#).await;
 
     let (status, _body) = send(
         app,
@@ -2594,16 +2578,16 @@ async fn propose_artifact_change_rejects_artifact_from_other_project() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_proposals_returns_all_proposals_newest_first() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"old"}"#).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"old"}"#).await;
 
     for i in 0..3 {
         let (_status, _body) = send(
@@ -2626,16 +2610,16 @@ async fn list_proposals_returns_all_proposals_newest_first() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn approve_proposal_applies_content_to_target_artifact_and_sets_approved() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"old"}"#).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"old"}"#).await;
 
     let (_status, proposal) = send(
         app.clone(),
@@ -2653,21 +2637,21 @@ async fn approve_proposal_applies_content_to_target_artifact_and_sets_approved()
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "approved");
 
-    let artifact = get_artifact_in_project(&neo4j, &pid, &aid).await.unwrap().unwrap();
+    let artifact = get_artifact_in_project(&db, &pid, &aid).await.unwrap().unwrap();
     assert_eq!(artifact["content"], "{\"main.tf\":\"new\"}");
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn approve_proposal_allows_editing_content_before_applying() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"old"}"#).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"old"}"#).await;
 
     let (_, proposal) = send(
         app.clone(),
@@ -2686,21 +2670,21 @@ async fn approve_proposal_allows_editing_content_before_applying() {
     ).await;
     assert_eq!(status, StatusCode::OK);
 
-    let artifact = get_artifact_in_project(&neo4j, &pid, &aid).await.unwrap().unwrap();
+    let artifact = get_artifact_in_project(&db, &pid, &aid).await.unwrap().unwrap();
     assert_eq!(artifact["content"], "{\"main.tf\":\"user-edited\"}");
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn approve_proposal_rejects_already_approved_proposal() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"old"}"#).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"old"}"#).await;
 
     let (_, proposal) = send(
         app.clone(),
@@ -2726,16 +2710,16 @@ async fn approve_proposal_rejects_already_approved_proposal() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn discard_proposal_sets_status_discarded_without_applying() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"old"}"#).await;
+    let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"old"}"#).await;
 
     let (_, proposal) = send(
         app.clone(),
@@ -2761,18 +2745,18 @@ async fn discard_proposal_sets_status_discarded_without_applying() {
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["status"], "discarded");
 
-    let artifact = get_artifact_in_project(&neo4j, &pid, &aid).await.unwrap().unwrap();
+    let artifact = get_artifact_in_project(&db, &pid, &aid).await.unwrap().unwrap();
     assert_eq!(artifact["content"], "{\"main.tf\":\"old\"}");
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn discard_proposal_404_for_nonexistent() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -2786,17 +2770,17 @@ async fn discard_proposal_404_for_nonexistent() {
 // ---- Execution plan (DAG) ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_creates_deploy_and_destroy_steps_with_dependencies() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let bash_aid = seed_bash_artifact(&neo4j, &pid, "#!/usr/bin/env bash\necho prep").await;
-    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+    let bash_aid = seed_bash_artifact(&db, &pid, "#!/usr/bin/env bash\necho prep").await;
+    let tf_aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"..."}"#).await;
 
     let (status, body) = send(
         app.clone(),
@@ -2828,17 +2812,17 @@ async fn set_execution_plan_creates_deploy_and_destroy_steps_with_dependencies()
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_execution_plan_returns_stored_plan() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
-    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+    let bash_aid = seed_bash_artifact(&db, &pid, "echo hi").await;
+    let tf_aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"..."}"#).await;
 
     let (_, _) = send(
         app.clone(),
@@ -2867,28 +2851,28 @@ async fn get_execution_plan_returns_stored_plan() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn creating_a_project_auto_creates_a_deployment() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "p1@x.com", "Admin", "admin").await;
-    let gid = make_group(&neo4j, "G1").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "p1@x.com", "Admin", "admin").await;
+    let gid = make_group(&db, "G1").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
 
     let pid = seed_project(&app, &tok, &gid, "ProjectOne").await;
 
-    assert_eq!(count_nodes(&neo4j, "Deployment").await, 1);
+    assert_eq!(count_rows(&db, "deployments").await, 1);
     let _ = pid;
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_project_deployment_returns_the_auto_created_deployment() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "p2@x.com", "Admin", "admin").await;
-    let gid = make_group(&neo4j, "G2").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "p2@x.com", "Admin", "admin").await;
+    let gid = make_group(&db, "G2").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
 
     let pid = seed_project(&app, &tok, &gid, "ProjectTwo").await;
 
@@ -2899,13 +2883,13 @@ async fn get_project_deployment_returns_the_auto_created_deployment() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_deployment_is_rejected_when_one_already_exists() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "p3@x.com", "Admin", "admin").await;
-    let gid = make_group(&neo4j, "G3").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "p3@x.com", "Admin", "admin").await;
+    let gid = make_group(&db, "G3").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
 
     let pid = seed_project(&app, &tok, &gid, "ProjectThree").await;
 
@@ -2914,17 +2898,17 @@ async fn create_deployment_is_rejected_when_one_already_exists() {
         json!({"name":"Second","environment_description":"env"}),
     )).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(count_nodes(&neo4j, "Deployment").await, 1);
+    assert_eq!(count_rows(&db, "deployments").await, 1);
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_deployments_returns_exactly_one_for_a_project() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "p4@x.com", "Admin", "admin").await;
-    let gid = make_group(&neo4j, "G4").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "p4@x.com", "Admin", "admin").await;
+    let gid = make_group(&db, "G4").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
 
     let pid = seed_project(&app, &tok, &gid, "ProjectFour").await;
 
@@ -2936,13 +2920,13 @@ async fn list_deployments_returns_exactly_one_for_a_project() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_execution_plan_returns_empty_plan_when_none_set() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
@@ -2956,16 +2940,16 @@ async fn get_execution_plan_returns_empty_plan_when_none_set() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_rejects_invalid_action_for_artifact_kind() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let bash_aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
+    let bash_aid = seed_bash_artifact(&db, &pid, "echo hi").await;
 
     let (status, body) = send(
         app,
@@ -2979,17 +2963,17 @@ async fn set_execution_plan_rejects_invalid_action_for_artifact_kind() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_rejects_cycle_in_deploy_steps() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid_a = seed_bash_artifact(&neo4j, &pid, "echo a").await;
-    let aid_b = seed_bash_artifact(&neo4j, &pid, "echo b").await;
+    let aid_a = seed_bash_artifact(&db, &pid, "echo a").await;
+    let aid_b = seed_bash_artifact(&db, &pid, "echo b").await;
 
     let (status, body) = send(
         app,
@@ -3006,16 +2990,16 @@ async fn set_execution_plan_rejects_cycle_in_deploy_steps() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_rejects_apply_without_destroy_coverage() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+    let tf_aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"..."}"#).await;
 
     let (status, body) = send(
         app,
@@ -3032,16 +3016,16 @@ async fn set_execution_plan_rejects_apply_without_destroy_coverage() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_accepts_apply_with_matching_destroy() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let tf_aid = seed_terraform_artifact(&neo4j, &pid, r#"{"main.tf":"..."}"#).await;
+    let tf_aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"..."}"#).await;
 
     let (status, _body) = send(
         app,
@@ -3058,17 +3042,17 @@ async fn set_execution_plan_accepts_apply_with_matching_destroy() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_rejects_artifact_from_other_project() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
     let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
     let did_b = create_deployment_raw(&app, &tok, &pid_b, "Rollout B").await;
-    let aid = seed_bash_artifact(&neo4j, &pid_a, "echo hi").await;
+    let aid = seed_bash_artifact(&db, &pid_a, "echo hi").await;
 
     let (status, _body) = send(
         app,
@@ -3081,17 +3065,17 @@ async fn set_execution_plan_rejects_artifact_from_other_project() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_overwrites_previous_plan() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let (app, _registry) = deployments_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let (app, _registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let aid = seed_bash_artifact(&neo4j, &pid, "echo hi").await;
-    let destroy_aid = seed_bash_artifact(&neo4j, &pid, "echo bye").await;
+    let aid = seed_bash_artifact(&db, &pid, "echo hi").await;
+    let destroy_aid = seed_bash_artifact(&db, &pid, "echo bye").await;
 
     let (status, _) = send(
         app.clone(),

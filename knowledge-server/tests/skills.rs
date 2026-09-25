@@ -1,3 +1,4 @@
+use harvest_db::Db;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -9,7 +10,7 @@ use axum::{
     Router,
 };
 use http_body_util::BodyExt as _;
-use neo4j_testcontainers::{prelude::*, runners::AsyncRunner as _, Neo4j};
+use harvest_db::test_support::TestDb;
 use serde_json::{json, Value};
 use tower::ServiceExt as _;
 use uuid::Uuid;
@@ -23,7 +24,7 @@ use knowledge_server::{
         types::{LlmResponse, Message, ModelInfo, ToolDefinition, Usage},
     },
     machines::MachineRegistry,
-    neo4j::Neo4jClient,
+
     projects::handlers::{
         create_project, create_project_skill, delete_project_skill,
         get_project_skill, list_project_skills, update_project_skill,
@@ -55,9 +56,9 @@ impl LlmProvider for FixedTextLlm {
 
 const JWT_SECRET: &str = "test-skills-secret";
 
-fn skills_app(neo4j: Arc<Neo4jClient>) -> Router {
+fn skills_app(db: Arc<Db>) -> Router {
     let secret      = Arc::new(JWT_SECRET.to_string());
-    let skill_store = Arc::new(SkillStore::new(Arc::clone(&neo4j)));
+    let skill_store = Arc::new(SkillStore::new(Arc::clone(&db)));
 
     let global_read = Router::new()
         .route("/skills",     route_get(list_global_skills))
@@ -77,7 +78,7 @@ fn skills_app(neo4j: Arc<Neo4jClient>) -> Router {
     let registry = MachineRegistry::new();
     let builder  = Arc::new(ProjectAgentBuilder {
         llm:                        Arc::clone(&llm),
-        neo4j:                      Arc::clone(&neo4j),
+        db:                      Arc::clone(&db),
         registry:                   Arc::clone(&registry),
         skills:                     Arc::clone(&skill_store),
         lxd:                        None,
@@ -86,7 +87,7 @@ fn skills_app(neo4j: Arc<Neo4jClient>) -> Router {
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,
     });
-    let project_state = Arc::new(ProjectState::new(Arc::clone(&neo4j), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
+    let project_state = Arc::new(ProjectState::new(Arc::clone(&db), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
 
     let project_routes = Router::new()
         .route("/projects", route_post(create_project))
@@ -100,58 +101,53 @@ fn skills_app(neo4j: Arc<Neo4jClient>) -> Router {
     Router::new().merge(global_read).merge(global_admin).merge(project_routes)
 }
 
-async fn setup_constraints(neo4j: &Neo4jClient) {
-    auth::setup_constraints(neo4j).await.unwrap();
-    neo4j.run("CREATE CONSTRAINT project_id IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE").await.unwrap();
-    neo4j.run("CREATE CONSTRAINT skill_id   IF NOT EXISTS FOR (s:Skill)   REQUIRE s.id IS UNIQUE").await.unwrap();
-}
-
-macro_rules! neo4j {
-    ($c:ident, $neo4j:ident) => {
-        let $c = Neo4j::default().start().await;
-        let uri  = $c.image().bolt_uri_ipv4();
-        let user = $c.image().user().unwrap_or("neo4j");
-        let pass = $c.image().password().unwrap_or("neo");
-        let $neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
-        setup_constraints(&$neo4j).await;
+macro_rules! db {
+    ($c:ident, $db:ident) => {
+        let $c = TestDb::new().await;
+        let $db = Arc::new($c.db.clone());
     };
 }
 
-async fn make_user(neo4j: &Neo4jClient, email: &str, name: &str, role: &str) -> (String, String) {
+async fn make_user(db: &Db, email: &str, name: &str, role: &str) -> (String, String) {
     let id  = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "CREATE (:User {id:$id,email:$email,name:$name,role:$role,\
-                        provider:'password',created_at:$now}) RETURN 1",
+    db.query(
+        "INSERT INTO users (id, email, name, role, provider, created_at)
+                        VALUES ($id, $email, $name, $role, 'password', $now)",
         json!({"id":id,"email":email,"name":name,"role":role,"now":now}),
     ).await.unwrap();
     let token = jwt::issue(JWT_SECRET, &id, email, name, role).unwrap();
     (id, token)
 }
 
-async fn make_project_raw(neo4j: &Neo4jClient, name: &str) -> String {
+async fn make_project_raw(db: &Db, name: &str) -> String {
     let id  = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "CREATE (:Project {id:$id, name:$name, description:'', group_id:'g', created_by:'system', created_at:$now})",
+    db.query(
+        "WITH g AS (
+             INSERT INTO groups (id, name) VALUES ('g', 'g') ON CONFLICT (id) DO UPDATE SET name = groups.name
+             RETURNING id
+         )
+         INSERT INTO projects (id, name, description, group_id, created_by, created_at)
+         SELECT $id, $name, '', g.id, 'system', $now::timestamptz FROM g",
         json!({"id": id, "name": name, "now": now}),
     ).await.unwrap();
     id
 }
 
-async fn make_group(neo4j: &Neo4jClient, name: &str) -> String {
+async fn make_group(db: &Db, name: &str) -> String {
     let id  = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "CREATE (:Group {id:$id,name:$name,description:'',created_at:$now}) RETURN 1",
+    db.query(
+        "INSERT INTO groups (id, name, description, created_at) VALUES ($id, $name, '', $now)",
         json!({"id":id,"name":name,"now":now}),
     ).await.unwrap();
     id
 }
 
-async fn join_group(neo4j: &Neo4jClient, user_id: &str, group_id: &str) {
-    neo4j.query_read(
-        "MATCH (u:User{id:$uid}),(g:Group{id:$gid}) MERGE (u)-[:MEMBER_OF]->(g) RETURN 1",
+async fn join_group(db: &Db, user_id: &str, group_id: &str) {
+    db.query(
+        "INSERT INTO user_groups (user_id, group_id) VALUES ($uid, $gid) ON CONFLICT DO NOTHING",
         json!({"uid":user_id,"gid":group_id}),
     ).await.unwrap();
 }
@@ -166,7 +162,7 @@ async fn seed_project(app: &Router, token: &str, group_id: &str, name: &str) -> 
 
 #[allow(clippy::too_many_arguments)]
 async fn seed_skill_raw(
-    neo4j: &Neo4jClient,
+    db: &Db,
     name: &str,
     description: &str,
     content: &str,
@@ -175,25 +171,19 @@ async fn seed_skill_raw(
 ) -> String {
     let id  = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "CREATE (s:Skill {id:$id, name:$name, description:$description, content:$content,
-                           is_global:$is_global, created_by:'system', created_at:$now, updated_at:$now})",
+    db.query(
+        "INSERT INTO skills (id, project_id, name, description, content, created_by, created_at, updated_at)
+                           VALUES ($id, $pid, $name, $description, $content, 'system', $now, $now)",
         json!({
             "id": id, "name": name, "description": description, "content": content,
-            "is_global": is_global, "now": now,
+            "pid": if is_global { None } else { project_id }, "now": now,
         }),
     ).await.unwrap();
-    if let Some(pid) = project_id {
-        neo4j.query_read(
-            "MATCH (p:Project {id:$pid}), (s:Skill {id:$sid}) CREATE (p)-[:HAS_SKILL]->(s)",
-            json!({"pid": pid, "sid": id}),
-        ).await.unwrap();
-    }
     id
 }
 
-async fn count_skills(neo4j: &Neo4jClient) -> usize {
-    let rows = neo4j.query_read("MATCH (s:Skill) RETURN count(s) AS n", json!({})).await.unwrap();
+async fn count_skills(db: &Db) -> usize {
+    let rows = db.query("SELECT count(*) AS n FROM skills", json!({})).await.unwrap();
     rows.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) as usize
 }
 
@@ -234,11 +224,11 @@ async fn send(app: Router, req: Request<Body>) -> (StatusCode, Value) {
 // ---- Global skill CRUD ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_global_skills_empty_initially() {
-    neo4j!(c, neo4j);
-    let (_, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let app = skills_app(Arc::clone(&db));
 
     let (status, body) = send(app, req_get("/skills", &tok)).await;
     assert_eq!(status, StatusCode::OK);
@@ -246,11 +236,11 @@ async fn list_global_skills_empty_initially() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_global_skill_returns_201_with_fields() {
-    neo4j!(c, neo4j);
-    let (_, admin_tok) = make_user(&neo4j, "admin@x.com", "Admin", "admin").await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
+    let app = skills_app(Arc::clone(&db));
 
     let (status, body) = send(
         app,
@@ -265,11 +255,11 @@ async fn create_global_skill_returns_201_with_fields() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_global_skill_rejected_for_non_admin() {
-    neo4j!(c, neo4j);
-    let (_, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let app = skills_app(Arc::clone(&db));
 
     let (status, _) = send(
         app,
@@ -281,10 +271,10 @@ async fn create_global_skill_rejected_for_non_admin() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_global_skill_rejected_unauthenticated() {
-    neo4j!(c, neo4j);
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let app = skills_app(Arc::clone(&db));
 
     let req = Request::builder().method("POST").uri("/admin/skills")
         .header("content-type", "application/json")
@@ -296,11 +286,11 @@ async fn create_global_skill_rejected_unauthenticated() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_global_skill_requires_name() {
-    neo4j!(c, neo4j);
-    let (_, admin_tok) = make_user(&neo4j, "admin@x.com", "Admin", "admin").await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
+    let app = skills_app(Arc::clone(&db));
 
     let (status, _) = send(
         app,
@@ -312,11 +302,11 @@ async fn create_global_skill_requires_name() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_global_skill_duplicate_name_returns_409() {
-    neo4j!(c, neo4j);
-    let (_, admin_tok) = make_user(&neo4j, "admin@x.com", "Admin", "admin").await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
+    let app = skills_app(Arc::clone(&db));
 
     send(app.clone(), req_post("/admin/skills", &admin_tok, json!({
         "name": "juju", "description": "d", "content": "c"
@@ -329,12 +319,12 @@ async fn create_global_skill_duplicate_name_returns_409() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_global_skill_returns_full_content() {
-    neo4j!(c, neo4j);
-    let (_, admin_tok) = make_user(&neo4j, "admin@x.com", "Admin", "admin").await;
-    let (_, tok)       = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
+    let (_, tok)       = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let app = skills_app(Arc::clone(&db));
 
     let (_, created) = send(app.clone(), req_post("/admin/skills", &admin_tok, json!({
         "name": "juju", "description": "Juju guide", "content": "# Juju\nfull body"
@@ -348,11 +338,11 @@ async fn get_global_skill_returns_full_content() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_global_skills_omits_content() {
-    neo4j!(c, neo4j);
-    let (_, admin_tok) = make_user(&neo4j, "admin@x.com", "Admin", "admin").await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
+    let app = skills_app(Arc::clone(&db));
 
     send(app.clone(), req_post("/admin/skills", &admin_tok, json!({
         "name": "juju", "description": "d", "content": "secret body"
@@ -366,11 +356,11 @@ async fn list_global_skills_omits_content() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn update_global_skill_changes_fields() {
-    neo4j!(c, neo4j);
-    let (_, admin_tok) = make_user(&neo4j, "admin@x.com", "Admin", "admin").await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
+    let app = skills_app(Arc::clone(&db));
 
     let (_, created) = send(app.clone(), req_post("/admin/skills", &admin_tok, json!({
         "name": "juju", "description": "old", "content": "old body"
@@ -388,12 +378,12 @@ async fn update_global_skill_changes_fields() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn update_global_skill_rejected_for_non_admin() {
-    neo4j!(c, neo4j);
-    let (_, admin_tok) = make_user(&neo4j, "admin@x.com", "Admin", "admin").await;
-    let (_, tok)       = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
+    let (_, tok)       = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let app = skills_app(Arc::clone(&db));
 
     let (_, created) = send(app.clone(), req_post("/admin/skills", &admin_tok, json!({
         "name": "juju", "description": "d", "content": "c"
@@ -407,11 +397,11 @@ async fn update_global_skill_rejected_for_non_admin() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn update_global_skill_duplicate_name_returns_409() {
-    neo4j!(c, neo4j);
-    let (_, admin_tok) = make_user(&neo4j, "admin@x.com", "Admin", "admin").await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
+    let app = skills_app(Arc::clone(&db));
 
     send(app.clone(), req_post("/admin/skills", &admin_tok, json!({
         "name": "juju", "description": "d", "content": "c"
@@ -428,11 +418,11 @@ async fn update_global_skill_duplicate_name_returns_409() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn delete_global_skill_removes_it() {
-    neo4j!(c, neo4j);
-    let (_, admin_tok) = make_user(&neo4j, "admin@x.com", "Admin", "admin").await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
+    let app = skills_app(Arc::clone(&db));
 
     let (_, created) = send(app.clone(), req_post("/admin/skills", &admin_tok, json!({
         "name": "juju", "description": "d", "content": "c"
@@ -447,12 +437,12 @@ async fn delete_global_skill_removes_it() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn delete_global_skill_rejected_for_non_admin() {
-    neo4j!(c, neo4j);
-    let (_, admin_tok) = make_user(&neo4j, "admin@x.com", "Admin", "admin").await;
-    let (_, tok)       = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
+    let (_, tok)       = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let app = skills_app(Arc::clone(&db));
 
     let (_, created) = send(app.clone(), req_post("/admin/skills", &admin_tok, json!({
         "name": "juju", "description": "d", "content": "c"
@@ -466,14 +456,14 @@ async fn delete_global_skill_rejected_for_non_admin() {
 // ---- SkillStore direct tests ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn skill_store_list_for_project_includes_global_and_own_skills() {
-    neo4j!(c, neo4j);
-    let store = SkillStore::new(Arc::clone(&neo4j));
-    let pid = make_project_raw(&neo4j, "proj-a").await;
+    db!(c, db);
+    let store = SkillStore::new(Arc::clone(&db));
+    let pid = make_project_raw(&db, "proj-a").await;
 
-    seed_skill_raw(&neo4j, "juju", "juju guide", "juju body", true, None).await;
-    seed_skill_raw(&neo4j, "proj-a-only", "custom", "custom body", false, Some(&pid)).await;
+    seed_skill_raw(&db, "juju", "juju guide", "juju body", true, None).await;
+    seed_skill_raw(&db, "proj-a-only", "custom", "custom body", false, Some(&pid)).await;
 
     let list = store.list_for_project(&pid).await;
     let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
@@ -482,14 +472,14 @@ async fn skill_store_list_for_project_includes_global_and_own_skills() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn skill_store_list_for_project_excludes_other_projects_skills() {
-    neo4j!(c, neo4j);
-    let store = SkillStore::new(Arc::clone(&neo4j));
-    let pid_a = make_project_raw(&neo4j, "proj-a").await;
-    let pid_b = make_project_raw(&neo4j, "proj-b").await;
+    db!(c, db);
+    let store = SkillStore::new(Arc::clone(&db));
+    let pid_a = make_project_raw(&db, "proj-a").await;
+    let pid_b = make_project_raw(&db, "proj-b").await;
 
-    seed_skill_raw(&neo4j, "proj-a-only", "custom", "custom body", false, Some(&pid_a)).await;
+    seed_skill_raw(&db, "proj-a-only", "custom", "custom body", false, Some(&pid_a)).await;
 
     let list_b = store.list_for_project(&pid_b).await;
     let names: Vec<&str> = list_b.iter().map(|s| s.name.as_str()).collect();
@@ -497,48 +487,48 @@ async fn skill_store_list_for_project_excludes_other_projects_skills() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn skill_store_load_content_resolves_global_skill_by_name() {
-    neo4j!(c, neo4j);
-    let store = SkillStore::new(Arc::clone(&neo4j));
-    let pid = make_project_raw(&neo4j, "proj-a").await;
-    seed_skill_raw(&neo4j, "juju", "juju guide", "juju body content", true, None).await;
+    db!(c, db);
+    let store = SkillStore::new(Arc::clone(&db));
+    let pid = make_project_raw(&db, "proj-a").await;
+    seed_skill_raw(&db, "juju", "juju guide", "juju body content", true, None).await;
 
     let content = store.load_content("juju", &pid).await;
     assert_eq!(content.as_deref(), Some("juju body content"));
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn skill_store_load_content_resolves_project_skill_by_name() {
-    neo4j!(c, neo4j);
-    let store = SkillStore::new(Arc::clone(&neo4j));
-    let pid = make_project_raw(&neo4j, "proj-a").await;
-    seed_skill_raw(&neo4j, "proj-a-only", "custom", "custom body content", false, Some(&pid)).await;
+    db!(c, db);
+    let store = SkillStore::new(Arc::clone(&db));
+    let pid = make_project_raw(&db, "proj-a").await;
+    seed_skill_raw(&db, "proj-a-only", "custom", "custom body content", false, Some(&pid)).await;
 
     let content = store.load_content("proj-a-only", &pid).await;
     assert_eq!(content.as_deref(), Some("custom body content"));
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn skill_store_load_content_project_skill_not_resolvable_from_other_project() {
-    neo4j!(c, neo4j);
-    let store = SkillStore::new(Arc::clone(&neo4j));
-    let pid_a = make_project_raw(&neo4j, "proj-a").await;
-    let pid_b = make_project_raw(&neo4j, "proj-b").await;
-    seed_skill_raw(&neo4j, "proj-a-only", "custom", "custom body content", false, Some(&pid_a)).await;
+    db!(c, db);
+    let store = SkillStore::new(Arc::clone(&db));
+    let pid_a = make_project_raw(&db, "proj-a").await;
+    let pid_b = make_project_raw(&db, "proj-b").await;
+    seed_skill_raw(&db, "proj-a-only", "custom", "custom body content", false, Some(&pid_a)).await;
 
     let content = store.load_content("proj-a-only", &pid_b).await;
     assert_eq!(content, None);
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn skill_store_load_content_unknown_name_returns_none() {
-    neo4j!(c, neo4j);
-    let store = SkillStore::new(Arc::clone(&neo4j));
-    let pid = make_project_raw(&neo4j, "proj-a").await;
+    db!(c, db);
+    let store = SkillStore::new(Arc::clone(&db));
+    let pid = make_project_raw(&db, "proj-a").await;
 
     let content = store.load_content("nonexistent", &pid).await;
     assert_eq!(content, None);
@@ -547,14 +537,14 @@ async fn skill_store_load_content_unknown_name_returns_none() {
 // ---- Seeding ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn seed_defaults_if_needed_seeds_five_skills_once() {
-    neo4j!(c, neo4j);
-    knowledge_server::skills::seed_defaults_if_needed(&neo4j).await.unwrap();
-    assert_eq!(count_skills(&neo4j).await, 5);
+    db!(c, db);
+    knowledge_server::skills::seed_defaults_if_needed(&db).await.unwrap();
+    assert_eq!(count_skills(&db).await, 5);
 
-    let rows = neo4j.query_read(
-        "MATCH (s:Skill {is_global: true}) RETURN s.name AS name ORDER BY s.name",
+    let rows = db.query(
+        "SELECT name FROM skills WHERE project_id IS NULL ORDER BY name",
         json!({}),
     ).await.unwrap();
     let names: Vec<&str> = rows.iter().filter_map(|r| r["name"].as_str()).collect();
@@ -564,38 +554,38 @@ async fn seed_defaults_if_needed_seeds_five_skills_once() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn seed_defaults_if_needed_is_idempotent_second_call_no_duplicates() {
-    neo4j!(c, neo4j);
-    knowledge_server::skills::seed_defaults_if_needed(&neo4j).await.unwrap();
-    knowledge_server::skills::seed_defaults_if_needed(&neo4j).await.unwrap();
-    assert_eq!(count_skills(&neo4j).await, 5);
+    db!(c, db);
+    knowledge_server::skills::seed_defaults_if_needed(&db).await.unwrap();
+    knowledge_server::skills::seed_defaults_if_needed(&db).await.unwrap();
+    assert_eq!(count_skills(&db).await, 5);
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn seed_defaults_if_needed_does_not_reseed_after_deletion() {
-    neo4j!(c, neo4j);
-    knowledge_server::skills::seed_defaults_if_needed(&neo4j).await.unwrap();
-    assert_eq!(count_skills(&neo4j).await, 5);
+    db!(c, db);
+    knowledge_server::skills::seed_defaults_if_needed(&db).await.unwrap();
+    assert_eq!(count_skills(&db).await, 5);
 
-    neo4j.run("MATCH (s:Skill) DETACH DELETE s").await.unwrap();
-    assert_eq!(count_skills(&neo4j).await, 0);
+    db.execute("DELETE FROM skills", json!({})).await.unwrap();
+    assert_eq!(count_skills(&db).await, 0);
 
-    knowledge_server::skills::seed_defaults_if_needed(&neo4j).await.unwrap();
-    assert_eq!(count_skills(&neo4j).await, 0, "deleted skills must not reappear after re-seeding attempt");
+    knowledge_server::skills::seed_defaults_if_needed(&db).await.unwrap();
+    assert_eq!(count_skills(&db).await, 0, "deleted skills must not reappear after re-seeding attempt");
 }
 
 // ---- Project-scoped skill CRUD ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_project_skills_empty_for_new_project() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Test Project").await;
 
     let (status, body) = send(app, req_get(&format!("/projects/{pid}/skills"), &tok)).await;
@@ -604,13 +594,13 @@ async fn list_project_skills_empty_for_new_project() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_skill_returns_201_with_fields() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Test Project").await;
 
     let (status, body) = send(
@@ -626,13 +616,13 @@ async fn create_project_skill_returns_201_with_fields() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_project_skill_returns_full_content() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Test Project").await;
 
     let (_, created) = send(app.clone(), req_post(&format!("/projects/{pid}/skills"), &tok, json!({
@@ -647,13 +637,13 @@ async fn get_project_skill_returns_full_content() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_project_skills_after_create_returns_summary() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Test Project").await;
 
     send(app.clone(), req_post(&format!("/projects/{pid}/skills"), &tok, json!({
@@ -669,13 +659,13 @@ async fn list_project_skills_after_create_returns_summary() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn update_project_skill_changes_fields() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Test Project").await;
 
     let (_, created) = send(app.clone(), req_post(&format!("/projects/{pid}/skills"), &tok, json!({
@@ -694,13 +684,13 @@ async fn update_project_skill_changes_fields() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn delete_project_skill_removes_it() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Test Project").await;
 
     let (_, created) = send(app.clone(), req_post(&format!("/projects/{pid}/skills"), &tok, json!({
@@ -716,14 +706,14 @@ async fn delete_project_skill_removes_it() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn non_member_cannot_access_project_skills() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (_, outsider_tok) = make_user(&neo4j, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_, outsider_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Test Project").await;
 
     let (status, _) = send(app, req_get(&format!("/projects/{pid}/skills"), &outsider_tok)).await;
@@ -731,14 +721,14 @@ async fn non_member_cannot_access_project_skills() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn admin_can_access_any_project_skills() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (_, admin_tok) = make_user(&neo4j, "admin@x.com", "Admin", "admin").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Test Project").await;
 
     let (status, body) = send(app, req_get(&format!("/projects/{pid}/skills"), &admin_tok)).await;
@@ -747,13 +737,13 @@ async fn admin_can_access_any_project_skills() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_skill_requires_name() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Test Project").await;
 
     let (status, _) = send(app, req_post(&format!("/projects/{pid}/skills"), &tok, json!({
@@ -763,13 +753,13 @@ async fn create_project_skill_requires_name() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_skill_duplicate_name_within_project_returns_409() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Test Project").await;
 
     send(app.clone(), req_post(&format!("/projects/{pid}/skills"), &tok, json!({
@@ -783,14 +773,14 @@ async fn create_project_skill_duplicate_name_within_project_returns_409() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_skill_same_name_as_global_returns_409() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (_, admin_tok) = make_user(&neo4j, "admin@x.com", "Admin", "admin").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Test Project").await;
 
     send(app.clone(), req_post("/admin/skills", &admin_tok, json!({
@@ -804,13 +794,13 @@ async fn create_project_skill_same_name_as_global_returns_409() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_skill_same_name_in_different_project_is_allowed() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
     let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
 
@@ -828,13 +818,13 @@ async fn create_project_skill_same_name_in_different_project_is_allowed() {
 // ---- Cross-project isolation ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn project_skill_not_visible_from_other_project() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
     let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
 
@@ -851,13 +841,13 @@ async fn project_skill_not_visible_from_other_project() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_project_skills_never_includes_other_projects_skills_even_with_same_name() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = skills_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = skills_app(Arc::clone(&db));
     let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
     let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
 
@@ -883,30 +873,30 @@ async fn list_project_skills_never_includes_other_projects_skills_even_with_same
 // ---- Agent tools (list_skills / load_skill) ----
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_skills_definition_has_correct_name() {
-    neo4j!(c, neo4j);
-    let store = Arc::new(SkillStore::new(Arc::clone(&neo4j)));
+    db!(c, db);
+    let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = ListSkillsTool { store, project_id: "any".into() };
     assert_eq!(tool.definition().name, "list_skills");
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn load_skill_definition_has_correct_name() {
-    neo4j!(c, neo4j);
-    let store = Arc::new(SkillStore::new(Arc::clone(&neo4j)));
+    db!(c, db);
+    let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = LoadSkillTool { store, project_id: "any".into() };
     assert_eq!(tool.definition().name, "load_skill");
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_skills_returns_json_array_with_seeded_skill() {
-    neo4j!(c, neo4j);
-    knowledge_server::skills::seed_defaults_if_needed(&neo4j).await.unwrap();
-    let pid = make_project_raw(&neo4j, "proj-a").await;
-    let store = Arc::new(SkillStore::new(Arc::clone(&neo4j)));
+    db!(c, db);
+    knowledge_server::skills::seed_defaults_if_needed(&db).await.unwrap();
+    let pid = make_project_raw(&db, "proj-a").await;
+    let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = ListSkillsTool { store, project_id: pid };
 
     let result = tool.execute(json!({})).await.unwrap();
@@ -916,12 +906,12 @@ async fn list_skills_returns_json_array_with_seeded_skill() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_skills_each_item_has_name_and_description() {
-    neo4j!(c, neo4j);
-    knowledge_server::skills::seed_defaults_if_needed(&neo4j).await.unwrap();
-    let pid = make_project_raw(&neo4j, "proj-a").await;
-    let store = Arc::new(SkillStore::new(Arc::clone(&neo4j)));
+    db!(c, db);
+    knowledge_server::skills::seed_defaults_if_needed(&db).await.unwrap();
+    let pid = make_project_raw(&db, "proj-a").await;
+    let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = ListSkillsTool { store, project_id: pid };
 
     let result = tool.execute(json!({})).await.unwrap();
@@ -934,12 +924,12 @@ async fn list_skills_each_item_has_name_and_description() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn load_skill_returns_content_for_known_skill() {
-    neo4j!(c, neo4j);
-    knowledge_server::skills::seed_defaults_if_needed(&neo4j).await.unwrap();
-    let pid = make_project_raw(&neo4j, "proj-a").await;
-    let store = Arc::new(SkillStore::new(Arc::clone(&neo4j)));
+    db!(c, db);
+    knowledge_server::skills::seed_defaults_if_needed(&db).await.unwrap();
+    let pid = make_project_raw(&db, "proj-a").await;
+    let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = LoadSkillTool { store, project_id: pid };
 
     let result = tool.execute(json!({ "name": "juju" })).await.unwrap();
@@ -948,11 +938,11 @@ async fn load_skill_returns_content_for_known_skill() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn load_skill_missing_name_param_returns_error() {
-    neo4j!(c, neo4j);
-    let pid = make_project_raw(&neo4j, "proj-a").await;
-    let store = Arc::new(SkillStore::new(Arc::clone(&neo4j)));
+    db!(c, db);
+    let pid = make_project_raw(&db, "proj-a").await;
+    let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = LoadSkillTool { store, project_id: pid };
 
     let result = tool.execute(json!({})).await;
@@ -960,11 +950,11 @@ async fn load_skill_missing_name_param_returns_error() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn load_skill_unknown_name_returns_error() {
-    neo4j!(c, neo4j);
-    let pid = make_project_raw(&neo4j, "proj-a").await;
-    let store = Arc::new(SkillStore::new(Arc::clone(&neo4j)));
+    db!(c, db);
+    let pid = make_project_raw(&db, "proj-a").await;
+    let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = LoadSkillTool { store, project_id: pid };
 
     let result = tool.execute(json!({ "name": "nonexistent" })).await;
@@ -973,11 +963,11 @@ async fn load_skill_unknown_name_returns_error() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn load_skill_preview_is_markdown_envelope() {
-    neo4j!(c, neo4j);
-    let pid = make_project_raw(&neo4j, "proj-a").await;
-    let store = Arc::new(SkillStore::new(Arc::clone(&neo4j)));
+    db!(c, db);
+    let pid = make_project_raw(&db, "proj-a").await;
+    let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = LoadSkillTool { store, project_id: pid };
 
     let preview = tool.preview("# Heading\nsome text");
@@ -987,14 +977,14 @@ async fn load_skill_preview_is_markdown_envelope() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn load_skill_scoped_to_project_via_agent_tool() {
-    neo4j!(c, neo4j);
-    let pid_a = make_project_raw(&neo4j, "proj-a").await;
-    let pid_b = make_project_raw(&neo4j, "proj-b").await;
-    seed_skill_raw(&neo4j, "proj-a-only", "custom", "custom body", false, Some(&pid_a)).await;
+    db!(c, db);
+    let pid_a = make_project_raw(&db, "proj-a").await;
+    let pid_b = make_project_raw(&db, "proj-b").await;
+    seed_skill_raw(&db, "proj-a-only", "custom", "custom body", false, Some(&pid_a)).await;
 
-    let store = Arc::new(SkillStore::new(Arc::clone(&neo4j)));
+    let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool_b = LoadSkillTool { store, project_id: pid_b };
 
     let result = tool_b.execute(json!({ "name": "proj-a-only" })).await;

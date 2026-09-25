@@ -1,3 +1,4 @@
+use harvest_db::Db;
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
@@ -29,7 +30,7 @@ use knowledge_server::{
         LlmProvider,
         types::{LlmResponse, Message, ModelInfo, ToolDefinition, Usage},
     },
-    neo4j::Neo4jClient,
+
 };
 
 
@@ -68,7 +69,7 @@ impl LlmProvider for ErrorLlm {
 
 fn query_app(agent: Arc<Agent>) -> Router {
     let llm = Arc::clone(agent.llm());
-    let qs = Arc::new(QueryState { agent, neo4j: None, llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6, pricing: Arc::new(knowledge_server::cost::PricingTable::default()) });
+    let qs = Arc::new(QueryState { agent, db: None, llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6, pricing: Arc::new(knowledge_server::cost::PricingTable::default()) });
     Router::new()
         .route("/query", post(handle_query))
         .route("/query/stream", post(handle_query_stream))
@@ -88,14 +89,11 @@ fn test_claims() -> Claims {
     }
 }
 
-fn repos_app(neo4j: Arc<Neo4jClient>) -> Router {
+fn repos_app(db: Arc<Db>) -> Router {
     let state = Arc::new(GraphState {
-        neo4j,
+        db,
         cache: Arc::new(RwLock::new(HashMap::new())),
         ingestion: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-        neo4j_uri: String::new(),
-        neo4j_user: String::new(),
-        neo4j_password: String::new(),
     });
     Router::new()
         .route("/repositories", get(handle_list_repositories))
@@ -369,18 +367,17 @@ async fn stream_missing_query_field_returns_422() {
 }
 
 
-use neo4j_testcontainers::{prelude::*, runners::AsyncRunner as _, Neo4j, Neo4jImageExt as _};
-use neo4rs::{query, Graph};
+use harvest_db::test_support::TestDb;
 use knowledge_server::conversations::handlers as conv_handlers;
 
-fn query_app_with_neo4j(agent: Arc<Agent>, neo4j: Arc<Neo4jClient>) -> Router {
+fn query_app_with_db(agent: Arc<Agent>, db: Arc<Db>) -> Router {
     let llm = Arc::clone(agent.llm());
-    let qs = Arc::new(QueryState { agent, neo4j: Some(Arc::clone(&neo4j)), llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6, pricing: Arc::new(knowledge_server::cost::PricingTable::default()) });
+    let qs = Arc::new(QueryState { agent, db: Some(Arc::clone(&db)), llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6, pricing: Arc::new(knowledge_server::cost::PricingTable::default()) });
     let query_router = Router::new()
         .route("/query/stream", post(handle_query_stream))
         .with_state(qs);
 
-    let conv_state = Arc::new(conv_handlers::ConvState { neo4j });
+    let conv_state = Arc::new(conv_handlers::ConvState { db });
     let conv_router = Router::new()
         .route("/conversations", post(conv_handlers::create))
         .route("/conversations/:id", get(conv_handlers::get))
@@ -398,45 +395,38 @@ fn post_conv(body: Value) -> Request<Body> {
         .unwrap()
 }
 
-async fn seed_one_repo(graph: &Graph) {
-    let stmts = [
-        "CREATE (:Repository {name: 'testrepo', url: 'https://example.com/t.git'})",
-        "CREATE (:Version   {repo: 'testrepo', tag: 'v1.0', timestamp: 1000, ingested: true})",
-        "MATCH  (r:Repository {name:'testrepo'}),(v:Version {repo:'testrepo',tag:'v1.0'}) \
-         CREATE (r)-[:HAS_VERSION]->(v)",
-    ];
-    for stmt in stmts {
-        graph.run(query(stmt)).await.unwrap();
-    }
+async fn seed_one_repo(db: &Db) {
+    db.execute(
+        "WITH r AS (
+             INSERT INTO repositories (name, url) VALUES ('testrepo', 'https://example.com/t.git')
+             RETURNING id
+         )
+         INSERT INTO versions (repository_id, tag, timestamp, ingested)
+         SELECT id, 'v1.0', 1000, true FROM r",
+        json!({}),
+    ).await.unwrap();
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn repositories_empty_graph_returns_empty_array() {
-    let container = Neo4j::default().start().await;
-    let uri  = container.image().bolt_uri_ipv4();
-    let user = container.image().user().unwrap_or("neo4j");
-    let pass = container.image().password().unwrap_or("neo");
-    let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+    let test_db = TestDb::new().await;
+    let db = Arc::new(test_db.db.clone());
 
-    let app = repos_app(neo4j);
+    let app = repos_app(db);
     let (status, body) = body_status_json(app, get_req("/repositories")).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!([]));
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn repositories_returns_ingested_repos() {
-    let container = Neo4j::default().start().await;
-    let uri  = container.image().bolt_uri_ipv4();
-    let user = container.image().user().unwrap_or("neo4j");
-    let pass = container.image().password().unwrap_or("neo");
-    let graph = Graph::new(&uri, user, pass).await.unwrap();
-    seed_one_repo(&graph).await;
-    let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+    let test_db = TestDb::new().await;
+    let db = Arc::new(test_db.db.clone());
+    seed_one_repo(&db).await;
 
-    let app = repos_app(neo4j);
+    let app = repos_app(db);
     let (status, body) = body_status_json(app, get_req("/repositories")).await;
     assert_eq!(status, StatusCode::OK);
     let repos = body.as_array().unwrap();
@@ -445,17 +435,13 @@ async fn repositories_returns_ingested_repos() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn repositories_returns_versions_for_repo() {
-    let container = Neo4j::default().start().await;
-    let uri  = container.image().bolt_uri_ipv4();
-    let user = container.image().user().unwrap_or("neo4j");
-    let pass = container.image().password().unwrap_or("neo");
-    let graph = Graph::new(&uri, user, pass).await.unwrap();
-    seed_one_repo(&graph).await;
-    let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
+    let test_db = TestDb::new().await;
+    let db = Arc::new(test_db.db.clone());
+    seed_one_repo(&db).await;
 
-    let app = repos_app(neo4j);
+    let app = repos_app(db);
     let (_, body) = body_status_json(app, get_req("/repositories")).await;
     let versions = body[0]["versions"].as_array().unwrap();
     assert!(
@@ -633,17 +619,17 @@ async fn docs_page_explanations_section_works() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn global_chat_second_turn_preserves_first_turns_chain_and_sources() {
-    let container = Neo4j::default().start().await;
-    let uri  = container.image().bolt_uri_ipv4();
-    let user = container.image().user().unwrap_or("neo4j");
-    let pass = container.image().password().unwrap_or("neo");
-    let neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
-    neo4j.run("CREATE (:User {id: 'test-user-id'})").await.unwrap();
+    let test_db = TestDb::new().await;
+    let db = Arc::new(test_db.db.clone());
+    db.execute(
+        "INSERT INTO users (id, provider, created_at) VALUES ('test-user-id', 'local', now())",
+        json!({}),
+    ).await.unwrap();
 
     let agent = make_agent("see [myrepo:v1.0:src/lib.rs:42]");
-    let app = query_app_with_neo4j(agent, Arc::clone(&neo4j));
+    let app = query_app_with_db(agent, Arc::clone(&db));
 
     let (status, conv) = body_status_json(app.clone(), post_conv(json!({}))).await;
     assert_eq!(status, StatusCode::CREATED);

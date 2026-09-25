@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod docker_tests {
+mod db_tests {
     use std::sync::Arc;
 
     use httpmock::prelude::*;
@@ -10,23 +10,23 @@ mod docker_tests {
     use knowledge_server::config::LxdConfig;
     use knowledge_server::lxd::{self, identity, Flavor, LxdClient};
     use knowledge_server::machines::lxd_provision::create_lxd_agent;
-    use knowledge_server::neo4j::Neo4jClient;
-    use neo4j_testcontainers::{prelude::*, runners::AsyncRunner as _, Neo4j, Neo4jImageExt as _};
+    use harvest_db::Db;
+    use harvest_db::test_support::TestDb;
 
-    async fn connect() -> Arc<Neo4jClient> {
-        let container = Neo4j::default().start().await;
-        let uri  = container.image().bolt_uri_ipv4();
-        let user = container.image().user().unwrap_or("neo4j").to_string();
-        let pass = container.image().password().unwrap_or("neo").to_string();
-        let client = Neo4jClient::new(&uri, &user, &pass).await.unwrap();
-        Box::leak(Box::new(container));
-        Arc::new(client)
+    async fn connect() -> (Arc<Db>, TestDb) {
+        let test_db = TestDb::new().await;
+        (Arc::new(test_db.db.clone()), test_db)
     }
 
-    async fn seed_project(neo4j: &Neo4jClient) -> String {
+    async fn seed_project(db: &Db) -> String {
         let id = uuid::Uuid::new_v4().to_string();
-        neo4j.query_read(
-            "CREATE (p:Project {id: $id, name: 'test', group_id: 'g1', created_by: 'u1', created_at: '2026-01-01'})",
+        db.execute(
+            "INSERT INTO groups (id, name) VALUES ($gid, 'g1') ON CONFLICT DO NOTHING",
+            json!({ "gid": "g1" }),
+        ).await.unwrap();
+        db.execute(
+            "INSERT INTO projects (id, name, group_id, created_by, created_at)
+             VALUES ($id, 'test', 'g1', 'u1', '2026-01-01T00:00:00+00:00')",
             json!({ "id": id }),
         ).await.unwrap();
         id
@@ -51,77 +51,77 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn load_or_generate_creates_identity_when_absent() {
-        let neo4j = connect().await;
+        let (db, _test_db) = connect().await;
 
-        let identity = identity::load_or_generate(&neo4j).await.unwrap();
+        let identity = identity::load_or_generate(&db).await.unwrap();
         assert!(identity.client_cert.contains("BEGIN CERTIFICATE"));
         assert!(identity.client_key.contains("PRIVATE KEY"));
         assert!(!identity.trusted);
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn load_or_generate_is_idempotent() {
-        let neo4j = connect().await;
+        let (db, _test_db) = connect().await;
 
-        let first = identity::load_or_generate(&neo4j).await.unwrap();
-        let second = identity::load_or_generate(&neo4j).await.unwrap();
+        let first = identity::load_or_generate(&db).await.unwrap();
+        let second = identity::load_or_generate(&db).await.unwrap();
 
         assert_eq!(first.client_cert, second.client_cert);
         assert_eq!(first.client_key, second.client_key);
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn mark_trusted_flips_the_flag() {
-        let neo4j = connect().await;
+        let (db, _test_db) = connect().await;
 
-        let generated = identity::load_or_generate(&neo4j).await.unwrap();
+        let generated = identity::load_or_generate(&db).await.unwrap();
         assert!(!generated.trusted);
 
-        identity::mark_trusted(&neo4j).await.unwrap();
+        identity::mark_trusted(&db).await.unwrap();
 
-        let reloaded = identity::load_or_generate(&neo4j).await.unwrap();
+        let reloaded = identity::load_or_generate(&db).await.unwrap();
         assert!(reloaded.trusted);
         assert_eq!(reloaded.client_cert, generated.client_cert);
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn resolve_client_manual_cert_skips_identity_generation() {
-        let neo4j = connect().await;
+        let (db, _test_db) = connect().await;
         let mut cfg = base_cfg("https://lxd.example.com:8443".into());
         cfg.client_cert = Some(TEST_CERT.to_string());
         cfg.client_key  = Some(TEST_KEY.to_string());
 
-        let client = lxd::resolve_client(&cfg, &neo4j).await.unwrap();
+        let client = lxd::resolve_client(&cfg, &db).await.unwrap();
         assert!(client.is_some());
 
-        let rows = neo4j.query_read(
-            "MATCH (i:LxdIdentity) RETURN i.id AS id", json!({}),
+        let rows = db.query(
+            "SELECT id FROM lxd_identity", json!({}),
         ).await.unwrap();
         assert!(rows.is_empty());
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn resolve_client_without_token_returns_none() {
-        let neo4j = connect().await;
+        let (db, _test_db) = connect().await;
         let cfg = base_cfg("https://lxd.example.com:8443".into());
 
-        let client = lxd::resolve_client(&cfg, &neo4j).await.unwrap();
+        let client = lxd::resolve_client(&cfg, &db).await.unwrap();
         assert!(client.is_none());
 
-        let ident = identity::load_or_generate(&neo4j).await.unwrap();
+        let ident = identity::load_or_generate(&db).await.unwrap();
         assert!(!ident.trusted, "identity should still be untrusted with no token supplied");
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn resolve_client_joins_via_valid_token_and_persists_trusted() {
-        let neo4j = connect().await;
+        let (db, _test_db) = connect().await;
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("POST").path("/1.0/certificates");
@@ -131,17 +131,17 @@ mod docker_tests {
         let mut cfg = base_cfg(server.base_url());
         cfg.trust_token = Some("tok-123".into());
 
-        let client = lxd::resolve_client(&cfg, &neo4j).await.unwrap();
+        let client = lxd::resolve_client(&cfg, &db).await.unwrap();
         assert!(client.is_some());
 
-        let ident = identity::load_or_generate(&neo4j).await.unwrap();
+        let ident = identity::load_or_generate(&db).await.unwrap();
         assert!(ident.trusted);
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn resolve_client_rejected_token_returns_none_and_stays_untrusted() {
-        let neo4j = connect().await;
+        let (db, _test_db) = connect().await;
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("POST").path("/1.0/certificates");
@@ -151,18 +151,18 @@ mod docker_tests {
         let mut cfg = base_cfg(server.base_url());
         cfg.trust_token = Some("bad-token".into());
 
-        let client = lxd::resolve_client(&cfg, &neo4j).await.unwrap();
+        let client = lxd::resolve_client(&cfg, &db).await.unwrap();
         assert!(client.is_none());
 
-        let ident = identity::load_or_generate(&neo4j).await.unwrap();
+        let ident = identity::load_or_generate(&db).await.unwrap();
         assert!(!ident.trusted);
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn create_lxd_agent_emits_error_event_when_network_fails() {
-        let neo4j = connect().await;
-        let project_id = seed_project(&neo4j).await;
+        let (db, _test_db) = connect().await;
+        let project_id = seed_project(&db).await;
 
         let server = MockServer::start();
         server.mock(|when, then| {
@@ -174,7 +174,7 @@ mod docker_tests {
         let (tx, mut rx) = mpsc::channel::<String>(64);
 
         let result = create_lxd_agent(
-            &neo4j, &lxd, "http://localhost:8080", &project_id, "Test Agent", "desc", Flavor::Small, tx,
+            &db, &lxd, "http://localhost:8080", &project_id, "Test Agent", "desc", Flavor::Small, tx,
         ).await;
 
         assert!(result.is_err());
@@ -192,10 +192,10 @@ mod docker_tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Docker"]
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn create_lxd_agent_emits_expected_phase_sequence_on_success() {
-        let neo4j = connect().await;
-        let project_id = seed_project(&neo4j).await;
+        let (db, _test_db) = connect().await;
+        let project_id = seed_project(&db).await;
 
         let instance_path = Regex::new(r"^/1\.0/instances/test-agent-[0-9a-f]{4}$").unwrap();
         let instance_state_path = Regex::new(r"^/1\.0/instances/test-agent-[0-9a-f]{4}/state$").unwrap();
@@ -256,11 +256,11 @@ mod docker_tests {
         let lxd = LxdClient::from_identity(TEST_CERT, TEST_KEY, &base_cfg(server.base_url())).unwrap();
         let (tx, mut rx) = mpsc::channel::<String>(64);
 
-        let neo4j2 = Arc::clone(&neo4j);
+        let db2 = Arc::clone(&db);
         let project_id2 = project_id.clone();
         let handle = tokio::spawn(async move {
             create_lxd_agent(
-                &neo4j2, &lxd, "http://localhost:8080", &project_id2, "Test Agent", "desc", Flavor::Small, tx,
+                &db2, &lxd, "http://localhost:8080", &project_id2, "Test Agent", "desc", Flavor::Small, tx,
             ).await
         });
 
