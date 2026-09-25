@@ -7,7 +7,7 @@ use crate::artifacts::{bundle, handlers::{get_artifact_in_project, ArtifactKind}
 use crate::deployments;
 use crate::llm::types::ToolDefinition;
 use crate::machines::{MachineRegistry, TerraformAction, TerraformFlavor};
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 use super::tool::Tool;
 
 const RUN_TERRAFORM_PREVIEW_CHARS: usize = 2000;
@@ -40,7 +40,7 @@ fn agent_belongs_to_project(registry: &MachineRegistry, agent_id: &str, project_
 }
 
 async fn run_terraform(
-    neo4j: &Neo4jClient,
+    db: &Db,
     registry: &MachineRegistry,
     project_id: &str,
     params: Value,
@@ -52,7 +52,7 @@ async fn run_terraform(
         anyhow::bail!("agent {agent_id} not found in this project");
     }
 
-    let artifact = get_artifact_in_project(neo4j, project_id, &artifact_id)
+    let artifact = get_artifact_in_project(db, project_id, &artifact_id)
         .await?
         .ok_or_else(|| anyhow!("artifact {artifact_id} not found in this project"))?;
 
@@ -63,7 +63,7 @@ async fn run_terraform(
     };
 
     let live_content = artifact["content"].as_str().unwrap_or("");
-    let content = deployments::resolve_run_content(neo4j, project_id, &artifact_id, action, live_content).await?;
+    let content = deployments::resolve_run_content(db, project_id, &artifact_id, action, live_content).await?;
 
     let files = bundle::parse_bundle(&content).map_err(|e| anyhow!(e))?;
     let files_json = serde_json::to_string(&files)?;
@@ -77,7 +77,7 @@ async fn run_terraform(
     let success          = exit_code == Some(0);
     let applied_content  = (action == TerraformAction::Apply && success).then_some(files_json.as_str());
     let infra_state = deployments::record_run_and_update_state(
-        neo4j, project_id, &artifact_id, action, exit_code, &stdout, &stderr,
+        db, project_id, &artifact_id, action, exit_code, &stdout, &stderr,
         applied_content, "agent", None,
     ).await.ok().flatten();
 
@@ -116,7 +116,7 @@ fn terraform_run_parameters() -> Value {
 }
 
 pub struct RunTerraformPlanTool {
-    pub neo4j:      Arc<Neo4jClient>,
+    pub db:      Arc<Db>,
     pub registry:   Arc<MachineRegistry>,
     pub project_id: String,
 }
@@ -137,7 +137,7 @@ impl Tool for RunTerraformPlanTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        run_terraform(&self.neo4j, &self.registry, &self.project_id, params, TerraformAction::Plan).await
+        run_terraform(&self.db, &self.registry, &self.project_id, params, TerraformAction::Plan).await
     }
 
     fn preview(&self, result: &str) -> String {
@@ -146,7 +146,7 @@ impl Tool for RunTerraformPlanTool {
 }
 
 pub struct RunTerraformApplyTool {
-    pub neo4j:      Arc<Neo4jClient>,
+    pub db:      Arc<Db>,
     pub registry:   Arc<MachineRegistry>,
     pub project_id: String,
 }
@@ -170,7 +170,7 @@ impl Tool for RunTerraformApplyTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        run_terraform(&self.neo4j, &self.registry, &self.project_id, params, TerraformAction::Apply).await
+        run_terraform(&self.db, &self.registry, &self.project_id, params, TerraformAction::Apply).await
     }
 
     fn preview(&self, result: &str) -> String {
@@ -179,7 +179,7 @@ impl Tool for RunTerraformApplyTool {
 }
 
 pub struct RunTerraformDestroyTool {
-    pub neo4j:      Arc<Neo4jClient>,
+    pub db:      Arc<Db>,
     pub registry:   Arc<MachineRegistry>,
     pub project_id: String,
 }
@@ -203,7 +203,7 @@ impl Tool for RunTerraformDestroyTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        run_terraform(&self.neo4j, &self.registry, &self.project_id, params, TerraformAction::Destroy).await
+        run_terraform(&self.db, &self.registry, &self.project_id, params, TerraformAction::Destroy).await
     }
 
     fn preview(&self, result: &str) -> String {
