@@ -9,7 +9,7 @@ use crate::artifacts::{bundle, handlers::{get_artifact_in_project}};
 use crate::deployments::handlers::{load_runnable_bundle, ApiError};
 use crate::deployments::{StepNode, topological_sort};
 use crate::llm::types::ToolDefinition;
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 use super::tool::Tool;
 
 fn map_api_err((_, body): ApiError) -> anyhow::Error {
@@ -24,11 +24,11 @@ fn required_str(params: &Value, key: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("{key} is required"))
 }
 
-fn artifact_role_relationship(role: &str) -> Result<&'static str> {
+fn artifact_role_column(role: &str) -> Result<&'static str> {
     match role {
-        "design"    => Ok("HAS_DESIGN_DOC"),
-        "terraform" => Ok("HAS_TERRAFORM_BUNDLE"),
-        "guide"     => Ok("HAS_GUIDE"),
+        "design"    => Ok("design_doc_id"),
+        "terraform" => Ok("terraform_bundle_id"),
+        "guide"     => Ok("guide_id"),
         _           => Err(anyhow!("role must be 'design', 'terraform', or 'guide'")),
     }
 }
@@ -44,7 +44,7 @@ fn role_accepts_kind(role: &str, kind: ArtifactKind) -> bool {
 fn validate_link_params(params: &Value) -> Result<(String, String)> {
     let artifact_id = required_str(params, "artifact_id")?;
     let role = required_str(params, "role")?;
-    artifact_role_relationship(&role)?;
+    artifact_role_column(&role)?;
     Ok((artifact_id, role))
 }
 
@@ -176,7 +176,7 @@ pub fn validate_destroy_coverage(plan: &ParsedExecutionPlan) -> Result<()> {
 }
 
 pub struct LinkDeploymentArtifactTool {
-    pub neo4j:         Arc<Neo4jClient>,
+    pub db:         Arc<Db>,
     pub project_id:    String,
     pub deployment_id: String,
 }
@@ -211,9 +211,9 @@ impl Tool for LinkDeploymentArtifactTool {
 
     async fn execute(&self, params: Value) -> Result<String> {
         let (artifact_id, role) = validate_link_params(&params)?;
-        let relationship = artifact_role_relationship(&role)?;
+        let column = artifact_role_column(&role)?;
 
-        let artifact = get_artifact_in_project(&self.neo4j, &self.project_id, &artifact_id)
+        let artifact = get_artifact_in_project(&self.db, &self.project_id, &artifact_id)
             .await?
             .ok_or_else(|| anyhow!("artifact {artifact_id} not found in this project"))?;
         let kind = ArtifactKind::parse(artifact["kind"].as_str().unwrap_or(""))
@@ -222,21 +222,19 @@ impl Tool for LinkDeploymentArtifactTool {
             anyhow::bail!("a '{role}' artifact must be markdown/pdf (design, guide) or terraform/terragrunt (terraform)");
         }
 
-        self.neo4j.query_read(
+        self.db.query(
             &format!(
-                "MATCH (:Project {{id: $pid}})-[:HAS_DEPLOYMENT]->(d:Deployment {{id: $did}})
-                 OPTIONAL MATCH (d)-[old:{relationship}]->(:Artifact)
-                 DELETE old
-                 WITH d
-                 MATCH (:Project {{id: $pid}})-[:HAS_ARTIFACT]->(a:Artifact {{id: $aid}})
-                 CREATE (d)-[:{relationship}]->(a)"
+                "UPDATE deployments d SET {column} = a.id
+                 FROM artifacts a
+                 WHERE d.id = $did AND d.project_id = $pid
+                   AND a.id = $aid AND a.project_id = $pid"
             ),
             json!({ "pid": self.project_id, "did": self.deployment_id, "aid": artifact_id }),
         ).await?;
 
         if role == "design" {
             crate::deployments::design_cache::schedule_regeneration(
-                self.neo4j.clone(), self.project_id.clone(), self.deployment_id.clone(),
+                self.db.clone(), self.project_id.clone(), self.deployment_id.clone(),
             );
         }
 
@@ -245,7 +243,7 @@ impl Tool for LinkDeploymentArtifactTool {
 }
 
 pub struct UpdateProductTemplateTool {
-    pub neo4j:         Arc<Neo4jClient>,
+    pub db:         Arc<Db>,
     pub group_id:      String,
     pub deployment_id: String,
 }
@@ -276,24 +274,22 @@ impl Tool for UpdateProductTemplateTool {
 
     async fn execute(&self, params: Value) -> Result<String> {
         let content = validate_update_template_params(&params)?;
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = harvest_db::now_rfc3339();
 
-        let existing = self.neo4j.query_read(
-            "MATCH (t:ProductTemplate)<-[:USES_TEMPLATE]-(:Deployment {id: $did})
-             RETURN t.id AS id",
+        let existing = self.db.query(
+            "SELECT template_id AS id FROM deployments WHERE id = $did AND template_id IS NOT NULL",
             json!({ "did": self.deployment_id }),
         ).await?;
 
         if let Some(template_id) = existing.into_iter().next().and_then(|r| r["id"].as_str().map(str::to_string)) {
-            self.neo4j.query_read(
-                "MATCH (t:ProductTemplate {id: $tid}) SET t.content = $content, t.updated_at = $now",
+            self.db.query(
+                "UPDATE product_templates SET content = $content, updated_at = $now WHERE id = $tid",
                 json!({ "tid": template_id, "content": content, "now": now }),
             ).await?;
             Ok(serde_json::to_string(&json!({ "template_id": template_id, "action": "updated" }))?)
         } else {
-            let deployment = self.neo4j.query_read(
-                "MATCH (:Project)-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-                 RETURN d.name AS name",
+            let deployment = self.db.query(
+                "SELECT name FROM deployments WHERE id = $did",
                 json!({ "did": self.deployment_id }),
             ).await?;
             let name = deployment.into_iter().next()
@@ -301,13 +297,14 @@ impl Tool for UpdateProductTemplateTool {
                 .unwrap_or_else(|| "Untitled product".to_string());
 
             let template_id = Uuid::new_v4().to_string();
-            self.neo4j.query_read(
-                "MATCH (:Project)-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-                 CREATE (t:ProductTemplate {
-                     id: $tid, name: $name, description: '', content: $content,
-                     created_by: 'assistant', created_at: $now, updated_at: $now
-                 })
-                 CREATE (d)-[:USES_TEMPLATE]->(t)",
+            self.db.query(
+                "WITH t AS (
+                     INSERT INTO product_templates (id, name, description, content, created_by, created_at, updated_at)
+                     SELECT $tid, $name, '', $content, 'assistant', $now::timestamptz, $now::timestamptz
+                     WHERE EXISTS (SELECT 1 FROM deployments WHERE id = $did)
+                     RETURNING id
+                 )
+                 UPDATE deployments SET template_id = t.id FROM t WHERE deployments.id = $did",
                 json!({ "did": self.deployment_id, "tid": template_id, "name": name, "content": content, "now": now }),
             ).await?;
             Ok(serde_json::to_string(&json!({ "template_id": template_id, "action": "created" }))?)
@@ -316,7 +313,7 @@ impl Tool for UpdateProductTemplateTool {
 }
 
 pub struct ReadProvisionBundleTool {
-    pub neo4j:         Arc<Neo4jClient>,
+    pub db:         Arc<Db>,
     pub project_id:    String,
     pub deployment_id: String,
 }
@@ -334,14 +331,14 @@ impl Tool for ReadProvisionBundleTool {
     }
 
     async fn execute(&self, _params: Value) -> Result<String> {
-        let run = load_runnable_bundle(&self.neo4j, &self.project_id, &self.deployment_id).await.map_err(map_api_err)?;
+        let run = load_runnable_bundle(&self.db, &self.project_id, &self.deployment_id).await.map_err(map_api_err)?;
         let files = bundle::parse_bundle(&run.artifact_content).map_err(|e| anyhow!(e))?;
         Ok(serde_json::to_string(&files)?)
     }
 }
 
 pub struct SetExecutionPlanTool {
-    pub neo4j:         Arc<Neo4jClient>,
+    pub db:         Arc<Db>,
     pub project_id:    String,
     pub deployment_id: String,
 }
@@ -405,7 +402,7 @@ impl Tool for SetExecutionPlanTool {
         validate_destroy_coverage(&plan)?;
 
         for step in plan.deploy_steps.iter().chain(plan.destroy_steps.iter()) {
-            let artifact = get_artifact_in_project(&self.neo4j, &self.project_id, &step.artifact_id)
+            let artifact = get_artifact_in_project(&self.db, &self.project_id, &step.artifact_id)
                 .await?
                 .ok_or_else(|| anyhow!("artifact {} not found in this project", step.artifact_id))?;
             let kind_str = artifact["kind"].as_str().unwrap_or("");
@@ -433,7 +430,7 @@ impl Tool for SetExecutionPlanTool {
             .collect();
 
         crate::deployments::handlers::set_execution_plan_core(
-            &self.neo4j, &self.project_id, &self.deployment_id,
+            &self.db, &self.project_id, &self.deployment_id,
             &deploy_steps, &destroy_steps,
         ).await.map_err(|e| anyhow!(e.1.0["error"].as_str().unwrap_or("set_execution_plan failed").to_string()))?;
 
