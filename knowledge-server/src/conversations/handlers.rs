@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::agent::HistoryMessage;
 use crate::auth::jwt::Claims;
 use crate::llm::types::{Usage, UsedProvider};
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 
 const CONVERSATION_TITLE_MAX_CHARS: usize = 60;
 const CONVERSATION_TITLE_TRUNCATE_CHARS: usize = 57;
@@ -20,13 +20,12 @@ const CONVERSATION_TITLE_TRUNCATE_CHARS: usize = 57;
 type ApiError = (StatusCode, Json<Value>);
 
 pub async fn load_user_messages_raw(
-    neo4j: &Neo4jClient,
+    db: &Db,
     user_id: &str,
     conv_id: &str,
 ) -> anyhow::Result<Vec<Value>> {
-    let rows = neo4j.query_read(
-        "MATCH (:User {id: $uid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         RETURN c.messages AS messages",
+    let rows = db.query(
+        "SELECT messages FROM conversations WHERE id = $cid AND user_id = $uid",
         json!({ "uid": user_id, "cid": conv_id }),
     ).await?;
     let row = match rows.into_iter().next() {
@@ -45,11 +44,11 @@ pub fn history_messages_from_raw(raw: &[Value]) -> Vec<HistoryMessage> {
 }
 
 pub async fn load_conversation_context(
-    neo4j: &Neo4jClient,
+    db: &Db,
     user_id: &str,
     conv_id: &str,
 ) -> anyhow::Result<(Vec<Value>, Vec<HistoryMessage>)> {
-    let raw = load_user_messages_raw(neo4j, user_id, conv_id).await?;
+    let raw = load_user_messages_raw(db, user_id, conv_id).await?;
     let history = history_messages_from_raw(&raw);
     Ok((raw, history))
 }
@@ -97,7 +96,7 @@ fn build_assistant_message(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn append_user_turn(
-    neo4j: &Neo4jClient,
+    db: &Db,
     user_id: &str,
     conv_id: &str,
     user_text: &str,
@@ -117,7 +116,7 @@ pub async fn append_user_turn(
     turn_id: &str,
     pricing: &crate::cost::PricingTable,
 ) -> anyhow::Result<()> {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
     let title = if user_text.len() > CONVERSATION_TITLE_MAX_CHARS {
         format!("{}…", &user_text[..CONVERSATION_TITLE_TRUNCATE_CHARS])
     } else {
@@ -141,15 +140,15 @@ pub async fn append_user_turn(
     let messages_json = serde_json::to_string(&messages)?;
     let message_count = messages.len() as i64;
 
-    neo4j.query_read(
-        "MATCH (u:User {id: $uid})
-         MERGE (u)-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         ON CREATE SET c.title = $title, c.messages = $messages,
-                       c.message_count = $count,
-                       c.created_at = $now, c.updated_at = $now
-         ON MATCH  SET c.messages = $messages, c.message_count = $count,
-                       c.updated_at = $now
-         RETURN c.id AS id",
+    db.query(
+        "INSERT INTO conversations (id, user_id, title, messages, message_count, created_at, updated_at)
+         VALUES ($cid, $uid, $title, $messages, $count, $now, $now)
+         ON CONFLICT (id) DO UPDATE SET
+             messages      = EXCLUDED.messages,
+             message_count = EXCLUDED.message_count,
+             updated_at    = EXCLUDED.updated_at
+         WHERE conversations.user_id = $uid
+         RETURNING id",
         json!({
             "uid": user_id, "cid": conv_id,
             "title": title, "messages": messages_json,
@@ -161,7 +160,7 @@ pub async fn append_user_turn(
         crate::cost::CostScope::Chat, turn_id, user_id, provider_used, usage, llm_call_count, pricing,
         duration_ms, None, Some(conv_id), None, None, None,
     ) {
-        let _ = crate::cost::record_llm_call(neo4j, &record).await;
+        let _ = crate::cost::record_llm_call(db, &record).await;
     }
     Ok(())
 }
@@ -172,19 +171,17 @@ fn err(status: StatusCode, msg: &str) -> ApiError {
 
 #[derive(Clone)]
 pub struct ConvState {
-    pub neo4j: Arc<Neo4jClient>,
+    pub db: Arc<Db>,
 }
 
 pub async fn list(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ConvState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (:User {id: $uid})-[:HAS_CONVERSATION]->(c:Conversation)
-         RETURN c.id AS id, c.title AS title,
-                c.message_count AS message_count,
-                c.created_at AS created_at, c.updated_at AS updated_at
-         ORDER BY c.updated_at DESC",
+    let rows = state.db.query(
+        "SELECT id, title, message_count, created_at, updated_at
+         FROM conversations WHERE user_id = $uid
+         ORDER BY updated_at DESC",
         json!({ "uid": user.sub }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(rows))
@@ -201,17 +198,13 @@ pub async fn create(
     Json(body): Json<CreateBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let id    = Uuid::new_v4().to_string();
-    let now   = chrono::Utc::now().to_rfc3339();
+    let now   = harvest_db::now_rfc3339();
     let title = body.title.unwrap_or_else(|| "New conversation".to_string());
 
-    state.neo4j.query_read(
-        "MATCH (u:User {id: $uid})
-         CREATE (c:Conversation {
-           id: $id, title: $title, messages: '[]',
-           message_count: 0, created_at: $now, updated_at: $now
-         })
-         CREATE (u)-[:HAS_CONVERSATION]->(c)
-         RETURN c.id AS id",
+    state.db.query(
+        "INSERT INTO conversations (id, user_id, title, messages, message_count, created_at, updated_at)
+         VALUES ($id, $uid, $title, '[]', 0, $now, $now)
+         RETURNING id",
         json!({ "uid": user.sub, "id": id, "title": title, "now": now }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -223,10 +216,9 @@ pub async fn get(
     State(state): State<Arc<ConvState>>,
     Path(conv_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (:User {id: $uid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         RETURN c.id AS id, c.title AS title, c.messages AS messages,
-                c.created_at AS created_at, c.updated_at AS updated_at",
+    let rows = state.db.query(
+        "SELECT id, title, messages, created_at, updated_at
+         FROM conversations WHERE id = $cid AND user_id = $uid",
         json!({ "uid": user.sub, "cid": conv_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -255,15 +247,15 @@ pub async fn update(
     Path(conv_id): Path<String>,
     Json(body): Json<UpdateBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let now           = chrono::Utc::now().to_rfc3339();
+    let now           = harvest_db::now_rfc3339();
     let message_count = body.messages.as_array().map(|a| a.len() as i64).unwrap_or(0);
     let messages_json = body.messages.to_string();
 
-    state.neo4j.query_read(
-        "MATCH (:User {id: $uid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         SET c.title = $title, c.messages = $messages,
-             c.message_count = $count, c.updated_at = $now
-         RETURN c.id AS id",
+    state.db.query(
+        "UPDATE conversations
+         SET title = $title, messages = $messages, message_count = $count, updated_at = $now
+         WHERE id = $cid AND user_id = $uid
+         RETURNING id",
         json!({
             "uid": user.sub, "cid": conv_id,
             "title": body.title, "messages": messages_json,
@@ -279,10 +271,8 @@ pub async fn delete(
     State(state): State<Arc<ConvState>>,
     Path(conv_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.neo4j.query_read(
-        "MATCH (:User {id: $uid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         OPTIONAL MATCH (c)-[:INCURRED]->(call:LlmCall)
-         DETACH DELETE c, call RETURN count(c) AS n",
+    state.db.query(
+        "DELETE FROM conversations WHERE id = $cid AND user_id = $uid",
         json!({ "uid": user.sub, "cid": conv_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
