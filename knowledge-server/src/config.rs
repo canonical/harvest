@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Deserialize)]
@@ -125,6 +126,8 @@ pub struct CollocateConfig {
     pub project: String,
     #[serde(default = "default_collocate_image")]
     pub default_image: String,
+    #[serde(default = "default_collocate_user")]
+    pub default_user: String,
     #[serde(default = "default_collocate_idle_timeout")]
     pub default_idle_timeout_secs: u64,
     #[serde(default = "default_collocate_max_containers")]
@@ -135,10 +138,13 @@ pub struct CollocateConfig {
     pub insecure: bool,
     #[serde(default)]
     pub server_fingerprint: Option<String>,
+    #[serde(default)]
+    pub image_presets: HashMap<String, String>,
 }
 
 fn default_collocate_project() -> String { "harvest".into() }
 fn default_collocate_image() -> String { "ubuntu:24.04".into() }
+fn default_collocate_user() -> String { "root".into() }
 fn default_collocate_idle_timeout() -> u64 { 600 }
 fn default_collocate_max_containers() -> usize { 20 }
 
