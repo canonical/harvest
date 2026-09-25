@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use crate::llm::types::ToolDefinition;
 use crate::lxd::{Flavor, LxdClient};
 use crate::machines::{handlers::delete_agent_core, lxd_provision, MachineRegistry};
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 use super::tool::Tool;
 
 const CREATE_PREVIEW_CHARS: usize = 500;
@@ -36,7 +36,7 @@ fn validate_delete_params(params: &Value) -> Result<String> {
 }
 
 pub struct CreateLxdAgentTool {
-    pub neo4j:      Arc<Neo4jClient>,
+    pub db:      Arc<Db>,
     pub lxd:        Arc<LxdClient>,
     pub server_url: String,
     pub project_id: String,
@@ -84,7 +84,7 @@ impl Tool for CreateLxdAgentTool {
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
 
         lxd_provision::create_lxd_agent(
-            &self.neo4j, &self.lxd, &self.server_url, &self.project_id,
+            &self.db, &self.lxd, &self.server_url, &self.project_id,
             &name, &description, flavor, tx,
         ).await?;
 
@@ -97,7 +97,7 @@ impl Tool for CreateLxdAgentTool {
 }
 
 pub struct DeleteAgentTool {
-    pub neo4j:      Arc<Neo4jClient>,
+    pub db:      Arc<Db>,
     pub lxd:        Option<Arc<LxdClient>>,
     pub registry:   Arc<MachineRegistry>,
     pub project_id: String,
@@ -132,7 +132,7 @@ impl Tool for DeleteAgentTool {
 
     async fn execute(&self, params: Value) -> Result<String> {
         let agent_id = validate_delete_params(&params)?;
-        delete_agent_core(&self.neo4j, self.lxd.as_ref(), &self.registry, &self.project_id, &agent_id)
+        delete_agent_core(&self.db, self.lxd.as_ref(), &self.registry, &self.project_id, &agent_id)
             .await?;
         Ok(format!("Agent '{agent_id}' deleted."))
     }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::llm::types::ToolDefinition;
 use crate::machines::port_forwards;
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 use super::tool::Tool;
 
 const LIST_PREVIEW_CHARS:   usize = 1000;
@@ -54,7 +54,7 @@ fn validate_delete_params(params: &Value) -> Result<(String, String)> {
 }
 
 pub struct ListPortForwardsTool {
-    pub neo4j:      Arc<Neo4jClient>,
+    pub db:      Arc<Db>,
     pub project_id: String,
 }
 
@@ -81,7 +81,7 @@ impl Tool for ListPortForwardsTool {
 
     async fn execute(&self, params: Value) -> Result<String> {
         let agent_id = validate_list_params(&params)?;
-        let forwards = port_forwards::list_for_agent(&self.neo4j, &self.project_id, &agent_id)
+        let forwards = port_forwards::list_for_agent(&self.db, &self.project_id, &agent_id)
             .await
             .map_err(|e| anyhow!(e.to_string()))?;
         Ok(serde_json::to_string_pretty(&forwards)?)
@@ -93,7 +93,7 @@ impl Tool for ListPortForwardsTool {
 }
 
 pub struct CreatePortForwardTool {
-    pub neo4j:      Arc<Neo4jClient>,
+    pub db:      Arc<Db>,
     pub project_id: String,
 }
 
@@ -134,7 +134,7 @@ impl Tool for CreatePortForwardTool {
 
     async fn execute(&self, params: Value) -> Result<String> {
         let (agent_id, port, route_name) = validate_create_params(&params)?;
-        let forward = port_forwards::create(&self.neo4j, &self.project_id, &agent_id, port, &route_name)
+        let forward = port_forwards::create(&self.db, &self.project_id, &agent_id, port, &route_name)
             .await
             .map_err(|e| anyhow!(e.to_string()))?;
         Ok(format!(
@@ -149,7 +149,7 @@ impl Tool for CreatePortForwardTool {
 }
 
 pub struct UpdatePortForwardTool {
-    pub neo4j:      Arc<Neo4jClient>,
+    pub db:      Arc<Db>,
     pub project_id: String,
 }
 
@@ -194,7 +194,7 @@ impl Tool for UpdatePortForwardTool {
 
     async fn execute(&self, params: Value) -> Result<String> {
         let (agent_id, forward_id, port, route_name) = validate_update_params(&params)?;
-        let forward = port_forwards::update(&self.neo4j, &self.project_id, &agent_id, &forward_id, port, route_name)
+        let forward = port_forwards::update(&self.db, &self.project_id, &agent_id, &forward_id, port, route_name)
             .await
             .map_err(|e| anyhow!(e.to_string()))?;
         Ok(format!(
@@ -209,7 +209,7 @@ impl Tool for UpdatePortForwardTool {
 }
 
 pub struct DeletePortForwardTool {
-    pub neo4j:      Arc<Neo4jClient>,
+    pub db:      Arc<Db>,
     pub project_id: String,
 }
 
@@ -246,7 +246,7 @@ impl Tool for DeletePortForwardTool {
 
     async fn execute(&self, params: Value) -> Result<String> {
         let (agent_id, forward_id) = validate_delete_params(&params)?;
-        port_forwards::delete(&self.neo4j, &self.project_id, &agent_id, &forward_id)
+        port_forwards::delete(&self.db, &self.project_id, &agent_id, &forward_id)
             .await
             .map_err(|e| anyhow!(e.to_string()))?;
         Ok(format!("Port forward '{forward_id}' deleted."))
