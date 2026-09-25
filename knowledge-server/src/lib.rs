@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod artifacts;
+pub mod collocate;
 pub mod skills;
 pub mod agent;
 pub mod api;
@@ -14,5 +15,4 @@ pub mod ingestion;
 pub mod llm;
 pub mod lxd;
 pub mod machines;
-pub mod neo4j;
 pub mod projects;
