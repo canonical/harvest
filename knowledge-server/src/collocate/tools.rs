@@ -195,7 +195,7 @@ impl Tool for CollocateCreateSessionTool {
                     "command": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "The command to execute as argv array. Mutually exclusive with 'script'."
+                        "description": "Main process for the container. For a session you'll exec into, use [\"sleep\", \"infinity\"] to keep it alive. Omitting this uses the image's default entrypoint — if that exits immediately, the container dies before you can exec into it."
                     },
                     "script": {
                         "type": "string",
