@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Deserialize)]
 pub struct Config {
-    pub neo4j: Neo4jConfig,
+    pub database: DatabaseConfig,
     pub git: Option<GitConfig>,
     pub repositories: Vec<RepoConfig>,
     pub llm: Option<LlmConfig>,
@@ -12,10 +12,8 @@ pub struct Config {
 }
 
 #[derive(Deserialize)]
-pub struct Neo4jConfig {
-    pub uri: String,
-    pub user: String,
-    pub password: String,
+pub struct DatabaseConfig {
+    pub url: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -120,10 +118,8 @@ mod tests {
     fn base_toml(extra: &str) -> String {
         format!(
             r#"
-[neo4j]
-uri      = "bolt://localhost:7687"
-user     = "neo4j"
-password = "pass"
+[database]
+url = "postgres://harvest:pass@localhost:5432/harvest"
 
 [[repositories]]
 name = "my-repo"
@@ -164,10 +160,8 @@ url  = "https://github.com/owner/repo.git"
     #[test]
     fn multiple_repos_each_own_refs() {
         let toml = r#"
-[neo4j]
-uri = "bolt://localhost:7687"
-user = "neo4j"
-password = "pass"
+[database]
+url = "postgres://harvest:pass@localhost:5432/harvest"
 
 [[repositories]]
 name = "repo-a"
@@ -193,10 +187,8 @@ url  = "https://github.com/b.git"
     #[test]
     fn anthropic_llm_config_parsed() {
         let toml = r#"
-[neo4j]
-uri = "bolt://localhost:7687"
-user = "neo4j"
-password = "pass"
+[database]
+url = "postgres://harvest:pass@localhost:5432/harvest"
 
 [[repositories]]
 name = "my-repo"
@@ -222,10 +214,8 @@ docs_dir = "/tmp/docs"
     #[test]
     fn openai_compat_llm_config_parsed() {
         let toml = r#"
-[neo4j]
-uri = "bolt://localhost:7687"
-user = "neo4j"
-password = "pass"
+[database]
+url = "postgres://harvest:pass@localhost:5432/harvest"
 
 [[repositories]]
 name = "my-repo"
@@ -245,10 +235,8 @@ model    = "llama-3.3-70b"
     #[test]
     fn gemini_llm_config_parsed() {
         let toml = r#"
-[neo4j]
-uri = "bolt://localhost:7687"
-user = "neo4j"
-password = "pass"
+[database]
+url = "postgres://harvest:pass@localhost:5432/harvest"
 
 [[repositories]]
 name = "my-repo"
@@ -273,10 +261,8 @@ api_key  = "AIza-test"
     #[test]
     fn git_ssh_key_path_parsed() {
         let toml = r#"
-[neo4j]
-uri = "bolt://localhost:7687"
-user = "neo4j"
-password = "pass"
+[database]
+url = "postgres://harvest:pass@localhost:5432/harvest"
 
 [git]
 ssh_key_path = "/home/user/.ssh/id_ed25519"
@@ -294,10 +280,8 @@ url  = "git@github.com:owner/repo.git"
     #[test]
     fn git_ssh_passphrase_parsed() {
         let toml = r#"
-[neo4j]
-uri = "bolt://localhost:7687"
-user = "neo4j"
-password = "pass"
+[database]
+url = "postgres://harvest:pass@localhost:5432/harvest"
 
 [git]
 ssh_key_path    = "/home/user/.ssh/id_rsa"
@@ -328,10 +312,8 @@ url  = "git@github.com:owner/repo.git"
     fn repo_toml(fields: &str) -> String {
         format!(
             r#"
-[neo4j]
-uri      = "bolt://localhost:7687"
-user     = "neo4j"
-password = "pass"
+[database]
+url = "postgres://harvest:pass@localhost:5432/harvest"
 
 [[repositories]]
 name = "my-repo"

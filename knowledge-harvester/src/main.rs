@@ -56,15 +56,8 @@ async fn main() -> Result<()> {
                     "document command requires [documentation] configuration in harvester.toml"
                 )
             })?;
-            let pipeline =
-                documentation::DocumentationPipeline::new(
-                    &config.neo4j.uri,
-                    &config.neo4j.user,
-                    &config.neo4j.password,
-                    llm_config,
-                    doc_config,
-                )
-                .await?;
+            let db = harvest_db::Db::connect(&config.database.url).await?;
+            let pipeline = documentation::DocumentationPipeline::new(db, llm_config, doc_config);
             pipeline.document(repo, version).await
         }
         _ => {
