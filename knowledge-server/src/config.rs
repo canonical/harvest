@@ -5,7 +5,7 @@ use std::path::Path;
 #[derive(Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
-    pub neo4j: Neo4jConfig,
+    pub database: DatabaseConfig,
     pub llm: Vec<LlmProviderConfig>,
     #[serde(default)]
     pub agent: AgentBehaviorConfig,
@@ -18,6 +18,8 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(default)]
     pub lxd: Option<LxdConfig>,
+    #[serde(default)]
+    pub collocate: Option<CollocateConfig>,
     #[serde(default)]
     pub security: SecurityConfig,
 }
@@ -110,6 +112,36 @@ fn default_lxd_image_alias() -> String { "24.04".into() }
 fn default_lxd_image_server() -> String { "https://cloud-images.ubuntu.com/releases".into() }
 fn default_lxd_profile() -> String { "default".into() }
 
+#[derive(Deserialize, Clone)]
+pub struct CollocateConfig {
+    pub endpoint: String,
+    #[serde(default)]
+    pub trust_token: Option<String>,
+    #[serde(default)]
+    pub client_cert: Option<String>,
+    #[serde(default)]
+    pub client_key: Option<String>,
+    #[serde(default = "default_collocate_project")]
+    pub project: String,
+    #[serde(default = "default_collocate_image")]
+    pub default_image: String,
+    #[serde(default = "default_collocate_idle_timeout")]
+    pub default_idle_timeout_secs: u64,
+    #[serde(default = "default_collocate_max_containers")]
+    pub max_containers: usize,
+    #[serde(default)]
+    pub ca_cert: Option<String>,
+    #[serde(default)]
+    pub insecure: bool,
+    #[serde(default)]
+    pub server_fingerprint: Option<String>,
+}
+
+fn default_collocate_project() -> String { "harvest".into() }
+fn default_collocate_image() -> String { "ubuntu:24.04".into() }
+fn default_collocate_idle_timeout() -> u64 { 600 }
+fn default_collocate_max_containers() -> usize { 20 }
+
 #[derive(Deserialize)]
 pub struct ServerConfig {
     #[serde(default = "default_host")]
@@ -122,10 +154,8 @@ fn default_host() -> String { "0.0.0.0".into() }
 fn default_port() -> u16 { 8080 }
 
 #[derive(Deserialize)]
-pub struct Neo4jConfig {
-    pub uri: String,
-    pub user: String,
-    pub password: String,
+pub struct DatabaseConfig {
+    pub url: String,
 }
 
 #[derive(Deserialize)]
@@ -497,10 +527,8 @@ mod tests {
     fn minimal_config(llm_block: &str) -> String {
         format!(r#"
             [server]
-            [neo4j]
-            uri = "bolt://localhost:7687"
-            user = "neo4j"
-            password = "pw"
+            [database]
+            url = "postgres://harvest:pw@localhost:5432/harvest"
             [auth]
             jwt_secret = "secret"
             {llm_block}
