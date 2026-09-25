@@ -40,10 +40,10 @@ pub async fn project_cost(
     State(state): State<Arc<ProjectState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let total = project_cost_summary(&state.neo4j, &project_id).await
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let total = project_cost_summary(&state.db, &project_id).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let by_scope = project_cost_by_scope(&state.neo4j, &project_id).await
+    let by_scope = project_cost_by_scope(&state.db, &project_id).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let scopes = by_scope.iter().map(|(s, c)| (s.clone(), summary_json(c))).collect::<serde_json::Map<_, _>>();
     Ok(Json(json!({
@@ -58,8 +58,8 @@ pub async fn project_cost_by_model(
     State(state): State<Arc<ProjectState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let rows = crate::cost::project_cost_by_model(&state.neo4j, &project_id).await
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let rows = crate::cost::project_cost_by_model(&state.db, &project_id).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let models: Vec<Value> = rows.iter().map(|(kind, model, summary)| json!({
         "kind": kind, "model": model, "summary": summary_json(summary),
@@ -72,8 +72,8 @@ pub async fn project_cost_by_user(
     State(state): State<Arc<ProjectState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let rows = crate::cost::project_cost_by_user(&state.neo4j, &project_id).await
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let rows = crate::cost::project_cost_by_user(&state.db, &project_id).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let users: Vec<Value> = rows.iter().map(|(uid, summary)| json!({
         "user_id": uid, "summary": summary_json(summary),
@@ -86,10 +86,10 @@ pub async fn conversation_cost(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, conversation_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let total = conversation_cost_summary(&state.neo4j, &conversation_id).await
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let total = conversation_cost_summary(&state.db, &conversation_id).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let turns = conversation_cost_by_turn(&state.neo4j, &conversation_id).await
+    let turns = conversation_cost_by_turn(&state.db, &conversation_id).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let turns_json: Vec<Value> = turns.iter().map(|(tid, summary)| json!({
         "turn_id": tid, "summary": summary_json(summary),
@@ -107,8 +107,8 @@ pub async fn deployment_cost(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let by_scope = deployment_cost_summary(&state.neo4j, &deployment_id).await
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let by_scope = deployment_cost_summary(&state.db, &deployment_id).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let total = by_scope.values().fold(CostSummary::default(), |mut acc, s| { acc.add(s); acc });
     let scopes = by_scope.iter().map(|(s, c)| (s.clone(), summary_json(c))).collect::<serde_json::Map<_, _>>();
@@ -125,8 +125,8 @@ pub async fn deployment_cost_calls(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let calls = deployment_llm_calls(&state.neo4j, &deployment_id, 200).await
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let calls = deployment_llm_calls(&state.db, &deployment_id, 200).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     Ok(Json(json!({
         "project_id": project_id,
