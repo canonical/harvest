@@ -1,6 +1,6 @@
 use crate::agent::HistoryMessage;
 use crate::llm::{LlmProvider, types::Message};
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 use serde_json::json;
 
 const TITLE_MAX_CHARS: usize = 60;
@@ -111,15 +111,15 @@ fn looks_like_body_text(sanitized: &str) -> bool {
     starts_like_heading || starts_like_list_item || too_many_words
 }
 
-async fn update_title(neo4j: &Neo4jClient, conv_id: &str, title: &str) -> bool {
-    neo4j.query_read(
-        "MATCH (c:Conversation {id: $cid}) SET c.title = $title RETURN c.id AS id",
+async fn update_title(db: &Db, conv_id: &str, title: &str) -> bool {
+    db.query(
+        "UPDATE conversations SET title = $title WHERE id = $cid RETURNING id",
         json!({ "cid": conv_id, "title": title }),
     ).await.is_ok()
 }
 
 pub async fn maybe_regenerate_title(
-    neo4j: &Neo4jClient,
+    db: &Db,
     llm: &dyn LlmProvider,
     conv_id: &str,
     prior: &[HistoryMessage],
@@ -131,7 +131,7 @@ pub async fn maybe_regenerate_title(
         return None;
     }
     let title = generate_title(llm, prior, user_text, assistant_text).await?;
-    if update_title(neo4j, conv_id, &title).await {
+    if update_title(db, conv_id, &title).await {
         Some(title)
     } else {
         None
