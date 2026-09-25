@@ -26,9 +26,10 @@ use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream};
 use uuid::Uuid;
 
+use harvest_db::Db;
 use crate::{
     artifacts::{bundle as tf_bundle, handlers::{require_artifact_access, ArtifactKind}},
-    auth::jwt::Claims, deployments, lxd::{Flavor, LxdClient}, neo4j::Neo4jClient,
+    auth::jwt::Claims, deployments, lxd::{Flavor, LxdClient},
 };
 use super::{lxd_provision, port_forwards, ConnectedAgent, MachineRegistry, ResultBody, ServerToAgent, TerraformAction, TerraformFlavor, hash_token};
 
@@ -42,7 +43,7 @@ const DEFAULT_CONSOLE_ROWS: u16 = 24;
 
 pub struct MachineState {
     pub registry:    Arc<MachineRegistry>,
-    pub neo4j:       Option<Arc<Neo4jClient>>,
+    pub db:       Option<Arc<Db>>,
     pub binary_path: Option<PathBuf>,
     pub server_url:  String,
     pub lxd:         Option<Arc<LxdClient>>,
@@ -54,8 +55,8 @@ pub(super) fn err(status: StatusCode, msg: &str) -> ApiError {
     (status, Json(json!({ "error": msg })))
 }
 
-pub(super) fn neo4j_or_err(state: &MachineState) -> Result<&Arc<Neo4jClient>, ApiError> {
-    state.neo4j.as_ref().ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "database unavailable"))
+pub(super) fn db_or_err(state: &MachineState) -> Result<&Arc<Db>, ApiError> {
+    state.db.as_ref().ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "database unavailable"))
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -180,11 +181,11 @@ pub fn machines_protected_router(state: Arc<MachineState>) -> Router {
 }
 
 pub(crate) async fn get_or_create_install_token(
-    neo4j: &Neo4jClient,
+    db: &Db,
     project_id: &str,
 ) -> anyhow::Result<Option<String>> {
-    let rows = neo4j.query_read(
-        "MATCH (p:Project {id: $pid}) RETURN p.install_token AS install_token",
+    let rows = db.query(
+        "SELECT install_token FROM projects WHERE id = $pid",
         json!({ "pid": project_id }),
     ).await?;
 
@@ -197,23 +198,25 @@ pub(crate) async fn get_or_create_install_token(
     }
 
     let tok = Uuid::new_v4().to_string();
-    neo4j.query_read(
-        "MATCH (p:Project {id: $pid}) SET p.install_token = $tok",
+    let rows = db.query(
+        "UPDATE projects SET install_token = COALESCE(install_token, $tok)
+         WHERE id = $pid
+         RETURNING install_token",
         json!({ "pid": project_id, "tok": tok }),
     ).await?;
-    Ok(Some(tok))
+    Ok(rows.into_iter().next().and_then(|r| r["install_token"].as_str().map(String::from)))
 }
 
 async fn install_script_handler(
     State(state): State<Arc<MachineState>>,
     Path(project_id): Path<String>,
 ) -> impl IntoResponse {
-    let neo4j = match neo4j_or_err(&state) {
+    let db = match db_or_err(&state) {
         Ok(n) => n,
         Err(e) => return e.into_response(),
     };
 
-    let install_token = match get_or_create_install_token(neo4j, &project_id).await {
+    let install_token = match get_or_create_install_token(db, &project_id).await {
         Ok(Some(tok)) => tok,
         Ok(None)      => return err(StatusCode::NOT_FOUND, "project not found").into_response(),
         Err(_)        => return err(StatusCode::INTERNAL_SERVER_ERROR, "server error").into_response(),
@@ -278,7 +281,7 @@ async fn agent_events_handler(
         Some(t) => t,
         None    => return StatusCode::UNAUTHORIZED.into_response(),
     };
-    let neo4j = match &state.neo4j {
+    let db = match &state.db {
         Some(n) => Arc::clone(n),
         None    => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
@@ -286,24 +289,23 @@ async fn agent_events_handler(
 
     let token_hash = hash_token(&token);
 
-    let machine = neo4j.query_read(
-        "MATCH (m:Machine) WHERE m.agent_token_hash = $h
-         RETURN m.id AS id, m.project_id AS project_id",
+    let machine = db.query(
+        "SELECT id, project_id FROM machines WHERE agent_token_hash = $h",
         json!({ "h": token_hash }),
     ).await.ok().and_then(|r| r.into_iter().next());
 
     let (agent_id, project_id, index_hash, first_event) = if let Some(row) = machine {
         let id  = row["id"].as_str().unwrap_or("").to_string();
         let pid = row["project_id"].as_str().unwrap_or("").to_string();
-        let now = chrono::Utc::now().to_rfc3339();
-        let _ = neo4j.query_read(
-            "MATCH (m:Machine {id: $id}) SET m.hostname = $h, m.last_seen = $now",
+        let now = harvest_db::now_rfc3339();
+        let _ = db.query(
+            "UPDATE machines SET hostname = $h, last_seen = $now WHERE id = $id",
             json!({ "id": id, "h": hostname, "now": now }),
         ).await;
         (id, pid, token_hash, ServerToAgent::HelloAck)
     } else {
-        let project = neo4j.query_read(
-            "MATCH (p:Project {install_token: $tok}) RETURN p.id AS id",
+        let project = db.query(
+            "SELECT id FROM projects WHERE install_token = $tok",
             json!({ "tok": token }),
         ).await.ok().and_then(|r| r.into_iter().next());
 
@@ -318,13 +320,11 @@ async fn agent_events_handler(
         let aid        = Uuid::new_v4().to_string();
         let perm_token = Uuid::new_v4().to_string();
         let perm_hash  = hash_token(&perm_token);
-        let now        = chrono::Utc::now().to_rfc3339();
+        let now        = harvest_db::now_rfc3339();
 
-        if neo4j.query_read(
-            "CREATE (m:Machine {
-                 id: $id, project_id: $pid, hostname: $h,
-                 agent_token_hash: $hash, created_at: $now, last_seen: $now
-             })",
+        if db.query(
+            "INSERT INTO machines (id, project_id, hostname, agent_token_hash, created_at, last_seen)
+                 VALUES ($id, $pid, $h, $hash, $now, $now)",
             json!({
                 "id": aid, "pid": project_id, "h": hostname,
                 "hash": perm_hash, "now": now,
@@ -333,12 +333,16 @@ async fn agent_events_handler(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
 
-        let _ = neo4j.query_read(
-            "MATCH (li:LxdInstance {project_id: $pid, hostname: $h})
-             WITH li LIMIT 1
-             MATCH (m:Machine {id: $mid})
-             SET m.provider = 'lxd', m.lxd_instance = li.hostname, m.description = li.description
-             DELETE li",
+        let _ = db.query(
+            "WITH li AS (
+                 DELETE FROM lxd_pending_instances
+                 WHERE project_id = $pid AND hostname = $h
+                   AND EXISTS (SELECT 1 FROM machines WHERE id = $mid)
+                 RETURNING hostname, description
+             )
+             UPDATE machines m
+             SET provider = 'lxd', lxd_instance = li.hostname, description = li.description
+             FROM li WHERE m.id = $mid",
             json!({ "pid": project_id, "h": hostname, "mid": aid }),
         ).await;
 
@@ -454,12 +458,12 @@ async fn agent_ping_handler(
         None    => return StatusCode::UNAUTHORIZED.into_response(),
     };
 
-    if let Some(neo4j) = &state.neo4j {
-        let neo4j = Arc::clone(neo4j);
+    if let Some(db) = &state.db {
+        let db = Arc::clone(db);
         tokio::spawn(async move {
-            let now = chrono::Utc::now().to_rfc3339();
-            let _ = neo4j.query_read(
-                "MATCH (m:Machine {id: $id}) SET m.last_seen = $now",
+            let now = harvest_db::now_rfc3339();
+            let _ = db.query(
+                "UPDATE machines SET last_seen = $now WHERE id = $id",
                 json!({ "id": agent_id, "now": now }),
             ).await;
         });
@@ -473,15 +477,13 @@ pub async fn list_agents(
     State(state):     State<Arc<MachineState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let neo4j = neo4j_or_err(&state)?;
-    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+    let db = db_or_err(&state)?;
+    require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
-    let db_machines = neo4j.query_read(
-        "MATCH (m:Machine {project_id: $pid})
-         RETURN m.id AS id, m.hostname AS hostname,
-                m.last_seen AS last_seen, m.created_at AS created_at,
-                m.provider AS provider, m.description AS description
-         ORDER BY m.created_at ASC",
+    let db_machines = db.query(
+        "SELECT id, hostname, last_seen, created_at, provider, description
+         FROM machines WHERE project_id = $pid
+         ORDER BY created_at ASC",
         json!({ "pid": project_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -518,8 +520,8 @@ pub async fn execute_command(
     Path((project_id, agent_id)): Path<(String, String)>,
     Json(body):       Json<ExecuteBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let neo4j = neo4j_or_err(&state)?;
-    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+    let db = db_or_err(&state)?;
+    require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
     let timeout = body.timeout_secs.min(MAX_EXECUTE_TIMEOUT_SECS);
     match state.registry.execute(&agent_id, body.command, timeout).await {
@@ -551,10 +553,10 @@ pub async fn run_terraform_command(
     Path((project_id, agent_id)): Path<(String, String)>,
     Json(body):      Json<RunTerraformBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let neo4j = neo4j_or_err(&state)?;
-    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+    let db = db_or_err(&state)?;
+    require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
-    let artifact = require_artifact_access(neo4j, &user.sub, &user.role, &body.artifact_id).await?;
+    let artifact = require_artifact_access(db, &user.sub, &user.role, &body.artifact_id).await?;
     if artifact["project_id"].as_str() != Some(project_id.as_str()) {
         return Err(err(StatusCode::NOT_FOUND, "not found"));
     }
@@ -569,7 +571,7 @@ pub async fn run_terraform_command(
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "action must be 'plan', 'apply', or 'destroy'"))?;
 
     let live_content = artifact["content"].as_str().unwrap_or("");
-    let content = deployments::resolve_run_content(neo4j, &project_id, &body.artifact_id, action, live_content)
+    let content = deployments::resolve_run_content(db, &project_id, &body.artifact_id, action, live_content)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let files = tf_bundle::parse_bundle(&content)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
@@ -587,7 +589,7 @@ pub async fn run_terraform_command(
     let success         = exit_code == Some(0);
     let applied_content = (action == TerraformAction::Apply && success).then_some(files_json.as_str());
     let infra_state = deployments::record_run_and_update_state(
-        neo4j, &project_id, &artifact_id, action, exit_code, &stdout, &stderr,
+        db, &project_id, &artifact_id, action, exit_code, &stdout, &stderr,
         applied_content, "user", None,
     ).await.ok().flatten();
 
@@ -689,8 +691,8 @@ pub async fn agent_console_open_handler(
     Query(q):         Query<ConsoleQuery>,
     ws:               WebSocketUpgrade,
 ) -> Result<impl IntoResponse, ApiError> {
-    let neo4j = neo4j_or_err(&state)?;
-    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+    let db = db_or_err(&state)?;
+    require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
     if !state.registry.agents.contains_key(&agent_id) {
         return Err(err(StatusCode::BAD_GATEWAY, "agent not connected"));
@@ -796,13 +798,12 @@ struct MachineLxdInfo {
 }
 
 async fn lookup_machine_lxd_info(
-    neo4j:      &Neo4jClient,
+    db:      &Db,
     project_id: &str,
     agent_id:   &str,
 ) -> Result<Option<MachineLxdInfo>, ()> {
-    let rows = neo4j.query_read(
-        "MATCH (m:Machine {id: $aid, project_id: $pid})
-         RETURN m.id AS id, m.provider AS provider, m.lxd_instance AS lxd_instance",
+    let rows = db.query(
+        "SELECT id, provider, lxd_instance FROM machines WHERE id = $aid AND project_id = $pid",
         json!({ "aid": agent_id, "pid": project_id }),
     ).await.map_err(|_| ())?;
 
@@ -813,12 +814,12 @@ async fn lookup_machine_lxd_info(
 }
 
 async fn lxd_instance_for_agent(
-    neo4j:      &Neo4jClient,
+    db:      &Db,
     lxd:        Option<&Arc<LxdClient>>,
     project_id: &str,
     agent_id:   &str,
 ) -> Result<(Arc<LxdClient>, String), ApiError> {
-    let info = lookup_machine_lxd_info(neo4j, project_id, agent_id).await
+    let info = lookup_machine_lxd_info(db, project_id, agent_id).await
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "agent not found"))?;
 
@@ -830,13 +831,13 @@ async fn lxd_instance_for_agent(
 }
 
 pub async fn delete_agent_core(
-    neo4j:      &Neo4jClient,
+    db:      &Db,
     lxd:        Option<&Arc<LxdClient>>,
     registry:   &MachineRegistry,
     project_id: &str,
     agent_id:   &str,
 ) -> Result<(), DeleteAgentError> {
-    let machine = lookup_machine_lxd_info(neo4j, project_id, agent_id).await
+    let machine = lookup_machine_lxd_info(db, project_id, agent_id).await
         .map_err(|_| DeleteAgentError::Db)?
         .ok_or(DeleteAgentError::NotFound)?;
 
@@ -852,8 +853,8 @@ pub async fn delete_agent_core(
         let _ = sender.send(super::ServerToAgent::Uninstall).await;
     }
 
-    neo4j.query_read(
-        "MATCH (m:Machine {id: $aid, project_id: $pid}) DELETE m",
+    db.query(
+        "DELETE FROM machines WHERE id = $aid AND project_id = $pid",
         json!({ "aid": agent_id, "pid": project_id }),
     ).await.map_err(|_| DeleteAgentError::Db)?;
 
@@ -865,10 +866,10 @@ pub async fn delete_agent(
     State(state):     State<Arc<MachineState>>,
     Path((project_id, agent_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let neo4j = neo4j_or_err(&state)?;
-    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+    let db = db_or_err(&state)?;
+    require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
-    delete_agent_core(neo4j, state.lxd.as_ref(), &state.registry, &project_id, &agent_id)
+    delete_agent_core(db, state.lxd.as_ref(), &state.registry, &project_id, &agent_id)
         .await
         .map_err(|e| match e {
             DeleteAgentError::NotFound       => err(StatusCode::NOT_FOUND, &e.to_string()),
@@ -887,10 +888,10 @@ async fn set_lxd_agent_state(
     agent_id:   &str,
     action:     &str,
 ) -> Result<(), ApiError> {
-    let neo4j = neo4j_or_err(state)?;
-    require_project_access(neo4j, &user.sub, &user.role, project_id).await?;
+    let db = db_or_err(state)?;
+    require_project_access(db, &user.sub, &user.role, project_id).await?;
 
-    let (lxd, lxd_instance) = lxd_instance_for_agent(neo4j, state.lxd.as_ref(), project_id, agent_id).await?;
+    let (lxd, lxd_instance) = lxd_instance_for_agent(db, state.lxd.as_ref(), project_id, agent_id).await?;
 
     let result = match action {
         "start"   => lxd.start_instance(&lxd_instance).await,
@@ -941,12 +942,12 @@ pub async fn rotate_install_token(
     State(state):     State<Arc<MachineState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let neo4j = neo4j_or_err(&state)?;
-    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+    let db = db_or_err(&state)?;
+    require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
     let new_token = Uuid::new_v4().to_string();
-    neo4j.query_read(
-        "MATCH (p:Project {id: $pid}) SET p.install_token = $tok",
+    db.query(
+        "UPDATE projects SET install_token = $tok WHERE id = $pid",
         json!({ "pid": project_id, "tok": new_token }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -958,8 +959,8 @@ pub async fn list_flavors(
     State(state):     State<Arc<MachineState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let neo4j = neo4j_or_err(&state)?;
-    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+    let db = db_or_err(&state)?;
+    require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
     if state.lxd.is_none() {
         return Err(err(StatusCode::SERVICE_UNAVAILABLE, "LXD is not configured on this server"));
@@ -983,11 +984,11 @@ pub async fn create_lxd_agent_handler(
     Path(project_id): Path<String>,
     Json(body):       Json<CreateLxdAgentBody>,
 ) -> axum::response::Response {
-    let neo4j = match neo4j_or_err(&state) {
+    let db = match db_or_err(&state) {
         Ok(n) => n,
         Err(e) => return e.into_response(),
     };
-    if let Err(e) = require_project_access(neo4j, &user.sub, &user.role, &project_id).await {
+    if let Err(e) = require_project_access(db, &user.sub, &user.role, &project_id).await {
         return e.into_response();
     }
 
@@ -1005,7 +1006,7 @@ pub async fn create_lxd_agent_handler(
     };
 
     let (tx, rx) = mpsc::channel::<String>(64);
-    let neo4j = Arc::clone(neo4j);
+    let db = Arc::clone(db);
     let lxd = Arc::clone(lxd);
     let server_url = state.server_url.clone();
     let project_id_task = project_id.clone();
@@ -1014,7 +1015,7 @@ pub async fn create_lxd_agent_handler(
 
     tokio::spawn(async move {
         if let Err(e) = lxd_provision::create_lxd_agent(
-            &neo4j, &lxd, &server_url, &project_id_task, &name, &description, flavor, tx,
+            &db, &lxd, &server_url, &project_id_task, &name, &description, flavor, tx,
         ).await {
             tracing::error!(project_id = project_id_task, name, error = ?e, "failed to create LXD-managed agent");
         }
@@ -1056,10 +1057,10 @@ pub async fn list_port_forwards(
     State(state):     State<Arc<MachineState>>,
     Path((project_id, agent_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let neo4j = neo4j_or_err(&state)?;
-    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+    let db = db_or_err(&state)?;
+    require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
-    let forwards = port_forwards::list_for_agent(neo4j, &project_id, &agent_id)
+    let forwards = port_forwards::list_for_agent(db, &project_id, &agent_id)
         .await
         .map_err(port_forward_error_to_api)?;
 
@@ -1079,13 +1080,13 @@ pub async fn create_port_forward(
     Path((project_id, agent_id)): Path<(String, String)>,
     Json(body):       Json<CreatePortForwardBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let neo4j = neo4j_or_err(&state)?;
-    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+    let db = db_or_err(&state)?;
+    require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
     let port = port_forwards::validate_port(body.port)
         .map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
 
-    let forward = port_forwards::create(neo4j, &project_id, &agent_id, port, &body.route_name)
+    let forward = port_forwards::create(db, &project_id, &agent_id, port, &body.route_name)
         .await
         .map_err(port_forward_error_to_api)?;
 
@@ -1104,15 +1105,15 @@ pub async fn update_port_forward(
     Path((project_id, agent_id, forward_id)): Path<(String, String, String)>,
     Json(body):       Json<UpdatePortForwardBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let neo4j = neo4j_or_err(&state)?;
-    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+    let db = db_or_err(&state)?;
+    require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
     let port = match body.port {
         Some(p) => Some(port_forwards::validate_port(p).map_err(|e| err(StatusCode::BAD_REQUEST, &e))?),
         None    => None,
     };
 
-    let forward = port_forwards::update(neo4j, &project_id, &agent_id, &forward_id, port, body.route_name)
+    let forward = port_forwards::update(db, &project_id, &agent_id, &forward_id, port, body.route_name)
         .await
         .map_err(port_forward_error_to_api)?;
 
@@ -1124,10 +1125,10 @@ pub async fn delete_port_forward(
     State(state):     State<Arc<MachineState>>,
     Path((project_id, agent_id, forward_id)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let neo4j = neo4j_or_err(&state)?;
-    require_project_access(neo4j, &user.sub, &user.role, &project_id).await?;
+    let db = db_or_err(&state)?;
+    require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
-    port_forwards::delete(neo4j, &project_id, &agent_id, &forward_id)
+    port_forwards::delete(db, &project_id, &agent_id, &forward_id)
         .await
         .map_err(port_forward_error_to_api)?;
 
@@ -1135,16 +1136,16 @@ pub async fn delete_port_forward(
 }
 
 pub(super) async fn require_project_access(
-    neo4j:      &Neo4jClient,
+    db:      &Db,
     user_id:    &str,
     user_role:  &str,
     project_id: &str,
 ) -> Result<(), ApiError> {
-    let rows = neo4j.query_read(
-        "MATCH (g:Group)-[:HAS_PROJECT]->(p:Project {id: $pid})
-         WHERE $role = 'admin'
-            OR EXISTS { MATCH (:User {id: $uid})-[:MEMBER_OF]->(g) }
-         RETURN p.id AS id",
+    let rows = db.query(
+        "SELECT p.id FROM projects p
+         WHERE p.id = $pid
+           AND ($role = 'admin' OR EXISTS (
+                 SELECT 1 FROM user_groups ug WHERE ug.user_id = $uid AND ug.group_id = p.group_id))",
         json!({ "pid": project_id, "uid": user_id, "role": user_role }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
