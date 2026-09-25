@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 
 use crate::machines::TerraformAction;
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepAction {
@@ -122,14 +122,14 @@ pub fn needs_destroy_before_apply(state: InfraState) -> bool {
 /// Deploy and every Redeploy/Destroy attempt fails the same "nothing was ever applied" way. Reset
 /// it back to `none` so the user can just deploy again.
 pub async fn reset_infra_state_to_none(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
 ) -> anyhow::Result<()> {
-    let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         SET d.infra_state = 'none', d.updated_at = $now",
+    let now = harvest_db::now_rfc3339();
+    db.query(
+        "UPDATE deployments SET infra_state = 'none', updated_at = $now
+         WHERE id = $did AND project_id = $pid",
         json!({ "pid": project_id, "did": deployment_id, "now": now }),
     ).await?;
     Ok(())
@@ -144,7 +144,7 @@ fn preview(s: &str, max_chars: usize) -> String {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn record_run_and_update_state(
-    neo4j:           &Neo4jClient,
+    db:           &Db,
     project_id:      &str,
     artifact_id:     &str,
     action:          TerraformAction,
@@ -155,9 +155,8 @@ pub async fn record_run_and_update_state(
     initiated_by:    &str,
     reasoning:       Option<&str>,
 ) -> anyhow::Result<Option<String>> {
-    let linked = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)-[:HAS_TERRAFORM_BUNDLE]->(:Artifact {id: $aid})
-         RETURN d.id AS id",
+    let linked = db.query(
+        "SELECT id FROM deployments WHERE project_id = $pid AND terraform_bundle_id = $aid",
         json!({ "pid": project_id, "aid": artifact_id }),
     ).await?;
     let Some(deployment_id) = linked.into_iter().next().and_then(|r| r["id"].as_str().map(str::to_string)) else {
@@ -169,17 +168,19 @@ pub async fn record_run_and_update_state(
         return Ok(None);
     };
 
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
     let rid = uuid::Uuid::new_v4().to_string();
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         CREATE (r:DeploymentRun {
-             id: $rid, action: $action, status: $status, exit_code: $exit_code,
-             stdout_preview: $stdout_preview, stderr_preview: $stderr_preview,
-             initiated_by: $initiated_by, reasoning: $reasoning, created_at: $now
-         })
-         CREATE (d)-[:HAS_RUN]->(r)
-         SET d.infra_state = $new_state, d.updated_at = $now",
+    db.query(
+        "WITH d AS (
+             UPDATE deployments SET infra_state = $new_state, updated_at = $now
+             WHERE id = $did AND project_id = $pid
+             RETURNING id
+         )
+         INSERT INTO deployment_runs (id, deployment_id, action, status, exit_code, stdout_preview,
+                                      stderr_preview, initiated_by, reasoning, created_at)
+         SELECT $rid, d.id, $action, $status, $exit_code::int, $stdout_preview, $stderr_preview,
+                $initiated_by, $reasoning, $now::timestamptz
+         FROM d",
         json!({
             "pid": project_id, "did": deployment_id, "rid": rid,
             "action": action.as_str(), "status": if success { "success" } else { "failed" },
@@ -192,9 +193,10 @@ pub async fn record_run_and_update_state(
 
     if matches!(action, TerraformAction::Apply) && success {
         if let Some(content) = applied_content {
-            neo4j.query_read(
-                "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-                 SET d.last_applied_content = $content, d.last_applied_artifact_id = $aid, d.last_applied_at = $now",
+            db.query(
+                "UPDATE deployments
+                 SET last_applied_content = $content, last_applied_artifact_id = $aid, last_applied_at = $now
+                 WHERE id = $did AND project_id = $pid",
                 json!({ "pid": project_id, "did": deployment_id, "content": content, "aid": artifact_id, "now": now }),
             ).await?;
         }
@@ -204,27 +206,26 @@ pub async fn record_run_and_update_state(
 }
 
 pub async fn last_applied_bundle_for_artifact(
-    neo4j:       &Neo4jClient,
+    db:       &Db,
     project_id:  &str,
     artifact_id: &str,
 ) -> anyhow::Result<Option<String>> {
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)-[:HAS_TERRAFORM_BUNDLE]->(:Artifact {id: $aid})
-         RETURN d.last_applied_content AS last_applied_content",
+    let rows = db.query(
+        "SELECT last_applied_content FROM deployments WHERE project_id = $pid AND terraform_bundle_id = $aid",
         json!({ "pid": project_id, "aid": artifact_id }),
     ).await?;
     Ok(rows.into_iter().next().and_then(|r| r["last_applied_content"].as_str().map(str::to_string)))
 }
 
 pub async fn resolve_run_content(
-    neo4j:        &Neo4jClient,
+    db:        &Db,
     project_id:   &str,
     artifact_id:  &str,
     action:       TerraformAction,
     live_content: &str,
 ) -> anyhow::Result<String> {
     if action == TerraformAction::Destroy {
-        if let Some(applied) = last_applied_bundle_for_artifact(neo4j, project_id, artifact_id).await? {
+        if let Some(applied) = last_applied_bundle_for_artifact(db, project_id, artifact_id).await? {
             return Ok(applied);
         }
     }
@@ -258,28 +259,27 @@ fn extract_design_template(template_content: &str) -> Option<String> {
 const MAX_PRIOR_DEPLOYMENTS: i64 = 5;
 
 pub async fn load_deployment_context(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
 ) -> anyhow::Result<Option<DeploymentContext>> {
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         OPTIONAL MATCH (d)-[:USES_TEMPLATE]->(t:ProductTemplate)
-         RETURN d.name AS name, d.environment_description AS environment_description,
-                d.infra_state AS infra_state,
-                t.id AS template_id, t.name AS template_name, t.content AS template_content",
+    let rows = db.query(
+        "SELECT d.name, d.environment_description, d.infra_state,
+                t.id AS template_id, t.name AS template_name, t.content AS template_content
+         FROM deployments d
+         LEFT JOIN product_templates t ON t.id = d.template_id
+         WHERE d.project_id = $pid AND d.id = $did",
         json!({ "pid": project_id, "did": deployment_id }),
     ).await?;
     let Some(row) = rows.into_iter().next() else { return Ok(None) };
 
     let prior_deployments = match opt_str(&row, "template_id") {
         Some(template_id) => {
-            let prior_rows = neo4j.query_read(
-                "MATCH (:ProductTemplate {id: $tid})<-[:USES_TEMPLATE]-(other:Deployment)
-                 WHERE other.id <> $did
-                 RETURN other.name AS name, other.environment_description AS environment_description,
-                        other.infra_state AS infra_state
-                 ORDER BY other.updated_at DESC LIMIT $limit",
+            let prior_rows = db.query(
+                "SELECT name, environment_description, infra_state FROM deployments
+                 WHERE template_id = $tid AND id <> $did
+                 ORDER BY updated_at DESC
+                 LIMIT $limit",
                 json!({ "tid": template_id, "did": deployment_id, "limit": MAX_PRIOR_DEPLOYMENTS }),
             ).await?;
             prior_rows.iter().map(|r| PriorDeploymentSummary {
