@@ -279,13 +279,14 @@ impl Tool for CollocateCreateSessionTool {
         }
 
         let full_name = sanitize_name(&name, &self.project_id, &self.conversation_id);
-        let image_for_opts = image.clone().or_else(|| Some(self.handle.config().default_image.clone()));
+        let resolved_image = image.clone().unwrap_or_else(|| self.handle.config().default_image.clone());
+        let resolved_user = user.unwrap_or_else(|| self.handle.config().default_user.clone());
         let opts = CreateContainerOpts {
-            image: image_for_opts,
+            image: Some(resolved_image.clone()),
             command,
             env,
             workdir,
-            user,
+            user: Some(resolved_user),
             publish: publish.clone(),
             persistent,
             idle_timeout_secs,
@@ -294,6 +295,8 @@ impl Tool for CollocateCreateSessionTool {
 
         let id = self.handle.create_container(&full_name, opts).await?;
         let id_str = id.to_string();
+
+        self.handle.wait_ready(&id_str, std::time::Duration::from_secs(15)).await;
 
         let containers = self.handle.list().await?;
         let info = containers
@@ -321,6 +324,7 @@ impl Tool for CollocateCreateSessionTool {
             "address": address,
             "published": published,
             "persistent": persistent,
+            "image_used": resolved_image,
         }))?)
     }
 
