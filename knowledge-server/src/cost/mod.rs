@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::config::LlmProviderConfig;
 use crate::llm::pricing::{format_cost, price, ModelPricing};
 use crate::llm::types::{Usage, UsedProvider};
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -213,7 +213,7 @@ pub fn build_record(
         iteration_index,
         llm_call_count: 1,
         succeeded,
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: harvest_db::now_rfc3339(),
     }
 }
 
@@ -254,16 +254,11 @@ pub fn build_turn_record(
         iteration_index: None,
         llm_call_count,
         succeeded: true,
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: harvest_db::now_rfc3339(),
     })
 }
 
-pub async fn setup_constraints(neo4j: &Neo4jClient) -> Result<()> {
-    neo4j.run("CREATE CONSTRAINT llm_call_id IF NOT EXISTS FOR (c:LlmCall) REQUIRE c.id IS UNIQUE").await?;
-    Ok(())
-}
-
-pub async fn record_llm_call(neo4j: &Neo4jClient, record: &LlmCallRecord) -> Result<()> {
+pub async fn record_llm_call(db: &Db, record: &LlmCallRecord) -> Result<()> {
     let params = json!({
         "id": record.id,
         "scope": record.scope.as_str(),
@@ -290,40 +285,28 @@ pub async fn record_llm_call(neo4j: &Neo4jClient, record: &LlmCallRecord) -> Res
         "created_at": record.created_at,
     });
 
-    let cypher = r#"
-        CREATE (c:LlmCall {
-            id: $id, scope: $scope, turn_id: $turn_id,
-            project_id: $project_id, conversation_id: $conversation_id,
-            deployment_id: $deployment_id, proposal_id: $proposal_id, artifact_id: $artifact_id,
-            user_id: $user_id, provider_id: $provider_id, kind: $kind, model: $model,
-            input_tokens: $input_tokens, output_tokens: $output_tokens,
-            cache_read_tokens: $cache_read_tokens, cache_creation_tokens: $cache_creation_tokens,
-            reasoning_tokens: $reasoning_tokens,
-            cost_microusd: $cost_microusd, duration_ms: $duration_ms,
-            iteration_index: $iteration_index, llm_call_count: $llm_call_count,
-            succeeded: $succeeded, created_at: $created_at
-        })
-        WITH c
-        CALL { WITH c OPTIONAL MATCH (p:Project {id: $project_id}) RETURN p LIMIT 1 }
-        CALL { WITH c OPTIONAL MATCH (conv:Conversation {id: $conversation_id}) RETURN conv LIMIT 1 }
-        CALL { WITH c OPTIONAL MATCH (d:Deployment {id: $deployment_id}) RETURN d LIMIT 1 }
-        CALL { WITH c OPTIONAL MATCH (prop:Proposal {id: $proposal_id}) RETURN prop LIMIT 1 }
-        CALL { WITH c OPTIONAL MATCH (a:Artifact {id: $artifact_id}) RETURN a LIMIT 1 }
-        CALL { WITH c OPTIONAL MATCH (u:User {id: $user_id}) RETURN u LIMIT 1 }
-        FOREACH (_ IN CASE WHEN p IS NOT NULL THEN [1] ELSE [] END | CREATE (p)-[:INCURRED]->(c))
-        FOREACH (_ IN CASE WHEN conv IS NOT NULL THEN [1] ELSE [] END | CREATE (conv)-[:INCURRED]->(c))
-        FOREACH (_ IN CASE WHEN d IS NOT NULL THEN [1] ELSE [] END | CREATE (d)-[:INCURRED]->(c))
-        FOREACH (_ IN CASE WHEN prop IS NOT NULL THEN [1] ELSE [] END | CREATE (prop)-[:INCURRED]->(c))
-        FOREACH (_ IN CASE WHEN a IS NOT NULL THEN [1] ELSE [] END | CREATE (a)-[:INCURRED]->(c))
-        FOREACH (_ IN CASE WHEN u IS NOT NULL THEN [1] ELSE [] END | CREATE (u)-[:TRIGGERED]->(c))
-    "#;
-
-    neo4j.run_with_params(cypher, params).await
+    db.execute(
+        "INSERT INTO llm_calls (
+             id, scope, turn_id, project_id, conversation_id, deployment_id, proposal_id,
+             artifact_id, user_id, provider_id, kind, model, input_tokens, output_tokens,
+             cache_read_tokens, cache_creation_tokens, reasoning_tokens, cost_microusd,
+             duration_ms, iteration_index, llm_call_count, succeeded, created_at
+         ) VALUES (
+             $id, $scope, $turn_id, $project_id,
+             (SELECT id FROM conversations WHERE id = $conversation_id::text),
+             $deployment_id, $proposal_id, $artifact_id, $user_id, $provider_id, $kind, $model,
+             $input_tokens, $output_tokens, $cache_read_tokens, $cache_creation_tokens,
+             $reasoning_tokens, $cost_microusd, $duration_ms, $iteration_index, $llm_call_count,
+             $succeeded, $created_at
+         )",
+        params,
+    ).await?;
+    Ok(())
 }
 
-pub async fn record_llm_calls(neo4j: &Neo4jClient, records: &[LlmCallRecord]) -> Result<()> {
+pub async fn record_llm_calls(db: &Db, records: &[LlmCallRecord]) -> Result<()> {
     for record in records {
-        if let Err(e) = record_llm_call(neo4j, record).await {
+        if let Err(e) = record_llm_call(db, record).await {
             tracing::warn!(error = %e, "failed to record LlmCall cost entry");
         }
     }
@@ -331,7 +314,7 @@ pub async fn record_llm_calls(neo4j: &Neo4jClient, records: &[LlmCallRecord]) ->
 }
 
 pub async fn record_deployment_turn(
-    neo4j: &Neo4jClient,
+    db: &Db,
     pricing: &PricingTable,
     scope: CostScope,
     turn_id: &str,
@@ -349,9 +332,17 @@ pub async fn record_deployment_turn(
         scope, turn_id, user_id, provider_used, usage, llm_call_count, pricing,
         duration_ms, Some(project_id), None, Some(deployment_id), proposal_id, artifact_id,
     ) {
-        let _ = record_llm_call(neo4j, &record).await;
+        let _ = record_llm_call(db, &record).await;
     }
 }
+
+const COST_COLUMNS: &str = "COALESCE(sum(cost_microusd), 0)::bigint AS total_cost,
+     count(*) AS call_count,
+     COALESCE(sum(input_tokens), 0)::bigint AS input_tokens,
+     COALESCE(sum(output_tokens), 0)::bigint AS output_tokens,
+     COALESCE(sum(cache_read_tokens), 0)::bigint AS cache_read_tokens,
+     COALESCE(sum(cache_creation_tokens), 0)::bigint AS cache_creation_tokens,
+     COALESCE(sum(reasoning_tokens), 0)::bigint AS reasoning_tokens";
 
 fn row_to_summary(row: &Value) -> CostSummary {
     CostSummary {
@@ -365,32 +356,17 @@ fn row_to_summary(row: &Value) -> CostSummary {
     }
 }
 
-pub async fn project_cost_summary(neo4j: &Neo4jClient, project_id: &str) -> Result<CostSummary> {
-    let rows = neo4j.query_read(
-        "MATCH (p:Project {id: $pid})-[:INCURRED]->(c:LlmCall)
-         RETURN coalesce(sum(c.cost_microusd), 0) AS total_cost,
-                count(c) AS call_count,
-                coalesce(sum(c.input_tokens), 0) AS input_tokens,
-                coalesce(sum(c.output_tokens), 0) AS output_tokens,
-                coalesce(sum(c.cache_read_tokens), 0) AS cache_read_tokens,
-                coalesce(sum(c.cache_creation_tokens), 0) AS cache_creation_tokens,
-                coalesce(sum(c.reasoning_tokens), 0) AS reasoning_tokens",
+pub async fn project_cost_summary(db: &Db, project_id: &str) -> Result<CostSummary> {
+    let rows = db.query(
+        &format!("SELECT {COST_COLUMNS} FROM llm_calls WHERE project_id = $pid"),
         json!({ "pid": project_id }),
     ).await?;
     Ok(rows.first().map(|r| row_to_summary(r)).unwrap_or_default())
 }
 
-pub async fn project_cost_by_scope(neo4j: &Neo4jClient, project_id: &str) -> Result<HashMap<String, CostSummary>> {
-    let rows = neo4j.query_read(
-        "MATCH (p:Project {id: $pid})-[:INCURRED]->(c:LlmCall)
-         RETURN c.scope AS scope,
-                coalesce(sum(c.cost_microusd), 0) AS total_cost,
-                count(c) AS call_count,
-                coalesce(sum(c.input_tokens), 0) AS input_tokens,
-                coalesce(sum(c.output_tokens), 0) AS output_tokens,
-                coalesce(sum(c.cache_read_tokens), 0) AS cache_read_tokens,
-                coalesce(sum(c.cache_creation_tokens), 0) AS cache_creation_tokens,
-                coalesce(sum(c.reasoning_tokens), 0) AS reasoning_tokens",
+pub async fn project_cost_by_scope(db: &Db, project_id: &str) -> Result<HashMap<String, CostSummary>> {
+    let rows = db.query(
+        &format!("SELECT scope, {COST_COLUMNS} FROM llm_calls WHERE project_id = $pid GROUP BY scope"),
         json!({ "pid": project_id }),
     ).await?;
     let mut map = HashMap::new();
@@ -401,33 +377,17 @@ pub async fn project_cost_by_scope(neo4j: &Neo4jClient, project_id: &str) -> Res
     Ok(map)
 }
 
-pub async fn conversation_cost_summary(neo4j: &Neo4jClient, conversation_id: &str) -> Result<CostSummary> {
-    let rows = neo4j.query_read(
-        "MATCH (conv:Conversation {id: $cid})-[:INCURRED]->(c:LlmCall)
-         RETURN coalesce(sum(c.cost_microusd), 0) AS total_cost,
-                count(c) AS call_count,
-                coalesce(sum(c.input_tokens), 0) AS input_tokens,
-                coalesce(sum(c.output_tokens), 0) AS output_tokens,
-                coalesce(sum(c.cache_read_tokens), 0) AS cache_read_tokens,
-                coalesce(sum(c.cache_creation_tokens), 0) AS cache_creation_tokens,
-                coalesce(sum(c.reasoning_tokens), 0) AS reasoning_tokens",
+pub async fn conversation_cost_summary(db: &Db, conversation_id: &str) -> Result<CostSummary> {
+    let rows = db.query(
+        &format!("SELECT {COST_COLUMNS} FROM llm_calls WHERE conversation_id = $cid"),
         json!({ "cid": conversation_id }),
     ).await?;
     Ok(rows.first().map(|r| row_to_summary(r)).unwrap_or_default())
 }
 
-pub async fn conversation_cost_by_turn(neo4j: &Neo4jClient, conversation_id: &str) -> Result<Vec<(String, CostSummary)>> {
-    let rows = neo4j.query_read(
-        "MATCH (conv:Conversation {id: $cid})-[:INCURRED]->(c:LlmCall)
-         RETURN c.turn_id AS turn_id,
-                coalesce(sum(c.cost_microusd), 0) AS total_cost,
-                count(c) AS call_count,
-                coalesce(sum(c.input_tokens), 0) AS input_tokens,
-                coalesce(sum(c.output_tokens), 0) AS output_tokens,
-                coalesce(sum(c.cache_read_tokens), 0) AS cache_read_tokens,
-                coalesce(sum(c.cache_creation_tokens), 0) AS cache_creation_tokens,
-                coalesce(sum(c.reasoning_tokens), 0) AS reasoning_tokens
-         ORDER BY min(c.created_at)",
+pub async fn conversation_cost_by_turn(db: &Db, conversation_id: &str) -> Result<Vec<(String, CostSummary)>> {
+    let rows = db.query(
+        &format!("SELECT turn_id, {COST_COLUMNS} FROM llm_calls WHERE conversation_id = $cid GROUP BY turn_id ORDER BY min(created_at)"),
         json!({ "cid": conversation_id }),
     ).await?;
     Ok(rows.iter().map(|r| {
@@ -436,17 +396,9 @@ pub async fn conversation_cost_by_turn(neo4j: &Neo4jClient, conversation_id: &st
     }).collect())
 }
 
-pub async fn deployment_cost_summary(neo4j: &Neo4jClient, deployment_id: &str) -> Result<HashMap<String, CostSummary>> {
-    let rows = neo4j.query_read(
-        "MATCH (d:Deployment {id: $did})-[:INCURRED]->(c:LlmCall)
-         RETURN c.scope AS scope,
-                coalesce(sum(c.cost_microusd), 0) AS total_cost,
-                count(c) AS call_count,
-                coalesce(sum(c.input_tokens), 0) AS input_tokens,
-                coalesce(sum(c.output_tokens), 0) AS output_tokens,
-                coalesce(sum(c.cache_read_tokens), 0) AS cache_read_tokens,
-                coalesce(sum(c.cache_creation_tokens), 0) AS cache_creation_tokens,
-                coalesce(sum(c.reasoning_tokens), 0) AS reasoning_tokens",
+pub async fn deployment_cost_summary(db: &Db, deployment_id: &str) -> Result<HashMap<String, CostSummary>> {
+    let rows = db.query(
+        &format!("SELECT scope, {COST_COLUMNS} FROM llm_calls WHERE deployment_id = $did GROUP BY scope"),
         json!({ "did": deployment_id }),
     ).await?;
     let mut map = HashMap::new();
@@ -457,18 +409,9 @@ pub async fn deployment_cost_summary(neo4j: &Neo4jClient, deployment_id: &str) -
     Ok(map)
 }
 
-pub async fn project_cost_by_model(neo4j: &Neo4jClient, project_id: &str) -> Result<Vec<(String, String, CostSummary)>> {
-    let rows = neo4j.query_read(
-        "MATCH (p:Project {id: $pid})-[:INCURRED]->(c:LlmCall)
-         RETURN c.kind AS kind, c.model AS model,
-                coalesce(sum(c.cost_microusd), 0) AS total_cost,
-                count(c) AS call_count,
-                coalesce(sum(c.input_tokens), 0) AS input_tokens,
-                coalesce(sum(c.output_tokens), 0) AS output_tokens,
-                coalesce(sum(c.cache_read_tokens), 0) AS cache_read_tokens,
-                coalesce(sum(c.cache_creation_tokens), 0) AS cache_creation_tokens,
-                coalesce(sum(c.reasoning_tokens), 0) AS reasoning_tokens
-         ORDER BY total_cost DESC",
+pub async fn project_cost_by_model(db: &Db, project_id: &str) -> Result<Vec<(String, String, CostSummary)>> {
+    let rows = db.query(
+        &format!("SELECT kind, model, {COST_COLUMNS} FROM llm_calls WHERE project_id = $pid GROUP BY kind, model ORDER BY total_cost DESC"),
         json!({ "pid": project_id }),
     ).await?;
     Ok(rows.iter().map(|r| {
@@ -478,18 +421,9 @@ pub async fn project_cost_by_model(neo4j: &Neo4jClient, project_id: &str) -> Res
     }).collect())
 }
 
-pub async fn project_cost_by_user(neo4j: &Neo4jClient, project_id: &str) -> Result<Vec<(String, CostSummary)>> {
-    let rows = neo4j.query_read(
-        "MATCH (p:Project {id: $pid})-[:INCURRED]->(c:LlmCall)
-         RETURN c.user_id AS user_id,
-                coalesce(sum(c.cost_microusd), 0) AS total_cost,
-                count(c) AS call_count,
-                coalesce(sum(c.input_tokens), 0) AS input_tokens,
-                coalesce(sum(c.output_tokens), 0) AS output_tokens,
-                coalesce(sum(c.cache_read_tokens), 0) AS cache_read_tokens,
-                coalesce(sum(c.cache_creation_tokens), 0) AS cache_creation_tokens,
-                coalesce(sum(c.reasoning_tokens), 0) AS reasoning_tokens
-         ORDER BY total_cost DESC",
+pub async fn project_cost_by_user(db: &Db, project_id: &str) -> Result<Vec<(String, CostSummary)>> {
+    let rows = db.query(
+        &format!("SELECT user_id, {COST_COLUMNS} FROM llm_calls WHERE project_id = $pid GROUP BY user_id ORDER BY total_cost DESC"),
         json!({ "pid": project_id }),
     ).await?;
     Ok(rows.iter().map(|r| {
@@ -498,16 +432,13 @@ pub async fn project_cost_by_user(neo4j: &Neo4jClient, project_id: &str) -> Resu
     }).collect())
 }
 
-pub async fn deployment_llm_calls(neo4j: &Neo4jClient, deployment_id: &str, limit: usize) -> Result<Vec<Value>> {
-    let rows = neo4j.query_read(
-        "MATCH (d:Deployment {id: $did})-[:INCURRED]->(c:LlmCall)
-         RETURN c.id AS id, c.scope AS scope, c.turn_id AS turn_id, c.model AS model, c.kind AS kind,
-                c.input_tokens AS input_tokens, c.output_tokens AS output_tokens,
-                c.cache_read_tokens AS cache_read_tokens, c.cache_creation_tokens AS cache_creation_tokens,
-                c.reasoning_tokens AS reasoning_tokens,
-                c.cost_microusd AS cost_microusd, c.duration_ms AS duration_ms,
-                c.iteration_index AS iteration_index, c.succeeded AS succeeded, c.created_at AS created_at
-         ORDER BY c.created_at DESC
+pub async fn deployment_llm_calls(db: &Db, deployment_id: &str, limit: usize) -> Result<Vec<Value>> {
+    let rows = db.query(
+        "SELECT id, scope, turn_id, model, kind, input_tokens, output_tokens, cache_read_tokens,
+                cache_creation_tokens, reasoning_tokens, cost_microusd, duration_ms,
+                iteration_index, succeeded, created_at
+         FROM llm_calls WHERE deployment_id = $did
+         ORDER BY created_at DESC
          LIMIT $limit",
         json!({ "did": deployment_id, "limit": limit as i64 }),
     ).await?;
