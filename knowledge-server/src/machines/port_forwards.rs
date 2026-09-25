@@ -1,11 +1,10 @@
-use chrono::Utc;
 use regex::Regex;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 use uuid::Uuid;
 
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 
 const RESERVED_ROUTE_NAMES: &[&str] = &["install.sh"];
 const MAX_ROUTE_NAME_LEN: usize = 63;
@@ -83,17 +82,16 @@ fn row_to_port_forward(row: Value) -> PortForward {
     }
 }
 
-const RETURN_FIELDS: &str = "f.id AS id, f.project_id AS project_id, f.agent_id AS agent_id, \
-                              f.port AS port, f.route_name AS route_name, \
-                              f.created_at AS created_at, f.updated_at AS updated_at";
+const SELECT_FIELDS: &str = "SELECT id, project_id, agent_id, port, route_name, created_at, updated_at \
+                             FROM port_forwards";
 
 pub async fn list_for_agent(
-    neo4j:      &Neo4jClient,
+    db:      &Db,
     project_id: &str,
     agent_id:   &str,
 ) -> Result<Vec<PortForward>, PortForwardError> {
-    let rows = neo4j.query_read(
-        &format!("MATCH (f:PortForward {{agent_id: $aid, project_id: $pid}}) RETURN {RETURN_FIELDS} ORDER BY f.created_at ASC"),
+    let rows = db.query(
+        &format!("{SELECT_FIELDS} WHERE agent_id = $aid AND project_id = $pid ORDER BY created_at ASC"),
         json!({ "aid": agent_id, "pid": project_id }),
     ).await.map_err(|_| PortForwardError::Db)?;
 
@@ -101,13 +99,13 @@ pub async fn list_for_agent(
 }
 
 pub async fn get_by_id(
-    neo4j:      &Neo4jClient,
+    db:      &Db,
     project_id: &str,
     agent_id:   &str,
     id:         &str,
 ) -> Result<Option<PortForward>, PortForwardError> {
-    let rows = neo4j.query_read(
-        &format!("MATCH (f:PortForward {{id: $id, agent_id: $aid, project_id: $pid}}) RETURN {RETURN_FIELDS}"),
+    let rows = db.query(
+        &format!("{SELECT_FIELDS} WHERE id = $id AND agent_id = $aid AND project_id = $pid"),
         json!({ "id": id, "aid": agent_id, "pid": project_id }),
     ).await.map_err(|_| PortForwardError::Db)?;
 
@@ -115,12 +113,12 @@ pub async fn get_by_id(
 }
 
 pub async fn get_by_route(
-    neo4j:      &Neo4jClient,
+    db:      &Db,
     agent_id:   &str,
     route_name: &str,
 ) -> Result<Option<PortForward>, PortForwardError> {
-    let rows = neo4j.query_read(
-        &format!("MATCH (f:PortForward {{agent_id: $aid, route_name: $rn}}) RETURN {RETURN_FIELDS}"),
+    let rows = db.query(
+        &format!("{SELECT_FIELDS} WHERE agent_id = $aid AND route_name = $rn"),
         json!({ "aid": agent_id, "rn": route_name }),
     ).await.map_err(|_| PortForwardError::Db)?;
 
@@ -128,12 +126,12 @@ pub async fn get_by_route(
 }
 
 async fn route_name_taken(
-    neo4j:      &Neo4jClient,
+    db:      &Db,
     agent_id:   &str,
     route_name: &str,
     excluding_id: Option<&str>,
 ) -> Result<bool, PortForwardError> {
-    let existing = get_by_route(neo4j, agent_id, route_name).await?;
+    let existing = get_by_route(db, agent_id, route_name).await?;
     Ok(match (existing, excluding_id) {
         (Some(f), Some(excl)) => f.id != excl,
         (Some(_), None)       => true,
@@ -142,7 +140,7 @@ async fn route_name_taken(
 }
 
 pub async fn create(
-    neo4j:      &Neo4jClient,
+    db:      &Db,
     project_id: &str,
     agent_id:   &str,
     port:       u16,
@@ -150,23 +148,25 @@ pub async fn create(
 ) -> Result<PortForward, PortForwardError> {
     let route_name = validate_route_name(route_name).map_err(PortForwardError::Validation)?;
 
-    if route_name_taken(neo4j, agent_id, &route_name, None).await? {
+    if route_name_taken(db, agent_id, &route_name, None).await? {
         return Err(PortForwardError::DuplicateRouteName);
     }
 
     let id  = Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
 
-    neo4j.query_read(
-        "CREATE (f:PortForward {
-             id: $id, project_id: $pid, agent_id: $aid, port: $port,
-             route_name: $rn, created_at: $now, updated_at: $now
-         })",
+    db.query(
+        "INSERT INTO port_forwards (id, project_id, agent_id, port, route_name, created_at, updated_at)
+             VALUES ($id, $pid, $aid, $port, $rn, $now, $now)",
         json!({
             "id": id, "pid": project_id, "aid": agent_id, "port": port as i64,
             "rn": route_name, "now": now,
         }),
-    ).await.map_err(|_| PortForwardError::Db)?;
+    ).await.map_err(|e| if harvest_db::is_unique_violation(&e) {
+        PortForwardError::DuplicateRouteName
+    } else {
+        PortForwardError::Db
+    })?;
 
     Ok(PortForward {
         id, project_id: project_id.to_string(), agent_id: agent_id.to_string(),
@@ -175,14 +175,14 @@ pub async fn create(
 }
 
 pub async fn update(
-    neo4j:          &Neo4jClient,
+    db:          &Db,
     project_id:     &str,
     agent_id:       &str,
     id:             &str,
     new_port:       Option<u16>,
     new_route_name: Option<String>,
 ) -> Result<PortForward, PortForwardError> {
-    let existing = get_by_id(neo4j, project_id, agent_id, id).await?
+    let existing = get_by_id(db, project_id, agent_id, id).await?
         .ok_or(PortForwardError::NotFound)?;
 
     let route_name = match new_route_name {
@@ -192,15 +192,15 @@ pub async fn update(
     let port = new_port.unwrap_or(existing.port);
 
     if route_name != existing.route_name
-        && route_name_taken(neo4j, agent_id, &route_name, Some(id)).await?
+        && route_name_taken(db, agent_id, &route_name, Some(id)).await?
     {
         return Err(PortForwardError::DuplicateRouteName);
     }
 
-    let now = Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "MATCH (f:PortForward {id: $id, agent_id: $aid, project_id: $pid})
-         SET f.port = $port, f.route_name = $rn, f.updated_at = $now",
+    let now = harvest_db::now_rfc3339();
+    db.query(
+        "UPDATE port_forwards SET port = $port, route_name = $rn, updated_at = $now
+         WHERE id = $id AND agent_id = $aid AND project_id = $pid",
         json!({
             "id": id, "aid": agent_id, "pid": project_id,
             "port": port as i64, "rn": route_name.clone(), "now": now,
@@ -214,16 +214,16 @@ pub async fn update(
 }
 
 pub async fn delete(
-    neo4j:      &Neo4jClient,
+    db:      &Db,
     project_id: &str,
     agent_id:   &str,
     id:         &str,
 ) -> Result<(), PortForwardError> {
-    get_by_id(neo4j, project_id, agent_id, id).await?
+    get_by_id(db, project_id, agent_id, id).await?
         .ok_or(PortForwardError::NotFound)?;
 
-    neo4j.query_read(
-        "MATCH (f:PortForward {id: $id, agent_id: $aid, project_id: $pid}) DELETE f",
+    db.query(
+        "DELETE FROM port_forwards WHERE id = $id AND agent_id = $aid AND project_id = $pid",
         json!({ "id": id, "aid": agent_id, "pid": project_id }),
     ).await.map_err(|_| PortForwardError::Db)?;
 

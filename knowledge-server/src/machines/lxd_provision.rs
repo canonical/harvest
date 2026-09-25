@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::lxd::{CreateInstance, Flavor, LxdClient};
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 
 use super::handlers::{generate_install_script, get_or_create_install_token};
 use super::hash_token;
@@ -82,7 +82,7 @@ pub fn unique_instance_name(user_name: &str) -> String {
 
 async fn cleanup_failed_provision(
     lxd: &LxdClient,
-    neo4j: &Neo4jClient,
+    db: &Db,
     project_id: &str,
     instance_name: &str,
 ) {
@@ -90,8 +90,8 @@ async fn cleanup_failed_provision(
     if let Err(e) = lxd.delete_instance(instance_name).await {
         tracing::warn!(instance_name, error = ?e, "cleanup: failed to delete LXD instance (it may never have been created)");
     }
-    if let Err(e) = neo4j.query_read(
-        "MATCH (li:LxdInstance {project_id: $pid, hostname: $h}) DELETE li",
+    if let Err(e) = db.query(
+        "DELETE FROM lxd_pending_instances WHERE project_id = $pid AND hostname = $h",
         json!({ "pid": project_id, "h": instance_name }),
     ).await {
         tracing::warn!(instance_name, error = ?e, "cleanup: failed to delete LxdInstance marker node");
@@ -99,7 +99,7 @@ async fn cleanup_failed_provision(
 }
 
 pub async fn create_lxd_agent(
-    neo4j:      &Neo4jClient,
+    db:      &Db,
     lxd:        &LxdClient,
     server_url: &str,
     project_id: &str,
@@ -120,7 +120,7 @@ pub async fn create_lxd_agent(
 
     tracing::info!(project_id, "step 2/6 get or create install token");
     emit(&progress, ProvisionEvent::PhaseStart { phase: ProvisionPhase::InstallToken }).await;
-    let install_token = match get_or_create_install_token(neo4j, project_id).await {
+    let install_token = match get_or_create_install_token(db, project_id).await {
         Ok(Some(tok)) => tok,
         Ok(None) => {
             tracing::error!(project_id, "step 2/6 FAILED: project not found");
@@ -136,14 +136,15 @@ pub async fn create_lxd_agent(
     let script = generate_install_script(server_url, &install_token);
 
     let instance_name = unique_instance_name(name);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
 
     tracing::info!(instance_name, "step 3/6 write LxdInstance marker");
-    if let Err(e) = neo4j.query_read(
-        "CREATE (:LxdInstance {
-             project_id: $pid, hostname: $h, lxd_project: $lp,
-             description: $desc, created_at: $now
-         })",
+    if let Err(e) = db.query(
+        "INSERT INTO lxd_pending_instances (project_id, hostname, lxd_project, description, created_at)
+             VALUES ($pid, $h, $lp, $desc, $now)
+             ON CONFLICT (project_id, hostname) DO UPDATE SET
+                 lxd_project = EXCLUDED.lxd_project, description = EXCLUDED.description,
+                 created_at = EXCLUDED.created_at",
         json!({
             "pid": project_id, "h": instance_name, "lp": lxd.project(),
             "desc": description, "now": now,
@@ -166,7 +167,7 @@ pub async fn create_lxd_agent(
     if let Err(e) = lxd.create_instance(&create_req).await {
         tracing::error!(instance_name, error = ?e, "step 4/6 FAILED: create_instance");
         emit(&progress, ProvisionEvent::Error { phase: ProvisionPhase::CreateContainer, message: format!("{e:#}") }).await;
-        cleanup_failed_provision(lxd, neo4j, project_id, &instance_name).await;
+        cleanup_failed_provision(lxd, db, project_id, &instance_name).await;
         return Err(e);
     }
 
@@ -174,7 +175,7 @@ pub async fn create_lxd_agent(
     if let Err(e) = lxd.start_instance(&instance_name).await {
         tracing::error!(instance_name, error = ?e, "step 4/6 FAILED: start_instance");
         emit(&progress, ProvisionEvent::Error { phase: ProvisionPhase::StartContainer, message: format!("{e:#}") }).await;
-        cleanup_failed_provision(lxd, neo4j, project_id, &instance_name).await;
+        cleanup_failed_provision(lxd, db, project_id, &instance_name).await;
         return Err(e);
     }
 
@@ -182,7 +183,7 @@ pub async fn create_lxd_agent(
     if let Err(e) = lxd.wait_running(&instance_name, WAIT_RUNNING_TIMEOUT_SECS).await {
         tracing::error!(instance_name, error = ?e, "step 4/6 FAILED: wait_running");
         emit(&progress, ProvisionEvent::Error { phase: ProvisionPhase::WaitRunning, message: format!("{e:#}") }).await;
-        cleanup_failed_provision(lxd, neo4j, project_id, &instance_name).await;
+        cleanup_failed_provision(lxd, db, project_id, &instance_name).await;
         return Err(e);
     }
 
@@ -202,14 +203,14 @@ pub async fn create_lxd_agent(
         Err(e) => {
             tracing::error!(instance_name, error = ?e, "step 5/6 FAILED: exec");
             emit(&progress, ProvisionEvent::Error { phase: ProvisionPhase::InstallAgent, message: format!("{e:#}") }).await;
-            cleanup_failed_provision(lxd, neo4j, project_id, &instance_name).await;
+            cleanup_failed_provision(lxd, db, project_id, &instance_name).await;
             return Err(e);
         }
     };
     if exit_code != 0 {
         tracing::error!(instance_name, exit_code, "step 5/6 FAILED: install script exited non-zero");
         emit(&progress, ProvisionEvent::Error { phase: ProvisionPhase::InstallAgent, message: format!("install script exited with status {exit_code}") }).await;
-        cleanup_failed_provision(lxd, neo4j, project_id, &instance_name).await;
+        cleanup_failed_provision(lxd, db, project_id, &instance_name).await;
         bail!("agent install script exited with status {exit_code}");
     }
 
