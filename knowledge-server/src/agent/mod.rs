@@ -220,7 +220,8 @@ impl Agent {
     }
 
     fn effective_system_prompt(&self) -> String {
-        self.system_prompt_override.clone().unwrap_or_else(prompt::system_prompt)
+        let collocate_enabled = self.tools.iter().any(|t| t.definition().name.starts_with("collocate_"));
+        self.system_prompt_override.clone().unwrap_or_else(|| prompt::system_prompt(collocate_enabled))
     }
 
     pub fn with_compaction(mut self, threshold_chars: usize, keep_last: usize) -> Self {
@@ -2659,7 +2660,7 @@ mod tests {
         agent.query_streaming("hi", &[], &[], None, tx).await;
         while rx.try_recv().is_ok() {}
 
-        assert_eq!(llm.captured_system.lock().unwrap().as_deref(), Some(prompt::system_prompt().as_str()));
+        assert_eq!(llm.captured_system.lock().unwrap().as_deref(), Some(prompt::system_prompt(false).as_str()));
     }
 
     async fn collect_agent_events(agent: Arc<Agent>, query: &str) -> Vec<AgentEvent> {
