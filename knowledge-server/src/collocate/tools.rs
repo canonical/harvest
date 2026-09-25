@@ -346,8 +346,10 @@ impl Tool for CollocateExecTool {
         ToolDefinition {
             name: "collocate_exec".into(),
             description: "Execute a command inside an existing session collocate container. \
-                          Use collocate_create_session first to get a container_id, then call this \
-                          multiple times for each command. Returns stdout, stderr, and exit code."
+                          Use collocate_create_session first to get a container_id. To run \
+                          multiple sequential commands in one call, use the 'script' parameter \
+                          or wrap them in a shell: [\"sh\", \"-c\", \"cmd1 && cmd2\"]. \
+                          Minimize the number of exec calls. Returns stdout, stderr, and exit code."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -359,7 +361,11 @@ impl Tool for CollocateExecTool {
                     "command": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "The command to execute as argv array"
+                        "description": "The command to execute as argv array. Mutually exclusive with 'script'."
+                    },
+                    "script": {
+                        "type": "string",
+                        "description": "A shell script to run with sh -c. Use this instead of 'command' when you need to chain multiple commands (&&, pipes, loops). Example: \"apt-get update && apt-get install -y git && make test\". Mutually exclusive with 'command'."
                     },
                     "env": {
                         "type": "object",
@@ -379,23 +385,28 @@ impl Tool for CollocateExecTool {
                         "description": "Timeout in seconds (default 60, max 600)",
                         "default": 60
                     }
-                },
-                "required": ["container_id", "command"]
+                }
             }),
         }
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
         let container_id = required_str(&params, "container_id")?;
+        let script = optional_str(&params, "script");
         let command: Vec<String> = params["command"]
             .as_array()
-            .ok_or_else(|| anyhow!("command must be an array"))?
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
-        if command.is_empty() {
-            anyhow::bail!("command must not be empty");
-        }
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let argv: Vec<String> = if let Some(s) = &script {
+            if !command.is_empty() {
+                anyhow::bail!("provide either 'command' or 'script', not both");
+            }
+            vec!["sh".into(), "-c".into(), s.clone()]
+        } else if command.is_empty() {
+            anyhow::bail!("either 'command' or 'script' is required");
+        } else {
+            command
+        };
         let timeout_secs = params["timeout_secs"]
             .as_u64()
             .unwrap_or(60)
@@ -427,8 +438,8 @@ impl Tool for CollocateExecTool {
             opts.user = Some(u.clone());
         }
 
-        let argv: Vec<&str> = command.iter().map(|s| s.as_str()).collect();
-        let result = self.handle.exec(&container_id, &argv, &opts, Vec::new()).await?;
+        let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+        let result = self.handle.exec(&container_id, &argv_refs, &opts, Vec::new()).await?;
         Ok(serde_json::to_string_pretty(&json!({
             "stdout": result.stdout,
             "stderr": result.stderr,
