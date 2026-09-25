@@ -25,7 +25,7 @@ use crate::llm::types::{Message, ProviderSelection, Usage, UsedProvider};
 use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::api::ProjectAgentBuilder;
 use crate::auth::jwt::Claims;
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 
 const PROJECT_NAME_MAX_CHARS: usize = 100;
 
@@ -128,13 +128,14 @@ fn selection_from_parts(provider_id: &Option<String>, model: &Option<String>) ->
 
 #[derive(Clone)]
 pub struct ProjectState {
-    pub neo4j:         Arc<Neo4jClient>,
+    pub db:         Arc<Db>,
     pub agent:         Arc<Agent>,
     pub agent_builder: Arc<ProjectAgentBuilder>,
     pub llm:           Arc<dyn crate::llm::LlmProvider>,
     pub llm_configs:   Arc<Vec<crate::config::LlmProviderConfig>>,
     pub user_key_store: Option<Arc<crate::auth::user_keys::UserKeyStore>>,
     pub pricing:       Arc<crate::cost::PricingTable>,
+    pub collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
     pub locks:     Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
     pub channels:  Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
     pub presence:  Arc<RwLock<HashMap<String, HashMap<String, UserPresence>>>>,
@@ -150,22 +151,24 @@ pub struct UserPresence {
 
 impl ProjectState {
     pub fn new(
-        neo4j: Arc<Neo4jClient>,
+        db: Arc<Db>,
         agent: Arc<Agent>,
         agent_builder: Arc<ProjectAgentBuilder>,
         llm: Arc<dyn crate::llm::LlmProvider>,
         llm_configs: Arc<Vec<crate::config::LlmProviderConfig>>,
         user_key_store: Option<Arc<crate::auth::user_keys::UserKeyStore>>,
         pricing: Arc<crate::cost::PricingTable>,
+        collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
     ) -> Self {
         Self {
-            neo4j,
+            db,
             agent,
             agent_builder,
             llm,
             llm_configs,
             user_key_store,
             pricing,
+            collocate_registry,
             locks:     Arc::new(RwLock::new(HashMap::new())),
             channels:  Arc::new(Mutex::new(HashMap::new())),
             presence:  Arc::new(RwLock::new(HashMap::new())),
@@ -244,18 +247,18 @@ fn err(status: StatusCode, msg: &str) -> ApiError {
 }
 
 pub async fn require_project_access(
-    neo4j: &Neo4jClient,
+    db: &Db,
     user_id: &str,
     user_role: &str,
     project_id: &str,
 ) -> Result<Value, ApiError> {
-    let rows = neo4j.query_read(
-        "MATCH (g:Group)-[:HAS_PROJECT]->(p:Project {id: $pid})
-         WHERE $role = 'admin'
-            OR EXISTS { MATCH (:User {id: $uid})-[:MEMBER_OF]->(g) }
-         RETURN p.id AS id, p.name AS name, p.description AS description,
-                p.group_id AS group_id, g.name AS group_name,
-                p.created_by AS created_by, p.created_at AS created_at",
+    let rows = db.query(
+        "SELECT p.id, p.name, p.description, p.group_id, g.name AS group_name,
+                p.created_by, p.created_at
+         FROM projects p JOIN groups g ON g.id = p.group_id
+         WHERE p.id = $pid
+           AND ($role = 'admin' OR EXISTS (
+                 SELECT 1 FROM user_groups ug WHERE ug.user_id = $uid AND ug.group_id = g.id))",
         json!({ "pid": project_id, "uid": user_id, "role": user_role }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -269,7 +272,7 @@ pub async fn project_events(
     Path(project_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await {
+    if let Err(e) = require_project_access(&state.db, &user.sub, &user.role, &project_id).await {
         return e.into_response();
     }
 
@@ -371,13 +374,12 @@ pub async fn project_events(
 }
 
 async fn load_project_messages_raw(
-    neo4j: &Neo4jClient,
+    db: &Db,
     project_id: &str,
     conv_id: &str,
 ) -> Vec<Value> {
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         RETURN c.messages AS messages",
+    let rows = db.query(
+        "SELECT messages FROM conversations WHERE id = $cid AND project_id = $pid",
         json!({ "pid": project_id, "cid": conv_id }),
     ).await.unwrap_or_default();
 
@@ -392,16 +394,16 @@ fn history_messages_from_raw(raw: &[Value]) -> Vec<HistoryMessage> {
 }
 
 async fn load_project_history(
-    neo4j: &Neo4jClient,
+    db: &Db,
     project_id: &str,
     conv_id: &str,
 ) -> Vec<HistoryMessage> {
-    history_messages_from_raw(&load_project_messages_raw(neo4j, project_id, conv_id).await)
+    history_messages_from_raw(&load_project_messages_raw(db, project_id, conv_id).await)
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn save_project_turn(
-    neo4j: &Neo4jClient,
+    db: &Db,
     project_id: &str,
     conv_id: &str,
     now: &str,
@@ -458,11 +460,11 @@ async fn save_project_turn(
     };
     let count = messages.len() as i64;
 
-    let _ = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         SET c.messages = $messages, c.message_count = $count,
-             c.updated_at = $now
-         RETURN c.id AS id",
+    let _ = db.query(
+        "UPDATE conversations
+         SET messages = $messages, message_count = $count, updated_at = $now
+         WHERE id = $cid AND project_id = $pid
+         RETURNING id",
         json!({
             "pid": project_id, "cid": conv_id,
             "messages": messages_json, "count": count, "now": now,
@@ -473,13 +475,13 @@ async fn save_project_turn(
         crate::cost::CostScope::Chat, turn_id, user_id, provider_used, usage, llm_call_count, pricing,
         duration_ms, Some(project_id), Some(conv_id), None, None, None,
     ) {
-        let _ = crate::cost::record_llm_call(neo4j, &record).await;
+        let _ = crate::cost::record_llm_call(db, &record).await;
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn update_last_assistant_turn(
-    neo4j: &Neo4jClient,
+    db: &Db,
     project_id: &str,
     conv_id: &str,
     now: &str,
@@ -496,7 +498,7 @@ async fn update_last_assistant_turn(
     user_id: &str,
     pricing: &crate::cost::PricingTable,
 ) {
-    let mut messages = load_project_messages_raw(neo4j, project_id, conv_id).await;
+    let mut messages = load_project_messages_raw(db, project_id, conv_id).await;
     let Some(last) = messages.last_mut() else { return; };
 
     let mut chain = last["chain"].as_array().cloned().unwrap_or_default();
@@ -528,11 +530,11 @@ async fn update_last_assistant_turn(
     };
     let count = messages.len() as i64;
 
-    let _ = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         SET c.messages = $messages, c.message_count = $count,
-             c.updated_at = $now
-         RETURN c.id AS id",
+    let _ = db.query(
+        "UPDATE conversations
+         SET messages = $messages, message_count = $count, updated_at = $now
+         WHERE id = $cid AND project_id = $pid
+         RETURNING id",
         json!({
             "pid": project_id, "cid": conv_id,
             "messages": messages_json, "count": count, "now": now,
@@ -543,17 +545,17 @@ async fn update_last_assistant_turn(
         crate::cost::CostScope::Chat, turn_id, user_id, provider_used, usage, llm_call_count, pricing,
         duration_ms, Some(project_id), Some(conv_id), None, None, None,
     ) {
-        let _ = crate::cost::record_llm_call(neo4j, &record).await;
+        let _ = crate::cost::record_llm_call(db, &record).await;
     }
 }
 
 async fn mark_confirm_action_statuses(
-    neo4j: &Neo4jClient,
+    db: &Db,
     project_id: &str,
     conv_id: &str,
     results: &[ResumeConfirmItem],
 ) {
-    let mut messages = load_project_messages_raw(neo4j, project_id, conv_id).await;
+    let mut messages = load_project_messages_raw(db, project_id, conv_id).await;
     let Some(last) = messages.last_mut() else { return; };
     let Some(chain) = last["chain"].as_array_mut() else { return; };
     for entry in chain.iter_mut() {
@@ -570,12 +572,13 @@ async fn mark_confirm_action_statuses(
         Err(e) => { tracing::error!(error=%e, "failed to serialize conversation"); return; }
     };
     let count = messages.len() as i64;
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
 
-    let _ = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         SET c.messages = $messages, c.message_count = $count, c.updated_at = $now
-         RETURN c.id AS id",
+    let _ = db.query(
+        "UPDATE conversations
+         SET messages = $messages, message_count = $count, updated_at = $now
+         WHERE id = $cid AND project_id = $pid
+         RETURNING id",
         json!({
             "pid": project_id, "cid": conv_id,
             "messages": messages_json, "count": count, "now": now,
@@ -610,7 +613,7 @@ enum TurnPersist {
 async fn drive_turn(
     locks:     Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
     channels:  Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
-    neo4j:     Arc<Neo4jClient>,
+    db:     Arc<Db>,
     llm:       Arc<dyn crate::llm::LlmProvider>,
     registry:  Arc<crate::machines::MachineRegistry>,
     in_flight: Arc<RwLock<HashMap<String, HashMap<String, InFlightState>>>>,
@@ -746,12 +749,12 @@ async fn drive_turn(
         }
 
         if let AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, .. } = &event {
-            let save_now = chrono::Utc::now().to_rfc3339();
+            let save_now = harvest_db::now_rfc3339();
             let chain = std::mem::take(&mut chain_builder).finish();
             match &persist {
                 TurnPersist::New { prior_messages, attachment_meta } => {
                     save_project_turn(
-                        &neo4j, &project_id, &conv_id, &save_now,
+                        &db, &project_id, &conv_id, &save_now,
                         &query, &username, attachment_meta.clone(),
                         prior_messages.clone(),
                         answer, sources, *tool_calls_made,
@@ -761,7 +764,7 @@ async fn drive_turn(
                 }
                 TurnPersist::Continuation => {
                     update_last_assistant_turn(
-                        &neo4j, &project_id, &conv_id, &save_now,
+                        &db, &project_id, &conv_id, &save_now,
                         answer, sources, *tool_calls_made,
                         chain, pending_question.clone(), provider_used.as_ref(), *duration_ms,
                         usage, *llm_call_count, &turn_id, &user_id, &pricing,
@@ -780,7 +783,7 @@ async fn drive_turn(
             }
 
             let llm_t      = Arc::clone(&llm);
-            let neo4j_t    = Arc::clone(&neo4j);
+            let db_t    = Arc::clone(&db);
             let channels_t = Arc::clone(&channels);
             let pid_t      = project_id.clone();
             let cid_t      = conv_id.clone();
@@ -790,7 +793,7 @@ async fn drive_turn(
             let count_t    = history.len() + 2;
             tokio::spawn(async move {
                 if let Some(new_title) = maybe_regenerate_title(
-                    &neo4j_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, count_t,
+                    &db_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, count_t,
                 ).await {
                     let data = json!({
                         "type": "title_updated",
@@ -858,7 +861,7 @@ pub async fn project_query_stream(
     Path(project_id): Path<String>,
     Json(body): Json<ProjectQueryStreamBody>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await {
+    if let Err(e) = require_project_access(&state.db, &user.sub, &user.role, &project_id).await {
         return e.into_response();
     }
 
@@ -874,11 +877,11 @@ pub async fn project_query_stream(
         &state.llm, &state.llm_configs, &state.user_key_store, &user.sub,
     ).await;
     let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-        state.agent_builder.build(project_id.clone())
+        state.agent_builder.build_for_conversation(project_id.clone(), body.conversation_id.clone())
     } else {
-        state.agent_builder.build_with_llm(project_id.clone(), user_llm.clone())
+        state.agent_builder.build_for_conversation_with_llm(project_id.clone(), body.conversation_id.clone(), user_llm.clone())
     };
-    let raw_messages = load_project_messages_raw(&state.neo4j, &project_id, &body.conversation_id).await;
+    let raw_messages = load_project_messages_raw(&state.db, &project_id, &body.conversation_id).await;
     let raw_history = history_messages_from_raw(&raw_messages);
     let history = agent.compact_history(&raw_history).await;
 
@@ -909,11 +912,12 @@ pub async fn project_query_stream(
 
     let locks     = Arc::clone(&state.locks);
     let channels  = Arc::clone(&state.channels);
-    let neo4j     = Arc::clone(&state.neo4j);
+    let db     = Arc::clone(&state.db);
     let llm       = Arc::clone(agent.llm());
     let registry  = Arc::clone(&state.agent_builder.registry);
     let in_flight = Arc::clone(&state.in_flight);
     let paused_confirmations = Arc::clone(&state.paused_confirmations);
+    let collocate_registry = Arc::clone(&state.collocate_registry);
     let project_id_owned = project_id.clone();
     let query            = body.query.clone();
     let conv_id          = body.conversation_id.clone();
@@ -939,6 +943,11 @@ pub async fn project_query_stream(
         });
 
     tokio::spawn(async move {
+        let _collocate_guard = crate::collocate::sessions::SessionGuard::new(
+            Arc::clone(&collocate_registry),
+            project_id_owned.clone(),
+            conv_id.clone(),
+        );
         let (agent_event_sender, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
         let agent_clone = Arc::clone(&agent);
@@ -951,7 +960,7 @@ pub async fn project_query_stream(
         });
 
         drive_turn(
-            locks, channels, neo4j, llm, registry, in_flight, paused_confirmations,
+            locks, channels, db, llm, registry, in_flight, paused_confirmations,
             project_id_owned, conv_id, query, username, history,
             TurnPersist::New { prior_messages: prior_messages_for_save, attachment_meta },
             selection,
@@ -967,9 +976,10 @@ pub async fn list_my_groups(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (:User {id: $uid})-[:MEMBER_OF]->(g:Group)
-         RETURN g.id AS id, g.name AS name, g.description AS description
+    let rows = state.db.query(
+        "SELECT g.id, g.name, g.description
+         FROM user_groups ug JOIN groups g ON g.id = ug.group_id
+         WHERE ug.user_id = $uid
          ORDER BY g.name",
         json!({ "uid": user.sub }),
     ).await
@@ -981,11 +991,13 @@ pub async fn list_projects(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (:User {id: $uid})-[:MEMBER_OF]->(g:Group)-[:HAS_PROJECT]->(p:Project)
-         RETURN p.id AS id, p.name AS name, p.description AS description,
-                p.group_id AS group_id, g.name AS group_name,
-                p.created_by AS created_by, p.created_at AS created_at
+    let rows = state.db.query(
+        "SELECT p.id, p.name, p.description, p.group_id, g.name AS group_name,
+                p.created_by, p.created_at
+         FROM user_groups ug
+         JOIN groups g   ON g.id = ug.group_id
+         JOIN projects p ON p.group_id = g.id
+         WHERE ug.user_id = $uid
          ORDER BY p.created_at DESC",
         json!({ "uid": user.sub }),
     ).await
@@ -1014,8 +1026,8 @@ pub async fn create_project(
         return Err(err(StatusCode::BAD_REQUEST, "name must be at most 100 characters"));
     }
 
-    let group_rows = state.neo4j.query_read(
-        "MATCH (g:Group {id: $gid}) RETURN g.id AS id",
+    let group_rows = state.db.query(
+        "SELECT id FROM groups WHERE id = $gid",
         json!({ "gid": body.group_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if group_rows.is_empty() {
@@ -1023,8 +1035,8 @@ pub async fn create_project(
     }
 
     if user.role != "admin" {
-        let member = state.neo4j.query_read(
-            "MATCH (:User {id: $uid})-[:MEMBER_OF]->(:Group {id: $gid}) RETURN 1 AS ok",
+        let member = state.db.query(
+            "SELECT 1 AS ok FROM user_groups WHERE user_id = $uid AND group_id = $gid",
             json!({ "uid": user.sub, "gid": body.group_id }),
         ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         if member.is_empty() {
@@ -1035,25 +1047,20 @@ pub async fn create_project(
     let id            = Uuid::new_v4().to_string();
     let install_token = Uuid::new_v4().to_string();
     let deployment_id = Uuid::new_v4().to_string();
-    let now           = chrono::Utc::now().to_rfc3339();
-    let rows = state.neo4j.query_read(
-        "MATCH (g:Group {id: $gid})
-         CREATE (p:Project {
-             id: $id, name: $name, description: $description,
-             group_id: $gid, created_by: $uid, created_at: $now,
-             install_token: $install_token
-         })
-         CREATE (g)-[:HAS_PROJECT]->(p)
-         CREATE (d:Deployment {
-             id: $deployment_id, name: $name, environment_description: '',
-             infra_state: 'none', last_applied_content: null,
-             last_applied_artifact_id: null, last_applied_at: null,
-             created_by: $uid, created_at: $now, updated_at: $now
-         })
-         CREATE (p)-[:HAS_DEPLOYMENT]->(d)
-         RETURN p.id AS id, p.name AS name, p.description AS description,
-                p.group_id AS group_id, g.name AS group_name,
-                p.created_by AS created_by, p.created_at AS created_at",
+    let now           = harvest_db::now_rfc3339();
+    let rows = state.db.query(
+        "WITH p AS (
+             INSERT INTO projects (id, name, description, group_id, created_by, created_at, install_token)
+             VALUES ($id, $name, $description, $gid, $uid, $now, $install_token)
+             RETURNING *
+         ), d AS (
+             INSERT INTO deployments (id, project_id, name, environment_description, infra_state,
+                                      created_by, created_at, updated_at)
+             SELECT $deployment_id, p.id, p.name, '', 'none', p.created_by, p.created_at, p.created_at
+             FROM p
+         )
+         SELECT p.id, p.name, p.description, p.group_id, g.name AS group_name, p.created_by, p.created_at
+         FROM p JOIN groups g ON g.id = p.group_id",
         json!({
             "gid": body.group_id, "id": id, "name": name,
             "description": body.description, "uid": user.sub, "now": now,
@@ -1072,7 +1079,7 @@ pub async fn get_project(
     State(state): State<Arc<ProjectState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     Ok(Json(project))
 }
 
@@ -1088,26 +1095,24 @@ pub async fn update_project(
     Path(project_id): Path<String>,
     Json(body): Json<UpdateProjectBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     if let Some(ref name) = body.name {
         if name.trim().is_empty() {
             return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
         }
     }
-    let mut set_clauses: Vec<&str> = Vec::new();
-    if body.name.is_some()        { set_clauses.push("p.name = $name"); }
-    if body.description.is_some() { set_clauses.push("p.description = $description"); }
-    if !set_clauses.is_empty() {
-        let cypher = format!(
-            "MATCH (p:Project {{id: $pid}}) SET {} RETURN p.id AS id",
-            set_clauses.join(", ")
-        );
-        let mut params = json!({ "pid": project_id });
-        if let Some(name) = &body.name        { params["name"]        = json!(name.trim()); }
-        if let Some(desc) = &body.description { params["description"] = json!(desc); }
-        state.neo4j.query_read(&cypher, params)
-            .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    }
+    state.db.query(
+        "UPDATE projects SET
+             name        = COALESCE($name::text, name),
+             description = COALESCE($description::text, description)
+         WHERE id = $pid
+         RETURNING id",
+        json!({
+            "pid": project_id,
+            "name": body.name.as_deref().map(str::trim),
+            "description": body.description,
+        }),
+    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1116,22 +1121,9 @@ pub async fn delete_project(
     State(state): State<Arc<ProjectState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation) DETACH DELETE c",
-        json!({ "pid": project_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)
-         OPTIONAL MATCH (d)-[:HAS_RUN]->(r:DeploymentRun)
-         OPTIONAL MATCH (d)-[:HAS_EXECUTION_STEP]->(s:ExecutionStep)
-         OPTIONAL MATCH (d)-[:HAS_ISSUE]->(i:Issue)
-         OPTIONAL MATCH (d)-[:HAS_PROPOSAL]->(pr:Proposal)
-         DETACH DELETE d, r, s, i, pr",
-        json!({ "pid": project_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    state.neo4j.query_read(
-        "MATCH (p:Project {id: $pid}) DETACH DELETE p",
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    state.db.query(
+        "DELETE FROM projects WHERE id = $pid",
         json!({ "pid": project_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
@@ -1142,19 +1134,17 @@ pub async fn list_conversations(
     State(state): State<Arc<ProjectState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let rows = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation)
-          OPTIONAL MATCH (u:User {id: c.created_by})
-          WITH c, head(collect(u.name)) AS created_by_name
-          RETURN c.id AS id, c.title AS title,
-                 c.created_by AS created_by, created_by_name AS created_by_name,
-                 c.message_count AS message_count,
-                 c.created_at AS created_at, c.updated_at AS updated_at
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let rows = state.db.query(
+        "SELECT c.id, c.title, c.created_by, u.name AS created_by_name, c.message_count,
+                 c.created_at, c.updated_at
+          FROM conversations c
+          LEFT JOIN users u ON u.id = c.created_by
+          WHERE c.project_id = $pid
           ORDER BY c.updated_at DESC",
         json!({ "pid": project_id }),
     ).await.map_err(|e| {
-        tracing::error!(error = %e, "list_conversations: neo4j query failed");
+        tracing::error!(error = %e, "list_conversations: db query failed");
         err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
     })?;
     Ok(Json(rows))
@@ -1171,19 +1161,15 @@ pub async fn create_conversation(
     Path(project_id): Path<String>,
     Json(body): Json<CreateConvBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let id    = Uuid::new_v4().to_string();
-    let now   = chrono::Utc::now().to_rfc3339();
+    let now   = harvest_db::now_rfc3339();
     let title = body.title.unwrap_or_else(|| "New conversation".to_string());
-    state.neo4j.query_read(
-        "MATCH (p:Project {id: $pid})
-         CREATE (c:Conversation {
-             id: $id, title: $title, messages: '[]',
-             message_count: 0, created_by: $uid,
-             created_at: $now, updated_at: $now
-         })
-         CREATE (p)-[:HAS_CONVERSATION]->(c)
-         RETURN c.id AS id",
+    state.db.query(
+        "INSERT INTO conversations (id, project_id, title, messages, message_count,
+                                    created_by, created_at, updated_at)
+         VALUES ($id, $pid, $title, '[]', 0, $uid, $now, $now)
+         RETURNING id",
         json!({ "pid": project_id, "id": id, "title": title, "uid": user.sub, "now": now }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     state.broadcast(&project_id, json!({
@@ -1203,12 +1189,10 @@ pub async fn get_conversation(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, conv_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let rows = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         RETURN c.id AS id, c.title AS title, c.messages AS messages,
-                c.created_by AS created_by,
-                c.created_at AS created_at, c.updated_at AS updated_at",
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let rows = state.db.query(
+        "SELECT id, title, messages, created_by, created_at, updated_at
+         FROM conversations WHERE id = $cid AND project_id = $pid",
         json!({ "pid": project_id, "cid": conv_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next()
@@ -1234,22 +1218,22 @@ pub async fn update_conversation(
     Path((project_id, conv_id)): Path<(String, String)>,
     Json(body): Json<UpdateConvBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let exists = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid}) RETURN 1",
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let exists = state.db.query(
+        "SELECT 1 AS ok FROM conversations WHERE id = $cid AND project_id = $pid",
         json!({ "pid": project_id, "cid": conv_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if exists.is_empty() {
         return Err(err(StatusCode::NOT_FOUND, "not found"));
     }
-    let now           = chrono::Utc::now().to_rfc3339();
+    let now           = harvest_db::now_rfc3339();
     let message_count = body.messages.as_array().map(|a| a.len() as i64).unwrap_or(0);
     let messages_json = body.messages.to_string();
-    state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         SET c.title = $title, c.messages = $messages,
-             c.message_count = $count, c.updated_at = $now
-         RETURN c.id AS id",
+    state.db.query(
+        "UPDATE conversations
+         SET title = $title, messages = $messages, message_count = $count, updated_at = $now
+         WHERE id = $cid AND project_id = $pid
+         RETURNING id",
         json!({
             "pid": project_id, "cid": conv_id,
             "title": body.title, "messages": messages_json,
@@ -1278,7 +1262,7 @@ pub async fn resume_confirm_action(
     Path((project_id, conv_id)): Path<(String, String)>,
     Json(body): Json<ResumeConfirmBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
 
     if body.results.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "results must not be empty"));
@@ -1308,7 +1292,7 @@ pub async fn resume_confirm_action(
         paused.resolved.len() >= paused.pending.len()
     };
 
-    mark_confirm_action_statuses(&state.neo4j, &project_id, &conv_id, &body.results).await;
+    mark_confirm_action_statuses(&state.db, &project_id, &conv_id, &body.results).await;
 
     if !ready {
         return Ok(Json(json!({ "ok": true, "resumed": false })));
@@ -1341,11 +1325,11 @@ pub async fn resume_confirm_action(
         &state.llm, &state.llm_configs, &state.user_key_store, &user.sub,
     ).await;
     let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-        state.agent_builder.build(project_id.clone())
+        state.agent_builder.build_for_conversation(project_id.clone(), conv_id.clone())
     } else {
-        state.agent_builder.build_with_llm(project_id.clone(), user_llm.clone())
+        state.agent_builder.build_for_conversation_with_llm(project_id.clone(), conv_id.clone(), user_llm.clone())
     };
-    let raw_messages = load_project_messages_raw(&state.neo4j, &project_id, &conv_id).await;
+    let raw_messages = load_project_messages_raw(&state.db, &project_id, &conv_id).await;
     let split = raw_messages.len().saturating_sub(2);
     let (prior_raw, tail_raw) = raw_messages.split_at(split);
     let prior_history = agent.compact_history(&history_messages_from_raw(prior_raw)).await;
@@ -1368,11 +1352,12 @@ pub async fn resume_confirm_action(
 
     let locks     = Arc::clone(&state.locks);
     let channels  = Arc::clone(&state.channels);
-    let neo4j     = Arc::clone(&state.neo4j);
+    let db     = Arc::clone(&state.db);
     let llm       = Arc::clone(agent.llm());
     let registry  = Arc::clone(&state.agent_builder.registry);
     let in_flight = Arc::clone(&state.in_flight);
     let paused_confirmations = Arc::clone(&state.paused_confirmations);
+    let collocate_registry = Arc::clone(&state.collocate_registry);
     let project_id_owned = project_id.clone();
     let conv_id_owned    = conv_id.clone();
     let pricing = Arc::clone(&state.pricing);
@@ -1382,6 +1367,11 @@ pub async fn resume_confirm_action(
     let selection = paused.selection.clone();
 
     tokio::spawn(async move {
+        let _collocate_guard = crate::collocate::sessions::SessionGuard::new(
+            Arc::clone(&collocate_registry),
+            project_id_owned.clone(),
+            conv_id_owned.clone(),
+        );
         let (agent_event_sender, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
         let agent_clone = Arc::clone(&agent);
@@ -1395,7 +1385,7 @@ pub async fn resume_confirm_action(
         });
 
         drive_turn(
-            locks, channels, neo4j, llm, registry, in_flight, paused_confirmations,
+            locks, channels, db, llm, registry, in_flight, paused_confirmations,
             project_id_owned, conv_id_owned, query, username, prior_history,
             TurnPersist::Continuation,
             selection,
@@ -1545,10 +1535,9 @@ pub async fn delete_conversation(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, conv_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let rows = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         RETURN c.created_by AS created_by",
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let rows = state.db.query(
+        "SELECT created_by FROM conversations WHERE id = $cid AND project_id = $pid",
         json!({ "pid": project_id, "cid": conv_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next()
@@ -1557,10 +1546,8 @@ pub async fn delete_conversation(
     if user.role != "admin" && creator != user.sub {
         return Err(err(StatusCode::FORBIDDEN, "only the creator can delete this conversation"));
     }
-    state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_CONVERSATION]->(c:Conversation {id: $cid})
-         OPTIONAL MATCH (c)-[:INCURRED]->(call:LlmCall)
-         DETACH DELETE c, call",
+    state.db.query(
+        "DELETE FROM conversations WHERE id = $cid AND project_id = $pid",
         json!({ "pid": project_id, "cid": conv_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
@@ -1571,13 +1558,11 @@ pub async fn list_artifacts(
     State(state): State<Arc<ProjectState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let rows = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact)
-         RETURN a.id AS id, a.title AS title, a.kind AS kind,
-                a.created_at AS created_at, a.updated_at AS updated_at,
-                a.created_by AS created_by
-         ORDER BY a.created_at DESC",
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let rows = state.db.query(
+        "SELECT id, title, kind, created_at, updated_at, created_by
+         FROM artifacts WHERE project_id = $pid
+         ORDER BY created_at DESC",
         json!({ "pid": project_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(rows))
@@ -1596,7 +1581,7 @@ pub async fn create_artifact_route(
     Path(project_id): Path<String>,
     Json(body): Json<CreateArtifactBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let kind = crate::artifacts::handlers::ArtifactKind::parse(&body.kind)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "kind must be 'markdown', 'pdf', 'terraform', or 'terragrunt'"))?;
     if body.title.trim().is_empty() {
@@ -1605,7 +1590,7 @@ pub async fn create_artifact_route(
     crate::artifacts::handlers::validate_content_for_kind(kind, &body.content)
         .map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
     let result = crate::artifacts::handlers::create_artifact(
-        &state.neo4j, &project_id, kind, &body.title, &body.content, &user.sub,
+        &state.db, &project_id, kind, &body.title, &body.content, &user.sub,
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok((StatusCode::CREATED, Json(result)))
 }
@@ -1615,29 +1600,26 @@ pub async fn list_project_skills(
     State(state): State<Arc<ProjectState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let rows = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s:Skill)
-         RETURN s.id AS id, s.name AS name, s.description AS description,
-                s.created_at AS created_at, s.updated_at AS updated_at,
-                s.created_by AS created_by
-         ORDER BY s.created_at DESC",
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let rows = state.db.query(
+        "SELECT id, name, description, created_at, updated_at, created_by
+         FROM skills WHERE project_id = $pid
+         ORDER BY created_at DESC",
         json!({ "pid": project_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(rows))
 }
 
 async fn project_skill_name_taken(
-    neo4j: &Neo4jClient,
+    db: &Db,
     project_id: &str,
     name: &str,
     exclude_id: &str,
 ) -> Result<bool, ApiError> {
-    let rows = neo4j.query_read(
-        "MATCH (s:Skill {name: $name})
-         WHERE (s.is_global = true OR EXISTS { MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s) })
-           AND s.id <> $exclude_id
-         RETURN s.id AS id LIMIT 1",
+    let rows = db.query(
+        "SELECT id FROM skills
+         WHERE name = $name AND (project_id IS NULL OR project_id = $pid) AND id <> $exclude_id
+         LIMIT 1",
         json!({ "pid": project_id, "name": name, "exclude_id": exclude_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(!rows.is_empty())
@@ -1656,24 +1638,20 @@ pub async fn create_project_skill(
     Path(project_id): Path<String>,
     Json(body): Json<CreateSkillBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let name = body.name.trim().to_string();
     if name.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "name is required"));
     }
-    if project_skill_name_taken(&state.neo4j, &project_id, &name, "").await? {
+    if project_skill_name_taken(&state.db, &project_id, &name, "").await? {
         return Err(err(StatusCode::CONFLICT, "a skill with this name already exists"));
     }
     let id  = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    state.neo4j.query_read(
-        "MATCH (p:Project {id: $pid})
-         CREATE (s:Skill {
-             id: $id, name: $name, description: $description, content: $content,
-             is_global: false, created_by: $uid, created_at: $now, updated_at: $now
-         })
-         CREATE (p)-[:HAS_SKILL]->(s)
-         RETURN s.id AS id",
+    let now = harvest_db::now_rfc3339();
+    state.db.query(
+        "INSERT INTO skills (id, project_id, name, description, content, created_by, created_at, updated_at)
+         VALUES ($id, $pid, $name, $description, $content, $uid, $now, $now)
+         RETURNING id",
         json!({
             "pid": project_id, "id": id, "name": name, "description": body.description,
             "content": body.content, "uid": user.sub, "now": now,
@@ -1687,12 +1665,10 @@ pub async fn get_project_skill(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, skill_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let rows = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s:Skill {id: $sid})
-         RETURN s.id AS id, s.name AS name, s.description AS description, s.content AS content,
-                s.created_by AS created_by,
-                s.created_at AS created_at, s.updated_at AS updated_at",
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let rows = state.db.query(
+        "SELECT id, name, description, content, created_by, created_at, updated_at
+         FROM skills WHERE id = $sid AND project_id = $pid",
         json!({ "pid": project_id, "sid": skill_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next()
@@ -1713,36 +1689,37 @@ pub async fn update_project_skill(
     Path((project_id, skill_id)): Path<(String, String)>,
     Json(body): Json<UpdateSkillBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     if let Some(ref name) = body.name {
         if name.trim().is_empty() {
             return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
         }
-        if project_skill_name_taken(&state.neo4j, &project_id, name.trim(), &skill_id).await? {
+        if project_skill_name_taken(&state.db, &project_id, name.trim(), &skill_id).await? {
             return Err(err(StatusCode::CONFLICT, "a skill with this name already exists"));
         }
     }
-    let exists = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s:Skill {id: $sid}) RETURN 1",
+    let exists = state.db.query(
+        "SELECT 1 AS ok FROM skills WHERE id = $sid AND project_id = $pid",
         json!({ "pid": project_id, "sid": skill_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if exists.is_empty() {
         return Err(err(StatusCode::NOT_FOUND, "not found"));
     }
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut set_clauses = vec!["s.updated_at = $now"];
-    if body.name.is_some()        { set_clauses.push("s.name = $name"); }
-    if body.description.is_some() { set_clauses.push("s.description = $description"); }
-    if body.content.is_some()     { set_clauses.push("s.content = $content"); }
-    let cypher = format!(
-        "MATCH (:Project {{id: $pid}})-[:HAS_SKILL]->(s:Skill {{id: $sid}}) SET {} RETURN s.id",
-        set_clauses.join(", ")
-    );
-    let mut params = json!({ "pid": project_id, "sid": skill_id, "now": now });
-    if let Some(name)        = &body.name        { params["name"]        = json!(name.trim()); }
-    if let Some(description) = &body.description { params["description"] = json!(description); }
-    if let Some(content)     = &body.content     { params["content"]     = json!(content); }
-    state.neo4j.query_read(&cypher, params)
+    let now = harvest_db::now_rfc3339();
+    let params = json!({
+        "pid": project_id, "sid": skill_id, "now": now,
+        "name": body.name.as_deref().map(str::trim),
+        "description": body.description,
+        "content": body.content,
+    });
+    let sql = "UPDATE skills SET
+                   name        = COALESCE($name::text, name),
+                   description = COALESCE($description::text, description),
+                   content     = COALESCE($content::text, content),
+                   updated_at  = $now
+               WHERE id = $sid AND project_id = $pid
+               RETURNING id";
+    state.db.query(sql, params)
         .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -1752,9 +1729,9 @@ pub async fn delete_project_skill(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, skill_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s:Skill {id: $sid}) DETACH DELETE s",
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    state.db.query(
+        "DELETE FROM skills WHERE id = $sid AND project_id = $pid",
         json!({ "pid": project_id, "sid": skill_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(StatusCode::NO_CONTENT)
@@ -1766,19 +1743,19 @@ pub async fn project_query(
     Path(project_id): Path<String>,
     Json(body): Json<ProjectQueryBody>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await {
+    if let Err(e) = require_project_access(&state.db, &user.sub, &user.role, &project_id).await {
         return e.into_response();
     }
     let user_llm = crate::api::resolve_user_llm(
         &state.llm, &state.llm_configs, &state.user_key_store, &user.sub,
     ).await;
     let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-        state.agent_builder.build(project_id.clone())
+        state.agent_builder.build_for_conversation(project_id.clone(), body.conversation_id.clone().unwrap_or_default())
     } else {
-        state.agent_builder.build_with_llm(project_id.clone(), user_llm)
+        state.agent_builder.build_for_conversation_with_llm(project_id.clone(), body.conversation_id.clone().unwrap_or_default(), user_llm.clone())
     };
     let raw_history = match &body.conversation_id {
-        Some(conv_id) => load_project_history(&state.neo4j, &project_id, conv_id).await,
+        Some(conv_id) => load_project_history(&state.db, &project_id, conv_id).await,
         None => vec![],
     };
     let history = agent.compact_history(&raw_history).await;
