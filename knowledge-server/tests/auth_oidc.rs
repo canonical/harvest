@@ -77,7 +77,7 @@ async fn config_reports_oidc_enabled_with_display_name() {
     let cfg = auth_config_with_oidc(&server.base_url());
     let ep  = Arc::new(endpoints(&server.base_url()));
     let auth = Arc::new(AuthState {
-        neo4j:          make_stub_neo4j().await,
+        db:          make_stub_db().await,
         config:         cfg,
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
@@ -102,7 +102,7 @@ async fn config_reports_oidc_enabled_with_display_name() {
 #[tokio::test]
 async fn config_reports_oidc_disabled_when_not_configured() {
     let auth = Arc::new(AuthState {
-        neo4j:          make_stub_neo4j().await,
+        db:          make_stub_db().await,
         config:         auth_config_no_oidc(),
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
@@ -140,7 +140,7 @@ async fn config_oidc_display_name_null_when_not_set() {
     });
     let ep = Arc::new(endpoints(&server.base_url()));
     let auth = Arc::new(AuthState {
-        neo4j:          make_stub_neo4j().await,
+        db:          make_stub_db().await,
         config:         cfg,
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
@@ -163,7 +163,7 @@ async fn config_oidc_display_name_null_when_not_set() {
 #[tokio::test]
 async fn oidc_redirect_returns_501_when_not_configured() {
     let auth = Arc::new(AuthState {
-        neo4j:          make_stub_neo4j().await,
+        db:          make_stub_db().await,
         config:         auth_config_no_oidc(),
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
@@ -186,7 +186,7 @@ async fn oidc_redirect_returns_302_to_authorization_endpoint() {
     let cfg = auth_config_with_oidc(&server.base_url());
     let ep  = Arc::new(endpoints(&server.base_url()));
     let auth = Arc::new(AuthState {
-        neo4j:          make_stub_neo4j().await,
+        db:          make_stub_db().await,
         config:         cfg,
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
@@ -212,7 +212,7 @@ async fn oidc_redirect_url_contains_required_params() {
     let cfg = auth_config_with_oidc(&server.base_url());
     let ep  = Arc::new(endpoints(&server.base_url()));
     let auth = Arc::new(AuthState {
-        neo4j:          make_stub_neo4j().await,
+        db:          make_stub_db().await,
         config:         cfg,
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
@@ -246,7 +246,7 @@ async fn oidc_redirect_stores_session_server_side() {
     let cfg = auth_config_with_oidc(&server.base_url());
     let ep  = Arc::new(endpoints(&server.base_url()));
     let auth = Arc::new(AuthState {
-        neo4j:          make_stub_neo4j().await,
+        db:          make_stub_db().await,
         config:         cfg,
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
@@ -284,7 +284,7 @@ async fn oidc_callback_returns_400_when_no_code() {
     let cfg = auth_config_with_oidc(&server.base_url());
     let ep  = Arc::new(endpoints(&server.base_url()));
     let auth = Arc::new(AuthState {
-        neo4j:          make_stub_neo4j().await,
+        db:          make_stub_db().await,
         config:         cfg,
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
@@ -313,7 +313,7 @@ async fn oidc_callback_returns_400_on_idp_error_param() {
     let cfg = auth_config_with_oidc(&server.base_url());
     let ep  = Arc::new(endpoints(&server.base_url()));
     let auth = Arc::new(AuthState {
-        neo4j:          make_stub_neo4j().await,
+        db:          make_stub_db().await,
         config:         cfg,
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
@@ -344,7 +344,7 @@ async fn oidc_callback_returns_400_on_state_mismatch() {
     let cfg = auth_config_with_oidc(&server.base_url());
     let ep  = Arc::new(endpoints(&server.base_url()));
     let auth = Arc::new(AuthState {
-        neo4j:          make_stub_neo4j().await,
+        db:          make_stub_db().await,
         config:         cfg,
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
@@ -372,7 +372,7 @@ async fn oidc_callback_returns_400_on_state_mismatch() {
 #[tokio::test]
 async fn oidc_callback_returns_501_when_not_configured() {
     let auth = Arc::new(AuthState {
-        neo4j:          make_stub_neo4j().await,
+        db:          make_stub_db().await,
         config:         auth_config_no_oidc(),
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
@@ -395,10 +395,9 @@ async fn oidc_callback_returns_501_when_not_configured() {
     assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
 }
 
-async fn make_stub_neo4j() -> Arc<knowledge_server::neo4j::Neo4jClient> {
+async fn make_stub_db() -> Arc<harvest_db::Db> {
     Arc::new(
-        knowledge_server::neo4j::Neo4jClient::new("bolt://127.0.0.1:19999", "neo4j", "x")
-            .await
-            .expect("neo4rs pool construction should succeed even with unreachable host"),
+        harvest_db::Db::connect_without_migrating("postgres://harvest:x@127.0.0.1:19999/harvest")
+            .expect("pool construction should succeed even with an unreachable host"),
     )
 }
