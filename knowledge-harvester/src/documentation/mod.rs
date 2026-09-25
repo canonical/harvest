@@ -3,8 +3,9 @@ pub mod workflow;
 mod retry;
 
 use anyhow::{Result, bail};
-use neo4rs::{query, Graph};
+use harvest_db::Db;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -26,22 +27,15 @@ pub struct DocIndex {
 }
 
 pub struct DocumentationPipeline {
-    graph: Graph,
+    db: Db,
     llm: Box<dyn llm::LlmClient>,
     docs_dir: PathBuf,
 }
 
 impl DocumentationPipeline {
-    pub async fn new(
-        neo4j_uri: &str,
-        neo4j_user: &str,
-        neo4j_password: &str,
-        llm_config: &LlmConfig,
-        doc_config: &DocumentationConfig,
-    ) -> Result<Self> {
-        let graph = Graph::new(neo4j_uri, neo4j_user, neo4j_password).await?;
+    pub fn new(db: Db, llm_config: &LlmConfig, doc_config: &DocumentationConfig) -> Self {
         let llm = llm::from_config(llm_config);
-        Ok(Self { graph, llm, docs_dir: doc_config.docs_dir.clone() })
+        Self { db, llm, docs_dir: doc_config.docs_dir.clone() }
     }
 
     pub async fn document(&self, repo: &str, version: &str) -> Result<()> {
@@ -59,51 +53,33 @@ impl DocumentationPipeline {
     }
 
     async fn verify_ingested(&self, repo: &str, version: &str) -> Result<()> {
-        let mut result = self
-            .graph
-            .execute(
-                query(
-                    "MATCH (v:Version {repo: $repo, tag: $tag, ingested: true}) \
-                     RETURN v LIMIT 1",
-                )
-                .param("repo", repo)
-                .param("tag", version),
-            )
-            .await?;
-        if result.next().await?.is_none() {
+        let rows = self.db.query(
+            "SELECT 1 AS ok FROM code_versions WHERE repo = $repo AND tag = $tag AND ingested LIMIT 1",
+            json!({ "repo": repo, "tag": version }),
+        ).await?;
+        if rows.is_empty() {
             bail!("repository {repo}:{version} not found or not ingested");
         }
         Ok(())
     }
 
     async fn fetch_structure(&self, repo: &str, version: &str) -> Result<Vec<StructureRow>> {
-        let mut result = self
-            .graph
-            .execute(
-                query(
-                    "MATCH (f:File {repo: $repo, version: $version}) \
-                     OPTIONAL MATCH (f)-[:DEFINES]->(s) \
-                     RETURN f.path AS path, f.language AS language, \
-                            collect({name: s.name, kind: labels(s)[0], \
-                                     signature: s.signature}) AS symbols \
-                     ORDER BY f.path",
-                )
-                .param("repo", repo)
-                .param("version", version),
-            )
-            .await?;
+        let rows = self.db.query(
+            "SELECT f.path, f.language,
+                    COALESCE(json_agg(json_build_object('name', s.name, 'kind', s.label,
+                                                        'signature', s.signature)
+                                      ORDER BY s.start_line) FILTER (WHERE s.id IS NOT NULL),
+                             '[]') AS symbols
+             FROM code_files f
+             LEFT JOIN symbols s ON s.file_id = f.id
+             WHERE f.repo = $repo AND f.version = $version
+             GROUP BY f.id, f.path, f.language
+             ORDER BY f.path",
+            json!({ "repo": repo, "version": version }),
+        ).await?;
 
-        let mut rows = Vec::new();
-        while let Some(row) = result.next().await? {
-            let path: String = row.get("path").unwrap_or_default();
-            let language: String = row.get("language").unwrap_or_default();
-            let symbols_raw: Vec<serde_json::Value> = row
-                .get::<serde_json::Value>("symbols")
-                .ok()
-                .and_then(|v| serde_json::from_value(v).ok())
-                .unwrap_or_default();
-
-            let symbols = symbols_raw
+        Ok(rows.into_iter().map(|row| {
+            let symbols = row["symbols"].as_array().cloned().unwrap_or_default()
                 .into_iter()
                 .filter_map(|s| {
                     let name = s["name"].as_str()?.to_string();
@@ -112,36 +88,26 @@ impl DocumentationPipeline {
                     Some(SymbolInfo { name, kind, signature })
                 })
                 .collect();
-
-            rows.push(StructureRow { path, language, symbols });
-        }
-        Ok(rows)
+            StructureRow {
+                path: row["path"].as_str().unwrap_or_default().to_string(),
+                language: row["language"].as_str().unwrap_or_default().to_string(),
+                symbols,
+            }
+        }).collect())
     }
 
     async fn fetch_sources(&self, repo: &str, version: &str) -> Result<Vec<(String, String)>> {
-        let mut result = self
-            .graph
-            .execute(
-                query(
-                    "MATCH (s {repo: $repo, version: $version}) \
-                     WHERE s.source IS NOT NULL AND s.name IS NOT NULL \
-                     RETURN s.name AS name, s.source AS source \
-                     LIMIT 200",
-                )
-                .param("repo", repo)
-                .param("version", version),
-            )
-            .await?;
-
-        let mut sources = Vec::new();
-        while let Some(row) = result.next().await? {
-            let name: String = row.get("name").unwrap_or_default();
-            let source: String = row.get("source").unwrap_or_default();
-            if !name.is_empty() && !source.is_empty() {
-                sources.push((name, source));
-            }
-        }
-        Ok(sources)
+        let rows = self.db.query(
+            "SELECT name, source FROM code_symbols
+             WHERE repo = $repo AND version = $version AND source <> ''
+             ORDER BY file, start_line
+             LIMIT 200",
+            json!({ "repo": repo, "version": version }),
+        ).await?;
+        Ok(rows.into_iter()
+            .filter_map(|r| Some((r["name"].as_str()?.to_string(), r["source"].as_str()?.to_string())))
+            .filter(|(name, source)| !name.is_empty() && !source.is_empty())
+            .collect())
     }
 }
 

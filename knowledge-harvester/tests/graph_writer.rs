@@ -2,16 +2,14 @@ use knowledge_harvester::graph::{
     model::{ClassNode, FunctionNode, ImportNode, ParsedFile},
     writer::GraphWriter,
 };
-use neo4j_testcontainers::{prelude::*, runners::AsyncRunner as _, Neo4j, Neo4jImageExt as _};
+use harvest_db::test_support::TestDb;
+use knowledge_harvester::graph::model::CallRef;
+use serde_json::json;
 
 macro_rules! setup {
-    ($writer:ident, $container:ident) => {
-        let $container = Neo4j::default().start().await;
-        let uri = $container.image().bolt_uri_ipv4();
-        let user = $container.image().user().unwrap_or("neo4j");
-        let pass = $container.image().password().unwrap_or("neo");
-        let $writer = GraphWriter::new(&uri, user, pass).await.unwrap();
-        $writer.ensure_indexes().await.unwrap();
+    ($writer:ident, $test_db:ident) => {
+        let $test_db = TestDb::new().await;
+        let $writer = GraphWriter::new($test_db.db.clone());
     };
 }
 
@@ -72,7 +70,7 @@ fn make_file(repo: &str, version: &str, path: &str) -> ParsedFile {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn upsert_version_not_yet_ingested() {
     setup!(writer, container);
     writer.upsert_version("myrepo", "v1.0", 1_000_000, false).await.unwrap();
@@ -80,7 +78,7 @@ async fn upsert_version_not_yet_ingested() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn upsert_version_is_idempotent() {
     setup!(writer, container);
     writer.upsert_version("repo", "v1.0", 1_000, false).await.unwrap();
@@ -89,7 +87,7 @@ async fn upsert_version_is_idempotent() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn is_ingested_false_before_write_version() {
     setup!(writer, container);
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
@@ -97,7 +95,7 @@ async fn is_ingested_false_before_write_version() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn is_ingested_true_after_write_version() {
     setup!(writer, container);
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
@@ -106,14 +104,14 @@ async fn is_ingested_true_after_write_version() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn is_ingested_false_for_unknown_repo() {
     setup!(writer, container);
     assert!(!writer.is_ingested("nonexistent", "v1").await.unwrap());
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn ingested_versions_empty_before_any_ingestion() {
     setup!(writer, container);
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
@@ -122,7 +120,7 @@ async fn ingested_versions_empty_before_any_ingestion() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn ingested_versions_lists_only_completed_versions() {
     setup!(writer, container);
     writer.upsert_version("r", "v1", 1_000, false).await.unwrap();
@@ -134,7 +132,7 @@ async fn ingested_versions_lists_only_completed_versions() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn write_version_with_no_files_marks_ingested() {
     setup!(writer, container);
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
@@ -143,7 +141,7 @@ async fn write_version_with_no_files_marks_ingested() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn write_version_with_files_marks_ingested() {
     setup!(writer, container);
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
@@ -153,7 +151,7 @@ async fn write_version_with_files_marks_ingested() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn write_version_is_idempotent() {
     setup!(writer, container);
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
@@ -165,7 +163,7 @@ async fn write_version_is_idempotent() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn two_versions_are_tracked_independently() {
     setup!(writer, container);
     writer.upsert_version("r", "v1", 1_000, false).await.unwrap();
@@ -178,4 +176,45 @@ async fn two_versions_are_tracked_independently() {
     assert_eq!(versions.len(), 2);
     assert!(versions.contains(&"v1".to_string()));
     assert!(versions.contains(&"v2".to_string()));
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn write_version_stores_symbols_calls_and_class_links() {
+    setup!(writer, test_db);
+    let mut file = make_file("r", "v1", "src/lib.rs");
+    file.functions[0].calls = vec![CallRef { callee: "beta".into(), line: 2 }, CallRef { callee: "missing".into(), line: 2 }];
+    let mut child = file.classes[0].clone();
+    child.name = "Child".into();
+    child.bases = vec!["MyStruct".into()];
+    child.traits = vec!["Unknown".into()];
+    file.classes.push(child);
+    let mut duplicate = file.functions[1].clone();
+    duplicate.start_line = 40;
+    file.functions.push(duplicate);
+
+    writer.upsert_version("r", "v1", 0, false).await.unwrap();
+    writer.write_version("r", "v1", &[file.clone()]).await.unwrap();
+    writer.write_version("r", "v1", &[file]).await.unwrap();
+
+    let db = &test_db.db;
+    let symbols = db.query(
+        "SELECT label, name, start_line FROM code_symbols WHERE repo = 'r' AND version = 'v1' ORDER BY label, name",
+        json!({}),
+    ).await.unwrap();
+    let names: Vec<_> = symbols.iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Child", "MyStruct", "alpha", "beta"]);
+    assert_eq!(symbols[3]["start_line"], 40, "the last same-named function wins");
+
+    let edges = db.query(
+        "SELECT relation, src_name, dst_name, line FROM code_edges ORDER BY relation",
+        json!({}),
+    ).await.unwrap();
+    assert_eq!(edges, vec![
+        json!({ "relation": "CALLS", "src_name": "alpha", "dst_name": "beta", "line": 2 }),
+        json!({ "relation": "INHERITS", "src_name": "Child", "dst_name": "MyStruct", "line": null }),
+    ]);
+
+    let imports = db.query("SELECT target, line FROM code_imports", json!({})).await.unwrap();
+    assert_eq!(imports, vec![json!({ "target": "std::collections::HashMap", "line": 1 })]);
 }

@@ -4,13 +4,15 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::{Duration, interval};
 
-use crate::config::{Config, Neo4jConfig, RepoConfig};
+use harvest_db::Db;
+
+use crate::config::{Config, RepoConfig};
 use crate::git::GitClient;
 use crate::graph::writer::GraphWriter;
 use crate::parser::ParserRegistry;
 
 pub struct Pipeline {
-    config: Config,
+    repositories: Vec<RepoConfig>,
     git: GitClient,
     parsers: Arc<ParserRegistry>,
     writer: GraphWriter,
@@ -29,42 +31,25 @@ impl Pipeline {
     }
 
     pub async fn new(config: Config) -> Result<Self> {
-        let clone_root = std::env::temp_dir().join("harvest-repos");
-        std::fs::create_dir_all(&clone_root)?;
-        let mut git = GitClient::new(clone_root);
+        let db = Db::connect(&config.database.url).await?;
+        let mut pipeline = Self::with_db(db)?;
         if let Some(git_cfg) = &config.git {
-            git = git.with_ssh_key(git_cfg.ssh_key_path.clone(), git_cfg.ssh_passphrase.clone());
+            pipeline.git = pipeline.git.clone().with_ssh_key(git_cfg.ssh_key_path.clone(), git_cfg.ssh_passphrase.clone());
         }
-        let parsers = Arc::new(ParserRegistry::with_defaults());
-        let writer = GraphWriter::new(
-            &config.neo4j.uri,
-            &config.neo4j.user,
-            &config.neo4j.password,
-        )
-        .await?;
-        writer.ensure_indexes().await?;
-        Ok(Self { config, git, parsers, writer, progress_tx: None })
+        pipeline.repositories = config.repositories;
+        Ok(pipeline)
     }
 
-    pub async fn new_with_neo4j(uri: &str, user: &str, password: &str) -> Result<Self> {
+    pub fn with_db(db: Db) -> Result<Self> {
         let clone_root = std::env::temp_dir().join("harvest-repos");
         std::fs::create_dir_all(&clone_root)?;
-        let git = GitClient::new(clone_root);
-        let parsers = Arc::new(ParserRegistry::with_defaults());
-        let writer = GraphWriter::new(uri, user, password).await?;
-        writer.ensure_indexes().await?;
-        let config = Config {
-            neo4j: Neo4jConfig {
-                uri: uri.to_string(),
-                user: user.to_string(),
-                password: password.to_string(),
-            },
-            git: None,
+        Ok(Self {
             repositories: vec![],
-            llm: None,
-            documentation: None,
-        };
-        Ok(Self { config, git, parsers, writer, progress_tx: None })
+            git: GitClient::new(clone_root),
+            parsers: Arc::new(ParserRegistry::with_defaults()),
+            writer: GraphWriter::new(db),
+            progress_tx: None,
+        })
     }
 
     pub async fn process_single(&self, repo: &RepoConfig, force: bool) -> Result<()> {
@@ -83,7 +68,7 @@ impl Pipeline {
     }
 
     pub async fn run(&self, force: bool) -> Result<()> {
-        for repo in &self.config.repositories {
+        for repo in &self.repositories {
             if let Err(e) = self.process_repo(repo, force).await {
                 tracing::error!(repo = repo.name, error = %e, "repository failed");
             }
@@ -106,7 +91,7 @@ impl Pipeline {
     }
 
     pub async fn status(&self) -> Result<()> {
-        for repo in &self.config.repositories {
+        for repo in &self.repositories {
             let versions = self.writer.ingested_versions(&repo.name).await?;
             println!("{}: {} version(s) ingested", repo.name, versions.len());
             for v in versions {
@@ -117,7 +102,7 @@ impl Pipeline {
     }
 
     async fn process_repo(&self, repo: &RepoConfig, force: bool) -> Result<()> {
-        self.emit(format!("Registering repository '{}' in Neo4j…", repo.name));
+        self.emit(format!("Registering repository '{}' in the database…", repo.name));
         self.writer.upsert_repository(&repo.name, &repo.resolved_browse_url()).await?;
         self.emit("Cloning repository…");
         let repo_path = self.git.ensure_cloned(repo)?;
@@ -198,7 +183,7 @@ impl Pipeline {
         .await?;
 
         let parsed_count = parsed.len();
-        self.emit(format!("Parsed {} file(s). Writing to Neo4j…", parsed_count));
+        self.emit(format!("Parsed {} file(s). Writing to the database…", parsed_count));
 
         self.writer.write_version(&repo_owned, &tag_owned, &parsed).await?;
         self.emit(format!("Ref '{}' ingested successfully ({} files).", tag, parsed_count));
