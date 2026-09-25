@@ -3,29 +3,30 @@ use serde_json::json;
 use std::sync::Arc;
 
 use crate::crypto::Crypto;
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 
 pub struct UserKeyStore {
-    neo4j: Arc<Neo4jClient>,
+    db: Arc<Db>,
     crypto: Arc<Crypto>,
 }
 
 impl UserKeyStore {
-    pub fn new(neo4j: Arc<Neo4jClient>, crypto: Arc<Crypto>) -> Self {
-        Self { neo4j, crypto }
+    pub fn new(db: Arc<Db>, crypto: Arc<Crypto>) -> Self {
+        Self { db, crypto }
     }
 
     pub async fn upsert(&self, user_id: &str, provider_id: &str, api_key: &str) -> Result<()> {
         let (ciphertext, nonce) = self.crypto.encrypt(api_key)?;
-        let now = chrono::Utc::now().to_rfc3339();
-        let key_id = format!("{user_id}:{provider_id}");
-        self.neo4j.query_read(
-            "MATCH (u:User {id: $uid})
-             MERGE (u)-[:HAS_LLM_KEY]->(k:UserLlmKey {key_id: $key_id})
-             SET k.provider_id = $pid, k.key_ciphertext = $ct, k.key_nonce = $nonce, k.updated_at = $now",
+        let now = harvest_db::now_rfc3339();
+        self.db.query(
+            "INSERT INTO user_llm_keys (user_id, provider_id, key_ciphertext, key_nonce, updated_at)
+             VALUES ($uid, $pid, $ct, $nonce, $now)
+             ON CONFLICT (user_id, provider_id) DO UPDATE SET
+                 key_ciphertext = EXCLUDED.key_ciphertext,
+                 key_nonce      = EXCLUDED.key_nonce,
+                 updated_at     = EXCLUDED.updated_at",
             json!({
                 "uid": user_id,
-                "key_id": key_id,
                 "pid": provider_id,
                 "ct": ciphertext,
                 "nonce": nonce,
@@ -36,9 +37,9 @@ impl UserKeyStore {
     }
 
     pub async fn get(&self, user_id: &str, provider_id: &str) -> Result<Option<String>> {
-        let rows = self.neo4j.query_read(
-            "MATCH (:User {id: $uid})-[:HAS_LLM_KEY]->(k:UserLlmKey {provider_id: $pid})
-             RETURN k.key_ciphertext AS ct, k.key_nonce AS nonce",
+        let rows = self.db.query(
+            "SELECT key_ciphertext AS ct, key_nonce AS nonce
+             FROM user_llm_keys WHERE user_id = $uid AND provider_id = $pid",
             json!({ "uid": user_id, "pid": provider_id }),
         ).await?;
         if rows.is_empty() {
@@ -55,9 +56,8 @@ impl UserKeyStore {
     }
 
     pub async fn list_set_keys(&self, user_id: &str) -> Result<Vec<String>> {
-        let rows = self.neo4j.query_read(
-            "MATCH (:User {id: $uid})-[:HAS_LLM_KEY]->(k:UserLlmKey)
-             RETURN k.provider_id AS pid",
+        let rows = self.db.query(
+            "SELECT provider_id AS pid FROM user_llm_keys WHERE user_id = $uid",
             json!({ "uid": user_id }),
         ).await?;
         Ok(rows.iter()
@@ -66,9 +66,8 @@ impl UserKeyStore {
     }
 
     pub async fn list_with_status(&self, user_id: &str) -> Result<Vec<UserKeyStatus>> {
-        let rows = self.neo4j.query_read(
-            "MATCH (:User {id: $uid})-[:HAS_LLM_KEY]->(k:UserLlmKey)
-             RETURN k.provider_id AS pid, k.updated_at AS updated_at",
+        let rows = self.db.query(
+            "SELECT provider_id AS pid, updated_at FROM user_llm_keys WHERE user_id = $uid",
             json!({ "uid": user_id }),
         ).await?;
         Ok(rows.iter().map(|r| UserKeyStatus {
@@ -78,18 +77,17 @@ impl UserKeyStore {
     }
 
     pub async fn delete(&self, user_id: &str, provider_id: &str) -> Result<()> {
-        self.neo4j.query_read(
-            "MATCH (:User {id: $uid})-[r:HAS_LLM_KEY]->(k:UserLlmKey {provider_id: $pid})
-             DELETE r, k",
+        self.db.query(
+            "DELETE FROM user_llm_keys WHERE user_id = $uid AND provider_id = $pid",
             json!({ "uid": user_id, "pid": provider_id }),
         ).await?;
         Ok(())
     }
 
     pub async fn resolve_all(&self, user_id: &str) -> Result<std::collections::HashMap<String, String>> {
-        let rows = self.neo4j.query_read(
-            "MATCH (:User {id: $uid})-[:HAS_LLM_KEY]->(k:UserLlmKey)
-             RETURN k.provider_id AS pid, k.key_ciphertext AS ct, k.key_nonce AS nonce",
+        let rows = self.db.query(
+            "SELECT provider_id AS pid, key_ciphertext AS ct, key_nonce AS nonce
+             FROM user_llm_keys WHERE user_id = $uid",
             json!({ "uid": user_id }),
         ).await?;
         let mut keys = std::collections::HashMap::new();
