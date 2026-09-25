@@ -19,11 +19,10 @@ fn err(status: StatusCode, msg: &str) -> ApiError {
 pub async fn list_global_skills(
     State(state): State<Arc<SkillStore>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (s:Skill {is_global: true})
-         RETURN s.id AS id, s.name AS name, s.description AS description,
-                s.created_at AS created_at, s.updated_at AS updated_at
-         ORDER BY s.name",
+    let rows = state.db.query(
+        "SELECT id, name, description, created_at, updated_at
+         FROM skills WHERE project_id IS NULL
+         ORDER BY name",
         json!({}),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(rows))
@@ -33,10 +32,9 @@ pub async fn get_global_skill(
     State(state): State<Arc<SkillStore>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (s:Skill {id: $id, is_global: true})
-         RETURN s.id AS id, s.name AS name, s.description AS description, s.content AS content,
-                s.created_at AS created_at, s.updated_at AS updated_at",
+    let rows = state.db.query(
+        "SELECT id, name, description, content, created_at, updated_at
+         FROM skills WHERE id = $id AND project_id IS NULL",
         json!({ "id": id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next()
@@ -52,10 +50,10 @@ pub struct CreateGlobalSkillBody {
 }
 
 async fn global_name_taken(state: &SkillStore, name: &str, exclude_id: &str) -> Result<bool, ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (s:Skill {name: $name, is_global: true})
-         WHERE s.id <> $exclude_id
-         RETURN s.id AS id LIMIT 1",
+    let rows = state.db.query(
+        "SELECT id FROM skills
+         WHERE name = $name AND project_id IS NULL AND id <> $exclude_id
+         LIMIT 1",
         json!({ "name": name, "exclude_id": exclude_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(!rows.is_empty())
@@ -73,12 +71,10 @@ pub async fn create_global_skill(
         return Err(err(StatusCode::CONFLICT, "a global skill with this name already exists"));
     }
     let id  = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    state.neo4j.query_read(
-        "CREATE (s:Skill {
-             id: $id, name: $name, description: $description, content: $content,
-             is_global: true, created_by: 'system', created_at: $now, updated_at: $now
-         })",
+    let now = harvest_db::now_rfc3339();
+    state.db.query(
+        "INSERT INTO skills (id, project_id, name, description, content, created_by, created_at, updated_at)
+             VALUES ($id, NULL, $name, $description, $content, 'system', $now, $now)",
         json!({
             "id": id, "name": name, "description": body.description,
             "content": body.content, "now": now,
@@ -107,28 +103,29 @@ pub async fn update_global_skill(
             return Err(err(StatusCode::CONFLICT, "a global skill with this name already exists"));
         }
     }
-    let exists = state.neo4j.query_read(
-        "MATCH (s:Skill {id: $id, is_global: true}) RETURN 1",
+    let exists = state.db.query(
+        "SELECT 1 AS ok FROM skills WHERE id = $id AND project_id IS NULL",
         json!({ "id": id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if exists.is_empty() {
         return Err(err(StatusCode::NOT_FOUND, "not found"));
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut set_clauses = vec!["s.updated_at = $now"];
-    if body.name.is_some()        { set_clauses.push("s.name = $name"); }
-    if body.description.is_some() { set_clauses.push("s.description = $description"); }
-    if body.content.is_some()     { set_clauses.push("s.content = $content"); }
-    let cypher = format!(
-        "MATCH (s:Skill {{id: $id, is_global: true}}) SET {} RETURN s.id",
-        set_clauses.join(", ")
-    );
-    let mut params = json!({ "id": id, "now": now });
-    if let Some(name)        = &body.name        { params["name"]        = json!(name.trim()); }
-    if let Some(description) = &body.description { params["description"] = json!(description); }
-    if let Some(content)     = &body.content     { params["content"]     = json!(content); }
-    state.neo4j.query_read(&cypher, params)
+    let now = harvest_db::now_rfc3339();
+    let params = json!({
+        "id": id, "now": now,
+        "name": body.name.as_deref().map(str::trim),
+        "description": body.description,
+        "content": body.content,
+    });
+    let sql = "UPDATE skills SET
+                   name        = COALESCE($name::text, name),
+                   description = COALESCE($description::text, description),
+                   content     = COALESCE($content::text, content),
+                   updated_at  = $now
+               WHERE id = $id AND project_id IS NULL
+               RETURNING id";
+    state.db.query(sql, params)
         .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -137,8 +134,8 @@ pub async fn delete_global_skill(
     State(state): State<Arc<SkillStore>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.neo4j.query_read(
-        "MATCH (s:Skill {id: $id, is_global: true}) DETACH DELETE s",
+    state.db.query(
+        "DELETE FROM skills WHERE id = $id AND project_id IS NULL",
         json!({ "id": id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(StatusCode::NO_CONTENT)

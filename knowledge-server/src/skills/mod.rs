@@ -7,7 +7,7 @@ use anyhow::Result;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 
 const JUJU_MD:          &str = include_str!("../../skills/juju.md");
 const LXD_MD:           &str = include_str!("../../skills/lxd.md");
@@ -51,27 +51,19 @@ pub fn skill_body(content: &str) -> &str {
 }
 
 pub struct SkillStore {
-    pub neo4j: Arc<Neo4jClient>,
+    pub db: Arc<Db>,
 }
 
 impl SkillStore {
-    pub fn new(neo4j: Arc<Neo4jClient>) -> Self {
-        Self { neo4j }
-    }
-
-    pub async fn setup_constraints(&self) -> Result<()> {
-        self.neo4j
-            .run("CREATE CONSTRAINT skill_id IF NOT EXISTS FOR (s:Skill) REQUIRE s.id IS UNIQUE")
-            .await
+    pub fn new(db: Arc<Db>) -> Self {
+        Self { db }
     }
 
     pub async fn list_for_project(&self, project_id: &str) -> Vec<SkillSummary> {
-        let rows = self.neo4j.query_read(
-            "MATCH (s:Skill)
-             WHERE s.is_global = true
-                OR EXISTS { MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s) }
-             RETURN s.name AS name, s.description AS description
-             ORDER BY s.is_global DESC, s.name ASC",
+        let rows = self.db.query(
+            "SELECT name, description FROM skills
+             WHERE project_id IS NULL OR project_id = $pid
+             ORDER BY is_global DESC, name ASC",
             json!({ "pid": project_id }),
         ).await.unwrap_or_default();
 
@@ -82,11 +74,10 @@ impl SkillStore {
     }
 
     pub async fn load_content(&self, name: &str, project_id: &str) -> Option<String> {
-        let rows = self.neo4j.query_read(
-            "MATCH (s:Skill {name: $name})
-             WHERE s.is_global = true
-                OR EXISTS { MATCH (:Project {id: $pid})-[:HAS_SKILL]->(s) }
-             RETURN s.content AS content
+        let rows = self.db.query(
+            "SELECT content FROM skills
+             WHERE name = $name AND (project_id IS NULL OR project_id = $pid)
+             ORDER BY is_global DESC
              LIMIT 1",
             json!({ "name": name, "pid": project_id }),
         ).await.unwrap_or_default();
@@ -95,16 +86,16 @@ impl SkillStore {
     }
 }
 
-pub async fn seed_defaults_if_needed(neo4j: &Neo4jClient) -> Result<()> {
-    let marker = neo4j.query_read(
-        "MATCH (m:SkillsSeeded) RETURN m.seeded_at AS seeded_at LIMIT 1",
+pub async fn seed_defaults_if_needed(db: &Db) -> Result<()> {
+    let marker = db.query(
+        "SELECT set_at FROM app_flags WHERE key = 'skills_seeded'",
         json!({}),
     ).await?;
     if !marker.is_empty() {
         return Ok(());
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
     for raw in [JUJU_MD, LXD_MD, CEPH_MD, CANONICAL_K8S_MD, LANDSCAPE_MD, OPENSTACK_MD] {
         let fm          = parse_frontmatter(raw);
         let name        = fm.get("name").cloned().unwrap_or_default();
@@ -112,11 +103,10 @@ pub async fn seed_defaults_if_needed(neo4j: &Neo4jClient) -> Result<()> {
         let content     = skill_body(raw).to_string();
         let id          = Uuid::new_v4().to_string();
 
-        neo4j.query_read(
-            "MERGE (s:Skill {name: $name})
-             ON CREATE SET s.id = $id, s.description = $description, s.content = $content,
-                           s.is_global = true, s.created_by = 'system',
-                           s.created_at = $now, s.updated_at = $now",
+        db.query(
+            "INSERT INTO skills (id, project_id, name, description, content, created_by, created_at, updated_at)
+             VALUES ($id, NULL, $name, $description, $content, 'system', $now, $now)
+             ON CONFLICT (name) WHERE project_id IS NULL DO NOTHING",
             json!({
                 "id": id, "name": name, "description": description,
                 "content": content, "now": now,
@@ -124,8 +114,8 @@ pub async fn seed_defaults_if_needed(neo4j: &Neo4jClient) -> Result<()> {
         ).await?;
     }
 
-    neo4j.query_read(
-        "CREATE (:SkillsSeeded {seeded_at: $now})",
+    db.query(
+        "INSERT INTO app_flags (key, set_at) VALUES ('skills_seeded', $now) ON CONFLICT (key) DO NOTHING",
         json!({ "now": now }),
     ).await?;
 
