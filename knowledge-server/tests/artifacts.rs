@@ -1,3 +1,4 @@
+use harvest_db::Db;
 use std::sync::Arc;
 
 use axum::{
@@ -8,7 +9,7 @@ use axum::{
     Router,
 };
 use http_body_util::BodyExt as _;
-use neo4j_testcontainers::{prelude::*, runners::AsyncRunner as _, Neo4j};
+use harvest_db::test_support::TestDb;
 use serde_json::{json, Value};
 use tower::ServiceExt as _;
 use uuid::Uuid;
@@ -23,7 +24,7 @@ use knowledge_server::{
         types::{LlmResponse, Message, ModelInfo, ToolDefinition, Usage},
     },
     machines::MachineRegistry,
-    neo4j::Neo4jClient,
+
     projects::handlers::{create_artifact_route, create_project, list_artifacts, ProjectState},
 };
 
@@ -47,24 +48,24 @@ impl LlmProvider for FixedTextLlm {
 
 const JWT_SECRET: &str = "test-artifacts-secret";
 
-fn artifacts_app(neo4j: Arc<Neo4jClient>) -> Router {
+fn artifacts_app(db: Arc<Db>) -> Router {
     let secret   = Arc::new(JWT_SECRET.to_string());
     let llm: Arc<dyn LlmProvider> = FixedTextLlm::new("stub");
     let agent    = Arc::new(Agent::new(Arc::clone(&llm), vec![], 2));
     let registry = MachineRegistry::new();
     let builder  = Arc::new(ProjectAgentBuilder {
         llm:                        Arc::clone(&llm),
-        neo4j:                      Arc::clone(&neo4j),
+        db:                      Arc::clone(&db),
         registry:                   Arc::clone(&registry),
-        skills:                     Arc::new(knowledge_server::skills::SkillStore::new(Arc::clone(&neo4j))),
+        skills:                     Arc::new(knowledge_server::skills::SkillStore::new(Arc::clone(&db))),
         lxd:                        None,
         server_url:                 "http://localhost".into(),
         max_iterations:             2,
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,
     });
-    let project_state  = Arc::new(ProjectState::new(Arc::clone(&neo4j), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
-    let artifact_state = Arc::new(ArtifactState { neo4j: Arc::clone(&neo4j) });
+    let project_state  = Arc::new(ProjectState::new(Arc::clone(&db), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
+    let artifact_state = Arc::new(ArtifactState { db: Arc::clone(&db) });
 
     let project_router = Router::new()
         .route("/projects",                    route_post(create_project))
@@ -81,37 +82,31 @@ fn artifacts_app(neo4j: Arc<Neo4jClient>) -> Router {
         .layer(from_fn_with_state(secret, auth::require_auth))
 }
 
-async fn setup_constraints(neo4j: &Neo4jClient) {
-    auth::setup_constraints(neo4j).await.unwrap();
-    neo4j.run("CREATE CONSTRAINT project_id IF NOT EXISTS FOR (p:Project) REQUIRE p.id IS UNIQUE").await.unwrap();
-    neo4j.run("CREATE CONSTRAINT artifact_id IF NOT EXISTS FOR (a:Artifact) REQUIRE a.id IS UNIQUE").await.unwrap();
-}
-
-async fn make_user(neo4j: &Neo4jClient, email: &str, name: &str, role: &str) -> (String, String) {
+async fn make_user(db: &Db, email: &str, name: &str, role: &str) -> (String, String) {
     let id  = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "CREATE (:User {id:$id,email:$email,name:$name,role:$role,\
-                        provider:'password',created_at:$now}) RETURN 1",
+    db.query(
+        "INSERT INTO users (id, email, name, role, provider, created_at)
+                        VALUES ($id, $email, $name, $role, 'password', $now)",
         json!({"id":id,"email":email,"name":name,"role":role,"now":now}),
     ).await.unwrap();
     let token = jwt::issue(JWT_SECRET, &id, email, name, role).unwrap();
     (id, token)
 }
 
-async fn make_group(neo4j: &Neo4jClient, name: &str) -> String {
+async fn make_group(db: &Db, name: &str) -> String {
     let id  = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "CREATE (:Group {id:$id,name:$name,description:'',created_at:$now}) RETURN 1",
+    db.query(
+        "INSERT INTO groups (id, name, description, created_at) VALUES ($id, $name, '', $now)",
         json!({"id":id,"name":name,"now":now}),
     ).await.unwrap();
     id
 }
 
-async fn join_group(neo4j: &Neo4jClient, user_id: &str, group_id: &str) {
-    neo4j.query_read(
-        "MATCH (u:User{id:$uid}),(g:Group{id:$gid}) MERGE (u)-[:MEMBER_OF]->(g) RETURN 1",
+async fn join_group(db: &Db, user_id: &str, group_id: &str) {
+    db.query(
+        "INSERT INTO user_groups (user_id, group_id) VALUES ($uid, $gid) ON CONFLICT DO NOTHING",
         json!({"uid":user_id,"gid":group_id}),
     ).await.unwrap();
 }
@@ -161,14 +156,10 @@ async fn send_raw(app: Router, req: Request<Body>) -> RawResponse {
     RawResponse { status, content_type, disposition, bytes }
 }
 
-macro_rules! neo4j {
-    ($c:ident, $neo4j:ident) => {
-        let $c = Neo4j::default().start().await;
-        let uri  = $c.image().bolt_uri_ipv4();
-        let user = $c.image().user().unwrap_or("neo4j");
-        let pass = $c.image().password().unwrap_or("neo");
-        let $neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
-        setup_constraints(&$neo4j).await;
+macro_rules! db {
+    ($c:ident, $db:ident) => {
+        let $c = TestDb::new().await;
+        let $db = Arc::new($c.db.clone());
     };
 }
 
@@ -181,13 +172,13 @@ async fn seed_project(app: &Router, token: &str, group_id: &str) -> String {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_artifacts_empty_for_new_project() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = artifacts_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = artifacts_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid).await;
 
     let (status, body) = send(app, req_get(&format!("/projects/{pid}/artifacts"), &tok)).await;
@@ -196,13 +187,13 @@ async fn list_artifacts_empty_for_new_project() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_markdown_artifact_returns_201_with_fields() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = artifacts_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = artifacts_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid).await;
 
     let (status, body) = send(
@@ -221,13 +212,13 @@ async fn create_markdown_artifact_returns_201_with_fields() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_artifact_rejects_invalid_kind() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = artifacts_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = artifacts_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid).await;
 
     let (status, _) = send(
@@ -242,13 +233,13 @@ async fn create_artifact_rejects_invalid_kind() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_artifact_requires_title() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = artifacts_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = artifacts_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid).await;
 
     let (status, _) = send(
@@ -263,13 +254,13 @@ async fn create_artifact_requires_title() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_artifact_by_id_returns_full_content() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = artifacts_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = artifacts_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid).await;
 
     let content = "# Report\n\nDetails here.";
@@ -291,14 +282,14 @@ async fn get_artifact_by_id_returns_full_content() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn non_member_cannot_access_artifact() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (_, outsider_tok) = make_user(&neo4j, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = artifacts_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_, outsider_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = artifacts_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid).await;
 
     let (_, create_body) = send(
@@ -314,14 +305,14 @@ async fn non_member_cannot_access_artifact() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn admin_can_access_any_artifact() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let (_, admin_tok) = make_user(&neo4j, "admin@x.com", "Admin", "admin").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = artifacts_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = artifacts_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid).await;
 
     let (_, create_body) = send(
@@ -338,13 +329,13 @@ async fn admin_can_access_any_artifact() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn download_markdown_artifact_returns_text_with_attachment_header() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = artifacts_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = artifacts_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid).await;
 
     let content = "# Hello\n\nWorld.";
@@ -366,13 +357,13 @@ async fn download_markdown_artifact_returns_text_with_attachment_header() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn download_pdf_artifact_returns_pdf_bytes() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = artifacts_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = artifacts_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid).await;
 
     let (_, create_body) = send(
@@ -392,13 +383,13 @@ async fn download_pdf_artifact_returns_pdf_bytes() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn delete_artifact_removes_it() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = artifacts_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = artifacts_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid).await;
 
     let (_, create_body) = send(
@@ -417,13 +408,13 @@ async fn delete_artifact_removes_it() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_artifacts_after_create_returns_summary_without_content() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&neo4j, "eng").await;
-    join_group(&neo4j, &uid, &gid).await;
-    let app = artifacts_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let gid = make_group(&db, "eng").await;
+    join_group(&db, &uid, &gid).await;
+    let app = artifacts_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid).await;
 
     send(

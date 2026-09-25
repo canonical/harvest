@@ -1,3 +1,4 @@
+use harvest_db::Db;
 use std::io::{Read, Write};
 use std::sync::Arc;
 
@@ -9,7 +10,7 @@ use axum::{
     routing::{get as route_get, post as route_post},
     Router,
 };
-use neo4j_testcontainers::{prelude::*, runners::AsyncRunner as _, Neo4j};
+use harvest_db::test_support::TestDb;
 use serde_json::{json, Value};
 use tower::ServiceExt as _;
 
@@ -22,7 +23,7 @@ use knowledge_server::{
     },
     llm::{LlmProvider, types::{LlmResponse, Message, ModelInfo, ToolDefinition, Usage}},
     machines::MachineRegistry,
-    neo4j::Neo4jClient,
+
     projects::handlers::ProjectState,
     skills::SkillStore,
 };
@@ -46,42 +47,34 @@ impl LlmProvider for FixedTextLlm {
 
 fn cookie(token: &str) -> String { format!("token={token}") }
 
-async fn setup_constraints(neo4j: &Neo4jClient) {
-    auth::setup_constraints(neo4j).await.unwrap();
-    neo4j.run("CREATE CONSTRAINT template_id IF NOT EXISTS FOR (t:ProductTemplate) REQUIRE t.id IS UNIQUE").await.unwrap();
-}
-
-macro_rules! neo4j {
-    ($c:ident, $neo4j:ident) => {
-        let $c = Neo4j::default().start().await;
-        let uri  = $c.image().bolt_uri_ipv4();
-        let user = $c.image().user().unwrap_or("neo4j");
-        let pass = $c.image().password().unwrap_or("neo");
-        let $neo4j = Arc::new(Neo4jClient::new(&uri, user, pass).await.unwrap());
-        setup_constraints(&$neo4j).await;
+macro_rules! db {
+    ($c:ident, $db:ident) => {
+        let $c = TestDb::new().await;
+        let $db = Arc::new($c.db.clone());
     };
 }
 
-async fn make_user(neo4j: &Neo4jClient, email: &str, name: &str, role: &str) -> (String, String) {
+async fn make_user(db: &Db, email: &str, name: &str, role: &str) -> (String, String) {
     let id  = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "CREATE (:User {id:$id,email:$email,name:$name,role:$role,provider:'password',created_at:$now}) RETURN 1",
+    db.query(
+        "INSERT INTO users (id, email, name, role, provider, created_at)
+         VALUES ($id, $email, $name, $role, 'password', $now)",
         json!({"id":id,"email":email,"name":name,"role":role,"now":now}),
     ).await.unwrap();
     let token = jwt::issue(JWT_SECRET, &id, email, name, role).unwrap();
     (id, token)
 }
 
-fn templates_app(neo4j: Arc<Neo4jClient>) -> Router {
+fn templates_app(db: Arc<Db>) -> Router {
     let secret      = Arc::new(JWT_SECRET.to_string());
-    let skill_store = Arc::new(SkillStore::new(Arc::clone(&neo4j)));
+    let skill_store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let llm = FixedTextLlm::new("stub");
     let agent = Arc::new(Agent::new(Arc::clone(&llm), vec![], 2));
     let registry = MachineRegistry::new();
     let builder = Arc::new(ProjectAgentBuilder {
         llm: Arc::clone(&llm),
-        neo4j: Arc::clone(&neo4j),
+        db: Arc::clone(&db),
         registry: Arc::clone(&registry),
         skills: Arc::clone(&skill_store),
         lxd: None,
@@ -90,7 +83,7 @@ fn templates_app(neo4j: Arc<Neo4jClient>) -> Router {
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last: 6,
     });
-    let project_state = Arc::new(ProjectState::new(Arc::clone(&neo4j), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
+    let project_state = Arc::new(ProjectState::new(Arc::clone(&db), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
     Router::new()
         .route("/templates", route_get(list_templates).post(create_template))
         .route("/templates/upload", route_post(upload_template))
@@ -193,11 +186,11 @@ fn multipart_body(boundary: &str, filename: &str, content: &[u8]) -> Vec<u8> {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_templates_returns_all_templates_globally() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let app = templates_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let app = templates_app(Arc::clone(&db));
 
     let _ = send(app.clone(), req_post_json("/templates", &tok, json!({
         "name": "Template A", "description": "first", "content": "{}"
@@ -212,11 +205,11 @@ async fn list_templates_returns_all_templates_globally() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn upload_harvest_creates_template_with_skills_and_artifacts() {
-    neo4j!(c, neo4j);
-    let (uid, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let app = templates_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let app = templates_app(Arc::clone(&db));
 
     let zip_bytes = build_harvest_zip();
     let boundary = "----testboundary";
@@ -242,11 +235,11 @@ async fn upload_harvest_creates_template_with_skills_and_artifacts() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn upload_harvest_rejects_missing_metadata_yaml() {
-    neo4j!(c, neo4j);
-    let (_, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let app = templates_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let app = templates_app(Arc::clone(&db));
 
     let zip_bytes = build_harvest_zip_no_metadata();
     let boundary = "----testboundary";
@@ -257,11 +250,11 @@ async fn upload_harvest_rejects_missing_metadata_yaml() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn upload_harvest_rejects_missing_design_md() {
-    neo4j!(c, neo4j);
-    let (_, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let app = templates_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let app = templates_app(Arc::clone(&db));
 
     let zip_bytes = build_harvest_zip_no_design();
     let boundary = "----testboundary";
@@ -272,11 +265,11 @@ async fn upload_harvest_rejects_missing_design_md() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn upload_harvest_rejects_non_zip_file() {
-    neo4j!(c, neo4j);
-    let (_, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let app = templates_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let app = templates_app(Arc::clone(&db));
 
     let not_zip = b"this is not a zip file at all";
     let boundary = "----testboundary";
@@ -287,11 +280,11 @@ async fn upload_harvest_rejects_non_zip_file() {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker"]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn delete_template_removes_it() {
-    neo4j!(c, neo4j);
-    let (_, tok) = make_user(&neo4j, "a@x.com", "Alice", "regular").await;
-    let app = templates_app(Arc::clone(&neo4j));
+    db!(c, db);
+    let (_, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let app = templates_app(Arc::clone(&db));
 
     let (_, body) = send(app.clone(), req_post_json("/templates", &tok, json!({
         "name": "To Delete", "description": "", "content": "{}"
