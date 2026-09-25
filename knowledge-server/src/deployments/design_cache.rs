@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 
 static RUNNING: LazyLock<DashMap<String, ()>> = LazyLock::new(DashMap::new);
 
@@ -68,17 +68,19 @@ fn opt_str(row: &Value, key: &str) -> Option<String> {
 }
 
 pub async fn load_render_input(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
 ) -> anyhow::Result<Option<RenderInput>> {
-    let rows = neo4j.query_read(
-        "MATCH (p:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         OPTIONAL MATCH (d)-[:USES_TEMPLATE]->(t:ProductTemplate)
-         OPTIONAL MATCH (d)-[:HAS_DESIGN_DOC]->(a:Artifact)
-         RETURN p.name AS project_name, d.name AS deployment_name, t.name AS template_name,
+    let rows = db.query(
+        "SELECT p.name AS project_name, d.name AS deployment_name, t.name AS template_name,
                 a.id AS artifact_id, a.title AS artifact_title, a.content AS artifact_content,
-                a.updated_at AS artifact_updated_at",
+                a.updated_at AS artifact_updated_at
+         FROM deployments d
+         JOIN projects p ON p.id = d.project_id
+         LEFT JOIN product_templates t ON t.id = d.template_id
+         LEFT JOIN artifacts a ON a.id = d.design_doc_id
+         WHERE p.id = $pid AND d.id = $did",
         json!({ "pid": project_id, "did": deployment_id }),
     ).await?;
     let Some(row) = rows.into_iter().next() else { return Ok(None) };
@@ -95,17 +97,16 @@ pub async fn load_render_input(
 }
 
 pub async fn load_cache_state(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
 ) -> anyhow::Result<PdfCacheState> {
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         RETURN d.design_pdf_ready_artifact_id AS ready_artifact_id,
-                d.design_pdf_ready_artifact_updated_at AS ready_artifact_updated_at,
-                d.design_pdf_failed_artifact_id AS failed_artifact_id,
-                d.design_pdf_failed_artifact_updated_at AS failed_artifact_updated_at,
-                d.design_pdf_failed_error AS failed_error",
+    let rows = db.query(
+        "SELECT c.ready_artifact_id, c.ready_artifact_updated_at,
+                c.failed_artifact_id, c.failed_artifact_updated_at, c.failed_error
+         FROM deployments d
+         LEFT JOIN design_pdf_cache c ON c.deployment_id = d.id
+         WHERE d.id = $did AND d.project_id = $pid",
         json!({ "pid": project_id, "did": deployment_id }),
     ).await?;
     let Some(row) = rows.into_iter().next() else { return Ok(PdfCacheState::default()) };
@@ -127,13 +128,15 @@ pub async fn load_cache_state(
 }
 
 pub async fn load_ready_bytes(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
 ) -> anyhow::Result<Option<Vec<u8>>> {
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         RETURN d.design_pdf_ready_bytes AS bytes",
+    let rows = db.query(
+        "SELECT c.ready_bytes AS bytes
+         FROM design_pdf_cache c
+         JOIN deployments d ON d.id = c.deployment_id
+         WHERE d.id = $did AND d.project_id = $pid",
         json!({ "pid": project_id, "did": deployment_id }),
     ).await?;
     let Some(b64) = rows.into_iter().next().and_then(|row| opt_str(&row, "bytes")) else { return Ok(None) };
@@ -141,39 +144,46 @@ pub async fn load_ready_bytes(
 }
 
 pub async fn store_ready(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
     version:       &DesignVersion,
     bytes:         &[u8],
 ) -> anyhow::Result<()> {
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         SET d.design_pdf_ready_artifact_id = $aid,
-             d.design_pdf_ready_artifact_updated_at = $updated_at,
-             d.design_pdf_ready_bytes = $bytes,
-             d.design_pdf_ready_generated_at = $now",
+    db.query(
+        "INSERT INTO design_pdf_cache (deployment_id, ready_artifact_id, ready_artifact_updated_at,
+                                       ready_bytes, ready_generated_at)
+         SELECT d.id, $aid, $updated_at, $bytes, $now::timestamptz
+         FROM deployments d WHERE d.id = $did AND d.project_id = $pid
+         ON CONFLICT (deployment_id) DO UPDATE SET
+             ready_artifact_id         = EXCLUDED.ready_artifact_id,
+             ready_artifact_updated_at = EXCLUDED.ready_artifact_updated_at,
+             ready_bytes               = EXCLUDED.ready_bytes,
+             ready_generated_at        = EXCLUDED.ready_generated_at",
         json!({
             "pid": project_id, "did": deployment_id,
             "aid": version.artifact_id, "updated_at": version.updated_at,
-            "bytes": STANDARD.encode(bytes), "now": chrono::Utc::now().to_rfc3339(),
+            "bytes": STANDARD.encode(bytes), "now": harvest_db::now_rfc3339(),
         }),
     ).await?;
     Ok(())
 }
 
 pub async fn store_failed(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
     version:       &DesignVersion,
     error:         &str,
 ) -> anyhow::Result<()> {
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         SET d.design_pdf_failed_artifact_id = $aid,
-             d.design_pdf_failed_artifact_updated_at = $updated_at,
-             d.design_pdf_failed_error = $error",
+    db.query(
+        "INSERT INTO design_pdf_cache (deployment_id, failed_artifact_id, failed_artifact_updated_at, failed_error)
+         SELECT d.id, $aid, $updated_at, $error
+         FROM deployments d WHERE d.id = $did AND d.project_id = $pid
+         ON CONFLICT (deployment_id) DO UPDATE SET
+             failed_artifact_id         = EXCLUDED.failed_artifact_id,
+             failed_artifact_updated_at = EXCLUDED.failed_artifact_updated_at,
+             failed_error               = EXCLUDED.failed_error",
         json!({
             "pid": project_id, "did": deployment_id,
             "aid": version.artifact_id, "updated_at": version.updated_at, "error": error,
@@ -196,8 +206,8 @@ async fn wait_until_idle(deployment_id: &str, timeout: Duration) {
     }
 }
 
-async fn run_regeneration(neo4j: &Neo4jClient, project_id: &str, deployment_id: &str) {
-    let input = match load_render_input(neo4j, project_id, deployment_id).await {
+async fn run_regeneration(db: &Db, project_id: &str, deployment_id: &str) {
+    let input = match load_render_input(db, project_id, deployment_id).await {
         Ok(Some(input)) => input,
         _ => return,
     };
@@ -208,34 +218,33 @@ async fn run_regeneration(neo4j: &Neo4jClient, project_id: &str, deployment_id: 
         generated_date:  chrono::Utc::now().format("%Y-%m-%d").to_string(),
     };
     match super::design_pdf::build_design_pdf(&input.content, &info) {
-        Ok(bytes) => { let _ = store_ready(neo4j, project_id, deployment_id, &input.version, &bytes).await; }
-        Err(e)    => { let _ = store_failed(neo4j, project_id, deployment_id, &input.version, &e).await; }
+        Ok(bytes) => { let _ = store_ready(db, project_id, deployment_id, &input.version, &bytes).await; }
+        Err(e)    => { let _ = store_failed(db, project_id, deployment_id, &input.version, &e).await; }
     }
 }
 
-pub fn schedule_regeneration(neo4j: Arc<Neo4jClient>, project_id: String, deployment_id: String) {
+pub fn schedule_regeneration(db: Arc<Db>, project_id: String, deployment_id: String) {
     if RUNNING.insert(deployment_id.clone(), ()).is_some() {
         return;
     }
     tokio::spawn(async move {
-        run_regeneration(&neo4j, &project_id, &deployment_id).await;
+        run_regeneration(&db, &project_id, &deployment_id).await;
         RUNNING.remove(&deployment_id);
     });
 }
 
 pub async fn on_artifact_changed(
-    neo4j:      Arc<Neo4jClient>,
+    db:      Arc<Db>,
     project_id: String,
     artifact_id: String,
 ) -> anyhow::Result<()> {
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)-[:HAS_DESIGN_DOC]->(:Artifact {id: $aid})
-         RETURN d.id AS id",
+    let rows = db.query(
+        "SELECT id FROM deployments WHERE project_id = $pid AND design_doc_id = $aid",
         json!({ "pid": project_id, "aid": artifact_id }),
     ).await?;
     for row in rows {
         if let Some(deployment_id) = opt_str(&row, "id") {
-            schedule_regeneration(neo4j.clone(), project_id.clone(), deployment_id);
+            schedule_regeneration(db.clone(), project_id.clone(), deployment_id);
         }
     }
     Ok(())
@@ -250,36 +259,36 @@ pub enum ResolvedPdf {
 }
 
 pub async fn resolve_for_serving(
-    neo4j:         Arc<Neo4jClient>,
+    db:         Arc<Db>,
     project_id:    String,
     deployment_id: String,
 ) -> anyhow::Result<ResolvedPdf> {
-    let Some(input) = load_render_input(&neo4j, &project_id, &deployment_id).await? else {
+    let Some(input) = load_render_input(&db, &project_id, &deployment_id).await? else {
         return Ok(ResolvedPdf::NoDesignDoc);
     };
-    let cache = load_cache_state(&neo4j, &project_id, &deployment_id).await?;
+    let cache = load_cache_state(&db, &project_id, &deployment_id).await?;
 
     match decide_serve(&cache, &input.version, is_running(&deployment_id)) {
         ServeDecision::ServeReady => {
-            let bytes = load_ready_bytes(&neo4j, &project_id, &deployment_id).await?.unwrap_or_default();
+            let bytes = load_ready_bytes(&db, &project_id, &deployment_id).await?.unwrap_or_default();
             Ok(ResolvedPdf::Bytes { data: bytes, stale: false })
         }
         ServeDecision::ServeStale { trigger } => {
             if trigger {
-                schedule_regeneration(neo4j.clone(), project_id.clone(), deployment_id.clone());
+                schedule_regeneration(db.clone(), project_id.clone(), deployment_id.clone());
             }
-            let bytes = load_ready_bytes(&neo4j, &project_id, &deployment_id).await?.unwrap_or_default();
+            let bytes = load_ready_bytes(&db, &project_id, &deployment_id).await?.unwrap_or_default();
             Ok(ResolvedPdf::Bytes { data: bytes, stale: true })
         }
         ServeDecision::WaitForGeneration { trigger } => {
             if trigger {
-                schedule_regeneration(neo4j.clone(), project_id.clone(), deployment_id.clone());
+                schedule_regeneration(db.clone(), project_id.clone(), deployment_id.clone());
             }
             wait_until_idle(&deployment_id, Duration::from_secs(30)).await;
-            let cache = load_cache_state(&neo4j, &project_id, &deployment_id).await?;
+            let cache = load_cache_state(&db, &project_id, &deployment_id).await?;
             match decide_serve(&cache, &input.version, is_running(&deployment_id)) {
                 ServeDecision::ServeReady => {
-                    let bytes = load_ready_bytes(&neo4j, &project_id, &deployment_id).await?.unwrap_or_default();
+                    let bytes = load_ready_bytes(&db, &project_id, &deployment_id).await?.unwrap_or_default();
                     Ok(ResolvedPdf::Bytes { data: bytes, stale: false })
                 }
                 ServeDecision::ServeError => Ok(ResolvedPdf::Failed(cache.failed.map(|f| f.error).unwrap_or_default())),

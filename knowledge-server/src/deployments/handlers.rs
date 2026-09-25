@@ -20,7 +20,7 @@ use crate::agent::{Agent, AgentEvent};
 use crate::artifacts::{bundle, handlers::{create_artifact, get_artifact_in_project, sanitize_filename, update_artifact, ArtifactKind}};
 use crate::auth::jwt::Claims;
 use crate::machines::{TerraformAction, TerraformFlavor};
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 use crate::projects::handlers::{require_project_access, ProjectState};
 
 use super::{
@@ -42,16 +42,16 @@ pub(crate) fn err(status: StatusCode, msg: &str) -> ApiError {
 }
 
 pub async fn require_group_access(
-    neo4j: &Neo4jClient,
+    db: &Db,
     user_id: &str,
     user_role: &str,
     group_id: &str,
 ) -> Result<Value, ApiError> {
-    let rows = neo4j.query_read(
-        "MATCH (g:Group {id: $gid})
-         WHERE $role = 'admin'
-            OR EXISTS { MATCH (:User {id: $uid})-[:MEMBER_OF]->(g) }
-         RETURN g.id AS id, g.name AS name",
+    let rows = db.query(
+        "SELECT g.id, g.name FROM groups g
+         WHERE g.id = $gid
+           AND ($role = 'admin' OR EXISTS (
+                 SELECT 1 FROM user_groups ug WHERE ug.user_id = $uid AND ug.group_id = g.id))",
         json!({ "gid": group_id, "uid": user_id, "role": user_role }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -63,11 +63,9 @@ pub async fn list_templates(
     Extension(_user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (t:ProductTemplate)
-          RETURN t.id AS id, t.name AS name, t.description AS description,
-                 t.created_by AS created_by, t.created_at AS created_at, t.updated_at AS updated_at
-          ORDER BY t.name",
+    let rows = state.db.query(
+        "SELECT id, name, description, created_by, created_at, updated_at
+          FROM product_templates ORDER BY name",
         json!({}),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(rows))
@@ -78,10 +76,9 @@ pub async fn get_template(
     State(state): State<Arc<ProjectState>>,
     Path(template_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (t:ProductTemplate {id: $tid})
-          RETURN t.id AS id, t.name AS name, t.description AS description, t.content AS content,
-                 t.created_by AS created_by, t.created_at AS created_at, t.updated_at AS updated_at",
+    let rows = state.db.query(
+        "SELECT id, name, description, content, created_by, created_at, updated_at
+          FROM product_templates WHERE id = $tid",
         json!({ "tid": template_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next()
@@ -106,12 +103,11 @@ pub async fn create_template(
         return Err(err(StatusCode::BAD_REQUEST, "name is required"));
     }
     let id  = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    state.neo4j.query_read(
-        "CREATE (t:ProductTemplate {
-              id: $id, name: $name, description: $description, content: $content,
-              created_by: $uid, created_at: $now, updated_at: $now
-          }) RETURN t.id AS id",
+    let now = harvest_db::now_rfc3339();
+    state.db.query(
+        "INSERT INTO product_templates (id, name, description, content, created_by, created_at, updated_at)
+              VALUES ($id, $name, $description, $content, $uid, $now, $now)
+              RETURNING id",
         json!({
             "id": id, "name": name, "description": body.description,
             "content": body.content, "uid": user.sub, "now": now,
@@ -138,28 +134,29 @@ pub async fn update_template(
             return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
         }
     }
-    let exists = state.neo4j.query_read(
-        "MATCH (t:ProductTemplate {id: $tid}) RETURN 1",
+    let exists = state.db.query(
+        "SELECT 1 AS ok FROM product_templates WHERE id = $tid",
         json!({ "tid": template_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if exists.is_empty() {
         return Err(err(StatusCode::NOT_FOUND, "not found"));
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut set_clauses = vec!["t.updated_at = $now"];
-    if body.name.is_some()        { set_clauses.push("t.name = $name"); }
-    if body.description.is_some() { set_clauses.push("t.description = $description"); }
-    if body.content.is_some()     { set_clauses.push("t.content = $content"); }
-    let cypher = format!(
-        "MATCH (t:ProductTemplate {{id: $tid}}) SET {} RETURN t.id",
-        set_clauses.join(", ")
-    );
-    let mut params = json!({ "tid": template_id, "now": now });
-    if let Some(name)        = &body.name        { params["name"]        = json!(name.trim()); }
-    if let Some(description) = &body.description { params["description"] = json!(description); }
-    if let Some(content)     = &body.content     { params["content"]     = json!(content); }
-    state.neo4j.query_read(&cypher, params)
+    let now = harvest_db::now_rfc3339();
+    let params = json!({
+        "tid": template_id, "now": now,
+        "name": body.name.as_deref().map(str::trim),
+        "description": body.description,
+        "content": body.content,
+    });
+    let sql = "UPDATE product_templates SET
+                   name        = COALESCE($name::text, name),
+                   description = COALESCE($description::text, description),
+                   content     = COALESCE($content::text, content),
+                   updated_at  = $now
+               WHERE id = $tid
+               RETURNING id";
+    state.db.query(sql, params)
         .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -169,8 +166,8 @@ pub async fn delete_template(
     State(state): State<Arc<ProjectState>>,
     Path(template_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.neo4j.query_read(
-        "MATCH (t:ProductTemplate {id: $tid}) DETACH DELETE t",
+    state.db.query(
+        "DELETE FROM product_templates WHERE id = $tid",
         json!({ "tid": template_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(StatusCode::NO_CONTENT)
@@ -181,9 +178,8 @@ pub async fn download_template(
     State(state): State<Arc<ProjectState>>,
     Path(template_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let rows = state.neo4j.query_read(
-        "MATCH (t:ProductTemplate {id: $tid})
-         RETURN t.name AS name, t.description AS description, t.content AS content",
+    let rows = state.db.query(
+        "SELECT name, description, content FROM product_templates WHERE id = $tid",
         json!({ "tid": template_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next()
@@ -308,12 +304,11 @@ pub async fn upload_template(
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "failed to serialize template content"))?;
 
     let id  = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    state.neo4j.query_read(
-        "CREATE (t:ProductTemplate {
-              id: $id, name: $name, description: $description, content: $content,
-              created_by: $uid, created_at: $now, updated_at: $now
-          }) RETURN t.id AS id",
+    let now = harvest_db::now_rfc3339();
+    state.db.query(
+        "INSERT INTO product_templates (id, name, description, content, created_by, created_at, updated_at)
+              VALUES ($id, $name, $description, $content, $uid, $now, $now)
+              RETURNING id",
         json!({
             "id": id, "name": name, "description": description,
             "content": content, "uid": user.sub, "now": now,
@@ -328,14 +323,13 @@ pub async fn list_deployments(
     State(state): State<Arc<ProjectState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let rows = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)
-         OPTIONAL MATCH (d)-[:USES_TEMPLATE]->(t:ProductTemplate)
-         RETURN d.id AS id, d.name AS name, d.environment_description AS environment_description,
-                d.infra_state AS infra_state, d.created_by AS created_by,
-                d.created_at AS created_at, d.updated_at AS updated_at,
-                t.id AS template_id, t.name AS template_name
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let rows = state.db.query(
+        "SELECT d.id, d.name, d.environment_description, d.infra_state, d.created_by,
+                d.created_at, d.updated_at, t.id AS template_id, t.name AS template_name
+         FROM deployments d
+         LEFT JOIN product_templates t ON t.id = d.template_id
+         WHERE d.project_id = $pid
          ORDER BY d.updated_at DESC",
         json!({ "pid": project_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
@@ -343,38 +337,38 @@ pub async fn list_deployments(
     Ok(Json(shaped))
 }
 
-fn deployment_detail_cypher() -> &'static str {
-    "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-     OPTIONAL MATCH (d)-[:USES_TEMPLATE]->(t:ProductTemplate)
-     OPTIONAL MATCH (d)-[:HAS_DESIGN_DOC]->(design:Artifact)
-     OPTIONAL MATCH (creator:User {id: design.created_by})
-     OPTIONAL MATCH (d)-[:HAS_TERRAFORM_BUNDLE]->(tf:Artifact)
-     OPTIONAL MATCH (d)-[:HAS_GUIDE]->(guide:Artifact)
-     OPTIONAL MATCH (d)-[:HAS_CONTEXT_ARTIFACT]->(ca:Artifact)
-     OPTIONAL MATCH (d)-[:HAS_EXECUTION_STEP]->(es:ExecutionStep)
-     WITH d, t, design, creator, tf, guide, collect(DISTINCT {id: ca.id, title: ca.title, kind: ca.kind}) AS context_artifacts, count(DISTINCT es) AS execution_step_count
-     RETURN d.id AS id, d.name AS name, d.environment_description AS environment_description,
-            d.infra_state AS infra_state, d.last_applied_artifact_id AS last_applied_artifact_id,
-            d.last_applied_at AS last_applied_at, d.created_by AS created_by,
-            d.created_at AS created_at, d.updated_at AS updated_at,
+fn deployment_detail_sql() -> &'static str {
+    "SELECT d.id, d.name, d.environment_description, d.infra_state,
+            d.last_applied_artifact_id, d.last_applied_at, d.created_by, d.created_at, d.updated_at,
             t.id AS template_id, t.name AS template_name,
             design.id AS design_doc_id, design.title AS design_doc_title,
             design.created_by AS design_doc_created_by, design.created_at AS design_doc_created_at,
-            design.updated_at AS design_doc_updated_at,
-            creator.name AS design_doc_created_by_name,
+            design.updated_at AS design_doc_updated_at, creator.name AS design_doc_created_by_name,
             tf.id AS terraform_bundle_id, tf.title AS terraform_bundle_title, tf.kind AS terraform_bundle_kind,
             guide.id AS guide_id, guide.title AS guide_title,
-            context_artifacts,
-            execution_step_count"
+            COALESCE((SELECT json_agg(json_build_object('id', ca.id, 'title', ca.title, 'kind', ca.kind)
+                                      ORDER BY ca.title)
+                      FROM deployment_context_artifacts dca
+                      JOIN artifacts ca ON ca.id = dca.artifact_id
+                      WHERE dca.deployment_id = d.id), '[]') AS context_artifacts,
+            (SELECT count(*) FROM execution_steps es WHERE es.deployment_id = d.id) AS execution_step_count
+     FROM deployments d
+     LEFT JOIN product_templates t ON t.id = d.template_id
+     LEFT JOIN artifacts design    ON design.id = d.design_doc_id
+     LEFT JOIN users creator       ON creator.id = design.created_by
+     LEFT JOIN artifacts tf        ON tf.id = d.terraform_bundle_id
+     LEFT JOIN artifacts guide     ON guide.id = d.guide_id
+     WHERE d.project_id = $pid
+       AND d.id = $did"
 }
 
 async fn fetch_deployment_detail(
-    neo4j: &Neo4jClient,
+    db: &Db,
     project_id: &str,
     deployment_id: &str,
 ) -> Result<Value, ApiError> {
-    let rows = neo4j.query_read(
-        deployment_detail_cypher(),
+    let rows = db.query(
+        deployment_detail_sql(),
         json!({ "pid": project_id, "did": deployment_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next()
@@ -387,8 +381,8 @@ pub async fn get_deployment(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
 }
 
@@ -397,31 +391,31 @@ pub async fn get_project_deployment(
     State(state): State<Arc<ProjectState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let rows = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)
-         WITH d ORDER BY d.created_at ASC LIMIT 1
-         OPTIONAL MATCH (d)-[:USES_TEMPLATE]->(t:ProductTemplate)
-         OPTIONAL MATCH (d)-[:HAS_DESIGN_DOC]->(design:Artifact)
-         OPTIONAL MATCH (creator:User {id: design.created_by})
-         OPTIONAL MATCH (d)-[:HAS_TERRAFORM_BUNDLE]->(tf:Artifact)
-         OPTIONAL MATCH (d)-[:HAS_GUIDE]->(guide:Artifact)
-         OPTIONAL MATCH (d)-[:HAS_CONTEXT_ARTIFACT]->(ca:Artifact)
-         OPTIONAL MATCH (d)-[:HAS_EXECUTION_STEP]->(es:ExecutionStep)
-         WITH d, t, design, creator, tf, guide, collect(DISTINCT {id: ca.id, title: ca.title, kind: ca.kind}) AS context_artifacts, count(DISTINCT es) AS execution_step_count
-         RETURN d.id AS id, d.name AS name, d.environment_description AS environment_description,
-                d.infra_state AS infra_state, d.last_applied_artifact_id AS last_applied_artifact_id,
-                d.last_applied_at AS last_applied_at, d.created_by AS created_by,
-                d.created_at AS created_at, d.updated_at AS updated_at,
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let rows = state.db.query(
+        "SELECT d.id, d.name, d.environment_description, d.infra_state,
+                d.last_applied_artifact_id, d.last_applied_at, d.created_by, d.created_at, d.updated_at,
                 t.id AS template_id, t.name AS template_name,
                 design.id AS design_doc_id, design.title AS design_doc_title,
                 design.created_by AS design_doc_created_by, design.created_at AS design_doc_created_at,
-                design.updated_at AS design_doc_updated_at,
-                creator.name AS design_doc_created_by_name,
+                design.updated_at AS design_doc_updated_at, creator.name AS design_doc_created_by_name,
                 tf.id AS terraform_bundle_id, tf.title AS terraform_bundle_title, tf.kind AS terraform_bundle_kind,
                 guide.id AS guide_id, guide.title AS guide_title,
-                context_artifacts,
-                execution_step_count",
+                COALESCE((SELECT json_agg(json_build_object('id', ca.id, 'title', ca.title, 'kind', ca.kind)
+                                          ORDER BY ca.title)
+                          FROM deployment_context_artifacts dca
+                          JOIN artifacts ca ON ca.id = dca.artifact_id
+                          WHERE dca.deployment_id = d.id), '[]') AS context_artifacts,
+                (SELECT count(*) FROM execution_steps es WHERE es.deployment_id = d.id) AS execution_step_count
+         FROM deployments d
+         LEFT JOIN product_templates t ON t.id = d.template_id
+         LEFT JOIN artifacts design    ON design.id = d.design_doc_id
+         LEFT JOIN users creator       ON creator.id = design.created_by
+         LEFT JOIN artifacts tf        ON tf.id = d.terraform_bundle_id
+         LEFT JOIN artifacts guide     ON guide.id = d.guide_id
+         WHERE d.project_id = $pid
+         ORDER BY d.created_at ASC
+         LIMIT 1",
         json!({ "pid": project_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next()
@@ -442,15 +436,14 @@ pub async fn create_deployment(
     Path(project_id): Path<String>,
     Json(body): Json<CreateDeploymentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let _project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let _project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let name = body.name.trim().to_string();
     if name.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "name is required"));
     }
 
-    let existing = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment)
-         RETURN d.id AS id LIMIT 1",
+    let existing = state.db.query(
+        "SELECT id FROM deployments WHERE project_id = $pid LIMIT 1",
         json!({ "pid": project_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if !existing.is_empty() {
@@ -458,8 +451,8 @@ pub async fn create_deployment(
     }
 
     if let Some(template_id) = &body.product_template_id {
-        let exists = state.neo4j.query_read(
-            "MATCH (t:ProductTemplate {id: $tid}) RETURN 1",
+        let exists = state.db.query(
+            "SELECT 1 AS ok FROM product_templates WHERE id = $tid",
             json!({ "tid": template_id }),
         ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         if exists.is_empty() {
@@ -468,33 +461,15 @@ pub async fn create_deployment(
     }
 
     let id  = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
 
-    let cypher = if body.product_template_id.is_some() {
-        "MATCH (p:Project {id: $pid}), (t:ProductTemplate {id: $tid})
-         CREATE (d:Deployment {
-             id: $id, name: $name, environment_description: $env_desc,
-             infra_state: 'none', last_applied_content: null,
-             last_applied_artifact_id: null, last_applied_at: null,
-             created_by: $uid, created_at: $now, updated_at: $now
-         })
-         CREATE (p)-[:HAS_DEPLOYMENT]->(d)
-         CREATE (d)-[:USES_TEMPLATE]->(t)
-         RETURN d.id AS id"
-    } else {
-        "MATCH (p:Project {id: $pid})
-         CREATE (d:Deployment {
-             id: $id, name: $name, environment_description: $env_desc,
-             infra_state: 'none', last_applied_content: null,
-             last_applied_artifact_id: null, last_applied_at: null,
-             created_by: $uid, created_at: $now, updated_at: $now
-         })
-         CREATE (p)-[:HAS_DEPLOYMENT]->(d)
-         RETURN d.id AS id"
-    };
+    let sql = "INSERT INTO deployments (id, project_id, template_id, name, environment_description,
+                                   infra_state, created_by, created_at, updated_at)
+               VALUES ($id, $pid, $tid, $name, $env_desc, 'none', $uid, $now, $now)
+               RETURNING id";
 
-    state.neo4j.query_read(
-        cypher,
+    state.db.query(
+        sql,
         json!({
             "pid": project_id, "tid": body.product_template_id, "id": id,
             "name": name, "env_desc": body.environment_description,
@@ -517,32 +492,33 @@ pub async fn update_deployment(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<UpdateDeploymentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     if let Some(ref name) = body.name {
         if name.trim().is_empty() {
             return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
         }
     }
-    let exists = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did}) RETURN 1",
+    let exists = state.db.query(
+        "SELECT 1 AS ok FROM deployments WHERE id = $did AND project_id = $pid",
         json!({ "pid": project_id, "did": deployment_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if exists.is_empty() {
         return Err(err(StatusCode::NOT_FOUND, "not found"));
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut set_clauses = vec!["d.updated_at = $now"];
-    if body.name.is_some()                     { set_clauses.push("d.name = $name"); }
-    if body.environment_description.is_some()  { set_clauses.push("d.environment_description = $env_desc"); }
-    let cypher = format!(
-        "MATCH (:Project {{id: $pid}})-[:HAS_DEPLOYMENT]->(d:Deployment {{id: $did}}) SET {} RETURN d.id",
-        set_clauses.join(", ")
-    );
-    let mut params = json!({ "pid": project_id, "did": deployment_id, "now": now });
-    if let Some(name)     = &body.name                    { params["name"]     = json!(name.trim()); }
-    if let Some(env_desc) = &body.environment_description { params["env_desc"] = json!(env_desc); }
-    state.neo4j.query_read(&cypher, params)
+    let now = harvest_db::now_rfc3339();
+    let params = json!({
+        "pid": project_id, "did": deployment_id, "now": now,
+        "name": body.name.as_deref().map(str::trim),
+        "env_desc": body.environment_description,
+    });
+    let sql = "UPDATE deployments SET
+                   name                    = COALESCE($name::text, name),
+                   environment_description = COALESCE($env_desc::text, environment_description),
+                   updated_at              = $now
+               WHERE id = $did AND project_id = $pid
+               RETURNING id";
+    state.db.query(sql, params)
         .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -552,11 +528,9 @@ pub async fn delete_deployment(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         OPTIONAL MATCH (d)-[:HAS_RUN]->(r:DeploymentRun)
-         DETACH DELETE d, r",
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    state.db.query(
+        "DELETE FROM deployments WHERE id = $did AND project_id = $pid",
         json!({ "pid": project_id, "did": deployment_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(StatusCode::NO_CONTENT)
@@ -578,15 +552,16 @@ pub(crate) struct RunnableBundle {
 }
 
 pub(crate) async fn load_runnable_bundle(
-    neo4j: &Neo4jClient,
+    db: &Db,
     project_id: &str,
     deployment_id: &str,
 ) -> Result<RunnableBundle, ApiError> {
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         OPTIONAL MATCH (d)-[:HAS_TERRAFORM_BUNDLE]->(a:Artifact)
-         RETURN d.infra_state AS infra_state, d.last_applied_content AS last_applied_content,
-                a.id AS artifact_id, a.kind AS artifact_kind, a.content AS artifact_content",
+    let rows = db.query(
+        "SELECT d.infra_state, d.last_applied_content,
+                a.id AS artifact_id, a.kind AS artifact_kind, a.content AS artifact_content
+         FROM deployments d
+         LEFT JOIN artifacts a ON a.id = d.terraform_bundle_id
+         WHERE d.id = $did AND d.project_id = $pid",
         json!({ "pid": project_id, "did": deployment_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next().ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
@@ -698,7 +673,7 @@ async fn execute_and_record(
     let success          = exit_code == Some(0);
     let applied_content  = (action == TerraformAction::Apply && success).then_some(files_json.as_str());
     let infra_state = record_run_and_update_state(
-        &state.neo4j, project_id, artifact_id, action, exit_code, &stdout, &stderr,
+        &state.db, project_id, artifact_id, action, exit_code, &stdout, &stderr,
         applied_content, "user", reasoning,
     ).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
@@ -729,7 +704,7 @@ pub(crate) async fn deploy_deployment_core(
     timeout_secs:  u64,
 ) -> Result<Value, ApiError> {
     require_agent_in_project(state, agent_id, project_id)?;
-    let run = load_runnable_bundle(&state.neo4j, project_id, deployment_id).await?;
+    let run = load_runnable_bundle(&state.db, project_id, deployment_id).await?;
     let flavor = flavor_for_kind(&run.artifact_kind)?;
     let timeout = timeout_secs.min(MAX_RUN_TIMEOUT_SECS);
 
@@ -747,7 +722,7 @@ pub(crate) async fn redeploy_deployment_core(
     agent_id:      &str,
     timeout_secs:  u64,
 ) -> Result<Value, ApiError> {
-    let run = load_runnable_bundle(&state.neo4j, project_id, deployment_id).await?;
+    let run = load_runnable_bundle(&state.db, project_id, deployment_id).await?;
     let flavor = flavor_for_kind(&run.artifact_kind)?;
     let timeout = timeout_secs.min(MAX_RUN_TIMEOUT_SECS);
 
@@ -756,7 +731,7 @@ pub(crate) async fn redeploy_deployment_core(
 
     if needs_destroy_before_apply(run.infra_state) {
         let Some(snapshot) = run.last_applied_content.clone() else {
-            reset_infra_state_to_none(&state.neo4j, project_id, deployment_id).await
+            reset_infra_state_to_none(&state.db, project_id, deployment_id).await
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
             return Err(err(
                 StatusCode::BAD_REQUEST,
@@ -797,12 +772,12 @@ pub(crate) async fn destroy_deployment_core(
     timeout_secs:  u64,
 ) -> Result<Value, ApiError> {
     require_agent_in_project(state, agent_id, project_id)?;
-    let run = load_runnable_bundle(&state.neo4j, project_id, deployment_id).await?;
+    let run = load_runnable_bundle(&state.db, project_id, deployment_id).await?;
     if matches!(run.infra_state, InfraState::None | InfraState::Destroyed) {
         return Err(err(StatusCode::BAD_REQUEST, "nothing to destroy"));
     }
     let Some(snapshot) = run.last_applied_content.clone() else {
-        reset_infra_state_to_none(&state.neo4j, project_id, deployment_id).await
+        reset_infra_state_to_none(&state.db, project_id, deployment_id).await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -825,7 +800,7 @@ pub async fn deploy_deployment(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<RunDeploymentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let value = deploy_deployment_core(&state, &project_id, &deployment_id, &body.agent_id, body.timeout_secs).await?;
     Ok(Json(value))
 }
@@ -836,7 +811,7 @@ pub async fn redeploy_deployment(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<RunDeploymentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     require_agent_in_project(&state, &body.agent_id, &project_id)?;
     let value = redeploy_deployment_core(&state, &project_id, &deployment_id, &body.agent_id, body.timeout_secs).await?;
     Ok(Json(value))
@@ -848,7 +823,7 @@ pub async fn destroy_deployment(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<RunDeploymentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let value = destroy_deployment_core(&state, &project_id, &deployment_id, &body.agent_id, body.timeout_secs).await?;
     Ok(Json(value))
 }
@@ -858,12 +833,13 @@ pub async fn list_deployment_runs(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let rows = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_RUN]->(r:DeploymentRun)
-         RETURN r.id AS id, r.action AS action, r.status AS status, r.exit_code AS exit_code,
-                r.stdout_preview AS stdout_preview, r.stderr_preview AS stderr_preview,
-                r.initiated_by AS initiated_by, r.reasoning AS reasoning, r.created_at AS created_at
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let rows = state.db.query(
+        "SELECT r.id, r.action, r.status, r.exit_code, r.stdout_preview, r.stderr_preview,
+                r.initiated_by, r.reasoning, r.created_at
+         FROM deployment_runs r
+         JOIN deployments d ON d.id = r.deployment_id
+         WHERE d.id = $did AND d.project_id = $pid
          ORDER BY r.created_at DESC",
         json!({ "pid": project_id, "did": deployment_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
@@ -877,7 +853,7 @@ async fn build_deployment_agent(
     deployment_id: &str,
     user_sub:      &str,
 ) -> Result<Arc<Agent>, ApiError> {
-    let ctx = load_deployment_context(&state.neo4j, project_id, deployment_id)
+    let ctx = load_deployment_context(&state.db, project_id, deployment_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let user_llm = crate::api::resolve_user_llm(
@@ -896,7 +872,7 @@ async fn build_deployment_agent_text_only(
     deployment_id: &str,
     user_sub:      &str,
 ) -> Result<Arc<Agent>, ApiError> {
-    let ctx = load_deployment_context(&state.neo4j, project_id, deployment_id)
+    let ctx = load_deployment_context(&state.db, project_id, deployment_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let user_llm = crate::api::resolve_user_llm(
@@ -915,7 +891,7 @@ async fn build_deployment_agent_design(
     deployment_id: &str,
     user_sub:      &str,
 ) -> Result<Arc<Agent>, ApiError> {
-    let ctx = load_deployment_context(&state.neo4j, project_id, deployment_id)
+    let ctx = load_deployment_context(&state.db, project_id, deployment_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let user_llm = crate::api::resolve_user_llm(
@@ -940,7 +916,7 @@ pub async fn generate_environment_questions(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
     let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
@@ -971,17 +947,17 @@ pub async fn generate_design(
     let response = agent.query(&prompt, &[], &[], None).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    let artifact_id = save_design_doc(&state.neo4j, &project_id, &deployment_id, &response.answer).await
+    let artifact_id = save_design_doc(&state.db, &project_id, &deployment_id, &response.answer).await
         .map_err(|message| err(StatusCode::INTERNAL_SERVER_ERROR, &message))?;
 
     let turn_id = uuid::Uuid::new_v4().to_string();
     crate::cost::record_deployment_turn(
-        &state.neo4j, &state.pricing, crate::cost::CostScope::Design, &turn_id, &user.sub,
+        &state.db, &state.pricing, crate::cost::CostScope::Design, &turn_id, &user.sub,
         &project_id, &deployment_id, None, Some(&artifact_id),
         response.provider_used.as_ref(), &response.usage, response.llm_call_count, response.duration_ms,
     ).await;
 
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
 }
 
@@ -992,23 +968,19 @@ async fn prepare_design_generation(
     deployment_id: &str,
     body:          &GenerateDesignBody,
 ) -> Result<(Arc<Agent>, String), ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
 
     if let Some(template_id) = &body.product_template_id {
-        let exists = state.neo4j.query_read(
-            "MATCH (t:ProductTemplate {id: $tid}) RETURN 1",
+        let exists = state.db.query(
+            "SELECT 1 AS ok FROM product_templates WHERE id = $tid",
             json!({ "tid": template_id }),
         ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         if exists.is_empty() {
             return Err(err(StatusCode::BAD_REQUEST, "template not found"));
         }
-        state.neo4j.query_read(
-            "MATCH (d:Deployment {id: $did})
-             OPTIONAL MATCH (d)-[old:USES_TEMPLATE]->(:ProductTemplate)
-             DELETE old
-             WITH d
-             MATCH (t:ProductTemplate {id: $tid})
-             CREATE (d)-[:USES_TEMPLATE]->(t)",
+        state.db.query(
+            "UPDATE deployments SET template_id = $tid
+             WHERE id = $did AND EXISTS (SELECT 1 FROM product_templates WHERE id = $tid)",
             json!({ "did": deployment_id, "tid": template_id }),
         ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     }
@@ -1016,24 +988,24 @@ async fn prepare_design_generation(
     let selected_artifacts = if body.artifact_ids.is_empty() {
         Vec::new()
     } else {
-        let artifacts = state.neo4j.query_read(
-            "MATCH (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact)
-             WHERE a.id IN $ids
-             RETURN a.id AS id, a.title AS title, a.kind AS kind, a.content AS content
-             ORDER BY a.title",
+        let artifacts = state.db.query(
+            "SELECT id, title, kind, content FROM artifacts
+             WHERE project_id = $pid AND id = ANY($ids)
+             ORDER BY title",
             json!({ "pid": project_id, "ids": body.artifact_ids }),
         ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-        state.neo4j.query_read(
-            "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did}),
-                    (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact)
-             WHERE a.id IN $ids
-             MERGE (d)-[:HAS_CONTEXT_ARTIFACT]->(a)",
+        state.db.query(
+            "INSERT INTO deployment_context_artifacts (deployment_id, artifact_id)
+                    SELECT d.id, a.id
+                    FROM deployments d JOIN artifacts a ON a.project_id = d.project_id
+                    WHERE d.id = $did AND d.project_id = $pid AND a.id = ANY($ids)
+                    ON CONFLICT DO NOTHING",
             json!({ "pid": project_id, "did": deployment_id, "ids": body.artifact_ids }),
         ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         artifacts
     };
 
-    let ctx = load_deployment_context(&state.neo4j, project_id, deployment_id)
+    let ctx = load_deployment_context(&state.db, project_id, deployment_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let agent = build_deployment_agent_design(state, project_id, deployment_id, &user.sub).await?;
@@ -1099,7 +1071,7 @@ pub async fn generate_design_stream(
     let (agent, prompt) = prepare_design_generation(&state, &user, &project_id, &deployment_id, &body).await?;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
-    let neo4j          = Arc::clone(&state.neo4j);
+    let db          = Arc::clone(&state.db);
     let project_id_bg  = project_id.clone();
     let deployment_id_bg = deployment_id.clone();
     let pricing        = Arc::clone(&state.pricing);
@@ -1111,7 +1083,7 @@ pub async fn generate_design_stream(
         });
         while let Some(event) = agent_rx.recv().await {
             if let AgentEvent::Done { answer, provider_used, duration_ms, usage, llm_call_count, .. } = &event {
-                let artifact_id = match save_design_doc(&neo4j, &project_id_bg, &deployment_id_bg, answer).await {
+                let artifact_id = match save_design_doc(&db, &project_id_bg, &deployment_id_bg, answer).await {
                     Ok(id) => id,
                     Err(message) => {
                         tracing::warn!(
@@ -1124,7 +1096,7 @@ pub async fn generate_design_stream(
                 };
                 let turn_id = uuid::Uuid::new_v4().to_string();
                 crate::cost::record_deployment_turn(
-                    &neo4j, &pricing, crate::cost::CostScope::Design, &turn_id, &user_id_bg,
+                    &db, &pricing, crate::cost::CostScope::Design, &turn_id, &user_id_bg,
                     &project_id_bg, &deployment_id_bg, None, Some(&artifact_id),
                     provider_used.as_ref(), usage, *llm_call_count, *duration_ms,
                 ).await;
@@ -1151,7 +1123,7 @@ pub async fn generate_design_stream(
 /// longer asked to save the document itself via tool calls, so this is the
 /// only path that ever creates or relinks a design_doc.
 async fn save_design_doc(
-    neo4j:         &Arc<Neo4jClient>,
+    db:         &Arc<Db>,
     project_id:    &str,
     deployment_id: &str,
     answer:        &str,
@@ -1178,28 +1150,25 @@ async fn save_design_doc(
         );
     }
 
-    let deployment = fetch_deployment_detail(neo4j, project_id, deployment_id).await
+    let deployment = fetch_deployment_detail(db, project_id, deployment_id).await
         .map_err(|_| "could not load the deployment".to_string())?;
     let title = format!("{} Design", deployment["name"].as_str().unwrap_or("Deployment"));
 
-    let created = create_artifact(neo4j, project_id, ArtifactKind::Markdown, &title, &content, "assistant").await
+    let created = create_artifact(db, project_id, ArtifactKind::Markdown, &title, &content, "assistant").await
         .map_err(|e| format!("failed to save the design document: {e}"))?;
     let artifact_id = created["id"].as_str()
         .ok_or_else(|| "artifact creation returned no id".to_string())?
         .to_string();
 
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         OPTIONAL MATCH (d)-[old:HAS_DESIGN_DOC]->(:Artifact)
-         DELETE old
-         WITH d
-         MATCH (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact {id: $aid})
-         CREATE (d)-[:HAS_DESIGN_DOC]->(a)",
+    db.query(
+        "UPDATE deployments SET design_doc_id = $aid
+         WHERE id = $did AND project_id = $pid
+           AND EXISTS (SELECT 1 FROM artifacts WHERE id = $aid AND project_id = $pid)",
         json!({ "pid": project_id, "did": deployment_id, "aid": artifact_id }),
     ).await.map_err(|e| format!("failed to link the design document: {e}"))?;
 
     crate::deployments::design_cache::schedule_regeneration(
-        Arc::clone(neo4j), project_id.to_string(), deployment_id.to_string(),
+        Arc::clone(db), project_id.to_string(), deployment_id.to_string(),
     );
     Ok(artifact_id)
 }
@@ -1217,14 +1186,14 @@ pub async fn generate_design_decisions(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
     let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     let design_doc_id = deployment["design_doc"]["id"].as_str()
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?;
-    let design = get_artifact_in_project(&state.neo4j, &project_id, design_doc_id)
+    let design = get_artifact_in_project(&state.db, &project_id, design_doc_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "design document not found"))?;
     let design_content = design["content"].as_str().unwrap_or_default();
@@ -1270,11 +1239,11 @@ pub async fn revise_design(
     if body.decisions.is_empty() && body.instructions.as_deref().unwrap_or("").trim().is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "decisions or instructions are required"));
     }
-    let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
     let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     let design_doc_id = deployment["design_doc"]["id"].as_str()
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?
         .to_string();
@@ -1297,7 +1266,7 @@ pub async fn revise_design(
     agent.query(&prompt, &[], &[], None).await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
 }
 
@@ -1320,14 +1289,14 @@ async fn prepare_design_change_proposal(
         return Err(err(StatusCode::BAD_REQUEST, "explanation is required"));
     }
 
-    require_project_access(&state.neo4j, &user.sub, &user.role, project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, project_id).await?;
     let agent = build_deployment_agent_text_only(state, project_id, deployment_id, &user.sub).await?;
 
-    let deployment = fetch_deployment_detail(&state.neo4j, project_id, deployment_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, project_id, deployment_id).await?;
     let design_doc_id = deployment["design_doc"]["id"].as_str()
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?
         .to_string();
-    let design = get_artifact_in_project(&state.neo4j, project_id, &design_doc_id)
+    let design = get_artifact_in_project(&state.db, project_id, &design_doc_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "design document not found"))?;
     let current_content = design["content"].as_str().unwrap_or_default().to_string();
@@ -1335,11 +1304,10 @@ async fn prepare_design_change_proposal(
     let selected_artifacts = if body.artifact_ids.is_empty() {
         Vec::new()
     } else {
-        state.neo4j.query_read(
-            "MATCH (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact)
-             WHERE a.id IN $ids
-             RETURN a.id AS id, a.title AS title, a.kind AS kind, a.content AS content
-             ORDER BY a.title",
+        state.db.query(
+            "SELECT id, title, kind, content FROM artifacts
+             WHERE project_id = $pid AND id = ANY($ids)
+             ORDER BY title",
             json!({ "pid": project_id, "ids": body.artifact_ids }),
         ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
     };
@@ -1377,7 +1345,7 @@ pub async fn propose_design_change_stream(
     let (agent, prompt) = prepare_design_change_proposal(&state, &user, &project_id, &deployment_id, &body).await?;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
-    let neo4j          = Arc::clone(&state.neo4j);
+    let db          = Arc::clone(&state.db);
     let pricing        = Arc::clone(&state.pricing);
     let project_id_bg  = project_id.clone();
     let deployment_id_bg = deployment_id.clone();
@@ -1391,7 +1359,7 @@ pub async fn propose_design_change_stream(
             if let AgentEvent::Done { provider_used, duration_ms, usage, llm_call_count, .. } = &event {
                 let turn_id = uuid::Uuid::new_v4().to_string();
                 crate::cost::record_deployment_turn(
-                    &neo4j, &pricing, crate::cost::CostScope::Proposal, &turn_id, &user_id_bg,
+                    &db, &pricing, crate::cost::CostScope::Proposal, &turn_id, &user_id_bg,
                     &project_id_bg, &deployment_id_bg, None, None,
                     provider_used.as_ref(), usage, *llm_call_count, *duration_ms,
                 ).await;
@@ -1425,11 +1393,11 @@ pub async fn get_design_pdf(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Query(query): Query<DesignPdfQuery>,
 ) -> Result<Response, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     let design_title = deployment["design_doc"]["title"].as_str().unwrap_or("Design").to_string();
 
-    let resolved = super::design_cache::resolve_for_serving(state.neo4j.clone(), project_id.clone(), deployment_id.clone())
+    let resolved = super::design_cache::resolve_for_serving(state.db.clone(), project_id.clone(), deployment_id.clone())
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     match resolved {
@@ -1475,19 +1443,19 @@ pub async fn update_design_content(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<UpdateDesignContentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     let design_doc_id = deployment["design_doc"]["id"].as_str()
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?
         .to_string();
 
     crate::artifacts::handlers::update_artifact(
-        &state.neo4j, &design_doc_id, ArtifactKind::Markdown, ArtifactKind::Markdown, &body.title, &body.content,
+        &state.db, &design_doc_id, ArtifactKind::Markdown, ArtifactKind::Markdown, &body.title, &body.content,
     ).await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
 
-    super::design_cache::schedule_regeneration(state.neo4j.clone(), project_id.clone(), deployment_id.clone());
+    super::design_cache::schedule_regeneration(state.db.clone(), project_id.clone(), deployment_id.clone());
 
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
 }
 
@@ -1504,12 +1472,12 @@ pub async fn generate_provision(
 
     let turn_id = uuid::Uuid::new_v4().to_string();
     crate::cost::record_deployment_turn(
-        &state.neo4j, &state.pricing, crate::cost::CostScope::Provision, &turn_id, &user.sub,
+        &state.db, &state.pricing, crate::cost::CostScope::Provision, &turn_id, &user.sub,
         &project_id, &deployment_id, None, None,
         response.provider_used.as_ref(), &response.usage, response.llm_call_count, response.duration_ms,
     ).await;
 
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
 }
 
@@ -1521,7 +1489,7 @@ pub async fn generate_provision_stream(
     let (agent, prompt) = prepare_provision_generation(&state, &user, &project_id, &deployment_id).await?;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
-    let neo4j          = Arc::clone(&state.neo4j);
+    let db          = Arc::clone(&state.db);
     let pricing        = Arc::clone(&state.pricing);
     let project_id_bg  = project_id.clone();
     let deployment_id_bg = deployment_id.clone();
@@ -1535,7 +1503,7 @@ pub async fn generate_provision_stream(
             if let AgentEvent::Done { provider_used, duration_ms, usage, llm_call_count, .. } = &event {
                 let turn_id = uuid::Uuid::new_v4().to_string();
                 crate::cost::record_deployment_turn(
-                    &neo4j, &pricing, crate::cost::CostScope::Provision, &turn_id, &user_id_bg,
+                    &db, &pricing, crate::cost::CostScope::Provision, &turn_id, &user_id_bg,
                     &project_id_bg, &deployment_id_bg, None, None,
                     provider_used.as_ref(), usage, *llm_call_count, *duration_ms,
                 ).await;
@@ -1563,22 +1531,24 @@ async fn prepare_provision_generation(
     project_id:    &str,
     deployment_id: &str,
 ) -> Result<(Arc<Agent>, String), ApiError> {
-    let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
     let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     let design_doc_id = deployment["design_doc"]["id"].as_str()
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?;
-    let design = get_artifact_in_project(&state.neo4j, &project_id, design_doc_id)
+    let design = get_artifact_in_project(&state.db, &project_id, design_doc_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "design document not found"))?;
     let design_content = design["content"].as_str().unwrap_or_default();
 
-    let context_artifact_rows = state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         OPTIONAL MATCH (d)-[:HAS_CONTEXT_ARTIFACT]->(a:Artifact)
-         RETURN a.title AS title, a.kind AS kind, a.content AS content
+    let context_artifact_rows = state.db.query(
+        "SELECT a.title, a.kind, a.content
+         FROM deployment_context_artifacts dca
+         JOIN deployments d ON d.id = dca.deployment_id
+         JOIN artifacts a   ON a.id = dca.artifact_id
+         WHERE d.id = $did AND d.project_id = $pid
          ORDER BY a.title",
         json!({ "pid": project_id, "did": deployment_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
@@ -1676,7 +1646,7 @@ pub async fn propose_provision_change(
 
     let turn_id = uuid::Uuid::new_v4().to_string();
     crate::cost::record_deployment_turn(
-        &state.neo4j, &state.pricing, crate::cost::CostScope::Proposal, &turn_id, &user.sub,
+        &state.db, &state.pricing, crate::cost::CostScope::Proposal, &turn_id, &user.sub,
         &project_id, &deployment_id, None, body.artifact_id.as_deref(),
         response.provider_used.as_ref(), &response.usage, response.llm_call_count, response.duration_ms,
     ).await;
@@ -1705,7 +1675,7 @@ pub async fn propose_provision_change_stream(
     let (agent, prompt) = prepare_provision_proposal(&state, &user, &project_id, &deployment_id, &body).await?;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
-    let neo4j          = Arc::clone(&state.neo4j);
+    let db          = Arc::clone(&state.db);
     let pricing        = Arc::clone(&state.pricing);
     let project_id_bg  = project_id.clone();
     let deployment_id_bg = deployment_id.clone();
@@ -1720,7 +1690,7 @@ pub async fn propose_provision_change_stream(
             if let AgentEvent::Done { provider_used, duration_ms, usage, llm_call_count, .. } = &event {
                 let turn_id = uuid::Uuid::new_v4().to_string();
                 crate::cost::record_deployment_turn(
-                    &neo4j, &pricing, crate::cost::CostScope::Proposal, &turn_id, &user_id_bg,
+                    &db, &pricing, crate::cost::CostScope::Proposal, &turn_id, &user_id_bg,
                     &project_id_bg, &deployment_id_bg, None, artifact_id_bg.as_deref(),
                     provider_used.as_ref(), usage, *llm_call_count, *duration_ms,
                 ).await;
@@ -1755,7 +1725,7 @@ async fn prepare_provision_proposal(
         return Err(err(StatusCode::BAD_REQUEST, "instructions or error_context are required"));
     }
 
-    let project = require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
     let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
@@ -1773,7 +1743,7 @@ async fn prepare_provision_proposal(
     let artifact_id = body.artifact_id.as_deref().unwrap_or_default().trim();
 
     if !artifact_id.is_empty() {
-        let artifact = get_artifact_in_project(&state.neo4j, &project_id, artifact_id)
+        let artifact = get_artifact_in_project(&state.db, &project_id, artifact_id)
             .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "artifact not found in this project"))?;
         let kind_str = artifact["kind"].as_str().unwrap_or_default();
@@ -1785,7 +1755,7 @@ async fn prepare_provision_proposal(
             let deploy_content = artifact["content"].as_str().unwrap_or_default().to_string();
 
             let (deploy_title, destroy_title, destroy_content) = find_bash_pair(
-                &state.neo4j, &project_id, &deployment_id, artifact_id, &title,
+                &state.db, &project_id, &deployment_id, artifact_id, &title,
             ).await?;
 
             let destroy_section = match &destroy_content {
@@ -1819,12 +1789,12 @@ async fn prepare_provision_proposal(
         }
     }
 
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
 
     let mut all_files = std::collections::BTreeMap::new();
 
     if let Some(bundle_id) = deployment["terraform_bundle"]["id"].as_str() {
-        let bundle_artifact = get_artifact_in_project(&state.neo4j, &project_id, bundle_id)
+        let bundle_artifact = get_artifact_in_project(&state.db, &project_id, bundle_id)
             .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "terraform bundle not found"))?;
         let bundle_content = bundle_artifact["content"].as_str().unwrap_or_default().to_string();
@@ -1837,13 +1807,13 @@ async fn prepare_provision_proposal(
         }
     }
 
-    let deploy_rows = fetch_execution_plan_rows(&state.neo4j, &project_id, &deployment_id, "deploy").await?;
-    let destroy_rows = fetch_execution_plan_rows(&state.neo4j, &project_id, &deployment_id, "destroy").await?;
+    let deploy_rows = fetch_execution_plan_rows(&state.db, &project_id, &deployment_id, "deploy").await?;
+    let destroy_rows = fetch_execution_plan_rows(&state.db, &project_id, &deployment_id, "destroy").await?;
     for rows in [&deploy_rows, &destroy_rows] {
         for row in rows {
             if let (Some(aid), Some(kind)) = (row["artifact_id"].as_str(), row["artifact_kind"].as_str()) {
                 if kind == "bash" {
-                    if let Ok(Some(artifact)) = get_artifact_in_project(&state.neo4j, &project_id, aid).await {
+                    if let Ok(Some(artifact)) = get_artifact_in_project(&state.db, &project_id, aid).await {
                         let title = artifact["title"].as_str().unwrap_or_default().to_string();
                         let content = artifact["content"].as_str().unwrap_or_default().to_string();
                         all_files.insert(title, content);
@@ -1877,7 +1847,7 @@ async fn prepare_provision_proposal(
 }
 
 async fn find_bash_pair(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
     artifact_id:   &str,
@@ -1896,18 +1866,22 @@ async fn find_bash_pair(
     };
 
     let destroy_content = if is_deploy {
-        let rows = neo4j.query_read(
-            "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_EXECUTION_STEP]->(s:ExecutionStep {phase: 'destroy', action: 'destroy'})
-             OPTIONAL MATCH (s)-[:RUNS]->(a:Artifact {kind: 'bash'})
-             RETURN a.id AS id, a.title AS title, a.content AS content",
+        let rows = db.query(
+            "SELECT a.id, a.title, a.content
+             FROM execution_steps s
+             JOIN deployments d ON d.id = s.deployment_id
+             LEFT JOIN artifacts a ON a.id = s.artifact_id AND a.kind = 'bash'
+             WHERE d.id = $did AND d.project_id = $pid AND s.phase = 'destroy' AND s.action = 'destroy'",
             json!({ "pid": project_id, "did": deployment_id }),
         ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         find_matching_bash(&rows, &destroy_title, artifact_id)
     } else {
-        let rows = neo4j.query_read(
-            "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_EXECUTION_STEP]->(s:ExecutionStep {phase: 'deploy', action: 'run'})
-             OPTIONAL MATCH (s)-[:RUNS]->(a:Artifact {kind: 'bash'})
-             RETURN a.id AS id, a.title AS title, a.content AS content",
+        let rows = db.query(
+            "SELECT a.id, a.title, a.content
+             FROM execution_steps s
+             JOIN deployments d ON d.id = s.deployment_id
+             LEFT JOIN artifacts a ON a.id = s.artifact_id AND a.kind = 'bash'
+             WHERE d.id = $did AND d.project_id = $pid AND s.phase = 'deploy' AND s.action = 'run'",
             json!({ "pid": project_id, "did": deployment_id }),
         ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         find_matching_bash(&rows, &deploy_title, artifact_id)
@@ -1950,13 +1924,13 @@ pub async fn apply_provision_change(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<ApplyProvisionChangeBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     bundle::validate_bundle(&body.files).map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
 
     let artifact_id = body.artifact_id.as_deref().unwrap_or_default().trim();
 
     if !artifact_id.is_empty() {
-        let artifact = get_artifact_in_project(&state.neo4j, &project_id, artifact_id)
+        let artifact = get_artifact_in_project(&state.db, &project_id, artifact_id)
             .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "artifact not found in this project"))?;
         let kind_str = artifact["kind"].as_str().unwrap_or_default();
@@ -1979,34 +1953,34 @@ pub async fn apply_provision_change(
 
             if let Some(ref content) = deploy_content {
                 let deploy_artifact_id = if is_deploy { artifact_id.to_string() } else {
-                    find_bash_artifact_id(&state.neo4j, &project_id, &deployment_id, &deploy_title, artifact_id).await?
+                    find_bash_artifact_id(&state.db, &project_id, &deployment_id, &deploy_title, artifact_id).await?
                 };
                 if !deploy_artifact_id.is_empty() {
-                    update_artifact(&state.neo4j, &deploy_artifact_id, ArtifactKind::Bash, ArtifactKind::Bash, &deploy_title, content)
+                    update_artifact(&state.db, &deploy_artifact_id, ArtifactKind::Bash, ArtifactKind::Bash, &deploy_title, content)
                         .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
                 }
             }
 
             if let Some(ref content) = destroy_content {
                 let destroy_artifact_id = if !is_deploy { artifact_id.to_string() } else {
-                    find_bash_artifact_id(&state.neo4j, &project_id, &deployment_id, &destroy_title, artifact_id).await?
+                    find_bash_artifact_id(&state.db, &project_id, &deployment_id, &destroy_title, artifact_id).await?
                 };
                 if destroy_artifact_id.is_empty() {
-                    let created = create_artifact(&state.neo4j, &project_id, ArtifactKind::Bash, &destroy_title, content, "user")
+                    let created = create_artifact(&state.db, &project_id, ArtifactKind::Bash, &destroy_title, content, "user")
                         .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
-                    link_bash_to_deployment(&state.neo4j, &deployment_id, created["id"].as_str().unwrap_or_default(), "destroy").await?;
+                    link_bash_to_deployment(&state.db, &deployment_id, created["id"].as_str().unwrap_or_default(), "destroy").await?;
                 } else {
-                    update_artifact(&state.neo4j, &destroy_artifact_id, ArtifactKind::Bash, ArtifactKind::Bash, &destroy_title, content)
+                    update_artifact(&state.db, &destroy_artifact_id, ArtifactKind::Bash, ArtifactKind::Bash, &destroy_title, content)
                         .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
                 }
             }
 
-            let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+            let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
             return Ok(Json(deployment));
         }
     }
 
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
 
     let mut bundle_files: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     let mut bash_files: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
@@ -2024,7 +1998,7 @@ pub async fn apply_provision_change(
 
     if !bundle_files.is_empty() {
         if let Some(bundle_id) = deployment["terraform_bundle"]["id"].as_str() {
-            let existing = get_artifact_in_project(&state.neo4j, &project_id, bundle_id)
+            let existing = get_artifact_in_project(&state.db, &project_id, bundle_id)
                 .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
                 .ok_or_else(|| err(StatusCode::NOT_FOUND, "terraform bundle not found"))?;
             let kind = ArtifactKind::parse(existing["kind"].as_str().unwrap_or(""))
@@ -2032,30 +2006,30 @@ pub async fn apply_provision_change(
             let title = existing["title"].as_str().unwrap_or("Infrastructure");
             let content = serde_json::to_string(&bundle_files)
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-            crate::artifacts::handlers::update_artifact(&state.neo4j, bundle_id, kind, kind, title, &content)
+            crate::artifacts::handlers::update_artifact(&state.db, bundle_id, kind, kind, title, &content)
                 .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
         }
     }
 
     for (title, content) in &bash_files {
         let phase = if title.to_lowercase().starts_with("destroy-") { "destroy" } else { "deploy" };
-        let existing_id = find_bash_artifact_id(&state.neo4j, &project_id, &deployment_id, title, "").await?;
+        let existing_id = find_bash_artifact_id(&state.db, &project_id, &deployment_id, title, "").await?;
         if existing_id.is_empty() {
-            let created = create_artifact(&state.neo4j, &project_id, ArtifactKind::Bash, title, content, "user")
+            let created = create_artifact(&state.db, &project_id, ArtifactKind::Bash, title, content, "user")
                 .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
-            link_bash_to_deployment(&state.neo4j, &deployment_id, created["id"].as_str().unwrap_or_default(), phase).await?;
+            link_bash_to_deployment(&state.db, &deployment_id, created["id"].as_str().unwrap_or_default(), phase).await?;
         } else {
-            update_artifact(&state.neo4j, &existing_id, ArtifactKind::Bash, ArtifactKind::Bash, title, content)
+            update_artifact(&state.db, &existing_id, ArtifactKind::Bash, ArtifactKind::Bash, title, content)
                 .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
         }
     }
 
-    let deployment = fetch_deployment_detail(&state.neo4j, &project_id, &deployment_id).await?;
+    let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
 }
 
 async fn find_bash_artifact_id(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
     target_title:  &str,
@@ -2063,10 +2037,12 @@ async fn find_bash_artifact_id(
 ) -> Result<String, ApiError> {
     let phase = if target_title.starts_with("destroy-") { "destroy" } else { "deploy" };
     let action = if phase == "destroy" { "destroy" } else { "run" };
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_EXECUTION_STEP]->(s:ExecutionStep {phase: $phase, action: $action})
-         OPTIONAL MATCH (s)-[:RUNS]->(a:Artifact {kind: 'bash'})
-         RETURN a.id AS id, a.title AS title",
+    let rows = db.query(
+        "SELECT a.id, a.title
+         FROM execution_steps s
+         JOIN deployments d ON d.id = s.deployment_id
+         LEFT JOIN artifacts a ON a.id = s.artifact_id AND a.kind = 'bash'
+         WHERE d.id = $did AND d.project_id = $pid AND s.phase = $phase AND s.action = $action",
         json!({ "pid": project_id, "did": deployment_id, "phase": phase, "action": action }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     for row in &rows {
@@ -2080,75 +2056,77 @@ async fn find_bash_artifact_id(
 }
 
 async fn link_bash_to_deployment(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     deployment_id: &str,
     artifact_id:   &str,
     phase:         &str,
 ) -> Result<(), ApiError> {
     let step_id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
     let action = if phase == "destroy" { "destroy" } else { "run" };
-    neo4j.query_read(
-        "MATCH (d:Deployment {id: $did}), (a:Artifact {id: $aid})
-         CREATE (s:ExecutionStep {id: $sid, phase: $phase, action: $action, label: $label, step_index: 0, created_at: $now})
-         CREATE (d)-[:HAS_EXECUTION_STEP]->(s)
-         CREATE (s)-[:RUNS]->(a)",
+    db.query(
+        "INSERT INTO execution_steps (id, deployment_id, phase, action, label, step_index, artifact_id, created_at)
+         VALUES ($sid, $did, $phase, $action, $label, 0, $aid, $now)",
         json!({ "did": deployment_id, "aid": artifact_id, "sid": step_id, "phase": phase, "action": action, "label": artifact_id, "now": now }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(())
 }
 
 pub(crate) async fn add_context_artifact_core(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id:  &str,
     title:         &str,
     kind:          ArtifactKind,
     content:       &str,
 ) -> Result<Value, ApiError> {
-    let created = create_artifact(neo4j, project_id, kind, title, content, "user")
+    let created = create_artifact(db, project_id, kind, title, content, "user")
         .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
     let artifact_id = created["id"].as_str().unwrap_or_default().to_string();
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did}),
-                (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact {id: $aid})
-         CREATE (d)-[:HAS_CONTEXT_ARTIFACT]->(a)",
+    db.query(
+        "INSERT INTO deployment_context_artifacts (deployment_id, artifact_id)
+                SELECT d.id, a.id FROM deployments d JOIN artifacts a ON a.project_id = d.project_id
+                WHERE d.id = $did AND d.project_id = $pid AND a.id = $aid
+                ON CONFLICT DO NOTHING",
         json!({ "pid": project_id, "did": deployment_id, "aid": artifact_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let deployment = fetch_deployment_detail(neo4j, project_id, deployment_id).await?;
+    let deployment = fetch_deployment_detail(db, project_id, deployment_id).await?;
     Ok(deployment)
 }
 
 pub(crate) async fn link_context_artifact_core(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
     artifact_id:   &str,
 ) -> Result<Value, ApiError> {
-    let artifact = get_artifact_in_project(neo4j, project_id, artifact_id)
+    let artifact = get_artifact_in_project(db, project_id, artifact_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "artifact not found in this project"))?;
     let aid = artifact["id"].as_str().unwrap_or_default().to_string();
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did}),
-                (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact {id: $aid})
-         MERGE (d)-[:HAS_CONTEXT_ARTIFACT]->(a)",
+    db.query(
+        "INSERT INTO deployment_context_artifacts (deployment_id, artifact_id)
+                SELECT d.id, a.id FROM deployments d JOIN artifacts a ON a.project_id = d.project_id
+                WHERE d.id = $did AND d.project_id = $pid AND a.id = $aid
+                ON CONFLICT DO NOTHING",
         json!({ "pid": project_id, "did": deployment_id, "aid": aid }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let deployment = fetch_deployment_detail(neo4j, project_id, deployment_id).await?;
+    let deployment = fetch_deployment_detail(db, project_id, deployment_id).await?;
     Ok(deployment)
 }
 
 pub(crate) async fn remove_context_artifact_core(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
     artifact_id:   &str,
 ) -> Result<(), ApiError> {
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         MATCH (d)-[r:HAS_CONTEXT_ARTIFACT]->(:Artifact {id: $aid})
-         DELETE r RETURN 1",
+    let rows = db.query(
+        "DELETE FROM deployment_context_artifacts dca
+         USING deployments d
+         WHERE dca.deployment_id = d.id AND d.id = $did AND d.project_id = $pid
+           AND dca.artifact_id = $aid
+         RETURNING 1 AS ok",
         json!({ "pid": project_id, "did": deployment_id, "aid": artifact_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if rows.is_empty() {
@@ -2170,7 +2148,7 @@ pub async fn add_context_artifact(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<AddContextArtifactBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let title = body.title.trim();
     if title.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "title is required"));
@@ -2178,7 +2156,7 @@ pub async fn add_context_artifact(
     let kind = ArtifactKind::parse(&body.kind)
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "kind must be 'markdown', 'pdf', 'terraform', 'terragrunt', or 'bash'"))?;
     let deployment = add_context_artifact_core(
-        &state.neo4j, &project_id, &deployment_id, title, kind, &body.content,
+        &state.db, &project_id, &deployment_id, title, kind, &body.content,
     ).await?;
     Ok((StatusCode::CREATED, Json(deployment)))
 }
@@ -2194,9 +2172,9 @@ pub async fn link_context_artifact(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<LinkContextArtifactBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let deployment = link_context_artifact_core(
-        &state.neo4j, &project_id, &deployment_id, &body.artifact_id,
+        &state.db, &project_id, &deployment_id, &body.artifact_id,
     ).await?;
     Ok(Json(deployment))
 }
@@ -2206,14 +2184,14 @@ pub async fn remove_context_artifact(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id, artifact_id)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    remove_context_artifact_core(&state.neo4j, &project_id, &deployment_id, &artifact_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    remove_context_artifact_core(&state.db, &project_id, &deployment_id, &artifact_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn propose_artifact_change_core(
-    neo4j:           &Neo4jClient,
+    db:           &Db,
     project_id:      &str,
     deployment_id:   &str,
     artifact_id:     &str,
@@ -2222,33 +2200,29 @@ pub(crate) async fn propose_artifact_change_core(
     current_content: &str,
     proposed_content: &str,
 ) -> Result<Value, ApiError> {
-    let artifact = get_artifact_in_project(neo4j, project_id, artifact_id)
+    let artifact = get_artifact_in_project(db, project_id, artifact_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "artifact not found in this project"))?;
     let kind = artifact["kind"].as_str().unwrap_or("").to_string();
     let id  = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did}),
-                (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact {id: $aid})
-         CREATE (p:Proposal {
-             id: $id, source: $source, explanation: $explanation,
-             current_content: $current_content, proposed_content: $proposed_content,
-             status: 'pending', created_at: $now
-         })
-         CREATE (d)-[:HAS_PROPOSAL]->(p)
-         CREATE (p)-[:TARGETS]->(a)",
+    let now = harvest_db::now_rfc3339();
+    db.query(
+        "INSERT INTO proposals (id, deployment_id, target_artifact_id, source, explanation,
+                                       current_content, proposed_content, status, created_at)
+                SELECT $id, d.id, a.id, $source, $explanation, $current_content, $proposed_content,
+                       'pending', $now::timestamptz
+                FROM deployments d JOIN artifacts a ON a.project_id = d.project_id
+                WHERE d.id = $did AND d.project_id = $pid AND a.id = $aid",
         json!({
             "pid": project_id, "did": deployment_id, "aid": artifact_id, "id": id,
             "source": source, "explanation": explanation,
             "current_content": current_content, "proposed_content": proposed_content, "now": now,
         }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let rows = neo4j.query_read(
-        "MATCH (:Deployment {id: $did})-[:HAS_PROPOSAL]->(p:Proposal {id: $id})
-         RETURN p.id AS id, p.source AS source, p.explanation AS explanation,
-                p.current_content AS current_content, p.proposed_content AS proposed_content,
-                p.status AS status, p.created_at AS created_at, $aid AS target_artifact_id, $kind AS target_artifact_kind",
+    let rows = db.query(
+        "SELECT p.id, p.source, p.explanation, p.current_content, p.proposed_content, p.status, p.created_at,
+                $aid::text AS target_artifact_id, $kind::text AS target_artifact_kind
+         FROM proposals p WHERE p.deployment_id = $did AND p.id = $id",
         json!({ "did": deployment_id, "id": id, "aid": artifact_id, "kind": kind }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next()
@@ -2257,49 +2231,52 @@ pub(crate) async fn propose_artifact_change_core(
 }
 
 pub(crate) async fn list_proposals_core(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
     status_filter: Option<&str>,
 ) -> Result<Value, ApiError> {
-    let (cypher, params) = match status_filter {
+    let (sql, params) = match status_filter {
         Some(status) => (
-            "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_PROPOSAL]->(p:Proposal {status: $status})
-             MATCH (p)-[:TARGETS]->(a:Artifact)
-             RETURN p.id AS id, p.source AS source, p.explanation AS explanation,
-                    p.current_content AS current_content, p.proposed_content AS proposed_content,
-                    p.status AS status, p.created_at AS created_at,
+            "SELECT p.id, p.source, p.explanation, p.current_content, p.proposed_content, p.status, p.created_at,
                     a.id AS target_artifact_id, a.kind AS target_artifact_kind
+             FROM proposals p
+             JOIN deployments d ON d.id = p.deployment_id
+             JOIN artifacts a   ON a.id = p.target_artifact_id
+             WHERE d.id = $did AND d.project_id = $pid AND p.status = $status
              ORDER BY p.created_at DESC",
             json!({ "pid": project_id, "did": deployment_id, "status": status }),
         ),
         None => (
-            "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_PROPOSAL]->(p:Proposal)
-             MATCH (p)-[:TARGETS]->(a:Artifact)
-             RETURN p.id AS id, p.source AS source, p.explanation AS explanation,
-                    p.current_content AS current_content, p.proposed_content AS proposed_content,
-                    p.status AS status, p.created_at AS created_at,
+            "SELECT p.id, p.source, p.explanation, p.current_content, p.proposed_content, p.status, p.created_at,
                     a.id AS target_artifact_id, a.kind AS target_artifact_kind
+             FROM proposals p
+             JOIN deployments d ON d.id = p.deployment_id
+             JOIN artifacts a   ON a.id = p.target_artifact_id
+             WHERE d.id = $did AND d.project_id = $pid
              ORDER BY p.created_at DESC",
             json!({ "pid": project_id, "did": deployment_id }),
         ),
     };
-    let rows = neo4j.query_read(cypher, params)
+    let rows = db.query(sql, params)
         .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(shape_proposals(&rows))
 }
 
 pub(crate) async fn approve_proposal_core(
-    neo4j:         Arc<Neo4jClient>,
+    db:         Arc<Db>,
     project_id:    &str,
     deployment_id: &str,
     proposal_id:   &str,
     edited_content: Option<&str>,
 ) -> Result<Value, ApiError> {
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_PROPOSAL]->(p:Proposal {id: $propid})
-         MATCH (p)-[:TARGETS]->(a:Artifact)
-         RETURN p.status AS status, p.proposed_content AS proposed_content, a.id AS artifact_id, a.kind AS artifact_kind, a.title AS artifact_title",
+    let rows = db.query(
+        "SELECT p.status, p.proposed_content,
+                a.id AS artifact_id, a.kind AS artifact_kind, a.title AS artifact_title
+         FROM proposals p
+         JOIN deployments d ON d.id = p.deployment_id
+         JOIN artifacts a   ON a.id = p.target_artifact_id
+         WHERE d.id = $did AND d.project_id = $pid AND p.id = $propid",
         json!({ "pid": project_id, "did": deployment_id, "propid": proposal_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next()
@@ -2316,31 +2293,36 @@ pub(crate) async fn approve_proposal_core(
     let new_content = edited_content
         .map(str::to_string)
         .unwrap_or_else(|| row["proposed_content"].as_str().unwrap_or_default().to_string());
-    crate::artifacts::handlers::update_artifact(&neo4j, &artifact_id, kind, kind, &artifact_title, &new_content)
+    crate::artifacts::handlers::update_artifact(&db, &artifact_id, kind, kind, &artifact_title, &new_content)
         .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
     if kind == ArtifactKind::Markdown {
-        let _ = super::design_cache::on_artifact_changed(neo4j.clone(), project_id.to_string(), artifact_id.clone()).await;
+        let _ = super::design_cache::on_artifact_changed(db.clone(), project_id.to_string(), artifact_id.clone()).await;
     }
-    let now = chrono::Utc::now().to_rfc3339();
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_PROPOSAL]->(p:Proposal {id: $propid})
-         SET p.status = 'approved', p.proposed_content = $content",
+    let now = harvest_db::now_rfc3339();
+    db.query(
+        "UPDATE proposals p SET status = 'approved', proposed_content = $content
+         FROM deployments d
+         WHERE p.deployment_id = d.id AND d.id = $did AND d.project_id = $pid
+           AND p.id = $propid AND p.status = 'pending'
+         RETURNING p.id",
         json!({ "pid": project_id, "did": deployment_id, "propid": proposal_id, "content": new_content, "now": now }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let deployment = fetch_deployment_detail(&neo4j, project_id, deployment_id).await?;
+    let deployment = fetch_deployment_detail(&db, project_id, deployment_id).await?;
     Ok(json!({ "proposal_id": proposal_id, "status": "approved", "deployment": deployment }))
 }
 
 pub(crate) async fn discard_proposal_core(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
     proposal_id:   &str,
 ) -> Result<(), ApiError> {
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_PROPOSAL]->(p:Proposal {id: $propid})
-         WHERE p.status = 'pending'
-         SET p.status = 'discarded' RETURN 1",
+    let rows = db.query(
+        "UPDATE proposals p SET status = 'discarded'
+         FROM deployments d
+         WHERE p.deployment_id = d.id AND d.id = $did AND d.project_id = $pid
+           AND p.id = $propid AND p.status = 'pending'
+         RETURNING 1 AS ok",
         json!({ "pid": project_id, "did": deployment_id, "propid": proposal_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if rows.is_empty() {
@@ -2364,7 +2346,7 @@ pub async fn propose_artifact_change(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<ProposeChangeBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     if body.explanation.trim().is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "explanation is required"));
     }
@@ -2374,7 +2356,7 @@ pub async fn propose_artifact_change(
     let source = body.source.as_deref().unwrap_or("agent").trim();
     let source = if source.is_empty() { "agent" } else { source };
     let proposal = propose_artifact_change_core(
-        &state.neo4j, &project_id, &deployment_id, &body.artifact_id,
+        &state.db, &project_id, &deployment_id, &body.artifact_id,
         source, &body.explanation, &body.current_content, &body.proposed_content,
     ).await?;
     Ok((StatusCode::CREATED, Json(proposal)))
@@ -2385,8 +2367,8 @@ pub async fn list_proposals(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let proposals = list_proposals_core(&state.neo4j, &project_id, &deployment_id, None).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let proposals = list_proposals_core(&state.db, &project_id, &deployment_id, None).await?;
     Ok(Json(proposals))
 }
 
@@ -2401,9 +2383,9 @@ pub async fn approve_proposal(
     Path((project_id, deployment_id, proposal_id)): Path<(String, String, String)>,
     Json(body): Json<ApproveProposalBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let result = approve_proposal_core(
-        state.neo4j.clone(), &project_id, &deployment_id, &proposal_id,
+        state.db.clone(), &project_id, &deployment_id, &proposal_id,
         body.edited_content.as_deref(),
     ).await?;
     Ok(Json(result))
@@ -2414,8 +2396,8 @@ pub async fn discard_proposal(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id, proposal_id)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    discard_proposal_core(&state.neo4j, &project_id, &deployment_id, &proposal_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    discard_proposal_core(&state.db, &project_id, &deployment_id, &proposal_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2428,14 +2410,14 @@ pub struct ParsedStepInput {
 }
 
 pub(crate) async fn set_execution_plan_core(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
     deploy_steps:  &[ParsedStepInput],
     destroy_steps: &[ParsedStepInput],
 ) -> Result<(), ApiError> {
     for step in deploy_steps.iter().chain(destroy_steps.iter()) {
-        let artifact = get_artifact_in_project(neo4j, project_id, &step.artifact_id)
+        let artifact = get_artifact_in_project(db, project_id, &step.artifact_id)
             .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| err(StatusCode::NOT_FOUND, &format!("artifact {} not found in this project", step.artifact_id)))?;
         let kind_str = artifact["kind"].as_str().unwrap_or("");
@@ -2467,28 +2449,24 @@ pub(crate) async fn set_execution_plan_core(
     crate::agent::deployment_tools::validate_destroy_coverage(&coverage_plan)
         .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
 
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         OPTIONAL MATCH (d)-[:HAS_EXECUTION_STEP]->(s:ExecutionStep)
-         DETACH DELETE s",
+    let tx = db.begin().await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    tx.query(
+        "DELETE FROM execution_steps s USING deployments d
+         WHERE s.deployment_id = d.id AND d.id = $did AND d.project_id = $pid",
         json!({ "pid": project_id, "did": deployment_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
     let deploy_ids: Vec<String> = (0..deploy_steps.len()).map(|_| Uuid::new_v4().to_string()).collect();
     let destroy_ids: Vec<String> = (0..destroy_steps.len()).map(|_| Uuid::new_v4().to_string()).collect();
 
     for (i, step) in deploy_steps.iter().enumerate() {
         let step_id = &deploy_ids[i];
-        neo4j.query_read(
-            "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did}),
-                    (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact {id: $aid})
-             CREATE (s:ExecutionStep {
-                 id: $sid, action: $action, phase: 'deploy', label: $label,
-                 step_index: $idx, created_at: $now
-             })
-             CREATE (d)-[:HAS_EXECUTION_STEP]->(s)
-             CREATE (s)-[:RUNS]->(a)",
+        tx.query(
+            "INSERT INTO execution_steps (id, deployment_id, action, phase, label, step_index, artifact_id, created_at)
+                    SELECT $sid, d.id, $action, 'deploy', $label, $idx::int, a.id, $now::timestamptz
+                    FROM deployments d JOIN artifacts a ON a.project_id = d.project_id
+                    WHERE d.id = $did AND d.project_id = $pid AND a.id = $aid",
             json!({
                 "pid": project_id, "did": deployment_id, "aid": step.artifact_id,
                 "sid": step_id, "action": step.action, "label": step.label,
@@ -2498,15 +2476,11 @@ pub(crate) async fn set_execution_plan_core(
     }
     for (i, step) in destroy_steps.iter().enumerate() {
         let step_id = &destroy_ids[i];
-        neo4j.query_read(
-            "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did}),
-                    (:Project {id: $pid})-[:HAS_ARTIFACT]->(a:Artifact {id: $aid})
-             CREATE (s:ExecutionStep {
-                 id: $sid, action: $action, phase: 'destroy', label: $label,
-                 step_index: $idx, created_at: $now
-             })
-             CREATE (d)-[:HAS_EXECUTION_STEP]->(s)
-             CREATE (s)-[:RUNS]->(a)",
+        tx.query(
+            "INSERT INTO execution_steps (id, deployment_id, action, phase, label, step_index, artifact_id, created_at)
+                    SELECT $sid, d.id, $action, 'destroy', $label, $idx::int, a.id, $now::timestamptz
+                    FROM deployments d JOIN artifacts a ON a.project_id = d.project_id
+                    WHERE d.id = $did AND d.project_id = $pid AND a.id = $aid",
             json!({
                 "pid": project_id, "did": deployment_id, "aid": step.artifact_id,
                 "sid": step_id, "action": step.action, "label": step.label,
@@ -2517,40 +2491,46 @@ pub(crate) async fn set_execution_plan_core(
 
     for (i, step) in deploy_steps.iter().enumerate() {
         for &dep in &step.depends_on {
-            neo4j.query_read(
-                "MATCH (dep:ExecutionStep {id: $dep_id}), (target:ExecutionStep {id: $target_id})
-                 CREATE (target)-[:DEPENDS_ON]->(dep)",
+            tx.query(
+                "INSERT INTO execution_step_deps (step_id, depends_on_id)
+                 VALUES ($target_id, $dep_id)
+                 ON CONFLICT DO NOTHING",
                 json!({ "dep_id": &deploy_ids[dep], "target_id": &deploy_ids[i] }),
             ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         }
     }
     for (i, step) in destroy_steps.iter().enumerate() {
         for &dep in &step.depends_on {
-            neo4j.query_read(
-                "MATCH (dep:ExecutionStep {id: $dep_id}), (target:ExecutionStep {id: $target_id})
-                 CREATE (target)-[:DEPENDS_ON]->(dep)",
+            tx.query(
+                "INSERT INTO execution_step_deps (step_id, depends_on_id)
+                 VALUES ($target_id, $dep_id)
+                 ON CONFLICT DO NOTHING",
                 json!({ "dep_id": &destroy_ids[dep], "target_id": &destroy_ids[i] }),
             ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         }
     }
 
+    tx.commit().await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(())
 }
 
 async fn fetch_execution_plan_rows(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
     phase:         &str,
 ) -> Result<Vec<Value>, ApiError> {
-    let rows = neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(:Deployment {id: $did})-[:HAS_EXECUTION_STEP]->(s:ExecutionStep {phase: $phase})
-         OPTIONAL MATCH (s)-[:RUNS]->(a:Artifact)
-         OPTIONAL MATCH (s)-[:DEPENDS_ON]->(dep:ExecutionStep)
-         RETURN s.id AS id, s.action AS action, s.phase AS phase, s.label AS label,
-                s.step_index AS step_index,
+    let rows = db.query(
+        "SELECT s.id, s.action, s.phase, s.label, s.step_index,
                 a.id AS artifact_id, a.kind AS artifact_kind, a.title AS artifact_title,
-                [x IN collect(dep.id) WHERE x IS NOT NULL] AS depends_on
+                COALESCE(array_agg(dep.depends_on_id ORDER BY dep.depends_on_id)
+                             FILTER (WHERE dep.depends_on_id IS NOT NULL), '{}') AS depends_on
+         FROM execution_steps s
+         JOIN deployments d ON d.id = s.deployment_id
+         LEFT JOIN artifacts a ON a.id = s.artifact_id
+         LEFT JOIN execution_step_deps dep ON dep.step_id = s.id
+         WHERE d.id = $did AND d.project_id = $pid AND s.phase = $phase
+         GROUP BY s.id, a.id
          ORDER BY s.step_index",
         json!({ "pid": project_id, "did": deployment_id, "phase": phase }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
@@ -2558,12 +2538,12 @@ async fn fetch_execution_plan_rows(
 }
 
 pub(crate) async fn get_execution_plan_core(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
 ) -> Result<Value, ApiError> {
-    let deploy_rows  = fetch_execution_plan_rows(neo4j, project_id, deployment_id, "deploy").await?;
-    let destroy_rows = fetch_execution_plan_rows(neo4j, project_id, deployment_id, "destroy").await?;
+    let deploy_rows  = fetch_execution_plan_rows(db, project_id, deployment_id, "deploy").await?;
+    let destroy_rows = fetch_execution_plan_rows(db, project_id, deployment_id, "destroy").await?;
     Ok(json!({
         "deploy_steps":  shape_execution_plan(&deploy_rows),
         "destroy_steps": shape_execution_plan(&destroy_rows),
@@ -2575,8 +2555,8 @@ pub async fn get_execution_plan(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
-    let plan = get_execution_plan_core(&state.neo4j, &project_id, &deployment_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let plan = get_execution_plan_core(&state.db, &project_id, &deployment_id).await?;
     Ok(Json(plan))
 }
 
@@ -2592,7 +2572,7 @@ pub async fn set_execution_plan(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<SetExecutionPlanBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let deploy_nodes: Vec<StepNode> = body.deploy_steps.iter()
         .map(|s| StepNode {
             id:         s.artifact_id.clone(),
@@ -2617,10 +2597,10 @@ pub async fn set_execution_plan(
     topological_sort(&destroy_nodes).map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
 
     set_execution_plan_core(
-        &state.neo4j, &project_id, &deployment_id,
+        &state.db, &project_id, &deployment_id,
         &body.deploy_steps, &body.destroy_steps,
     ).await?;
-    let plan = get_execution_plan_core(&state.neo4j, &project_id, &deployment_id).await?;
+    let plan = get_execution_plan_core(&state.db, &project_id, &deployment_id).await?;
     Ok((StatusCode::CREATED, Json(plan)))
 }
 
@@ -2633,7 +2613,7 @@ fn dag_preview(s: &str, max_chars: usize) -> String {
 
 #[allow(clippy::too_many_arguments)]
 async fn record_dag_step_run(
-    neo4j:         &Neo4jClient,
+    db:         &Db,
     project_id:    &str,
     deployment_id: &str,
     step_id:       &str,
@@ -2643,18 +2623,15 @@ async fn record_dag_step_run(
     stdout:        &str,
     stderr:        &str,
 ) -> anyhow::Result<()> {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
     let rid = uuid::Uuid::new_v4().to_string();
     let success = exit_code == Some(0);
-    neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         CREATE (r:DeploymentRun {
-             id: $rid, action: $action, status: $status, exit_code: $exit_code,
-             stdout_preview: $stdout_preview, stderr_preview: $stderr_preview,
-             step_id: $step_id, artifact_id: $aid,
-             initiated_by: 'user', created_at: $now
-         })
-         CREATE (d)-[:HAS_RUN]->(r)",
+    db.query(
+        "INSERT INTO deployment_runs (id, deployment_id, action, status, exit_code, stdout_preview,
+                                      stderr_preview, step_id, artifact_id, initiated_by, created_at)
+         SELECT $rid, d.id, $action, $status, $exit_code::int, $stdout_preview, $stderr_preview,
+                $step_id, $aid, 'user', $now::timestamptz
+         FROM deployments d WHERE d.id = $did AND d.project_id = $pid",
         json!({
             "pid": project_id, "did": deployment_id, "rid": rid,
             "action": action, "status": if success { "success" } else { "failed" },
@@ -2681,7 +2658,7 @@ async fn execute_dag_step(
     let artifact_kind_str = step["artifact_kind"].as_str().unwrap_or_default().to_string();
     let label      = step["label"].as_str().unwrap_or_default().to_string();
 
-    let artifact = get_artifact_in_project(&state.neo4j, project_id, &artifact_id)
+    let artifact = get_artifact_in_project(&state.db, project_id, &artifact_id)
         .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "artifact not found"))?;
     let content = artifact["content"].as_str().unwrap_or_default().to_string();
@@ -2722,7 +2699,7 @@ async fn execute_dag_step(
 
     let success = exit_code == Some(0);
     record_dag_step_run(
-        &state.neo4j, project_id, deployment_id, &step_id, &artifact_id,
+        &state.db, project_id, deployment_id, &step_id, &artifact_id,
         &action_str, exit_code, &stdout, &stderr,
     ).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
@@ -2747,7 +2724,7 @@ pub(crate) async fn run_dag_core(
     timeout_secs:  u64,
 ) -> Result<Value, ApiError> {
     require_agent_in_project(state, agent_id, project_id)?;
-    let rows = fetch_execution_plan_rows(&state.neo4j, project_id, deployment_id, "deploy").await?;
+    let rows = fetch_execution_plan_rows(&state.db, project_id, deployment_id, "deploy").await?;
     if rows.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "no deploy steps configured — set an execution plan first"));
     }
@@ -2785,11 +2762,11 @@ pub(crate) async fn run_dag_core(
         }
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
     let new_state = if all_success { InfraState::Up } else { InfraState::Broken };
-    state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         SET d.infra_state = $new_state, d.updated_at = $now",
+    state.db.query(
+        "UPDATE deployments SET infra_state = $new_state, updated_at = $now
+         WHERE id = $did AND project_id = $pid",
         json!({ "pid": project_id, "did": deployment_id, "new_state": new_state.as_str(), "now": now }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -2802,7 +2779,7 @@ pub async fn run_dag(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<RunDeploymentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let value = run_dag_core(&state, &project_id, &deployment_id, &body.agent_id, body.timeout_secs).await?;
     Ok(Json(value))
 }
@@ -2815,7 +2792,7 @@ pub(crate) async fn run_destroy_dag_core(
     timeout_secs:  u64,
 ) -> Result<Value, ApiError> {
     require_agent_in_project(state, agent_id, project_id)?;
-    let rows = fetch_execution_plan_rows(&state.neo4j, project_id, deployment_id, "destroy").await?;
+    let rows = fetch_execution_plan_rows(&state.db, project_id, deployment_id, "destroy").await?;
     if rows.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "no destroy steps configured — set an execution plan first"));
     }
@@ -2853,11 +2830,11 @@ pub(crate) async fn run_destroy_dag_core(
         }
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
     let new_state = if all_success { InfraState::Destroyed } else { InfraState::DestroyFailed };
-    state.neo4j.query_read(
-        "MATCH (:Project {id: $pid})-[:HAS_DEPLOYMENT]->(d:Deployment {id: $did})
-         SET d.infra_state = $new_state, d.updated_at = $now",
+    state.db.query(
+        "UPDATE deployments SET infra_state = $new_state, updated_at = $now
+         WHERE id = $did AND project_id = $pid",
         json!({ "pid": project_id, "did": deployment_id, "new_state": new_state.as_str(), "now": now }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -2870,7 +2847,7 @@ pub async fn run_destroy_dag(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<RunDeploymentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    require_project_access(&state.neo4j, &user.sub, &user.role, &project_id).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let value = run_destroy_dag_core(&state, &project_id, &deployment_id, &body.agent_id, body.timeout_secs).await?;
     Ok(Json(value))
 }
