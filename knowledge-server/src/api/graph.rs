@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::api::GraphState;
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 
 pub use crate::api::GraphCache;
 
@@ -60,71 +60,66 @@ pub struct SymbolSource {
     pub source: Option<String>,
 }
 
-async fn fetch_graph_data(neo4j: &Neo4jClient, repo: &str, version: &str) -> Result<GraphData, String> {
+async fn fetch_graph_data(db: &Db, repo: &str, version: &str) -> Result<GraphData, String> {
     let p = || json!({ "repo": repo, "version": version });
 
     let (r_nodes, r_calls, r_contains, r_impl_contains, r_inherits, r_implements, r_uses, r_embeds) =
         tokio::join!(
-            neo4j.query_read(
-                "MATCH (n {repo: $repo, version: $version})
-                 WHERE n:Function OR n:Class
-                 RETURN n.name AS name, n.file AS file,
-                        coalesce(n.kind, toLower(labels(n)[0])) AS kind,
-                        coalesce(n.start_line, 0) AS start_line, n.signature AS signature
-                 ORDER BY n.file, n.start_line",
+            db.query(
+                "SELECT name, file, COALESCE(kind, lower(label)) AS kind,
+                        COALESCE(start_line, 0) AS start_line, signature
+                 FROM code_symbols WHERE repo = $repo AND version = $version
+                 ORDER BY file, start_line",
                 p(),
             ),
-            neo4j.query_read(
-                "MATCH (a {repo: $repo, version: $version})-[:CALLS]->(b {repo: $repo, version: $version})
-                 WHERE (a:Function OR a:Class) AND (b:Function OR b:Class)
-                 RETURN a.file AS src_file, a.name AS src_name,
-                        b.file AS tgt_file, b.name AS tgt_name",
+            db.query(
+                "SELECT src_file AS src_file, src_name AS src_name, dst_file AS tgt_file, dst_name AS tgt_name
+                 FROM code_edges
+                 WHERE repo = $repo AND version = $version AND relation = 'CALLS'",
                 p(),
             ),
-            neo4j.query_read(
-                "MATCH (fn:Function {repo: $repo, version: $version}),
-                       (cls:Class   {repo: $repo, version: $version})
-                 WHERE fn.file = cls.file
-                   AND cls.start_line <= fn.start_line
-                   AND fn.end_line    <= cls.end_line
-                 WITH fn, cls
-                 ORDER BY (cls.end_line - cls.start_line) ASC
-                 WITH fn, collect(cls)[0] AS innermost
-                 RETURN fn.file   AS fn_file,  fn.name   AS fn_name,
-                        innermost.file AS cls_file, innermost.name AS cls_name",
+            db.query(
+                "SELECT DISTINCT ON (fn.id)
+                              fn.file AS fn_file, fn.name AS fn_name, cls.file AS cls_file, cls.name AS cls_name
+                       FROM code_symbols fn
+                       JOIN code_symbols cls
+                         ON cls.file_id = fn.file_id AND cls.label = 'Class'
+                        AND cls.start_line <= fn.start_line AND fn.end_line <= cls.end_line
+                       WHERE fn.repo = $repo AND fn.version = $version AND fn.label = 'Function'
+                       ORDER BY fn.id, cls.end_line - cls.start_line",
                 p(),
             ),
-            neo4j.query_read(
-                "MATCH (fn:Function {repo: $repo, version: $version})
-                 WHERE fn.impl_type IS NOT NULL
-                 MATCH (cls:Class {repo: $repo, version: $version})
-                 WHERE cls.name = fn.impl_type
-                 RETURN fn.file  AS fn_file,  fn.name  AS fn_name,
-                        cls.file AS cls_file, cls.name AS cls_name",
+            db.query(
+                "SELECT fn.file AS fn_file, fn.name AS fn_name, cls.file AS cls_file, cls.name AS cls_name
+                 FROM code_symbols fn
+                 JOIN symbols c ON c.version_id = fn.version_id AND c.label = 'Class' AND c.name = fn.impl_type
+                 JOIN code_symbols cls ON cls.id = c.id
+                 WHERE fn.repo = $repo AND fn.version = $version
+                   AND fn.label = 'Function' AND fn.impl_type IS NOT NULL",
                 p(),
             ),
-            neo4j.query_read(
-                "MATCH (child:Class {repo: $repo, version: $version})-[:INHERITS]->(parent:Class {repo: $repo, version: $version})
-                 RETURN child.file AS child_file, child.name AS child_name,
-                        parent.file AS parent_file, parent.name AS parent_name",
+            db.query(
+                "SELECT src_file AS child_file, src_name AS child_name, dst_file AS parent_file, dst_name AS parent_name
+                 FROM code_edges
+                 WHERE repo = $repo AND version = $version AND relation = 'INHERITS'",
                 p(),
             ),
-            neo4j.query_read(
-                "MATCH (impl:Class {repo: $repo, version: $version})-[:IMPLEMENTS]->(t:Class {repo: $repo, version: $version})
-                 RETURN impl.file AS impl_file, impl.name AS impl_name,
-                        t.file    AS trait_file, t.name    AS trait_name",
+            db.query(
+                "SELECT src_file AS impl_file, src_name AS impl_name, dst_file AS trait_file, dst_name AS trait_name
+                 FROM code_edges
+                 WHERE repo = $repo AND version = $version AND relation = 'IMPLEMENTS'",
                 p(),
             ),
-            neo4j.query_read(
-                "MATCH (user:Class {repo: $repo, version: $version})-[:USES]->(used:Class {repo: $repo, version: $version})
-                 RETURN user.file AS user_file, user.name AS user_name,
-                        used.file AS used_file, used.name AS used_name",
+            db.query(
+                "SELECT src_file AS user_file, src_name AS user_name, dst_file AS used_file, dst_name AS used_name
+                 FROM code_edges
+                 WHERE repo = $repo AND version = $version AND relation = 'USES'",
                 p(),
             ),
-            neo4j.query_read(
-                "MATCH (outer:Class {repo: $repo, version: $version})-[:EMBEDS]->(inner:Class {repo: $repo, version: $version})
-                 RETURN outer.file AS outer_file, outer.name AS outer_name,
-                        inner.file AS inner_file, inner.name AS inner_name",
+            db.query(
+                "SELECT src_file AS outer_file, src_name AS outer_name, dst_file AS inner_file, dst_name AS inner_name
+                 FROM code_edges
+                 WHERE repo = $repo AND version = $version AND relation = 'EMBEDS'",
                 p(),
             ),
         );
@@ -244,10 +239,10 @@ async fn fetch_graph_data(neo4j: &Neo4jClient, repo: &str, version: &str) -> Res
     Ok(GraphData { nodes, edges, truncated: total_nodes > MAX_NODES, total_nodes })
 }
 
-pub async fn warm_graph_cache(neo4j: Arc<Neo4jClient>, cache: Arc<GraphCache>) {
-    let pairs = match neo4j
-        .query_read(
-            "MATCH (v:Version {ingested: true}) RETURN v.repo AS repo, v.tag AS version",
+pub async fn warm_graph_cache(db: Arc<Db>, cache: Arc<GraphCache>) {
+    let pairs = match db
+        .query(
+            "SELECT repo, tag AS version FROM code_versions WHERE ingested",
             json!({}),
         )
         .await
@@ -270,7 +265,7 @@ pub async fn warm_graph_cache(neo4j: Arc<Neo4jClient>, cache: Arc<GraphCache>) {
 
         if cache.read().await.contains_key(&key) { continue; }
 
-        match fetch_graph_data(&neo4j, repo, version).await {
+        match fetch_graph_data(&db, repo, version).await {
             Ok(data) => {
                 let json = serde_json::to_string(&data).unwrap_or_default();
                 cache.write().await.insert(key, Arc::new(json));
@@ -294,7 +289,7 @@ pub async fn handle_get_graph(
         return ([("content-type", "application/json")], json.as_ref().to_owned()).into_response();
     }
 
-    match fetch_graph_data(&state.neo4j, &repo, &version).await {
+    match fetch_graph_data(&state.db, &repo, &version).await {
         Ok(data) => {
             let json = serde_json::to_string(&data).unwrap_or_default();
             state.cache.write().await.insert(key, Arc::new(json.clone()));
@@ -309,13 +304,12 @@ pub async fn handle_get_symbol_source(
     Path((repo, version)): Path<(String, String)>,
     Query(params): Query<SourceParams>,
 ) -> impl IntoResponse {
-    let rows = match state.neo4j
-        .query_read(
-            "MATCH (n {repo: $repo, version: $version, file: $file, name: $name})
-             WHERE n:Function OR n:Class
-             RETURN n.name AS name, n.file AS file, labels(n)[0] AS kind,
-                    coalesce(n.start_line, 0) AS start_line, n.end_line AS end_line,
-                    n.signature AS signature, n.source AS source
+    let rows = match state.db
+        .query(
+            "SELECT name, file, label AS kind, COALESCE(start_line, 0) AS start_line,
+                    end_line, signature, source
+             FROM code_symbols
+             WHERE repo = $repo AND version = $version AND file = $file AND name = $name
              LIMIT 1",
             json!({
                 "repo": repo, "version": version,

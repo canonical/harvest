@@ -95,10 +95,11 @@ pub struct RepositoryStats {
 pub async fn handle_list_repositories(
     State(state): State<Arc<GraphState>>,
 ) -> impl IntoResponse {
-    let result = state.neo4j
-        .query_read(
-            "MATCH (r:Repository)-[:HAS_VERSION]->(v:Version {ingested: true})
-             RETURN r.name AS name, r.url AS url, collect(v.tag) AS versions
+    let result = state.db
+        .query(
+            "SELECT r.name, r.url, array_agg(v.tag ORDER BY v.timestamp) AS versions
+             FROM repositories r JOIN versions v ON v.repository_id = r.id AND v.ingested
+             GROUP BY r.id
              ORDER BY r.name",
             json!({}),
         )
@@ -203,18 +204,14 @@ pub async fn handle_add_repository(
     }
 
     let registry = Arc::clone(&state.ingestion);
-    let neo4j_uri = state.neo4j_uri.clone();
-    let neo4j_user = state.neo4j_user.clone();
-    let neo4j_password = state.neo4j_password.clone();
+    let db = (*state.db).clone();
     let cache = Arc::clone(&state.cache);
     let name_for_response = name.clone();
 
     tokio::spawn(async move {
         crate::ingestion::run_ingestion(
             registry.clone(),
-            neo4j_uri,
-            neo4j_user,
-            neo4j_password,
+            db,
             name.clone(),
             url,
             body.browse_url.clone(),
@@ -253,13 +250,7 @@ pub async fn handle_verify_repository(
             .into_response();
     }
 
-    let pipeline = match knowledge_harvester::pipeline::Pipeline::new_with_neo4j(
-        &state.neo4j_uri,
-        &state.neo4j_user,
-        &state.neo4j_password,
-    )
-    .await
-    {
+    let pipeline = match knowledge_harvester::pipeline::Pipeline::with_db((*state.db).clone()) {
         Ok(p) => p,
         Err(e) => {
             return (
@@ -315,15 +306,9 @@ pub async fn handle_delete_repository(
         }
     }
 
-    let result = state.neo4j
-        .run_with_params(
-            "MATCH (r:Repository {name: $repo})
-             OPTIONAL MATCH (r)-[:HAS_VERSION]->(v:Version)
-             OPTIONAL MATCH (v)-[:HAS_FILE]->(f:File)
-             OPTIONAL MATCH (f)-[:DEFINES]->(n)
-             WHERE n:Function OR n:Class
-             OPTIONAL MATCH (f)-[:IMPORTS]->(i:Import)
-             DETACH DELETE i, n, f, v, r",
+    let result = state.db
+        .execute(
+            "DELETE FROM repositories WHERE name = $repo",
             json!({ "repo": repo }),
         )
         .await;
@@ -371,9 +356,9 @@ pub async fn handle_ingest_versions(
     }
 
     let url_result = state
-        .neo4j
-        .query_read(
-            "MATCH (r:Repository {name: $repo}) RETURN r.url AS url",
+        .db
+        .query(
+            "SELECT url FROM repositories WHERE name = $repo",
             json!({ "repo": repo }),
         )
         .await;
@@ -418,18 +403,14 @@ pub async fn handle_ingest_versions(
     }
 
     let registry = Arc::clone(&state.ingestion);
-    let neo4j_uri = state.neo4j_uri.clone();
-    let neo4j_user = state.neo4j_user.clone();
-    let neo4j_password = state.neo4j_password.clone();
+    let db = (*state.db).clone();
     let cache = Arc::clone(&state.cache);
     let repo_name = repo.clone();
 
     tokio::spawn(async move {
         crate::ingestion::run_ingestion(
             registry.clone(),
-            neo4j_uri,
-            neo4j_user,
-            neo4j_password,
+            db,
             repo_name.clone(),
             url,
             None,
@@ -474,9 +455,9 @@ pub async fn handle_resync_version(
     }
 
     let url_result = state
-        .neo4j
-        .query_read(
-            "MATCH (r:Repository {name: $repo}) RETURN r.url AS url",
+        .db
+        .query(
+            "SELECT url FROM repositories WHERE name = $repo",
             json!({ "repo": repo }),
         )
         .await;
@@ -507,9 +488,7 @@ pub async fn handle_resync_version(
     };
 
     let registry = Arc::clone(&state.ingestion);
-    let neo4j_uri = state.neo4j_uri.clone();
-    let neo4j_user = state.neo4j_user.clone();
-    let neo4j_password = state.neo4j_password.clone();
+    let db = (*state.db).clone();
     let cache = Arc::clone(&state.cache);
     let repo_name = repo.clone();
     let version_name = version.clone();
@@ -517,9 +496,7 @@ pub async fn handle_resync_version(
     tokio::spawn(async move {
         crate::ingestion::run_resync(
             registry.clone(),
-            neo4j_uri,
-            neo4j_user,
-            neo4j_password,
+            db,
             repo_name.clone(),
             url,
             version_name.clone(),
@@ -556,14 +533,10 @@ pub async fn handle_delete_version(
         }
     }
 
-    let result = state.neo4j
-        .run_with_params(
-            "MATCH (v:Version {repo: $repo, tag: $version})
-             OPTIONAL MATCH (v)-[:HAS_FILE]->(f:File)
-             OPTIONAL MATCH (f)-[:DEFINES]->(n)
-             WHERE n:Function OR n:Class
-             OPTIONAL MATCH (f)-[:IMPORTS]->(i:Import)
-             DETACH DELETE i, n, f, v",
+    let result = state.db
+        .execute(
+            "DELETE FROM versions v USING repositories r
+             WHERE v.repository_id = r.id AND r.name = $repo AND v.tag = $version",
             json!({ "repo": repo, "version": version }),
         )
         .await;
@@ -667,11 +640,11 @@ pub async fn handle_get_repository_stats(
     Query(params): Query<StatsQuery>,
 ) -> impl IntoResponse {
     let versions_result = state
-        .neo4j
-        .query_read(
-            "MATCH (v:Version {repo: $repo, ingested: true})
-             RETURN v.tag AS tag, v.timestamp AS timestamp
-             ORDER BY v.timestamp DESC",
+        .db
+        .query(
+            "SELECT tag, timestamp FROM code_versions
+             WHERE repo = $repo AND ingested
+             ORDER BY timestamp DESC",
             json!({ "repo": repo }),
         )
         .await;
@@ -704,9 +677,9 @@ pub async fn handle_get_repository_stats(
     let p = || json!({ "repo": repo, "version": version });
 
     let url_result = state
-        .neo4j
-        .query_read(
-            "MATCH (r:Repository {name: $repo}) RETURN r.url AS url",
+        .db
+        .query(
+            "SELECT url FROM repositories WHERE name = $repo",
             json!({ "repo": repo }),
         )
         .await;
@@ -717,37 +690,30 @@ pub async fn handle_get_repository_stats(
         .and_then(|r| r["url"].as_str().map(String::from));
 
     let (lang_result, symbol_result, rel_result, file_count_result, symbol_count_result) = tokio::join!(
-        state.neo4j.query_read(
-            "MATCH (f:File {repo: $repo, version: $version})
-             RETURN f.language AS language, count(*) AS count
-             ORDER BY count DESC",
+        state.db.query(
+            "SELECT language, count(*) AS count FROM code_files
+             WHERE repo = $repo AND version = $version
+             GROUP BY language ORDER BY count DESC",
             p(),
         ),
-        state.neo4j.query_read(
-            "MATCH (n {repo: $repo, version: $version})
-             WHERE n:Function OR n:Class
-             RETURN labels(n)[0] AS type,
-                    coalesce(n.kind, toLower(labels(n)[0])) AS kind,
-                    count(*) AS count
-             ORDER BY count DESC",
+        state.db.query(
+            "SELECT label AS type, COALESCE(kind, lower(label)) AS kind, count(*) AS count
+             FROM code_symbols WHERE repo = $repo AND version = $version
+             GROUP BY 1, 2 ORDER BY count DESC",
             p(),
         ),
-        state.neo4j.query_read(
-            "MATCH (a {repo: $repo, version: $version})-[r]->(b {repo: $repo, version: $version})
-             WHERE (a:Function OR a:Class) AND (b:Function OR b:Class)
-             RETURN type(r) AS relation, count(*) AS count
-             ORDER BY count DESC",
+        state.db.query(
+            "SELECT relation, count(*) AS count FROM code_edges
+             WHERE repo = $repo AND version = $version
+             GROUP BY relation ORDER BY count DESC",
             p(),
         ),
-        state.neo4j.query_read(
-            "MATCH (f:File {repo: $repo, version: $version})
-             RETURN count(*) AS total",
+        state.db.query(
+            "SELECT count(*) AS total FROM code_files WHERE repo = $repo AND version = $version",
             p(),
         ),
-        state.neo4j.query_read(
-            "MATCH (n {repo: $repo, version: $version})
-             WHERE n:Function OR n:Class
-             RETURN count(*) AS total",
+        state.db.query(
+            "SELECT count(*) AS total FROM code_symbols WHERE repo = $repo AND version = $version",
             p(),
         ),
     );
