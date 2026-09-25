@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::{mpsc, watch, RwLock};
 
+use harvest_db::Db;
 use knowledge_harvester::config::RepoConfig;
 use knowledge_harvester::pipeline::Pipeline;
 
@@ -72,9 +73,7 @@ pub fn new_registry() -> IngestionRegistry {
 
 pub async fn run_ingestion(
     registry: IngestionRegistry,
-    neo4j_uri: String,
-    neo4j_user: String,
-    neo4j_password: String,
+    db: Db,
     name: String,
     url: String,
     browse_url: Option<String>,
@@ -96,9 +95,7 @@ pub async fn run_ingestion(
     }
 
     let result = perform_ingestion(
-        &neo4j_uri,
-        &neo4j_user,
-        &neo4j_password,
+        db,
         &name,
         &url,
         browse_url.as_deref(),
@@ -125,9 +122,7 @@ pub async fn run_ingestion(
 }
 
 async fn perform_ingestion(
-    neo4j_uri: &str,
-    neo4j_user: &str,
-    neo4j_password: &str,
+    db: Db,
     name: &str,
     url: &str,
     browse_url: Option<&str>,
@@ -141,7 +136,7 @@ async fn perform_ingestion(
         refs: Some(refs.to_vec()),
     };
 
-    let mut pipeline = Pipeline::new_with_neo4j(neo4j_uri, neo4j_user, neo4j_password).await?;
+    let mut pipeline = Pipeline::with_db(db)?;
     pipeline.set_progress_tx(progress_tx);
     pipeline.process_single(&repo, false).await?;
     let versions = pipeline.ingested_versions(name).await?;
@@ -150,9 +145,7 @@ async fn perform_ingestion(
 
 pub async fn run_resync(
     registry: IngestionRegistry,
-    neo4j_uri: String,
-    neo4j_user: String,
-    neo4j_password: String,
+    db: Db,
     name: String,
     url: String,
     version: String,
@@ -179,7 +172,7 @@ pub async fn run_resync(
         refs: Some(vec![version.clone()]),
     };
 
-    let mut pipeline = match Pipeline::new_with_neo4j(&neo4j_uri, &neo4j_user, &neo4j_password).await {
+    let mut pipeline = match Pipeline::with_db(db) {
         Ok(p) => p,
         Err(e) => {
             let jobs = registry.read().await;

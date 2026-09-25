@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::config::LxdConfig;
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 
 const DEFAULT_OPERATION_WAIT_SECS: u64 = 120;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -16,12 +16,12 @@ fn wants_manual_cert(cfg: &LxdConfig) -> bool {
     cfg.client_cert.is_some() && cfg.client_key.is_some()
 }
 
-pub async fn resolve_client(cfg: &LxdConfig, neo4j: &Neo4jClient) -> Result<Option<LxdClient>> {
+pub async fn resolve_client(cfg: &LxdConfig, db: &Db) -> Result<Option<LxdClient>> {
     if wants_manual_cert(cfg) {
         return Ok(Some(LxdClient::new(cfg)?));
     }
 
-    let mut ident = identity::load_or_generate(neo4j).await?;
+    let mut ident = identity::load_or_generate(db).await?;
 
     if !ident.trusted {
         let Some(token) = &cfg.trust_token else {
@@ -36,7 +36,7 @@ pub async fn resolve_client(cfg: &LxdConfig, neo4j: &Neo4jClient) -> Result<Opti
             &cfg.endpoint, &ident, IDENTITY_NAME, token, cfg.ca_cert.as_deref(), cfg.insecure,
         ).await {
             Ok(()) => {
-                identity::mark_trusted(neo4j).await?;
+                identity::mark_trusted(db).await?;
                 ident.trusted = true;
                 tracing::info!("LXD client identity successfully joined via trust token");
             }

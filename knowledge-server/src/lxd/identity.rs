@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
 
-use crate::neo4j::Neo4jClient;
+use harvest_db::Db;
 use super::build_http_client;
 
 const IDENTITY_ID: &str = "singleton";
@@ -16,10 +16,9 @@ pub struct LxdIdentity {
 
 /// Loads the persisted singleton identity, generating and persisting a new
 /// self-signed one (untrusted) if none exists yet.
-pub async fn load_or_generate(neo4j: &Neo4jClient) -> Result<LxdIdentity> {
-    let rows = neo4j.query_read(
-        "MATCH (i:LxdIdentity {id: $id})
-         RETURN i.client_cert AS client_cert, i.client_key AS client_key, i.trusted AS trusted",
+pub async fn load_or_generate(db: &Db) -> Result<LxdIdentity> {
+    let rows = db.query(
+        "SELECT client_cert, client_key, trusted FROM lxd_identity WHERE id = $id",
         json!({ "id": IDENTITY_ID }),
     ).await?;
 
@@ -35,11 +34,14 @@ pub async fn load_or_generate(neo4j: &Neo4jClient) -> Result<LxdIdentity> {
         .context("generating LXD client identity")?;
     let client_cert = certified_key.cert.pem();
     let client_key  = certified_key.signing_key.serialize_pem();
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = harvest_db::now_rfc3339();
 
-    neo4j.query_read(
-        "MERGE (i:LxdIdentity {id: $id})
-         SET i.client_cert = $cert, i.client_key = $key, i.trusted = false, i.created_at = $now",
+    db.query(
+        "INSERT INTO lxd_identity (id, client_cert, client_key, trusted, created_at)
+         VALUES ($id, $cert, $key, false, $now)
+         ON CONFLICT (id) DO UPDATE SET
+             client_cert = EXCLUDED.client_cert, client_key = EXCLUDED.client_key,
+             trusted = false, created_at = EXCLUDED.created_at",
         json!({ "id": IDENTITY_ID, "cert": client_cert, "key": client_key, "now": now }),
     ).await?;
 
@@ -47,9 +49,9 @@ pub async fn load_or_generate(neo4j: &Neo4jClient) -> Result<LxdIdentity> {
 }
 
 /// Marks the persisted identity as trusted after a successful join.
-pub async fn mark_trusted(neo4j: &Neo4jClient) -> Result<()> {
-    neo4j.query_read(
-        "MATCH (i:LxdIdentity {id: $id}) SET i.trusted = true",
+pub async fn mark_trusted(db: &Db) -> Result<()> {
+    db.query(
+        "UPDATE lxd_identity SET trusted = true WHERE id = $id",
         json!({ "id": IDENTITY_ID }),
     ).await?;
     Ok(())

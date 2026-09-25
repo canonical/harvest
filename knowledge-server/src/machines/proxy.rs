@@ -18,9 +18,10 @@ use tokio::{
     sync::mpsc,
 };
 
-use super::handlers::{err, neo4j_or_err, require_project_access, MachineState};
+use super::handlers::{err, db_or_err, require_project_access, MachineState};
 use super::port_forwards;
-use crate::{auth::jwt::Claims, neo4j::Neo4jClient};
+use crate::auth::jwt::Claims;
+use harvest_db::Db;
 
 const TUNNEL_CLAIM_TIMEOUT_SECS: u64 = 15;
 const PROXY_REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -37,9 +38,9 @@ fn api_error(status: StatusCode, msg: &str) -> Response {
     err(status, msg).into_response()
 }
 
-async fn lookup_agent_project_id(neo4j: &Neo4jClient, agent_id: &str) -> Option<String> {
-    let rows = neo4j.query_read(
-        "MATCH (m:Machine {id: $aid}) RETURN m.project_id AS project_id",
+async fn lookup_agent_project_id(db: &Db, agent_id: &str) -> Option<String> {
+    let rows = db.query(
+        "SELECT project_id FROM machines WHERE id = $aid",
         json!({ "aid": agent_id }),
     ).await.ok()?;
 
@@ -176,21 +177,21 @@ async fn proxy_request_inner(
     outbound_path: String,
     req:           Request,
 ) -> Response {
-    let neo4j = match neo4j_or_err(&state) {
+    let db = match db_or_err(&state) {
         Ok(n) => n,
         Err(e) => return e.into_response(),
     };
 
-    let project_id = match lookup_agent_project_id(neo4j, &agent_id).await {
+    let project_id = match lookup_agent_project_id(db, &agent_id).await {
         Some(pid) => pid,
         None => return api_error(StatusCode::NOT_FOUND, "agent not found"),
     };
 
-    if let Err(e) = require_project_access(neo4j, &user.sub, &user.role, &project_id).await {
+    if let Err(e) = require_project_access(db, &user.sub, &user.role, &project_id).await {
         return e.into_response();
     }
 
-    let forward = match port_forwards::get_by_route(neo4j, &agent_id, &route_name).await {
+    let forward = match port_forwards::get_by_route(db, &agent_id, &route_name).await {
         Ok(Some(f)) => f,
         Ok(None)    => return api_error(StatusCode::NOT_FOUND, "no such port forward"),
         Err(_)      => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "server error"),
