@@ -47,11 +47,11 @@ pub async fn handle_query(
     let agent = if Arc::ptr_eq(&user_llm, &qs.llm) {
         Arc::clone(&qs.agent)
     } else {
-        let neo4j = qs.neo4j.clone().unwrap_or_else(|| {
-            panic!("neo4j must be available when user key providers are configured")
+        let db = qs.db.clone().unwrap_or_else(|| {
+            panic!("db must be available when user key providers are configured")
         });
         Arc::new(
-            Agent::new(user_llm, crate::agent::graph_tools::all_tools(neo4j), qs.max_iterations)
+            Agent::new(user_llm, crate::agent::graph_tools::all_tools(db), qs.max_iterations)
                 .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
                 .with_parallel_research(true),
         )
@@ -59,13 +59,13 @@ pub async fn handle_query(
     let compacted = agent.compact_history(&history).await;
     match agent.query(&req.query, &compacted, attachments, selection.as_ref()).await {
         Ok(response) => {
-            if let (Some(neo4j), Some(cid)) = (&qs.neo4j, &req.conversation_id) {
+            if let (Some(db), Some(cid)) = (&qs.db, &req.conversation_id) {
                 let att_meta: Vec<_> = attachments.iter()
                     .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
                     .collect();
                 let turn_id = uuid::Uuid::new_v4().to_string();
                 let _ = append_user_turn(
-                    neo4j, &user.sub, cid,
+                    db, &user.sub, cid,
                     &req.query, &user.name, &att_meta, raw_messages,
                     &response.answer, &response.sources, response.tool_calls_made,
                     vec![], None, None, response.provider_used.as_ref(), response.duration_ms,
@@ -73,7 +73,7 @@ pub async fn handle_query(
                 ).await;
 
                 let msg_count = compacted.len() + 2;
-                let neo4j_t   = Arc::clone(neo4j);
+                let db_t   = Arc::clone(db);
                 let llm_t     = Arc::clone(agent.llm());
                 let cid_t     = cid.clone();
                 let prior_t   = compacted.clone();
@@ -81,7 +81,7 @@ pub async fn handle_query(
                 let answer_t  = response.answer.clone();
                 tokio::spawn(async move {
                     maybe_regenerate_title(
-                        &neo4j_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, msg_count,
+                        &db_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, msg_count,
                     ).await;
                 });
             }
@@ -113,18 +113,18 @@ pub async fn handle_query_stream(
     let agent = if Arc::ptr_eq(&user_llm, &qs.llm) {
         Arc::clone(&qs.agent)
     } else {
-        let neo4j = qs.neo4j.clone().unwrap_or_else(|| {
-            panic!("neo4j must be available when user key providers are configured")
+        let db = qs.db.clone().unwrap_or_else(|| {
+            panic!("db must be available when user key providers are configured")
         });
         Arc::new(
-            Agent::new(user_llm.clone(), crate::agent::graph_tools::all_tools(neo4j), qs.max_iterations)
+            Agent::new(user_llm.clone(), crate::agent::graph_tools::all_tools(db), qs.max_iterations)
                 .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
                 .with_parallel_research(true),
         )
     };
     let llm      = Arc::clone(agent.llm());
     let qs_ctx   = Arc::clone(&qs);
-    let neo4j    = qs.neo4j.clone();
+    let db    = qs.db.clone();
     let user_id  = user.sub.clone();
     let username = user.name.clone();
     let query    = req.query.clone();
@@ -182,12 +182,12 @@ pub async fn handle_query_stream(
             if let (
                 AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, .. },
                 Some(cid),
-                Some(neo4j),
-            ) = (&event, &conv_id, &neo4j) {
+                Some(db),
+            ) = (&event, &conv_id, &db) {
                 let chain = std::mem::take(&mut chain_builder).finish();
                 let turn_id = uuid::Uuid::new_v4().to_string();
                 let _ = append_user_turn(
-                    neo4j, &user_id, cid,
+                    db, &user_id, cid,
                     &query, &username, &att_meta, raw_messages.clone(),
                     answer, sources, *tool_calls_made,
                     chain, pending_question.clone(), pending_confirm_action.clone(),
@@ -196,7 +196,7 @@ pub async fn handle_query_stream(
                 ).await;
 
                 let msg_count = compacted.len() + 2;
-                let neo4j_t  = Arc::clone(neo4j);
+                let db_t  = Arc::clone(db);
                 let llm_t    = Arc::clone(&llm);
                 let cid_t    = cid.clone();
                 let prior_t  = compacted.clone();
@@ -205,7 +205,7 @@ pub async fn handle_query_stream(
                 let tx_t     = tx.clone();
                 tokio::spawn(async move {
                     if let Some(title) = maybe_regenerate_title(
-                        &neo4j_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, msg_count,
+                        &db_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, msg_count,
                     ).await {
                         let _ = tx_t.send(AgentEvent::TitleUpdated { title }).await;
                     }
@@ -249,9 +249,9 @@ async fn load_context_if_needed(
     user_id: &str,
     conv_id: Option<&str>,
 ) -> (Vec<Value>, Vec<crate::agent::HistoryMessage>) {
-    match (conv_id, &qs.neo4j) {
-        (Some(cid), Some(neo4j)) => {
-            load_conversation_context(neo4j, user_id, cid).await.unwrap_or_default()
+    match (conv_id, &qs.db) {
+        (Some(cid), Some(db)) => {
+            load_conversation_context(db, user_id, cid).await.unwrap_or_default()
         }
         _ => (vec![], vec![]),
     }
