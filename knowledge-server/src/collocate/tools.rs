@@ -58,16 +58,17 @@ impl Tool for CollocateRunTool {
                           single call and removed immediately after. This runs containers directly \
                           on the Collocate daemon — do NOT use list_agents or run_command for container \
                           tasks, and do NOT generate Docker scripts. Use this for one-off tasks like \
-                          building, linting, running tests, or verifying a service with curl. The \
-                          container uses the default image unless 'image' is specified. Returns stdout, \
-                          stderr, and exit code."
+                          building, linting, running tests, or verifying a service with curl. \
+                          The container uses the default image (ubuntu:24.04) unless 'image' is \
+                          specified — match the image to the target platform, not the language runtime. \
+                          Returns stdout, stderr, and exit code."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "image": {
                         "type": "string",
-                        "description": "Container image (e.g. 'ubuntu:24.04', 'python:3.12-slim'). Defaults to the server's configured default image."
+                        "description": "Container image (e.g. 'ubuntu:24.04', 'python:3.12-slim'). Defaults to the server's configured default image. Match the image to the target platform — use ubuntu:24.04 for projects with apt/system dependencies."
                     },
                     "command": {
                         "type": "array",
