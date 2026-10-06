@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use super::{
     retry,
-    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, StreamEvent, ToolCall, ToolDefinition, Usage},
+    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, ProviderSelection, Role, StreamEvent, ToolCall, ToolDefinition, Usage, UsedProvider},
     LlmProvider,
 };
 
@@ -114,6 +114,48 @@ impl LlmProvider for AnthropicProvider {
         parse_anthropic_response(json)
     }
 
+    async fn chat_routed(
+        &self,
+        selection: Option<&ProviderSelection>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<(LlmResponse, UsedProvider, Usage)> {
+        let model = selection
+            .filter(|s| s.provider_id == self.id())
+            .and_then(|s| s.model.as_deref());
+        let bp = selection.and_then(|s| s.cache_breakpoint_index);
+        let body = build_body_with_breakpoint(model.unwrap_or(&self.model), messages, tools, false, bp);
+
+        let response = retry::send_with_retry(
+            self.max_retries,
+            OVERLOAD_STATUS_CODES,
+            "Anthropic",
+            || self.client
+                .post(&self.base_url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("content-type", "application/json")
+                .json(&body)
+                .send(),
+        ).await?;
+
+        let status = response.status();
+        let body_text = response.text().await?;
+        let json: Value = serde_json::from_str(&body_text)
+            .map_err(|e| anyhow::anyhow!("Anthropic API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+
+        if !status.is_success() {
+            bail!("Anthropic API error {status}: {json}");
+        }
+
+        let resp = parse_anthropic_response(json)?;
+        let usage = match &resp {
+            LlmResponse::Message { usage, .. } => usage.clone(),
+            LlmResponse::ToolCalls { usage, .. } => usage.clone(),
+        };
+        Ok((resp, self.used(model), usage))
+    }
+
     async fn chat_stream_with(
         &self,
         model: Option<&str>,
@@ -123,9 +165,28 @@ impl LlmProvider for AnthropicProvider {
     ) -> Result<()> {
         self.stream(model, messages, tools, tx).await
     }
+
+    async fn chat_stream_routed(
+        &self,
+        selection: Option<&ProviderSelection>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<UsedProvider> {
+        let model = selection
+            .filter(|s| s.provider_id == self.id())
+            .and_then(|s| s.model.as_deref());
+        let bp = selection.and_then(|s| s.cache_breakpoint_index);
+        self.stream_with_breakpoint(model, messages, tools, tx, bp).await?;
+        Ok(self.used(model))
+    }
 }
 
 fn build_body(model: &str, messages: &[Message], tools: &[ToolDefinition], stream: bool) -> Value {
+    build_body_with_breakpoint(model, messages, tools, stream, None)
+}
+
+fn build_body_with_breakpoint(model: &str, messages: &[Message], tools: &[ToolDefinition], stream: bool, cache_breakpoint_index: Option<usize>) -> Value {
     let system_text = messages
         .iter()
         .find(|m| matches!(m.role, Role::System))
@@ -140,7 +201,7 @@ fn build_body(model: &str, messages: &[Message], tools: &[ToolDefinition], strea
         .filter(|m| !matches!(m.role, Role::System))
         .map(to_anthropic_message)
         .collect();
-    add_cache_breakpoint_to_last_message(&mut api_messages);
+    add_cache_breakpoint(&mut api_messages, cache_breakpoint_index);
 
     let api_tools: Vec<Value> = tools.iter().map(to_anthropic_tool).collect();
 
@@ -157,9 +218,11 @@ fn build_body(model: &str, messages: &[Message], tools: &[ToolDefinition], strea
     body
 }
 
-fn add_cache_breakpoint_to_last_message(api_messages: &mut [Value]) {
-    let Some(last) = api_messages.last_mut() else { return };
-    let mut blocks = match last["content"].take() {
+fn add_cache_breakpoint(api_messages: &mut [Value], breakpoint_index: Option<usize>) {
+    let Some(bp) = breakpoint_index else { return };
+    let idx = bp.min(api_messages.len().saturating_sub(1));
+    let Some(msg) = api_messages.get_mut(idx) else { return };
+    let mut blocks = match msg["content"].take() {
         Value::String(s) => vec![json!({ "type": "text", "text": s })],
         Value::Array(blocks) => blocks,
         other => vec![other],
@@ -167,7 +230,7 @@ fn add_cache_breakpoint_to_last_message(api_messages: &mut [Value]) {
     if let Some(block) = blocks.last_mut().and_then(Value::as_object_mut) {
         block.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
     }
-    last["content"] = Value::Array(blocks);
+    msg["content"] = Value::Array(blocks);
 }
 
 fn to_anthropic_message(msg: &Message) -> Value {
@@ -359,7 +422,18 @@ impl AnthropicProvider {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
-        let body = build_body(model.unwrap_or(&self.model), messages, tools, true);
+        self.stream_with_breakpoint(model, messages, tools, tx, None).await
+    }
+
+    async fn stream_with_breakpoint(
+        &self,
+        model: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        tx: mpsc::Sender<StreamEvent>,
+        cache_breakpoint_index: Option<usize>,
+    ) -> Result<()> {
+        let body = build_body_with_breakpoint(model.unwrap_or(&self.model), messages, tools, true, cache_breakpoint_index);
 
         let response = retry::send_with_retry(
             self.max_retries,
@@ -824,20 +898,48 @@ mod tests {
     }
 
     #[test]
-    fn build_body_puts_a_cache_breakpoint_on_the_last_message_block() {
+    fn build_body_without_breakpoint_does_not_tag_last_message() {
         let body = build_body("m", &[Message::user("first"), Message::assistant_text("ok"), Message::user("second")], &[], false);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
+        let last = messages.last().unwrap();
+        let content = last["content"].as_str().unwrap_or_default();
+        assert_eq!(content, "second");
+        assert!(last["content"].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn build_body_with_breakpoint_tags_specified_index() {
+        let body = build_body_with_breakpoint("m", &[Message::user("first"), Message::assistant_text("ok"), Message::user("second")], &[], false, Some(1));
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        let bp_content = messages[1]["content"].as_array().unwrap();
+        assert_eq!(bp_content.last().unwrap()["cache_control"]["type"], "ephemeral");
+        assert!(messages[2]["content"].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn build_body_with_breakpoint_clamps_to_last_when_out_of_range() {
+        let body = build_body_with_breakpoint("m", &[Message::user("a"), Message::user("b")], &[], false, Some(100));
+        let messages = body["messages"].as_array().unwrap();
         let last_content = messages.last().unwrap()["content"].as_array().unwrap();
         assert_eq!(last_content.last().unwrap()["cache_control"]["type"], "ephemeral");
-        assert!(messages[0]["content"].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn build_body_with_none_breakpoint_does_not_tag_any_message() {
+        let body = build_body_with_breakpoint("m", &[Message::user("a"), Message::user("b")], &[], false, None);
+        let messages = body["messages"].as_array().unwrap();
+        for msg in messages {
+            assert!(msg["content"].get("cache_control").is_none());
+        }
     }
 
     #[test]
     fn build_body_cache_breakpoint_survives_multi_part_message_content() {
         let att = crate::agent::Attachment { name: "a.png".into(), mime_type: "image/png".into(), data: "abc".into() };
         let msg = crate::agent::build_user_message("look at this", &[att]);
-        let body = build_body("m", &[msg], &[], false);
+        let body = build_body_with_breakpoint("m", &[msg], &[], false, Some(0));
         let parts = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
         assert!(parts[0].get("cache_control").is_none(), "breakpoint belongs on the last block, not the first");

@@ -21,6 +21,7 @@ pub struct LlmState {
     pub llm: Arc<dyn LlmProvider>,
     pub configs: Arc<Vec<LlmProviderConfig>>,
     pub user_key_store: Option<Arc<UserKeyStore>>,
+    pub system_one_config: Option<crate::config::SystemOneConfig>,
     cache: RwLock<Option<(Instant, Value)>>,
 }
 
@@ -29,8 +30,9 @@ impl LlmState {
         llm: Arc<dyn LlmProvider>,
         configs: Arc<Vec<LlmProviderConfig>>,
         user_key_store: Option<Arc<UserKeyStore>>,
+        system_one_config: Option<crate::config::SystemOneConfig>,
     ) -> Self {
-        Self { llm, configs, user_key_store, cache: RwLock::new(None) }
+        Self { llm, configs, user_key_store, system_one_config, cache: RwLock::new(None) }
     }
 }
 
@@ -126,16 +128,12 @@ pub async fn get_user_keys(
         .filter(|c| c.user_provided_key())
         .collect();
 
-    if user_key_providers.is_empty() {
-        return Json(json!({ "providers": [] })).into_response();
-    }
-
     let statuses = match &state.user_key_store {
         Some(store) => store.list_with_status(&user.sub).await.unwrap_or_default(),
         None => vec![],
     };
 
-    let providers: Vec<Value> = user_key_providers.iter().map(|config| {
+    let mut providers: Vec<Value> = user_key_providers.iter().map(|config| {
         let status = statuses.iter().find(|s| s.provider_id == config.id());
         json!({
             "id": config.id(),
@@ -146,6 +144,20 @@ pub async fn get_user_keys(
         })
     }).collect();
 
+    if let Some(so_config) = &state.system_one_config {
+        if so_config.needs_user_key(&state.configs) {
+            let key_id = so_config.key_provider_id(&state.configs);
+            let status = statuses.iter().find(|s| s.provider_id == key_id);
+            providers.push(json!({
+                "id": key_id,
+                "kind": "system-one",
+                "name": "System One (Jev)",
+                "key_set": status.is_some(),
+                "updated_at": status.and_then(|s| s.updated_at.clone()),
+            }));
+        }
+    }
+
     Json(json!({ "providers": providers })).into_response()
 }
 
@@ -155,8 +167,11 @@ pub async fn set_user_key(
     Path(provider_id): Path<String>,
     Json(body): Json<SetKeyBody>,
 ) -> Response {
-    let config = state.configs.iter().find(|c| c.id() == provider_id && c.user_provided_key());
-    if config.is_none() {
+    let llm_config = state.configs.iter().find(|c| c.id() == provider_id && c.user_provided_key());
+    let is_system_one = provider_id == "system-one"
+        && state.system_one_config.as_ref().map_or(false, |c| c.needs_user_key(&state.configs));
+
+    if llm_config.is_none() && !is_system_one {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "provider not found or does not use user-provided keys" })),
@@ -197,8 +212,11 @@ pub async fn delete_user_key(
     State(state): State<Arc<LlmState>>,
     Path(provider_id): Path<String>,
 ) -> Response {
-    let config = state.configs.iter().find(|c| c.id() == provider_id && c.user_provided_key());
-    if config.is_none() {
+    let llm_config = state.configs.iter().find(|c| c.id() == provider_id && c.user_provided_key());
+    let is_system_one = provider_id == "system-one"
+        && state.system_one_config.as_ref().map_or(false, |c| c.needs_user_key(&state.configs));
+
+    if llm_config.is_none() && !is_system_one {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "provider not found or does not use user-provided keys" })),
@@ -432,7 +450,7 @@ mod tests {
     #[tokio::test]
     async fn second_call_within_ttl_uses_cache_not_a_fresh_fetch() {
         let leaf = TestProvider::leaf("a");
-        let state = LlmState::new(Arc::clone(&leaf) as Arc<dyn LlmProvider>, Arc::new(vec![]), None);
+        let state = LlmState::new(Arc::clone(&leaf) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, None);
 
         let _ = cached_or_fresh(&state, false).await;
         let _ = cached_or_fresh(&state, false).await;
@@ -443,7 +461,7 @@ mod tests {
     #[tokio::test]
     async fn force_refresh_bypasses_cache() {
         let leaf = TestProvider::leaf("a");
-        let state = LlmState::new(Arc::clone(&leaf) as Arc<dyn LlmProvider>, Arc::new(vec![]), None);
+        let state = LlmState::new(Arc::clone(&leaf) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, None);
 
         let _ = cached_or_fresh(&state, false).await;
         let _ = cached_or_fresh(&state, true).await;

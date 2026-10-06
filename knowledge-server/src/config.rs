@@ -3,11 +3,140 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
+#[derive(Deserialize, Clone, Default)]
+pub struct SystemOneThresholds {
+    #[serde(default = "default_system_one_confidence")]
+    pub confidence_threshold: f64,
+}
+
+fn default_system_one_confidence() -> f64 { 0.5 }
+fn default_system_one_model() -> String { "~typesafe/jev-latest".into() }
+fn default_system_one_timeout() -> u64 { 10 }
+fn default_fast_path_threshold() -> f64 { 0.7 }
+fn default_early_synthesis_threshold() -> f64 { 0.85 }
+fn default_early_synthesis_research_threshold() -> f64 { 0.95 }
+fn default_relevance_threshold() -> f64 { 0.4 }
+fn default_relevance_preserve_recent() -> usize { 2 }
+fn default_early_synthesis_coverage_threshold() -> f64 { 0.8 }
+fn default_early_synthesis_min_iterations_first_turn() -> usize { 5 }
+fn default_early_synthesis_uniform_threshold() -> f64 { 0.7 }
+
+fn default_early_synthesis_capability_gate_threshold() -> f64 { 0.8 }
+fn default_next_action_confidence() -> f64 { 0.5 }
+
+#[derive(Deserialize, Clone, Default)]
+pub struct SystemOneModelRouting {
+    #[serde(default = "default_system_one_confidence")]
+    pub confidence_threshold: f64,
+    #[serde(default)]
+    pub small_tier: Option<String>,
+    #[serde(default)]
+    pub medium_tier: Option<String>,
+    #[serde(default)]
+    pub large_tier: Option<String>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+pub struct SystemOneConfig {
+    pub endpoint: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_system_one_model")]
+    pub model: String,
+    #[serde(default = "default_system_one_timeout")]
+    pub timeout_secs: u64,
+    #[serde(default)]
+    pub user_provided_key: bool,
+    #[serde(default)]
+    pub intent: SystemOneThresholds,
+    #[serde(default)]
+    pub model_routing: SystemOneModelRouting,
+    #[serde(default)]
+    pub tool_filter: SystemOneThresholds,
+    #[serde(default)]
+    pub compaction: SystemOneThresholds,
+    #[serde(default)]
+    pub parallel_research: SystemOneThresholds,
+    #[serde(default)]
+    pub prompt_sections: SystemOneThresholds,
+    #[serde(default = "default_fast_path_threshold")]
+    pub fast_path: f64,
+    #[serde(default = "default_early_synthesis_threshold")]
+    pub early_synthesis: f64,
+    #[serde(default = "default_early_synthesis_research_threshold")]
+    pub early_synthesis_research: f64,
+    #[serde(default = "default_relevance_threshold")]
+    pub relevance: f64,
+    #[serde(default = "default_relevance_preserve_recent")]
+    pub relevance_preserve_recent: usize,
+    #[serde(default = "default_early_synthesis_coverage_threshold")]
+    pub early_synthesis_coverage: f64,
+    #[serde(default = "default_early_synthesis_min_iterations_first_turn")]
+    pub early_synthesis_min_iterations_first_turn: usize,
+    #[serde(default = "default_early_synthesis_uniform_threshold")]
+    pub early_synthesis_uniform: f64,
+    #[serde(default = "default_early_synthesis_capability_gate_threshold")]
+    pub early_synthesis_capability_gate: f64,
+    #[serde(default = "default_next_action_confidence")]
+    pub next_action_confidence: f64,
+}
+
+impl SystemOneConfig {
+    pub fn is_enabled(&self) -> bool {
+        !self.endpoint.is_empty()
+    }
+
+    pub fn bundled_llm_provider_id(&self, llm_configs: &[LlmProviderConfig]) -> Option<String> {
+        let so_host = reqwest::Url::parse(&self.endpoint).ok()?.host_str()?.to_string();
+        for config in llm_configs {
+            if let Some(base_url) = config.base_url() {
+                if let Ok(url) = reqwest::Url::parse(base_url) {
+                    if url.host_str() == Some(&so_host) {
+                        return Some(config.id().to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    pub fn is_bundled_with_llm(&self, llm_configs: &[LlmProviderConfig]) -> bool {
+        if self.user_provided_key {
+            return false;
+        }
+        if !self.api_key.is_empty() {
+            return false;
+        }
+        self.bundled_llm_provider_id(llm_configs).is_some()
+    }
+
+    pub fn key_provider_id(&self, llm_configs: &[LlmProviderConfig]) -> String {
+        if let Some(llm_id) = self.bundled_llm_provider_id(llm_configs) {
+            if self.api_key.is_empty() && !self.user_provided_key {
+                return llm_id;
+            }
+        }
+        "system-one".to_string()
+    }
+
+    pub fn needs_user_key(&self, llm_configs: &[LlmProviderConfig]) -> bool {
+        if !self.api_key.is_empty() {
+            return false;
+        }
+        if self.is_bundled_with_llm(llm_configs) {
+            return false;
+        }
+        true
+    }
+}
+
 #[derive(Deserialize)]
 pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub llm: Vec<LlmProviderConfig>,
+    #[serde(default)]
+    pub system_one: Option<SystemOneConfig>,
     #[serde(default)]
     pub agent: AgentBehaviorConfig,
     #[serde(default)]
@@ -23,6 +152,57 @@ pub struct Config {
     pub collocate: Option<CollocateConfig>,
     #[serde(default)]
     pub security: SecurityConfig,
+    #[serde(default)]
+    pub semantic: SemanticConfig,
+}
+
+fn default_semantic_model() -> String { "text-embedding-004".to_string() }
+fn default_semantic_dimensions() -> usize { 768 }
+fn default_semantic_lexical_weight() -> f64 { 0.6 }
+fn default_semantic_semantic_weight() -> f64 { 0.4 }
+fn default_semantic_batch_size() -> usize { 64 }
+
+#[derive(Deserialize, Clone)]
+pub struct SemanticConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_semantic_model")]
+    pub model: String,
+    #[serde(default = "default_semantic_dimensions")]
+    pub dimensions: usize,
+    #[serde(default = "default_semantic_lexical_weight")]
+    pub lexical_weight: f64,
+    #[serde(default = "default_semantic_semantic_weight")]
+    pub semantic_weight: f64,
+    #[serde(default)]
+    pub backfill_on_start: bool,
+    #[serde(default = "default_semantic_batch_size")]
+    pub batch_size: usize,
+}
+
+impl Default for SemanticConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: default_semantic_model(),
+            dimensions: default_semantic_dimensions(),
+            lexical_weight: default_semantic_lexical_weight(),
+            semantic_weight: default_semantic_semantic_weight(),
+            backfill_on_start: false,
+            batch_size: default_semantic_batch_size(),
+        }
+    }
+}
+
+impl SemanticConfig {
+    pub fn effective_weights(&self) -> (f64, f64) {
+        crate::agent::semantic::hybrid_weights(self.lexical_weight, self.semantic_weight)
+            .unwrap_or((crate::agent::semantic::DEFAULT_LEXICAL_WEIGHT, crate::agent::semantic::DEFAULT_SEMANTIC_WEIGHT))
+    }
+
+    pub fn effective_batch_size(&self) -> usize {
+        crate::agent::semantic::backfill_batch_limit(Some(self.batch_size))
+    }
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -280,6 +460,8 @@ pub enum LlmProviderConfig {
         user_provided_key: bool,
         #[serde(default)]
         pricing: Option<PricingConfig>,
+        #[serde(default)]
+        enable_prompt_caching: bool,
     },
 }
 
@@ -376,6 +558,13 @@ impl LlmProviderConfig {
         match self {
             Self::OpenAiCompat { base_url, .. } => Some(base_url),
             _ => None,
+        }
+    }
+
+    pub fn enable_prompt_caching(&self) -> bool {
+        match self {
+            Self::OpenAiCompat { enable_prompt_caching, .. } => *enable_prompt_caching,
+            _ => false,
         }
     }
 
@@ -530,6 +719,13 @@ mod tests {
         assert!(cfg.oidc.is_some());
     }
 
+    const TEST_LLM: &str = r#"
+        [[llm]]
+        provider = "gemini"
+        model    = "gemini-2.5-flash"
+        api_key  = "key1"
+    "#;
+
     fn minimal_config(llm_block: &str) -> String {
         format!(r#"
             [server]
@@ -657,6 +853,87 @@ mod tests {
             }
             other => panic!("expected OpenAiCompat: {other:?}", other = std::mem::discriminant(other)),
         }
+    }
+
+    #[test]
+    fn openrouter_provider_with_user_supplied_key_parses() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider           = "openai-compatible"
+            base_url           = "https://openrouter.ai/api/v1"
+            api_key            = ""
+            model              = "z-ai/glm-5.3-flash"
+            models             = ["z-ai/glm-5.3-flash"]
+            id                 = "openrouter"
+            name               = "OpenRouter"
+            priority           = 1
+            user_provided_key  = true
+        "#);
+        let cfg = parse_config(&toml);
+        assert_eq!(cfg.llm.len(), 1);
+        match &cfg.llm[0] {
+            LlmProviderConfig::OpenAiCompat {
+                base_url, model, id, name, priority, user_provided_key, ..
+            } => {
+                assert_eq!(base_url, "https://openrouter.ai/api/v1");
+                assert_eq!(model, "z-ai/glm-5.3-flash");
+                assert_eq!(id, "openrouter");
+                assert_eq!(name.as_deref(), Some("OpenRouter"));
+                assert_eq!(*priority, 1);
+                assert!(*user_provided_key);
+            }
+            other => panic!("expected OpenAiCompat: {:?}", std::mem::discriminant(other)),
+        }
+        assert!(cfg.llm[0].api_key().is_empty(), "user-supplied keys must not be baked into the config");
+    }
+
+    #[test]
+    fn opencode_zen_free_fallback_sits_after_openrouter() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider           = "openai-compatible"
+            base_url           = "https://openrouter.ai/api/v1"
+            api_key            = ""
+            model              = "z-ai/glm-5.3-flash"
+            models             = ["z-ai/glm-5.3-flash"]
+            id                 = "openrouter"
+            name               = "OpenRouter"
+            priority           = 1
+            user_provided_key  = true
+
+            [[llm]]
+            provider           = "openai-compatible"
+            base_url           = "https://opencode.ai/zen/v1"
+            api_key            = ""
+            model              = "longcat-2.5-preview-free"
+            models             = ["longcat-2.5-preview-free", "jev-1.13-free"]
+            id                 = "opencode-zen"
+            name               = "OpenCode Zen"
+            priority           = 2
+            user_provided_key  = true
+        "#);
+        let cfg = parse_config(&toml);
+        assert_eq!(cfg.llm.len(), 2);
+        let priorities: Vec<u32> = cfg.llm.iter().map(|c| c.priority()).collect();
+        assert_eq!(priorities, vec![1, 2]);
+        assert_eq!(cfg.llm[0].id(), "openrouter");
+        assert_eq!(cfg.llm[1].id(), "opencode-zen");
+        match &cfg.llm[1] {
+            LlmProviderConfig::OpenAiCompat { base_url, model, models, user_provided_key, .. } => {
+                assert_eq!(base_url, "https://opencode.ai/zen/v1");
+                assert_eq!(model, "longcat-2.5-preview-free");
+                assert_eq!(
+                    *models,
+                    Some(vec![
+                        "longcat-2.5-preview-free".to_string(),
+                        "jev-1.13-free".to_string(),
+                    ])
+                );
+                assert!(*user_provided_key);
+            }
+            other => panic!("expected OpenAiCompat: {:?}", std::mem::discriminant(other)),
+        }
+        assert_eq!(cfg.llm[1].api_key().len(), 0, "zen fallback must not bake in a key");
     }
 
     #[test]
@@ -960,5 +1237,193 @@ mod tests {
         assert_eq!(lxd.image_alias, "22.04");
         assert_eq!(lxd.image_server, "https://images.example.com");
         assert_eq!(lxd.profile, "harvest-profile");
+    }
+
+    #[test]
+    fn openai_compat_enable_prompt_caching_defaults_to_false() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "openai-compatible"
+            base_url = "https://openai.example.com"
+            api_key  = "k"
+            model    = "gpt-4o"
+        "#);
+        let cfg = parse_config(&toml);
+        assert!(!cfg.llm[0].enable_prompt_caching());
+    }
+
+    #[test]
+    fn openai_compat_enable_prompt_caching_can_be_set_true() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider           = "openai-compatible"
+            base_url           = "https://openai.example.com"
+            api_key            = "k"
+            model              = "gpt-4o"
+            enable_prompt_caching = true
+        "#);
+        let cfg = parse_config(&toml);
+        assert!(cfg.llm[0].enable_prompt_caching());
+    }
+
+    #[test]
+    fn system_one_thresholds_default_when_absent() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+
+            [system_one]
+            endpoint = "https://so.example.com"
+        "#);
+        let cfg = parse_config(&toml);
+        let so = cfg.system_one.expect("system_one should be present");
+        assert!((so.fast_path - 0.7).abs() < f64::EPSILON);
+        assert!((so.early_synthesis - 0.85).abs() < f64::EPSILON);
+        assert!((so.relevance - 0.4).abs() < f64::EPSILON);
+        assert!((so.early_synthesis_research - 0.95).abs() < f64::EPSILON);
+        assert_eq!(so.relevance_preserve_recent, 2);
+        assert!((so.early_synthesis_coverage - 0.8).abs() < f64::EPSILON);
+        assert_eq!(so.early_synthesis_min_iterations_first_turn, 5);
+        assert!((so.early_synthesis_uniform - 0.7).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn system_one_thresholds_can_be_overridden() {
+        let toml = minimal_config(r#"
+            [[llm]]
+            provider = "gemini"
+            model    = "m"
+            api_key  = "k"
+
+            [system_one]
+            endpoint       = "https://so.example.com"
+            fast_path      = 0.8
+            early_synthesis = 0.9
+            relevance      = 0.5
+            early_synthesis_research = 0.97
+            relevance_preserve_recent = 3
+            early_synthesis_coverage = 0.85
+            early_synthesis_min_iterations_first_turn = 6
+            early_synthesis_uniform = 0.75
+        "#);
+        let cfg = parse_config(&toml);
+        let so = cfg.system_one.expect("system_one should be present");
+        assert!((so.fast_path - 0.8).abs() < f64::EPSILON);
+        assert!((so.early_synthesis - 0.9).abs() < f64::EPSILON);
+        assert!((so.relevance - 0.5).abs() < f64::EPSILON);
+        assert!((so.early_synthesis_research - 0.97).abs() < f64::EPSILON);
+        assert_eq!(so.relevance_preserve_recent, 3);
+        assert!((so.early_synthesis_coverage - 0.85).abs() < f64::EPSILON);
+        assert_eq!(so.early_synthesis_min_iterations_first_turn, 6);
+        assert!((so.early_synthesis_uniform - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn next_action_confidence_defaults_to_a_half() {
+        let toml = minimal_config(&format!(
+            r#"{TEST_LLM}
+            [system_one]
+            endpoint = "http://localhost:1"
+            "#
+        ));
+        let so = parse_config(&toml).system_one.expect("system_one should be present");
+        assert!((so.next_action_confidence - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn next_action_confidence_can_be_overridden() {
+        let toml = minimal_config(&format!(
+            r#"{TEST_LLM}
+            [system_one]
+            endpoint = "http://localhost:1"
+            next_action_confidence = 0.9
+            "#
+        ));
+        let so = parse_config(&toml).system_one.expect("system_one should be present");
+        assert!((so.next_action_confidence - 0.9).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn semantic_search_is_disabled_by_default() {
+        let cfg = parse_config(&minimal_config(TEST_LLM));
+        let sem = cfg.semantic;
+        assert!(!sem.enabled, "semantic search must be opt-in");
+        assert_eq!(sem.model, "text-embedding-004");
+        assert_eq!(sem.dimensions, 768);
+        assert!(!sem.backfill_on_start, "backfill must be opt-in");
+        assert_eq!(sem.batch_size, 64);
+    }
+
+    #[test]
+    fn semantic_weights_default_to_the_agreed_mix() {
+        let cfg = parse_config(&minimal_config(TEST_LLM));
+        let sem = cfg.semantic;
+        assert!((sem.lexical_weight - 0.6).abs() < f64::EPSILON);
+        assert!((sem.semantic_weight - 0.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn semantic_settings_are_read_from_toml() {
+        let toml = minimal_config(&format!(
+            r#"{TEST_LLM}
+            [semantic]
+            enabled = true
+            model = "gemini-embed"
+            dimensions = 1024
+            lexical_weight = 0.2
+            semantic_weight = 0.8
+            backfill_on_start = true
+            batch_size = 16
+            "#,
+        ));
+        let sem = parse_config(&toml).semantic;
+        assert!(sem.enabled);
+        assert_eq!(sem.model, "gemini-embed");
+        assert_eq!(sem.dimensions, 1024);
+        assert!((sem.lexical_weight - 0.2).abs() < f64::EPSILON);
+        assert!((sem.semantic_weight - 0.8).abs() < f64::EPSILON);
+        assert!(sem.backfill_on_start);
+        assert_eq!(sem.batch_size, 16);
+    }
+
+    #[test]
+    fn semantic_absent_block_falls_back_to_disabled_defaults() {
+        let cfg = parse_config(&minimal_config(TEST_LLM));
+        let sem = cfg.semantic;
+        assert!(!sem.enabled);
+        assert_eq!(sem.dimensions, 768);
+    }
+
+    #[test]
+    fn semantic_config_exposes_effective_weights() {
+        let toml = minimal_config(&format!(
+            r#"{TEST_LLM}
+            [semantic]
+            enabled = true
+            lexical_weight = 1.0
+            semantic_weight = 1.0
+            "#,
+        ));
+        let sem = parse_config(&toml).semantic;
+        let (lex, sm) = sem.effective_weights();
+        assert!((lex - 0.5).abs() < 1e-9);
+        assert!((sm - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn semantic_config_caps_the_batch_size() {
+        let toml = minimal_config(&format!("{TEST_LLM}\n[semantic]\nbatch_size = 5000\n"));
+        let sem = parse_config(&toml).semantic;
+        assert_eq!(sem.effective_batch_size(), 64);
+    }
+
+    #[test]
+    fn semantic_absent_block_is_ignored() {
+        let cfg = parse_config(&minimal_config(TEST_LLM));
+        let sem = cfg.semantic;
+        assert!(!sem.enabled);
+        assert_eq!(sem.dimensions, 768);
     }
 }

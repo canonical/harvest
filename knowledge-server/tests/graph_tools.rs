@@ -19,7 +19,7 @@ fn function(version: &str, name: &str, signature: &str, lines: (u32, u32), sourc
     FunctionNode {
         repo: "myrepo".into(), version: version.into(), file: "src/lib.rs".into(),
         name: name.into(), kind: "function".into(), signature: signature.into(),
-        start_line: lines.0, end_line: lines.1, source: source.into(), impl_type: None, calls,
+        start_line: lines.0, end_line: lines.1, source: source.into(), impl_type: None, docstring: None, calls,
     }
 }
 
@@ -38,7 +38,7 @@ async fn seed_graph(writer: &GraphWriter) {
             repo: "myrepo".into(), version: "v1.0".into(), file: "src/lib.rs".into(),
             name: "MyStruct".into(), kind: "struct".into(), start_line: 11, end_line: 13,
             source: "struct MyStruct { x: i32 }".into(),
-            bases: vec![], traits: vec![], embeds: vec![], uses: vec![],
+            bases: vec![], traits: vec![], embeds: vec![], uses: vec![], docstring: None,
         }],
         imports: vec![ImportNode {
             repo: "myrepo".into(), version: "v1.0".into(), file: "src/lib.rs".into(),
@@ -98,7 +98,7 @@ async fn list_repositories_empty_graph_returns_empty_array() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn search_symbols_finds_function_by_name() {
     setup!(client, test_db);
-    let tool = SearchSymbolsTool(Arc::clone(&client));
+    let tool = SearchSymbolsTool::new(Arc::clone(&client));
     let result: Vec<Value> = serde_json::from_str(
         &tool.execute(json!({"query": "alpha"})).await.unwrap()
     ).unwrap();
@@ -110,7 +110,7 @@ async fn search_symbols_finds_function_by_name() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn search_symbols_repo_filter_limits_results() {
     setup!(client, test_db);
-    let tool = SearchSymbolsTool(Arc::clone(&client));
+    let tool = SearchSymbolsTool::new(Arc::clone(&client));
     let result: Vec<Value> = serde_json::from_str(
         &tool.execute(json!({"query": "alpha", "repo": "myrepo"})).await.unwrap()
     ).unwrap();
@@ -123,7 +123,7 @@ async fn search_symbols_repo_filter_limits_results() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn search_symbols_version_filter_limits_results() {
     setup!(client, test_db);
-    let tool = SearchSymbolsTool(Arc::clone(&client));
+    let tool = SearchSymbolsTool::new(Arc::clone(&client));
     let result: Vec<Value> = serde_json::from_str(
         &tool.execute(json!({"query": "alpha", "version": "v1.0"})).await.unwrap()
     ).unwrap();
@@ -136,7 +136,7 @@ async fn search_symbols_version_filter_limits_results() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn search_symbols_unknown_name_returns_empty() {
     setup!(client, test_db);
-    let tool = SearchSymbolsTool(Arc::clone(&client));
+    let tool = SearchSymbolsTool::new(Arc::clone(&client));
     let result = tool.execute(json!({"query": "xyzzy_nonexistent"})).await.unwrap();
     assert!(result.starts_with("No symbols found"), "result: {result}");
 }
@@ -145,7 +145,7 @@ async fn search_symbols_unknown_name_returns_empty() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn search_symbols_matches_fragments_and_ranks_exact_names_first() {
     setup!(client, test_db);
-    let tool = SearchSymbolsTool(Arc::clone(&client));
+    let tool = SearchSymbolsTool::new(Arc::clone(&client));
     let result: Vec<Value> = serde_json::from_str(
         &tool.execute(json!({"query": "MyStr", "kind": "class"})).await.unwrap()
     ).unwrap();
@@ -417,4 +417,374 @@ async fn run_sql_cannot_read_application_tables() {
     let tool = RunSqlTool(Arc::clone(&client));
     let err = tool.execute(json!({ "query": "SELECT password_hash FROM users" })).await.unwrap_err();
     assert!(format!("{err:#}").contains("permission denied"), "error: {err:#}");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn search_symbols_matches_docstring_prose() {
+    setup!(client, test_db);
+    let writer = GraphWriter::new(client.as_ref().clone());
+    writer.upsert_repository("docrepo", "https://example.com/docrepo.git").await.unwrap();
+    writer.upsert_version("docrepo", "v1.0", 1, false).await.unwrap();
+    writer.write_version("docrepo", "v1.0", &[ParsedFile {
+        path: "src/volume.py".into(),
+        language: "python".into(),
+        functions: vec![FunctionNode {
+            repo: "docrepo".into(), version: "v1.0".into(), file: "src/volume.py".into(),
+            name: "provision".into(), kind: "function".into(),
+            signature: "def provision()".into(), start_line: 1, end_line: 3,
+            source: "def provision():\n    return 1".into(),
+            impl_type: None,
+            docstring: Some("Provisions a block volume over iSCSI.".into()),
+            calls: vec![],
+        }],
+        classes: vec![],
+        imports: vec![],
+    }]).await.unwrap();
+
+    let tool = SearchSymbolsTool::new(Arc::clone(&client));
+    let result: Vec<Value> = serde_json::from_str(
+        &tool.execute(json!({"query": "iscsi", "repo": "docrepo", "version": "v1.0"})).await.unwrap()
+    ).unwrap();
+    assert_eq!(result.len(), 1, "prose search should find the symbol: {result:?}");
+    let matched = result[0]["matched_on"].as_array().unwrap();
+    assert!(matched.iter().any(|v| v == "docstring"), "matched_on: {matched:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn search_symbols_matches_capability_constant_inside_a_class() {
+    setup!(client, test_db);
+    let writer = GraphWriter::new(client.as_ref().clone());
+    writer.upsert_repository("caprepo", "https://example.com/caprepo.git").await.unwrap();
+    writer.upsert_version("caprepo", "v1.0", 1, false).await.unwrap();
+    writer.write_version("caprepo", "v1.0", &[ParsedFile {
+        path: "pkg/driver.py".into(),
+        language: "python".into(),
+        functions: vec![],
+        classes: vec![ClassNode {
+            repo: "caprepo".into(), version: "v1.0".into(), file: "pkg/driver.py".into(),
+            name: "NfsDriver".into(), kind: "class".into(), start_line: 1, end_line: 4,
+            source: "class NfsDriver(Base):\n    SUPPORTS_ACTIVE_ACTIVE = True\n".into(),
+            bases: vec!["Base".into()], traits: vec![], embeds: vec![], uses: vec![], docstring: None,
+        }],
+        imports: vec![],
+    }]).await.unwrap();
+
+    let tool = SearchSymbolsTool::new(Arc::clone(&client));
+    let result: Vec<Value> = serde_json::from_str(
+        &tool.execute(json!({"query": "SUPPORTS_ACTIVE_ACTIVE", "repo": "caprepo", "version": "v1.0"}))
+            .await.unwrap()
+    ).unwrap();
+    assert_eq!(result.len(), 1, "capability constant should be findable: {result:?}");
+    assert_eq!(result[0]["name"], "NfsDriver");
+    let matched = result[0]["matched_on"].as_array().unwrap();
+    assert!(matched.iter().any(|v| v == "capability"), "matched_on: {matched:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn search_symbols_ranks_capability_above_path_match() {
+    setup!(client, test_db);
+    let writer = GraphWriter::new(client.as_ref().clone());
+    writer.upsert_repository("rankrepo", "https://example.com/rankrepo.git").await.unwrap();
+    writer.upsert_version("rankrepo", "v1.0", 1, false).await.unwrap();
+    writer.write_version("rankrepo", "v1.0", &[ParsedFile {
+        path: "pkg/other.py".into(),
+        language: "python".into(),
+        functions: vec![],
+        classes: vec![ClassNode {
+            repo: "rankrepo".into(), version: "v1.0".into(), file: "pkg/other.py".into(),
+            name: "NfsDriver".into(), kind: "class".into(), start_line: 1, end_line: 3,
+            source: "class NfsDriver(Base):\n    SUPPORTS_ACTIVE_ACTIVE = True\n".into(),
+            bases: vec![], traits: vec![], embeds: vec![], uses: vec![], docstring: None,
+        }],
+        imports: vec![],
+    }, ParsedFile {
+        path: "pkg/SUPPORTS_ACTIVE_ACTIVE_helper.py".into(),
+        language: "python".into(),
+        functions: vec![],
+        classes: vec![ClassNode {
+            repo: "rankrepo".into(), version: "v1.0".into(),
+            file: "pkg/SUPPORTS_ACTIVE_ACTIVE_helper.py".into(),
+            name: "Helper".into(), kind: "class".into(), start_line: 1, end_line: 2,
+            source: "class Helper:\n    pass".into(),
+            bases: vec![], traits: vec![], embeds: vec![], uses: vec![], docstring: None,
+        }],
+        imports: vec![],
+    }]).await.unwrap();
+
+    let tool = SearchSymbolsTool::new(Arc::clone(&client));
+    let result: Vec<Value> = serde_json::from_str(
+        &tool.execute(json!({"query": "SUPPORTS_ACTIVE_ACTIVE", "repo": "rankrepo", "version": "v1.0"}))
+            .await.unwrap()
+    ).unwrap();
+    assert!(result.len() >= 2, "both should match: {result:?}");
+    assert_eq!(result[0]["name"], "NfsDriver", "capability match must outrank a path-only match");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn search_symbols_returns_bounded_previews_not_full_source() {
+    setup!(client, test_db);
+    let writer = GraphWriter::new(client.as_ref().clone());
+    writer.upsert_repository("bigrepo", "https://example.com/bigrepo.git").await.unwrap();
+    writer.upsert_version("bigrepo", "v1.0", 1, false).await.unwrap();
+    let long: String = std::iter::repeat("z").take(20_000).collect();
+    writer.write_version("bigrepo", "v1.0", &[ParsedFile {
+        path: "src/big.rs".into(),
+        language: "rust".into(),
+        functions: vec![FunctionNode {
+            repo: "bigrepo".into(), version: "v1.0".into(), file: "src/big.rs".into(),
+            name: "huge".into(), kind: "function".into(),
+            signature: "fn huge()".into(), start_line: 1, end_line: 2,
+            source: format!("fn huge() {{ {long} }}"), impl_type: None, docstring: None, calls: vec![],
+        }],
+        classes: vec![],
+        imports: vec![],
+    }]).await.unwrap();
+
+    let tool = SearchSymbolsTool::new(Arc::clone(&client));
+    let raw = tool.execute(json!({"query": "huge", "repo": "bigrepo", "version": "v1.0"})).await.unwrap();
+    let result: Vec<Value> = serde_json::from_str(&raw).unwrap();
+    let preview = result[0]["preview"].as_str().unwrap();
+    assert!(preview.chars().count() <= 420, "preview must stay bounded: {}", preview.chars().count());
+    assert!(result[0].get("source").is_none(), "full source must not be returned in search results");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn search_symbols_tolerates_a_query_with_regex_metacharacters() {
+    setup!(client, test_db);
+    seed_graph(&GraphWriter::new(client.as_ref().clone())).await;
+    let tool = SearchSymbolsTool::new(Arc::clone(&client));
+    for query in ["fn alpha(", "a(b", "alpha[1]", "a.*", "x$"] {
+        let out = tool.execute(json!({ "query": query, "repo": "myrepo", "version": "v1.0" })).await;
+        assert!(out.is_ok(), "query {query:?} must not error: {:?}", out.err());
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn read_sources_batches_by_file_and_symbol_name() {
+    setup!(client, test_db);
+    seed_graph(&GraphWriter::new(client.as_ref().clone())).await;
+    let tool = ReadSourcesTool(Arc::clone(&client));
+    let out = tool.execute(json!({
+        "repo": "myrepo", "version": "v1.0", "files": ["src/lib.rs"]
+    })).await.unwrap();
+    let rows: Vec<Value> = serde_json::from_str(&out).unwrap();
+    assert!(rows.len() >= 3, "should return the file's symbols: {}", rows.len());
+    assert!(rows.iter().any(|r| r["name"] == "alpha"));
+    assert!(rows.iter().any(|r| r["name"] == "MyStruct"));
+
+    let by_name = tool.execute(json!({
+        "repo": "myrepo", "version": "v1.0", "names": ["beta"]
+    })).await.unwrap();
+    let rows: Vec<Value> = serde_json::from_str(&by_name).unwrap();
+    assert_eq!(rows.len(), 1, "name lookup should be exact: {rows:?}");
+    assert_eq!(rows[0]["name"], "beta");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn read_sources_clamps_the_limit() {
+    setup!(client, test_db);
+    seed_graph(&GraphWriter::new(client.as_ref().clone())).await;
+    let tool = ReadSourcesTool(Arc::clone(&client));
+    let out = tool.execute(json!({
+        "repo": "myrepo", "version": "v1.0", "files": ["src/lib.rs"], "limit": 1
+    })).await.unwrap();
+    let rows: Vec<Value> = serde_json::from_str(&out).unwrap();
+    assert_eq!(rows.len(), 1, "limit should be respected: {rows:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn get_evidence_pack_returns_matrix_and_sources_together() {
+    setup!(client, test_db);
+    seed_graph(&GraphWriter::new(client.as_ref().clone())).await;
+    let tool = GetEvidencePackTool(Arc::clone(&client));
+    let out = tool.execute(json!({
+        "repo": "myrepo", "version": "v1.0", "symbols": ["alpha"]
+    })).await.unwrap();
+    assert!(out.contains("capability_matrix"), "pack should carry the matrix section: {out}");
+    assert!(out.contains("## symbols"), "pack should carry symbol sources: {out}");
+    assert!(out.contains("alpha"), "pack should include the requested symbol: {out}");
+    assert!(out.chars().count() <= EVIDENCE_PACK_BUDGET_CHARS + 400, "pack must respect its budget");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn get_evidence_pack_requires_repo_and_version() {
+    setup!(client, test_db);
+    let tool = GetEvidencePackTool(Arc::clone(&client));
+    assert!(tool.execute(json!({ "repo": "myrepo" })).await.is_err());
+    assert!(tool.execute(json!({ "version": "v1.0" })).await.is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn all_tools_includes_the_evidence_pack_and_matrix() {
+    setup!(client, test_db);
+    let names: Vec<String> = knowledge_server::agent::graph_tools::all_tools(Arc::clone(&client))
+        .iter().map(|t| t.definition().name).collect();
+    for expected in ["get_evidence_pack", "get_capability_matrix", "read_sources", "search_symbols"] {
+        assert!(names.iter().any(|n| n == expected), "missing tool {expected} in {names:?}");
+    }
+}
+
+fn semantic_handle(fail: bool) -> Arc<SemanticHandle> {
+    use knowledge_server::agent::semantic::FnEmbedder;
+    let embedder: Arc<dyn knowledge_server::agent::semantic::Embedder> = if fail {
+        Arc::new(FnEmbedder::failing("text-embedding-004", 768))
+    } else {
+        Arc::new(FnEmbedder::constant("text-embedding-004", 768, 0.1))
+    };
+    Arc::new(SemanticHandle::configured(embedder, &knowledge_server::config::SemanticConfig::default()))
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn search_falls_back_to_lexical_when_the_embedding_column_is_absent() {
+    setup!(client, test_db);
+    let tool = SearchSymbolsTool::with_semantic(Arc::clone(&client), semantic_handle(false));
+    let result: Vec<Value> = serde_json::from_str(
+        &tool.execute(json!({ "query": "alpha" })).await.unwrap()
+    ).unwrap();
+    let names = names_from(&result);
+    assert!(names.iter().any(|n| n == "alpha"), "names: {names:?}");
+    for row in &result {
+        assert!(
+            row["matched_on"].as_array().map(|m| m.iter().all(|s| s != "semantic")).unwrap_or(true),
+            "the semantic signal must not appear without an embedding column: {row}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn search_falls_back_to_lexical_when_the_embedder_fails() {
+    setup!(client, test_db);
+    let tool = SearchSymbolsTool::with_semantic(Arc::clone(&client), semantic_handle(true));
+    let result: Vec<Value> = serde_json::from_str(
+        &tool.execute(json!({ "query": "alpha" })).await.unwrap()
+    ).unwrap();
+    assert!(names_from(&result).iter().any(|n| n == "alpha"));
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn semantic_search_reports_itself_unavailable_without_pgvector() {
+    let test_db = TestDb::new().await;
+    let available = knowledge_server::agent::semantic::semantic_available(&test_db.db).await.unwrap();
+    assert!(!available, "this test database is expected to have no embedding column");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn backfill_refuses_to_run_without_embedding_storage() {
+    use knowledge_server::agent::semantic::FnEmbedder;
+    let test_db = TestDb::new().await;
+    let err = knowledge_server::agent::semantic::backfill_embeddings(
+        &test_db.db,
+        &FnEmbedder::constant("text-embedding-004", 768, 0.1),
+        &knowledge_server::agent::semantic::BackfillOptions {
+            model: "text-embedding-004".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("not available"), "unexpected error: {err}");
+}
+
+const SEMANTIC_CTE: &str = "), semantic_scored AS (\n    SELECT s.id,\n           (1 - (s.embedding <=> $qvec::vector))::float8 AS semantic_score\n    FROM symbols s\n    WHERE s.embedding IS NOT NULL\n      AND s.embedding_model = $qmodel\n      AND ($repo = '' OR s.repo = $repo)\n      AND ($version = '' OR s.version = $version)\n)";
+const SEMANTIC_CTE_STUB: &str = "), semantic_scored AS (\n    SELECT s.id, NULL::float8 AS semantic_score FROM symbols s WHERE false\n)";
+
+async fn hybrid_sql_for(client: &harvest_db::Db) -> String {
+    let available: bool = client
+        .query(
+            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AS present",
+            json!({}),
+        )
+        .await
+        .ok()
+        .and_then(|rows| rows.into_iter().next())
+        .and_then(|r| r["present"].as_bool())
+        .unwrap_or(false);
+    if available {
+        return HYBRID_SEARCH_SQL.to_string();
+    }
+    assert!(
+        HYBRID_SEARCH_SQL.contains(SEMANTIC_CTE),
+        "the semantic CTE must match the stub target"
+    );
+    HYBRID_SEARCH_SQL.replace(SEMANTIC_CTE, SEMANTIC_CTE_STUB)
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn hybrid_sql_executes_the_full_lexical_cte_chain() {
+    setup!(client, _test_db);
+    let sql = hybrid_sql_for(&client).await;
+    let params = json!({
+        "query": "alpha", "repo": "myrepo", "version": "", "kind": "any", "limit": 10,
+        "qvec": "[0.0]", "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
+    });
+    let rows = client
+        .query(&sql, params)
+        .await
+        .expect("the hybrid CTE chain must parse and execute");
+    assert!(names_from(&rows).contains(&"alpha".to_string()));
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn hybrid_sql_reports_capability_matches() {
+    setup!(client, _test_db);
+    let sql = hybrid_sql_for(&client).await;
+    let params = json!({
+        "query": "i32", "repo": "myrepo", "version": "", "kind": "any", "limit": 10,
+        "qvec": "[0.0]", "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
+    });
+    let rows = client
+        .query(&sql, params)
+        .await
+        .expect("the hybrid CTE chain must parse and execute");
+    let my_struct = rows
+        .iter()
+        .find(|r| r["name"] == "MyStruct")
+        .expect("the class should match on the i32 capability in its source");
+    let matched: Vec<&str> = my_struct["matched_on"]
+        .as_array()
+        .expect("matched_on must be an array")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(
+        matched.contains(&"capability"),
+        "the capability CTE must contribute to matched_on, got {matched:?}"
+    );
+    assert!(
+        my_struct["score"].as_f64().unwrap_or(0.0) > 0.0,
+        "a capability-only match must still score above zero"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn disabling_semantic_search_leaves_the_tool_set_unchanged() {
+    setup!(client, _test_db);
+    let plain: Vec<String> = all_tools(Arc::clone(&client))
+        .iter()
+        .map(|t| t.definition().name)
+        .collect();
+    let with_none: Vec<String> = all_tools_with_semantic(Arc::clone(&client), None)
+        .iter()
+        .map(|t| t.definition().name)
+        .collect();
+    assert_eq!(plain, with_none);
+    assert!(plain.contains(&"search_symbols".to_string()));
 }

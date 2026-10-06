@@ -65,11 +65,70 @@ async fn main() -> Result<()> {
     let compaction_threshold_chars  = config.agent.compaction_threshold_chars;
     let compaction_keep_last        = config.agent.compaction_keep_last;
 
-    let global_tools = graph_tools::all_tools(Arc::clone(&db));
+    let system_one_client = match &config.system_one {
+        Some(so_cfg) if so_cfg.is_enabled() && !so_cfg.api_key.is_empty() => {
+            tracing::info!(endpoint = %so_cfg.endpoint, model = %so_cfg.model, "system-one decision provider enabled (server key)");
+            Some(crate::llm::system_one::SystemOneClient::from_config(so_cfg))
+        }
+        Some(so_cfg) if so_cfg.is_enabled() => {
+            tracing::info!(endpoint = %so_cfg.endpoint, model = %so_cfg.model, "system-one configured with user-provided key — will resolve per-user");
+            None
+        }
+        _ => None,
+    };
+
+    let semantic_handle = match knowledge_server::agent::semantic::build_handle(&config.semantic, &config.llm) {
+        Ok(handle) => handle,
+        Err(err) => {
+            tracing::error!(error = %err, "semantic search is configured but could not be initialised; continuing with lexical search only");
+            None
+        }
+    };
+    if let Some(handle) = semantic_handle.clone() {
+        tracing::info!(model = %handle.model, "semantic search enabled");
+        if config.semantic.backfill_on_start {
+            if let Some(embedder) = handle.embedder.clone() {
+                let db = Arc::clone(&db);
+                let semantic_cfg = config.semantic.clone();
+                tokio::spawn(async move {
+                    match knowledge_server::agent::semantic::run_backfill_if_configured(db.as_ref(), embedder.as_ref(), &semantic_cfg).await {
+                        Ok(stats) => tracing::info!(
+                            scanned = stats.scanned, embedded = stats.embedded,
+                            skipped = stats.skipped, batches = stats.batches,
+                            "semantic backfill finished"
+                        ),
+                        Err(err) => tracing::warn!(error = %err, "semantic backfill failed; continuing with lexical search only"),
+                    }
+                });
+            }
+        }
+    }
+
+    let global_tools = graph_tools::all_tools_with_semantic(Arc::clone(&db), semantic_handle.clone());
+    let (fast_path, early_synthesis, relevance, early_synth_research, rel_preserve, synth_coverage, synth_min_first, synth_uniform, synth_capability_gate, next_action_confidence) = match &config.system_one {
+        Some(so_cfg) if so_cfg.is_enabled() => (
+            so_cfg.fast_path,
+            so_cfg.early_synthesis,
+            so_cfg.relevance,
+            so_cfg.early_synthesis_research,
+            so_cfg.relevance_preserve_recent,
+            so_cfg.early_synthesis_coverage,
+            so_cfg.early_synthesis_min_iterations_first_turn,
+            so_cfg.early_synthesis_uniform,
+            so_cfg.early_synthesis_capability_gate,
+            so_cfg.next_action_confidence,
+        ),
+        _ => (0.7, 0.85, 0.4, 0.95, 2, 0.8, 5, 0.7, 0.8, 0.5),
+    };
+
     let agent = Arc::new(
         Agent::new(Arc::clone(&llm_provider), global_tools, max_iterations)
+            .with_system_one(system_one_client.clone())
             .with_compaction(compaction_threshold_chars, compaction_keep_last)
-            .with_parallel_research(true),
+            .with_parallel_research(true)
+            .with_thresholds(fast_path, early_synthesis, relevance, early_synth_research, rel_preserve, synth_coverage, synth_min_first, synth_uniform)
+            .with_capability_gate_threshold(synth_capability_gate)
+            .with_next_action_confidence(next_action_confidence),
     );
 
     let machine_registry = MachineRegistry::new();
@@ -102,6 +161,7 @@ async fn main() -> Result<()> {
 
     let agent_builder = Arc::new(ProjectAgentBuilder {
         llm:            Arc::clone(&llm_provider),
+        system_one:     system_one_client.clone(),
         db:             Arc::clone(&db),
         registry:       Arc::clone(&machine_registry),
         skills:         Arc::clone(&skill_registry),
@@ -112,6 +172,19 @@ async fn main() -> Result<()> {
         max_iterations,
         compaction_threshold_chars,
         compaction_keep_last,
+        thresholds: Some(knowledge_server::api::Thresholds {
+            fast_path,
+            early_synthesis,
+            relevance,
+            early_synthesis_research: early_synth_research,
+            relevance_preserve_recent: rel_preserve,
+            early_synthesis_coverage: synth_coverage,
+            early_synthesis_min_iterations_first_turn: synth_min_first,
+            early_synthesis_uniform: synth_uniform,
+            early_synthesis_capability_gate: synth_capability_gate,
+            next_action_confidence,
+        }),
+        semantic: semantic_handle.clone(),
     });
 
     let pricing = Arc::new(knowledge_server::cost::PricingTable::from_configs(&config.llm));
@@ -128,10 +201,12 @@ async fn main() -> Result<()> {
         binary_path,
         llm:              Arc::clone(&llm_provider),
         llm_configs,
+        system_one_config: config.system_one.clone(),
         user_key_store,
         lxd,
         collocate_registry,
         pricing,
+        semantic: semantic_handle,
     };
 
     let cache: Arc<GraphCache> = Arc::new(RwLock::new(HashMap::new()));

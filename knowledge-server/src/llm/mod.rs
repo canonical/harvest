@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod gemini;
 pub mod openai_compat;
 pub mod pricing;
+pub mod system_one;
 pub mod types;
 mod retry;
 
@@ -301,7 +302,7 @@ fn build_provider_with_key(config: &LlmProviderConfig, api_key_override: Option<
         LlmProviderConfig::OpenAiCompat { base_url, model, timeout_secs, max_retries, .. } =>
             Arc::new(openai_compat::OpenAiCompatProvider::new(
                 base_url.clone(), api_key.to_string(), model.clone(), *timeout_secs, *max_retries, meta,
-            )),
+            ).with_prompt_caching(config.enable_prompt_caching())),
     }
 }
 
@@ -543,7 +544,7 @@ mod tests {
         let p2 = MockProvider::with_id("p2", vec![MockProvider::ok("from p2")]);
         let fb = fallback(vec![p1.clone(), p2]);
 
-        let selection = ProviderSelection { provider_id: "p2".into(), model: Some("custom-model".into()) };
+        let selection = ProviderSelection { provider_id: "p2".into(), model: Some("custom-model".into()), cache_breakpoint_index: None };
         let (response, used, _) = fb.chat_routed(Some(&selection), &[], &[]).await.unwrap();
 
         assert!(matches!(response, LlmResponse::Message { text, .. } if text == "from p2"));
@@ -558,7 +559,7 @@ mod tests {
         let p2 = MockProvider::with_id("p2", vec![MockProvider::rate_limited()]);
         let fb = fallback(vec![p1, p2]);
 
-        let selection = ProviderSelection { provider_id: "p2".into(), model: None };
+        let selection = ProviderSelection { provider_id: "p2".into(), model: None, cache_breakpoint_index: None };
         let (response, used, _) = fb.chat_routed(Some(&selection), &[], &[]).await.unwrap();
 
         assert!(matches!(response, LlmResponse::Message { text, .. } if text == "from p1"));
@@ -571,7 +572,7 @@ mod tests {
         let p2 = MockProvider::with_id("p2", vec![]);
         let fb = fallback(vec![p1, p2]);
 
-        let selection = ProviderSelection { provider_id: "does-not-exist".into(), model: None };
+        let selection = ProviderSelection { provider_id: "does-not-exist".into(), model: None, cache_breakpoint_index: None };
         let (response, used, _) = fb.chat_routed(Some(&selection), &[], &[]).await.unwrap();
 
         assert!(matches!(response, LlmResponse::Message { text, .. } if text == "from p1"));
@@ -584,7 +585,7 @@ mod tests {
         let p2 = MockProvider::with_id("p2", vec![MockProvider::ok("streamed")]);
         let fb = fallback(vec![p1, p2]);
 
-        let selection = ProviderSelection { provider_id: "p2".into(), model: Some("m2".into()) };
+        let selection = ProviderSelection { provider_id: "p2".into(), model: Some("m2".into()), cache_breakpoint_index: None };
         let (tx, mut rx) = mpsc::channel(16);
         let used = fb.chat_stream_routed(Some(&selection), &[], &[], tx).await.unwrap();
 
@@ -643,5 +644,45 @@ mod tests {
         let provider = MockProvider::with_discovered_and_allowlist(discovered, vec!["nonexistent".into()]);
         let available = provider.available_models().await.unwrap();
         assert!(available.is_empty());
+    }
+
+    #[test]
+    fn from_config_openai_compat_without_caching() {
+        let cfg = vec![crate::config::LlmProviderConfig::OpenAiCompat {
+            base_url: "https://x".into(),
+            api_key: "k".into(),
+            model: "m".into(),
+            id: "oai-0".into(),
+            priority: 0,
+            timeout_secs: 30,
+            max_retries: 0,
+            expose_to_ui: true,
+            name: None,
+            models: None,
+            user_provided_key: false,
+            pricing: None,
+            enable_prompt_caching: false,
+        }];
+        let _ = from_config(&cfg);
+    }
+
+    #[test]
+    fn from_config_openai_compat_with_caching() {
+        let cfg = vec![crate::config::LlmProviderConfig::OpenAiCompat {
+            base_url: "https://x".into(),
+            api_key: "k".into(),
+            model: "m".into(),
+            id: "oai-0".into(),
+            priority: 0,
+            timeout_secs: 30,
+            max_retries: 0,
+            expose_to_ui: true,
+            name: None,
+            models: None,
+            user_provided_key: false,
+            pricing: None,
+            enable_prompt_caching: true,
+        }];
+        let _ = from_config(&cfg);
     }
 }

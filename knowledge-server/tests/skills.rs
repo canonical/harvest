@@ -82,12 +82,17 @@ fn skills_app(db: Arc<Db>) -> Router {
         registry:                   Arc::clone(&registry),
         skills:                     Arc::clone(&skill_store),
         lxd:                        None,
+        system_one:                 None,
+        collocate:                  None,
+        collocate_registry:         knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
         server_url:                 "http://localhost".into(),
         max_iterations:             2,
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,
+        thresholds:                 None,
+        semantic:  None,
     });
-    let project_state = Arc::new(ProjectState::new(Arc::clone(&db), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
+    let project_state = Arc::new(ProjectState::new(Arc::clone(&db), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, None, Arc::new(knowledge_server::cost::PricingTable::default()), knowledge_server::collocate::sessions::SessionContainerRegistry::new()));
 
     let project_routes = Router::new()
         .route("/projects", route_post(create_project))
