@@ -242,6 +242,37 @@ The Vite dev server proxies all API calls to `localhost:8080` automatically.
 
 ---
 
+## Running a persistent instance (systemd)
+
+`scripts/start-harvest.sh` runs the backend and the web UI together (the UI is
+the built `web-ui/dist` served by `vite preview`, which proxies API calls to the
+backend). `scripts/install-systemd-service.sh` builds everything and installs a
+systemd unit that runs it at boot and restarts it on failure.
+
+```bash
+# 1 — PostgreSQL (migrations run automatically on server start)
+sudo apt install postgresql postgresql-contrib   # + postgresql-16-pgvector for semantic search
+sudo -u postgres psql -c "CREATE ROLE harvest LOGIN PASSWORD 'harvest'"
+sudo -u postgres psql -c "CREATE DATABASE harvest OWNER harvest"
+
+# 2 — Write a server.toml (see knowledge-server/server.toml) with
+#     [database] url = "postgres://harvest:harvest@localhost:5432/harvest"
+
+# 3 — Build and install the service (runs as the user invoking sudo by default)
+sudo scripts/install-systemd-service.sh --config /path/to/server.toml
+
+# 4 — Open http://<host>:3000 — the first user to register becomes admin
+systemctl status harvest
+journalctl -u harvest -f
+```
+
+Options: `--user`, `--name`, `--ui-host`, `--ui-port` (default 3000),
+`--allowed-hosts` (hostnames the UI accepts besides those in `auth.public_url`
+/ `agents.public_url`), `--no-build`, `--uninstall`. Re-run the installer after
+pulling new code to rebuild and restart.
+
+---
+
 ## HTTP API
 
 ### Authentication
