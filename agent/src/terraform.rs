@@ -298,6 +298,33 @@ mod tests {
         assert!(init_pos < plan_pos);
     }
 
+    static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct PathGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        original: String,
+    }
+
+    impl PathGuard {
+        fn prepend(extra: &std::path::Path) -> Self {
+            let lock = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let original = std::env::var("PATH").unwrap_or_default();
+            let new_path = if original.is_empty() {
+                extra.display().to_string()
+            } else {
+                format!("{}:{original}", extra.display())
+            };
+            unsafe { std::env::set_var("PATH", &new_path) };
+            PathGuard { _lock: lock, original }
+        }
+    }
+
+    impl Drop for PathGuard {
+        fn drop(&mut self) {
+            unsafe { std::env::set_var("PATH", &self.original) };
+        }
+    }
+
     #[tokio::test]
     async fn run_in_executes_fake_terraform_init_and_then_action() {
         let workspace_root = TempDir::new().unwrap();
@@ -306,8 +333,7 @@ mod tests {
         std::fs::write(&fake_terraform, "#!/bin/sh\necho \"ran: $*\"\n").unwrap();
         std::fs::set_permissions(&fake_terraform, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", bin_dir.path().display(), original_path));
+        let _path = PathGuard::prepend(bin_dir.path());
 
         let mut files = BTreeMap::new();
         files.insert("main.tf".to_string(), "resource \"local_file\" \"x\" {}".to_string());
@@ -321,8 +347,6 @@ mod tests {
             10,
             None,
         ).await;
-
-        std::env::set_var("PATH", original_path);
 
         let result = result.unwrap();
         assert!(result.stdout.contains("ran: init"), "stdout: {}", result.stdout);
@@ -339,8 +363,7 @@ mod tests {
         std::fs::write(&fake_terraform, "#!/bin/sh\necho \"ran: $*\"\n").unwrap();
         std::fs::set_permissions(&fake_terraform, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", bin_dir.path().display(), original_path));
+        let _path = PathGuard::prepend(bin_dir.path());
 
         let mut files = BTreeMap::new();
         files.insert("main.tf".to_string(), "resource \"local_file\" \"x\" {}".to_string());
@@ -356,7 +379,6 @@ mod tests {
             Some(tx),
         ).await;
 
-        std::env::set_var("PATH", original_path);
         let result = result.unwrap();
 
         let mut streamed_stdout = String::new();
