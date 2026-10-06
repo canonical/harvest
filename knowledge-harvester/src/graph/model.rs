@@ -41,6 +41,7 @@ pub struct FunctionNode {
     pub end_line: u32,
     pub source: String,
     pub impl_type: Option<String>,
+    pub docstring: Option<String>,
     pub calls: Vec<CallRef>,
 }
 
@@ -58,6 +59,7 @@ pub struct ClassNode {
     pub traits: Vec<String>,
     pub embeds: Vec<String>,
     pub uses: Vec<String>,
+    pub docstring: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
