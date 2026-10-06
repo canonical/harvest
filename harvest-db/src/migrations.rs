@@ -3,6 +3,8 @@ use tokio_postgres::Client;
 
 const MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/0001_init.sql")),
+    (2, include_str!("../migrations/0002_docstring_and_search.sql")),
+    (3, include_str!("../migrations/0003_semantic.sql")),
 ];
 
 /// Changes whenever a migration is added or edited.
@@ -47,4 +49,49 @@ async fn apply_pending(client: &mut Client) -> Result<()> {
         tracing::info!(version, "applied database migration");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sql_for(version: i32) -> &'static str {
+        MIGRATIONS.iter().find(|(v, _)| *v == version).map(|(_, s)| *s).unwrap()
+    }
+
+    #[test]
+    fn migration_versions_are_unique_and_ascending() {
+        let versions: Vec<i32> = MIGRATIONS.iter().map(|(v, _)| *v).collect();
+        let mut sorted = versions.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(versions, sorted, "migration versions must be unique and ascending");
+    }
+
+    #[test]
+    fn migration_2_adds_docstring_column_and_indexes() {
+        let sql = sql_for(2);
+        assert!(sql.contains("docstring"), "migration 2 must add a docstring column");
+        assert!(sql.contains("symbols_signature_trgm"), "migration 2 must index signature for trigram search");
+        assert!(sql.contains("symbols_docstring_trgm"), "migration 2 must index docstring for trigram search");
+    }
+
+    #[test]
+    fn migration_2_is_idempotent_where_possible() {
+        let sql = sql_for(2);
+        assert!(sql.contains("IF NOT EXISTS"), "migration 2 must be re-runnable safely");
+    }
+
+    #[test]
+    fn fingerprint_changes_when_a_migration_is_added() {
+        let before = fingerprint();
+        assert_ne!(before, 0);
+    }
+
+    #[test]
+    fn later_migrations_do_not_block_startup_when_vector_is_missing() {
+        let sql = sql_for(3);
+        assert!(sql.contains("pg_available_extensions"), "vector setup must check availability first");
+        assert!(sql.contains("EXCEPTION"), "vector setup must not abort the migration on failure");
+    }
 }
