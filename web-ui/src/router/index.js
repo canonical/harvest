@@ -39,10 +39,7 @@ router.beforeEach(async (to, from) => {
 
   if (to.meta.feature && !auth.features[to.meta.feature]) return '/';
 
-  if (to.meta.requiresApiKey && auth.apiKeyRequired) {
-    auth.apiKeyDismissed = false;
-    return '/settings';
-  }
+  if (to.meta.requiresApiKey && auth.apiKeyRequired) return '/settings';
 
   if (!to.meta.directEntry && from.matched.length === 0 && to.path !== '/') return '/';
 

@@ -255,7 +255,7 @@
       </div>
     </div>
 
-    <div v-if="auth.apiKeyRequired && !auth.apiKeyDismissed" class="modal">
+    <div v-if="auth.apiKeyRequired && !auth.apiKeyDismissed && route.path !== '/settings'" class="modal">
       <div class="modal-content">
         <button class="modal-close" type="button" @click="auth.apiKeyDismissed = true" style="display:none"></button>
         <h3>API key required</h3>
@@ -467,8 +467,8 @@ async function checkApiKeys() {
       } else {
         auth.apiKeyProviderName = '';
       }
+      if (!auth.apiKeyRequired) auth.apiKeyDismissed = false;
       auth.apiKeyRequired = true;
-      auth.apiKeyDismissed = false;
     } else {
       auth.apiKeyRequired = false;
     }
