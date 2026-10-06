@@ -133,17 +133,20 @@ async fn write_file(tx: &Tx, version_id: i64, file: &ParsedFile) -> Result<()> {
             "end_line":   f.end_line,
             "source":     f.source,
             "impl_type":  f.impl_type,
+            "docstring":  f.docstring,
         })).collect(), "name");
         tx.execute(
             "INSERT INTO symbols (file_id, version_id, label, name, kind, signature,
-                                  start_line, end_line, source, impl_type)
+                                  start_line, end_line, source, impl_type, docstring)
              SELECT $file_id, $vid, 'Function', f->>'name', f->>'kind', f->>'signature',
-                    (f->>'start_line')::int, (f->>'end_line')::int, f->>'source', f->>'impl_type'
+                    (f->>'start_line')::int, (f->>'end_line')::int, f->>'source', f->>'impl_type',
+                    f->>'docstring'
              FROM jsonb_array_elements($fns::jsonb) AS f
              ON CONFLICT (file_id, label, name) DO UPDATE SET
                  kind = EXCLUDED.kind, signature = EXCLUDED.signature,
                  start_line = EXCLUDED.start_line, end_line = EXCLUDED.end_line,
-                 source = EXCLUDED.source, impl_type = EXCLUDED.impl_type",
+                 source = EXCLUDED.source, impl_type = EXCLUDED.impl_type,
+                 docstring = EXCLUDED.docstring",
             json!({ "file_id": file_id, "vid": version_id, "fns": fns }),
         ).await?;
     }
@@ -159,22 +162,25 @@ async fn write_file(tx: &Tx, version_id: i64, file: &ParsedFile) -> Result<()> {
             "traits":     c.traits,
             "embeds":     c.embeds,
             "uses":       c.uses,
+            "docstring":  c.docstring,
         })).collect(), "name");
         tx.execute(
             "INSERT INTO symbols (file_id, version_id, label, name, kind, start_line, end_line,
-                                  source, bases, traits, embeds, uses)
+                                  source, bases, traits, embeds, uses, docstring)
              SELECT $file_id, $vid, 'Class', c->>'name', c->>'kind',
                     (c->>'start_line')::int, (c->>'end_line')::int, c->>'source',
                     ARRAY(SELECT jsonb_array_elements_text(c->'bases')),
                     ARRAY(SELECT jsonb_array_elements_text(c->'traits')),
                     ARRAY(SELECT jsonb_array_elements_text(c->'embeds')),
-                    ARRAY(SELECT jsonb_array_elements_text(c->'uses'))
+                    ARRAY(SELECT jsonb_array_elements_text(c->'uses')),
+                    c->>'docstring'
              FROM jsonb_array_elements($classes::jsonb) AS c
              ON CONFLICT (file_id, label, name) DO UPDATE SET
                  kind = EXCLUDED.kind, start_line = EXCLUDED.start_line,
                  end_line = EXCLUDED.end_line, source = EXCLUDED.source,
                  bases = EXCLUDED.bases, traits = EXCLUDED.traits,
-                 embeds = EXCLUDED.embeds, uses = EXCLUDED.uses",
+                 embeds = EXCLUDED.embeds, uses = EXCLUDED.uses,
+                 docstring = EXCLUDED.docstring",
             json!({ "file_id": file_id, "vid": version_id, "classes": classes }),
         ).await?;
     }

@@ -29,6 +29,7 @@ fn make_file(repo: &str, version: &str, path: &str) -> ParsedFile {
                 end_line: 3,
                 source: "fn alpha() {\n    beta();\n}".to_string(),
                 impl_type: None,
+                docstring: None,
                 calls: vec![],
             },
             FunctionNode {
@@ -42,6 +43,7 @@ fn make_file(repo: &str, version: &str, path: &str) -> ParsedFile {
                 end_line: 6,
                 source: "fn beta() {}".to_string(),
                 impl_type: None,
+                docstring: None,
                 calls: vec![],
             },
         ],
@@ -58,6 +60,7 @@ fn make_file(repo: &str, version: &str, path: &str) -> ParsedFile {
             traits: vec![],
             embeds: vec![],
             uses: vec![],
+            docstring: None,
         }],
         imports: vec![ImportNode {
             repo: repo.to_string(),
