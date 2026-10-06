@@ -123,6 +123,7 @@ impl LanguageParser for RustParser {
                     end_line: end_row,
                     source: src_text.into(),
                     impl_type,
+                    docstring: leading_doc_comment(source, fn_n),
                     calls,
                 });
             }
@@ -164,6 +165,7 @@ impl LanguageParser for RustParser {
                             traits,
                             embeds: vec![],
                             uses,
+                            docstring: leading_doc_comment(source, tn),
                         });
                     }
                 }
@@ -243,6 +245,7 @@ impl LanguageParser for PythonParser {
                         end_line,
                         source: src_text.into(),
                         impl_type: None,
+                        docstring: python_docstring(source, fn_n),
                         calls,
                     });
                 }
@@ -278,6 +281,7 @@ impl LanguageParser for PythonParser {
                         traits: vec![],
                         embeds: vec![],
                         uses: vec![],
+                        docstring: python_docstring(source, cls_n),
                     });
                 }
             }
@@ -285,7 +289,7 @@ impl LanguageParser for PythonParser {
 
         let inherit_q = tree_sitter::Query::new(
             &lang,
-            "(class_definition name: (identifier) @class_name superclasses: (argument_list (identifier) @base_name))",
+            "(class_definition name: (identifier) @class_name superclasses: (argument_list [(identifier) @base_name (attribute attribute: (identifier) @base_name)]))",
         ).expect("valid Python inheritance query");
         let iclass_idx = inherit_q.capture_index_for_name("class_name").unwrap();
         let ibase_idx  = inherit_q.capture_index_for_name("base_name").unwrap();
@@ -451,6 +455,7 @@ impl LanguageParser for GoParser {
                         end_line,
                         source: src_text.into(),
                         impl_type,
+                        docstring: leading_doc_comment(source, fn_n),
                         calls,
                     });
                 }
@@ -500,6 +505,7 @@ impl LanguageParser for GoParser {
                         traits: vec![],
                         embeds,
                         uses: vec![],
+                        docstring: leading_doc_comment(source, ts_n),
                     });
                 }
             }
@@ -566,6 +572,46 @@ fn python_has_class_ancestor(mut node: tree_sitter::Node) -> bool {
         node = parent;
     }
     false
+}
+
+fn strip_docstring_quotes(text: &str) -> String {
+    let trimmed = text.trim();
+    for quote in ["\"\"\"", "'''"] {
+        if let Some(inner) = trimmed.strip_prefix(quote).and_then(|t| t.strip_suffix(quote)) {
+            let dedented = dedent_lines(inner);
+            return dedented.trim().to_string();
+        }
+    }
+    for quote in ['"', '\''] {
+        let q = quote.to_string();
+        if let Some(inner) = trimmed.strip_prefix(&q).and_then(|t| t.strip_suffix(&q)) {
+            return inner.trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
+fn dedent_lines(text: &str) -> String {
+    let non_empty: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let indent = non_empty
+        .iter()
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    text.lines()
+        .map(|l| if l.len() >= indent { &l[indent..] } else { l.trim_start() })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn python_docstring(source: &str, node: tree_sitter::Node) -> Option<String> {
+    let body = node.child_by_field_name("body")?;
+    let first = body.named_child(0)?;
+    if first.kind() != "expression_statement" { return None; }
+    let literal = first.named_child(0)?;
+    if !matches!(literal.kind(), "string" | "concatenated_string") { return None; }
+    let text = strip_docstring_quotes(&source[literal.byte_range()]);
+    if text.is_empty() { None } else { Some(text) }
 }
 
 fn python_import_target(source: &str, node: tree_sitter::Node) -> String {
@@ -716,6 +762,32 @@ fn rust_extract_field_uses(
         }
     }
     uses
+}
+
+pub fn leading_doc_comment(source: &str, node: tree_sitter::Node) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = node;
+    loop {
+        let prev = current.prev_sibling()?;
+        if prev.kind() != "comment" { break; }
+        if !prev.end_position().row + 1 >= current.start_position().row { break; }
+        let text = &source[prev.byte_range()];
+        let cleaned = text
+            .trim_start()
+            .trim_start_matches('/')
+            .trim_start_matches(['*', '!'])
+            .trim_start()
+            .trim_end()
+            .trim_end_matches("*/")
+            .trim()
+            .to_string();
+        lines.push(cleaned);
+        current = prev;
+    }
+    if lines.is_empty() { return None; }
+    lines.reverse();
+    let joined = lines.join("\n").trim().to_string();
+    if joined.is_empty() { None } else { Some(joined) }
 }
 
 fn first_line(text: &str) -> String {
@@ -897,6 +969,56 @@ mod tests {
     #[test] fn python_single_inheritance() {
         let pf = parse_python("class Child(Parent):\n    pass");
         assert_eq!(pf.classes[0].bases, vec!["Parent"]);
+    }
+
+    #[test] fn python_dotted_base_inheritance() {
+        let pf = parse_python("class Child(some.module.Parent):\n    pass");
+        assert_eq!(pf.classes[0].bases, vec!["Parent"], "dotted bases must still be captured");
+    }
+
+    #[test] fn python_mixed_base_inheritance() {
+        let pf = parse_python("class Child(First, mod.Second):\n    pass");
+        assert!(pf.classes[0].bases.contains(&"First".to_string()), "bases: {:?}", pf.classes[0].bases);
+        assert!(pf.classes[0].bases.contains(&"Second".to_string()), "bases: {:?}", pf.classes[0].bases);
+    }
+
+    #[test] fn python_class_docstring_extracted() {
+        let src = "class Foo:\n    \"\"\"Handles the thing.\n\n    More detail here.\n    \"\"\"\n    pass";
+        let pf = parse_python(src);
+        let doc = pf.classes[0].docstring.as_deref().unwrap_or("");
+        assert!(doc.contains("Handles the thing."), "doc: {doc:?}");
+        assert!(doc.contains("More detail here."), "doc: {doc:?}");
+        assert!(!doc.contains("\"\"\""), "quotes should be stripped: {doc:?}");
+    }
+
+    #[test] fn python_function_docstring_extracted() {
+        let src = "def helper():\n    \"\"\"Does a thing.\"\"\"\n    return 1";
+        let pf = parse_python(src);
+        assert_eq!(pf.functions[0].docstring.as_deref(), Some("Does a thing."));
+    }
+
+    #[test] fn python_single_quoted_docstring_extracted() {
+        let src = "def helper():\n    'One liner.'\n    return 1";
+        let pf = parse_python(src);
+        assert_eq!(pf.functions[0].docstring.as_deref(), Some("One liner."));
+    }
+
+    #[test] fn python_missing_docstring_is_none() {
+        let pf = parse_python("def helper():\n    return 1");
+        assert!(pf.functions[0].docstring.is_none());
+    }
+
+    #[test] fn python_attribute_initialiser_is_not_a_docstring() {
+        let src = "class Foo:\n    BAR = 1\n    pass";
+        let pf = parse_python(src);
+        assert!(pf.classes[0].docstring.is_none(), "got {:?}", pf.classes[0].docstring);
+    }
+
+    #[test] fn python_class_docstring_and_capability_constant_coexist() {
+        let src = "class Driver(Base):\n    \"\"\"NFS driver.\"\"\"\n    SUPPORTS_ACTIVE_ACTIVE = True";
+        let pf = parse_python(src);
+        assert_eq!(pf.classes[0].docstring.as_deref(), Some("NFS driver."));
+        assert!(pf.classes[0].source.contains("SUPPORTS_ACTIVE_ACTIVE = True"));
     }
 
     #[test] fn python_multiple_inheritance() {
