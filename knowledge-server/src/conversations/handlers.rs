@@ -58,6 +58,8 @@ fn build_assistant_message(
     assistant_text: &str,
     sources: &[crate::agent::Source],
     tool_calls_made: usize,
+    tool_errors: usize,
+    turns: usize,
     chain: Vec<Value>,
     question: Option<Value>,
     confirm_action: Option<Value>,
@@ -73,6 +75,8 @@ fn build_assistant_message(
         "sources": sources,
         "chain": chain,
         "tool_calls_made": tool_calls_made,
+        "tool_errors": tool_errors,
+        "turns": turns,
         "duration_ms": duration_ms,
         "usage": usage,
         "llm_call_count": llm_call_count,
@@ -106,6 +110,8 @@ pub async fn append_user_turn(
     assistant_text: &str,
     sources: &[crate::agent::Source],
     tool_calls_made: usize,
+    tool_errors: usize,
+    turns: usize,
     chain: Vec<Value>,
     question: Option<Value>,
     confirm_action: Option<Value>,
@@ -133,8 +139,8 @@ pub async fn append_user_turn(
         "attachments": attachments_meta,
     }));
     messages.push(build_assistant_message(
-        assistant_text, sources, tool_calls_made, chain, question, confirm_action, provider_used, duration_ms,
-        usage, llm_call_count, cost_microusd,
+        assistant_text, sources, tool_calls_made, tool_errors, turns, chain, question, confirm_action,
+        provider_used, duration_ms, usage, llm_call_count, cost_microusd,
     ));
 
     let messages_json = serde_json::to_string(&messages)?;
@@ -294,7 +300,7 @@ mod tests {
     #[test]
     fn build_assistant_message_includes_provider_when_present() {
         let used = used_provider();
-        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, Some(&used), 1234, &Usage::default(), 0, 0);
+        let msg = build_assistant_message("hi", &[], 0, 0, 0, vec![], None, None, Some(&used), 1234, &Usage::default(), 0, 0);
         assert_eq!(msg["provider"]["provider_id"], "anthropic-main");
         assert_eq!(msg["provider"]["kind"], "anthropic");
         assert_eq!(msg["provider"]["model"], "claude-sonnet-5");
@@ -302,22 +308,39 @@ mod tests {
 
     #[test]
     fn build_assistant_message_omits_provider_key_when_none() {
-        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, None, 0, &Usage::default(), 0, 0);
+        let msg = build_assistant_message("hi", &[], 0, 0, 0, vec![], None, None, None, 0, &Usage::default(), 0, 0);
         assert!(msg.as_object().unwrap().get("provider").is_none());
     }
 
     #[test]
     fn build_assistant_message_includes_duration_ms() {
-        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, None, 4200, &Usage::default(), 0, 0);
+        let msg = build_assistant_message("hi", &[], 0, 0, 0, vec![], None, None, None, 4200, &Usage::default(), 0, 0);
         assert_eq!(msg["duration_ms"], 4200);
     }
 
     #[test]
     fn build_assistant_message_provider_round_trips_through_json_string() {
         let used = used_provider();
-        let msg = build_assistant_message("hi", &[], 0, vec![], None, None, Some(&used), 1234, &Usage::default(), 0, 0);
+        let msg = build_assistant_message("hi", &[], 0, 0, 0, vec![], None, None, Some(&used), 1234, &Usage::default(), 0, 0);
         let serialized = serde_json::to_string(&vec![msg]).unwrap();
         let parsed: Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed[0]["provider"]["model"], "claude-sonnet-5");
+    }
+    #[test]
+    fn assistant_message_persists_the_exact_tool_metrics() {
+        let used = UsedProvider { provider_id: "gemini".into(), kind: "gemini".into(), model: "m".into() };
+        let msg = build_assistant_message("hi", &[], 7, 2, 3, vec![], None, None, Some(&used), 1234, &Usage::default(), 4, 0);
+        assert_eq!(msg["tool_calls_made"], 7);
+        assert_eq!(msg["tool_errors"], 2);
+        assert_eq!(msg["turns"], 3);
+        assert_eq!(msg["llm_call_count"], 4);
+    }
+
+    #[test]
+    fn assistant_message_defaults_to_zero_metrics() {
+        let msg = build_assistant_message("hi", &[], 0, 0, 0, vec![], None, None, None, 0, &Usage::default(), 0, 0);
+        assert_eq!(msg["tool_calls_made"], 0);
+        assert_eq!(msg["tool_errors"], 0);
+        assert_eq!(msg["turns"], 0);
     }
 }

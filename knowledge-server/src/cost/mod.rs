@@ -19,6 +19,7 @@ pub enum CostScope {
     Title,
     Overview,
     HarvesterDoc,
+    SystemOne,
 }
 
 impl CostScope {
@@ -31,6 +32,7 @@ impl CostScope {
             Self::Title => "title",
             Self::Overview => "overview",
             Self::HarvesterDoc => "harvester_doc",
+            Self::SystemOne => "system_one",
         }
     }
 }
@@ -101,6 +103,9 @@ fn default_pricing_for(kind: &str, model: &str) -> Option<ModelPricing> {
     }
     if m.contains("llama") || m.contains("mistral") || m.contains("ministral") {
         return Some(ModelPricing { input_per_1k: 200, cache_read_per_1k: 20, cache_creation_per_1k: 0, output_per_1k: 600, reasoning_per_1k: 0 });
+    }
+    if m.contains("jev") || m.contains("kev") || m.contains("systemone") || m.contains("system-one") {
+        return Some(ModelPricing { input_per_1k: 42, cache_read_per_1k: 0, cache_creation_per_1k: 0, output_per_1k: 0, reasoning_per_1k: 0 });
     }
     Some(ModelPricing { input_per_1k: 1000, cache_read_per_1k: 100, cache_creation_per_1k: 0, output_per_1k: 3000, reasoning_per_1k: 0 })
 }

@@ -62,6 +62,24 @@ pub async fn resolve_user_llm(
     }
 }
 
+pub async fn resolve_user_system_one(
+    config: &Option<crate::config::SystemOneConfig>,
+    llm_configs: &[LlmProviderConfig],
+    user_key_store: &Option<Arc<UserKeyStore>>,
+    user_id: &str,
+) -> Option<Arc<crate::llm::system_one::SystemOneClient>> {
+    let so_config = config.as_ref()?;
+    if !so_config.is_enabled() {
+        return None;
+    }
+    crate::llm::system_one::SystemOneClient::resolve_for_user(
+        so_config,
+        llm_configs,
+        user_key_store,
+        user_id,
+    ).await
+}
+
 #[derive(Clone)]
 pub struct GraphState {
     pub db: Arc<Db>,
@@ -80,6 +98,7 @@ pub struct QueryState {
     pub compaction_threshold_chars: usize,
     pub compaction_keep_last: usize,
     pub pricing: Arc<crate::cost::PricingTable>,
+    pub semantic: Option<Arc<graph_tools::SemanticHandle>>,
 }
 
 #[derive(Clone)]
@@ -95,15 +114,50 @@ pub struct AppState {
     pub binary_path:      Option<PathBuf>,
     pub llm:              Arc<dyn LlmProvider>,
     pub llm_configs:      Arc<Vec<LlmProviderConfig>>,
+    pub system_one_config: Option<crate::config::SystemOneConfig>,
     pub user_key_store:   Option<Arc<UserKeyStore>>,
     pub lxd:              Option<Arc<LxdClient>>,
     pub collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
     pub pricing:          Arc<crate::cost::PricingTable>,
+    pub semantic:         Option<Arc<graph_tools::SemanticHandle>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Thresholds {
+    pub fast_path: f64,
+    pub early_synthesis: f64,
+    pub relevance: f64,
+    pub early_synthesis_research: f64,
+    pub relevance_preserve_recent: usize,
+    pub early_synthesis_coverage: f64,
+    pub early_synthesis_min_iterations_first_turn: usize,
+    pub early_synthesis_uniform: f64,
+    pub early_synthesis_capability_gate: f64,
+    pub next_action_confidence: f64,
+}
+
+impl Thresholds {
+    fn apply(self, agent: Agent) -> Agent {
+        agent
+            .with_thresholds(
+                self.fast_path,
+                self.early_synthesis,
+                self.relevance,
+                self.early_synthesis_research,
+                self.relevance_preserve_recent,
+                self.early_synthesis_coverage,
+                self.early_synthesis_min_iterations_first_turn,
+                self.early_synthesis_uniform,
+            )
+            .with_capability_gate_threshold(self.early_synthesis_capability_gate)
+            .with_next_action_confidence(self.next_action_confidence)
+    }
 }
 
 #[derive(Clone)]
 pub struct ProjectAgentBuilder {
     pub llm:                        Arc<dyn LlmProvider>,
+    pub system_one:                 Option<Arc<crate::llm::system_one::SystemOneClient>>,
     pub db:                         Arc<Db>,
     pub registry:                   Arc<MachineRegistry>,
     pub skills:                     Arc<SkillStore>,
@@ -114,11 +168,13 @@ pub struct ProjectAgentBuilder {
     pub max_iterations:             usize,
     pub compaction_threshold_chars: usize,
     pub compaction_keep_last:       usize,
+    pub thresholds:                 Option<Thresholds>,
+    pub semantic:                   Option<Arc<graph_tools::SemanticHandle>>,
 }
 
 impl ProjectAgentBuilder {
     fn base_tools(&self, project_id: String, conversation_id: String) -> Vec<Box<dyn tool::Tool>> {
-        let mut tools = graph_tools::all_tools(Arc::clone(&self.db));
+        let mut tools = graph_tools::all_tools_with_semantic(Arc::clone(&self.db), self.semantic.clone());
         tools.push(Box::new(machine_tools::ListAgentsTool {
             registry:   Arc::clone(&self.registry),
             project_id: project_id.clone(),
@@ -245,12 +301,25 @@ impl ProjectAgentBuilder {
         conversation_id: String,
         llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
+        self.build_for_conversation_with_llm_and_system_one(project_id, conversation_id, llm, self.system_one.clone())
+    }
+
+    pub fn build_for_conversation_with_llm_and_system_one(
+        &self,
+        project_id: String,
+        conversation_id: String,
+        llm: Arc<dyn LlmProvider>,
+        system_one: Option<Arc<crate::llm::system_one::SystemOneClient>>,
+    ) -> Arc<Agent> {
         let tools = self.base_tools(project_id, conversation_id);
-        Arc::new(
-            Agent::new(llm, tools, self.max_iterations)
-                .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
-                .with_parallel_research(true),
-        )
+        let agent = Agent::new(llm, tools, self.max_iterations)
+            .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+            .with_system_one(system_one)
+            .with_parallel_research(true);
+        match self.thresholds {
+            Some(t) => Arc::new(t.apply(agent)),
+            None => Arc::new(agent),
+        }
     }
 
     pub fn build_for_deployment(
@@ -285,11 +354,13 @@ impl ProjectAgentBuilder {
             project_id:    project_id.clone(),
             deployment_id: ctx.deployment_id.clone(),
         }));
-        Arc::new(
-            Agent::new(llm, tools, self.max_iterations)
-                .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
-                .with_system_prompt(prompt::deployment_system_prompt(ctx)),
-        )
+        let agent = Agent::new(llm, tools, self.max_iterations)
+            .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+            .with_system_prompt(prompt::deployment_system_prompt(ctx));
+        match self.thresholds {
+            Some(t) => Arc::new(t.apply(agent)),
+            None => Arc::new(agent),
+        }
     }
 
     /// Same grounding as `build_for_deployment` but with no tools at all, so the model can only
@@ -305,11 +376,13 @@ impl ProjectAgentBuilder {
         ctx: &deployments::DeploymentContext,
         llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        Arc::new(
-            Agent::new(llm, Vec::new(), self.max_iterations)
-                .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
-                .with_system_prompt(prompt::deployment_system_prompt(ctx)),
-        )
+        let agent = Agent::new(llm, Vec::new(), self.max_iterations)
+            .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+            .with_system_prompt(prompt::deployment_system_prompt(ctx));
+        match self.thresholds {
+            Some(t) => Arc::new(t.apply(agent)),
+            None => Arc::new(agent),
+        }
     }
 
     pub fn build_for_deployment_design(
@@ -326,7 +399,7 @@ impl ProjectAgentBuilder {
         ctx:        &deployments::DeploymentContext,
         llm:        Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        let mut tools = graph_tools::all_tools(Arc::clone(&self.db));
+        let mut tools = graph_tools::all_tools_with_semantic(Arc::clone(&self.db), self.semantic.clone());
         tools.push(Box::new(skill_tools::ListSkillsTool {
             store:      Arc::clone(&self.skills),
             project_id: project_id.clone(),
@@ -335,11 +408,13 @@ impl ProjectAgentBuilder {
             store:      Arc::clone(&self.skills),
             project_id,
         }));
-        Arc::new(
-            Agent::new(llm, tools, self.max_iterations)
-                .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
-                .with_system_prompt(prompt::deployment_system_prompt(ctx)),
-        )
+        let agent = Agent::new(llm, tools, self.max_iterations)
+            .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+            .with_system_prompt(prompt::deployment_system_prompt(ctx));
+        match self.thresholds {
+            Some(t) => Arc::new(t.apply(agent)),
+            None => Arc::new(agent),
+        }
     }
 
 }
@@ -411,6 +486,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         compaction_threshold_chars: state.agent_builder.compaction_threshold_chars,
         compaction_keep_last: state.agent_builder.compaction_keep_last,
         pricing: Arc::clone(&state.pricing),
+        semantic: state.semantic.clone(),
     });
     let agent_router = Router::new()
         .route("/query",            post(query::handle_query))
@@ -434,6 +510,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         Arc::clone(&state.llm),
         Arc::clone(&state.llm_configs),
         state.user_key_store.clone(),
+        state.system_one_config.clone(),
     ));
     let llm_router = Router::new()
         .route("/llm/providers", get(llm::list_providers))
@@ -469,6 +546,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         Arc::clone(&state.agent_builder),
         Arc::clone(&state.llm),
         Arc::clone(&state.llm_configs),
+        state.system_one_config.clone(),
         state.user_key_store.clone(),
         Arc::clone(&state.pricing),
         Arc::clone(&state.collocate_registry),
@@ -643,4 +721,34 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_without_thresholds_uses_agent_defaults() {
+        let t: Option<Thresholds> = None;
+        assert!(t.is_none(), "an unset threshold bundle must leave agent defaults alone");
+    }
+
+    #[test]
+    fn thresholds_round_trip_into_the_agent_builder() {
+        let t = Thresholds {
+            fast_path: 0.6,
+            early_synthesis: 0.9,
+            relevance: 0.3,
+            early_synthesis_research: 0.97,
+            relevance_preserve_recent: 3,
+            early_synthesis_coverage: 0.85,
+            early_synthesis_min_iterations_first_turn: 6,
+            early_synthesis_uniform: 0.72,
+            early_synthesis_capability_gate: 0.55,
+            next_action_confidence: 0.65,
+        };
+        assert_eq!(t.early_synthesis_capability_gate, 0.55);
+        assert_eq!(t.early_synthesis_uniform, 0.72);
+        assert_eq!(t.next_action_confidence, 0.65);
+    }
 }

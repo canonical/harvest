@@ -21,6 +21,7 @@ pub struct OpenAiCompatProvider {
     client: Client,
     max_retries: u32,
     meta: ProviderMeta,
+    enable_prompt_caching: bool,
 }
 
 impl OpenAiCompatProvider {
@@ -29,7 +30,16 @@ impl OpenAiCompatProvider {
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .expect("failed to build HTTP client");
-        Self { base_url, api_key, model, client, max_retries, meta }
+        Self { base_url, api_key, model, client, max_retries, meta, enable_prompt_caching: false }
+    }
+
+    pub fn with_prompt_caching(mut self, enabled: bool) -> Self {
+        self.enable_prompt_caching = enabled;
+        self
+    }
+
+    pub fn prompt_caching_enabled(&self) -> bool {
+        self.enable_prompt_caching
     }
 }
 
@@ -64,7 +74,7 @@ impl LlmProvider for OpenAiCompatProvider {
     }
 
     async fn chat_with(&self, model: Option<&str>, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
-        let body = build_body(model.unwrap_or(&self.model), messages, tools, false);
+        let body = build_body(model.unwrap_or(&self.model), messages, tools, false, self.enable_prompt_caching, None);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         let response = retry::send_with_retry(
@@ -103,9 +113,13 @@ impl LlmProvider for OpenAiCompatProvider {
     }
 }
 
-fn build_body(model: &str, messages: &[Message], tools: &[ToolDefinition], stream: bool) -> Value {
-    let api_messages: Vec<Value> = messages.iter().map(to_openai_message).collect();
+fn build_body(model: &str, messages: &[Message], tools: &[ToolDefinition], stream: bool, enable_caching: bool, cache_breakpoint_index: Option<usize>) -> Value {
+    let mut api_messages: Vec<Value> = messages.iter().map(to_openai_message).collect();
     let api_tools: Vec<Value> = tools.iter().map(to_openai_function).collect();
+
+    if enable_caching {
+        inject_cache_breakpoints(&mut api_messages, cache_breakpoint_index);
+    }
 
     let mut body = json!({
         "model":    model,
@@ -116,8 +130,46 @@ fn build_body(model: &str, messages: &[Message], tools: &[ToolDefinition], strea
     }
     if stream {
         body["stream"] = json!(true);
+        body["stream_options"] = json!({ "include_usage": true });
     }
     body
+}
+
+fn inject_cache_breakpoints(api_messages: &mut Vec<Value>, breakpoint_index: Option<usize>) {
+    if api_messages.is_empty() {
+        return;
+    }
+    if let Some(msg) = api_messages.first_mut() {
+        if msg.get("role").and_then(Value::as_str) == Some("system") {
+            inject_cache_control_on_message(msg);
+        }
+    }
+    let second_bp = match breakpoint_index {
+        Some(idx) => idx.saturating_sub(1).min(api_messages.len().saturating_sub(1)),
+        None => api_messages.len().saturating_sub(1),
+    };
+    if let Some(msg) = api_messages.get_mut(second_bp) {
+        inject_cache_control_on_message(msg);
+    }
+}
+
+fn inject_cache_control_on_message(msg: &mut Value) {
+    if let Some(content) = msg.get_mut("content") {
+        match content {
+            Value::String(s) => {
+                let old = std::mem::take(s);
+                *content = json!([{ "type": "text", "text": old, "cache_control": { "type": "ephemeral" } }]);
+            }
+            Value::Array(arr) => {
+                if let Some(last_block) = arr.last_mut() {
+                    if let Some(obj) = last_block.as_object_mut() {
+                        obj.insert("cache_control".to_string(), json!({ "type": "ephemeral" }));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -131,10 +183,15 @@ fn apply_usage_delta(usage: &mut Usage, u: &Value) {
     if u.is_null() {
         return;
     }
-    if let Some(v) = u["prompt_tokens"].as_u64() { usage.input_tokens = v; }
-    if let Some(v) = u["completion_tokens"].as_u64() { usage.output_tokens = v; }
-    if let Some(v) = u["prompt_tokens_details"]["cached_tokens"].as_u64() { usage.cache_read_tokens = v; }
-    if let Some(v) = u["completion_tokens_details"]["reasoning_tokens"].as_u64() { usage.reasoning_tokens = v; }
+    let keep_max = |current: &mut u64, v: Option<u64>| {
+        if let Some(v) = v {
+            *current = (*current).max(v);
+        }
+    };
+    keep_max(&mut usage.input_tokens, u["prompt_tokens"].as_u64());
+    keep_max(&mut usage.output_tokens, u["completion_tokens"].as_u64());
+    keep_max(&mut usage.cache_read_tokens, u["prompt_tokens_details"]["cached_tokens"].as_u64());
+    keep_max(&mut usage.reasoning_tokens, u["completion_tokens_details"]["reasoning_tokens"].as_u64());
 }
 
 async fn process_stream_event(
@@ -196,7 +253,7 @@ impl OpenAiCompatProvider {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
-        let body = build_body(model.unwrap_or(&self.model), messages, tools, true);
+        let body = build_body(model.unwrap_or(&self.model), messages, tools, true, self.enable_prompt_caching, None);
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         let response = retry::send_with_retry(
@@ -596,14 +653,35 @@ mod tests {
 
     #[test]
     fn build_body_sets_stream_flag_when_streaming() {
-        let body = build_body("m", &[], &[], true);
+        let body = build_body("m", &[], &[], true, false, None);
         assert_eq!(body["stream"], true);
     }
 
     #[test]
-    fn build_body_omits_stream_flag_when_not_streaming() {
-        let body = build_body("m", &[], &[], false);
+    fn build_body_requests_usage_in_streaming() {
+        let body = build_body("m", &[], &[], true, false, None);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn build_body_omits_stream_options_when_not_streaming() {
+        let body = build_body("m", &[], &[], false, false, None);
         assert!(body.get("stream").is_none());
+        assert!(body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn apply_usage_delta_keeps_max_when_chunks_repeat() {
+        let mut usage = Usage::default();
+        apply_usage_delta(&mut usage, &json!({
+            "prompt_tokens": 1200,
+            "completion_tokens": 80,
+            "prompt_tokens_details": { "cached_tokens": 900 }
+        }));
+        apply_usage_delta(&mut usage, &json!({ "prompt_tokens": 0, "completion_tokens": 0 }));
+        assert_eq!(usage.input_tokens, 1200);
+        assert_eq!(usage.output_tokens, 80);
+        assert_eq!(usage.cache_read_tokens, 900);
     }
 
     #[test]
@@ -992,5 +1070,76 @@ mod tests {
 
         let provider = make_provider(&server.base_url());
         assert!(provider.chat(&[Message::user("hi")], &[]).await.is_ok());
+    }
+
+    #[test]
+    fn build_body_no_cache_control_when_caching_disabled() {
+        let msgs = [Message::system("sys"), Message::user("hi")];
+        let body = build_body("m", &msgs, &[], false, false, None);
+        let sys_msg = &body["messages"][0];
+        assert!(sys_msg.get("cache_control").is_none());
+        let sys_content = sys_msg["content"].as_str().unwrap();
+        assert_eq!(sys_content, "sys");
+    }
+
+    #[test]
+    fn build_body_adds_cache_control_on_system_message_when_enabled() {
+        let msgs = [Message::system("sys"), Message::user("hi")];
+        let body = build_body("m", &msgs, &[], false, true, None);
+        let sys_content = &body["messages"][0]["content"];
+        assert!(sys_content.is_array());
+        let blocks = sys_content.as_array().unwrap();
+        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(blocks[0]["text"], "sys");
+    }
+
+    #[test]
+    fn build_body_adds_cache_control_on_breakpoint_index_when_enabled() {
+        let msgs = [
+            Message::system("sys"),
+            Message::user("first"),
+            Message::assistant_text("ok"),
+            Message::user("second"),
+        ];
+        let body = build_body("m", &msgs, &[], false, true, Some(3));
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+        let sys_content = &messages[0]["content"];
+        assert!(sys_content.is_array());
+        assert_eq!(sys_content[0]["cache_control"]["type"], "ephemeral");
+        let bp_content = &messages[2]["content"];
+        assert!(bp_content.is_array());
+        assert_eq!(bp_content[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn build_body_no_cache_control_when_caching_disabled_even_with_breakpoint() {
+        let msgs = [Message::system("sys"), Message::user("hi")];
+        let body = build_body("m", &msgs, &[], false, false, Some(1));
+        let sys_msg = &body["messages"][0];
+        assert!(sys_msg.get("cache_control").is_none());
+    }
+
+    #[test]
+    fn build_body_cache_breakpoint_clamps_to_last_message() {
+        let msgs = [Message::system("sys"), Message::user("hi")];
+        let body = build_body("m", &msgs, &[], false, true, Some(100));
+        let messages = body["messages"].as_array().unwrap();
+        let last = &messages[1]["content"];
+        assert!(last.is_array());
+        assert_eq!(last[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn prompt_caching_disabled_by_default() {
+        let p = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta::new("a"));
+        assert!(!p.prompt_caching_enabled());
+    }
+
+    #[test]
+    fn with_prompt_caching_enables_it() {
+        let p = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta::new("a"))
+            .with_prompt_caching(true);
+        assert!(p.prompt_caching_enabled());
     }
 }

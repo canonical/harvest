@@ -32,7 +32,7 @@ pub struct QueryRequest {
 }
 
 fn selection_from(req: &QueryRequest) -> Option<ProviderSelection> {
-    req.provider_id.clone().map(|provider_id| ProviderSelection { provider_id, model: req.model.clone() })
+    req.provider_id.clone().map(|provider_id| ProviderSelection { provider_id, model: req.model.clone(), cache_breakpoint_index: None })
 }
 
 pub async fn handle_query(
@@ -51,7 +51,7 @@ pub async fn handle_query(
             panic!("db must be available when user key providers are configured")
         });
         Arc::new(
-            Agent::new(user_llm, crate::agent::graph_tools::all_tools(db), qs.max_iterations)
+            Agent::new(user_llm, crate::agent::graph_tools::all_tools_with_semantic(db, qs.semantic.clone()), qs.max_iterations)
                 .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
                 .with_parallel_research(true),
         )
@@ -68,6 +68,7 @@ pub async fn handle_query(
                     db, &user.sub, cid,
                     &req.query, &user.name, &att_meta, raw_messages,
                     &response.answer, &response.sources, response.tool_calls_made,
+                    response.tool_errors, response.turns,
                     vec![], None, None, response.provider_used.as_ref(), response.duration_ms,
                     &response.usage, response.llm_call_count, &turn_id, &qs.pricing,
                 ).await;
@@ -117,7 +118,7 @@ pub async fn handle_query_stream(
             panic!("db must be available when user key providers are configured")
         });
         Arc::new(
-            Agent::new(user_llm.clone(), crate::agent::graph_tools::all_tools(db), qs.max_iterations)
+            Agent::new(user_llm.clone(), crate::agent::graph_tools::all_tools_with_semantic(db, qs.semantic.clone()), qs.max_iterations)
                 .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
                 .with_parallel_research(true),
         )
@@ -180,7 +181,7 @@ pub async fn handle_query_stream(
             }
 
             if let (
-                AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, .. },
+                AgentEvent::Done { answer, sources, tool_calls_made, tool_errors, turns, provider_used, duration_ms, usage, llm_call_count, .. },
                 Some(cid),
                 Some(db),
             ) = (&event, &conv_id, &db) {
@@ -189,7 +190,7 @@ pub async fn handle_query_stream(
                 let _ = append_user_turn(
                     db, &user_id, cid,
                     &query, &username, &att_meta, raw_messages.clone(),
-                    answer, sources, *tool_calls_made,
+                    answer, sources, *tool_calls_made, *tool_errors, *turns,
                     chain, pending_question.clone(), pending_confirm_action.clone(),
                     provider_used.as_ref(), *duration_ms,
                     usage, *llm_call_count, &turn_id, &qs_ctx.pricing,

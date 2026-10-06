@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use reqwest::Client;
@@ -54,8 +54,7 @@ impl GeminiProvider {
         Self { model, api_key, client, base_url: API_BASE.to_string(), max_retries, meta }
     }
 
-    #[cfg(test)]
-    fn with_base_url(mut self, url: impl Into<String>) -> Self {
+    pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
         self.base_url = url.into();
         self
     }
@@ -70,6 +69,120 @@ impl GeminiProvider {
 
     fn models_url(&self) -> String {
         format!("{}?key={}", self.base_url, self.api_key)
+    }
+}
+
+pub const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-004";
+pub const DEFAULT_EMBEDDING_DIMENSIONS: usize = 768;
+pub const EMBEDDING_BATCH_MAX: usize = 100;
+
+pub fn build_embedding_body(model: &str, inputs: &[String]) -> Result<Value> {
+    if inputs.is_empty() {
+        bail!("embedding batch is empty");
+    }
+    let requests: Vec<Value> = inputs.iter().map(|text| {
+        json!({
+            "model": format!("models/{model}"),
+            "content": { "parts": [{ "text": text }] },
+        })
+    }).collect();
+    Ok(json!({ "requests": requests }))
+}
+
+pub fn parse_embeddings(json: &Value) -> Result<Vec<Vec<f32>>> {
+    let items = json["embeddings"].as_array()
+        .ok_or_else(|| anyhow!("embedding response has no embeddings array: {json}"))?;
+    if items.is_empty() {
+        bail!("embedding response contained no vectors");
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        let values = item["values"].as_array()
+            .ok_or_else(|| anyhow!("embedding entry has no values: {item}"))?;
+        let mut vec = Vec::with_capacity(values.len());
+        for v in values {
+            vec.push(v.as_f64().ok_or_else(|| anyhow!("embedding value is not a number: {v}"))? as f32);
+        }
+        if vec.is_empty() {
+            bail!("embedding entry was an empty vector");
+        }
+        out.push(vec);
+    }
+    Ok(out)
+}
+
+pub fn parse_embeddings_checked(json: &Value, expected: usize) -> Result<Vec<Vec<f32>>> {
+    let vecs = parse_embeddings(json)?;
+    if vecs.len() != expected {
+        bail!("expected {expected} embeddings, received {}", vecs.len());
+    }
+    Ok(vecs)
+}
+
+pub fn with_dimensions(mut body: Value, dimensions: Option<usize>) -> Result<Value> {
+    match dimensions {
+        None => Ok(body),
+        Some(d) => {
+            if d == 0 {
+                bail!("embedding dimensions must be greater than zero");
+            }
+            let requests = body["requests"].as_array_mut()
+                .ok_or_else(|| anyhow!("embedding body has no requests array"))?;
+            for req in requests.iter_mut() {
+                req["outputDimensionality"] = json!(d);
+            }
+            Ok(body)
+        }
+    }
+}
+
+pub fn embedding_endpoint(base_url: &str, model: &str) -> String {
+    format!("{}/v1beta/models/{}:batchEmbedContents", base_url, model)
+}
+
+pub fn dimensions_match(a: &[f32], b: &[f32]) -> bool {
+    !a.is_empty() && a.len() == b.len()
+}
+
+impl GeminiProvider {
+    pub async fn embed(
+        &self,
+        inputs: &[String],
+        model: &str,
+        dimensions: Option<usize>,
+    ) -> Result<Vec<Vec<f32>>> {
+        if inputs.is_empty() {
+            bail!("embedding batch is empty");
+        }
+        if inputs.len() > EMBEDDING_BATCH_MAX {
+            bail!(
+                "embedding batch of {} exceeds the Gemini limit of {EMBEDDING_BATCH_MAX}",
+                inputs.len()
+            );
+        }
+        let body = with_dimensions(build_embedding_body(model, inputs)?, Some(dimensions.unwrap_or(DEFAULT_EMBEDDING_DIMENSIONS)))?;
+        let url = embedding_endpoint(&self.base_url, model);
+        let response = retry::send_with_retry(
+            self.max_retries,
+            OVERLOAD_STATUS_CODES,
+            "Gemini embeddings",
+            || self.client.post(&url).json(&body).send(),
+        ).await?;
+        let status = response.status();
+        let body_text = response.text().await?;
+        let json: Value = serde_json::from_str(&body_text)
+            .map_err(|e| anyhow!("Gemini embedding API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+        if !status.is_success() {
+            bail!("Gemini embedding API error {status}: {json}");
+        }
+        let vecs = parse_embeddings_checked(&json, inputs.len())?;
+        let first = vecs[0].len();
+        for v in &vecs {
+            if v.len() != first {
+                bail!("embedding dimensions are inconsistent: expected {first}, received {}", v.len());
+            }
+        }
+        Ok(vecs)
     }
 }
 
@@ -400,7 +513,7 @@ fn parse_gemini_response(json: Value) -> Result<LlmResponse> {
     }
 
     let text = parts.iter()
-        .filter(|p| p.get("text").is_some() && p["thought"].as_bool().unwrap_or(false) == false)
+        .filter(|p| p.get("text").is_some() && !p["thought"].as_bool().unwrap_or(false))
         .filter_map(|p| p["text"].as_str())
         .collect::<Vec<_>>()
         .join("\n");
@@ -417,6 +530,283 @@ mod tests {
     fn make_provider(base_url: &str) -> GeminiProvider {
         GeminiProvider::new("gemini-test".into(), "test-key".into(), 30, 0, ProviderMeta::new("gemini-1"))
             .with_base_url(base_url)
+    }
+
+
+    fn embedding_response(n: usize) -> serde_json::Value {
+        json!({ "embeddings": (0..n).map(|i| json!({ "values": vec![i as f64, 0.5, -0.25] })).collect::<Vec<_>>() })
+    }
+
+    fn embed_server(
+        path: &'static str,
+        status: usize,
+        body: String,
+        expect_body_fragment: Option<(&'static str, bool)>,
+    ) -> MockServer {
+        let server = MockServer::start();
+        server.mock(move |when, then| {
+            let when = when.method("POST").path(path);
+            let when = match expect_body_fragment {
+                Some((fragment, true)) => when.body_includes(fragment),
+                Some((fragment, false)) => when.body_excludes(fragment),
+                None => when,
+            };
+            then.status(status)
+                .header("content-type", "application/json")
+                .body(body);
+        });
+        server
+    }
+
+    #[tokio::test]
+    async fn embed_posts_to_the_batch_endpoint_and_returns_vectors() {
+        let server = embed_server("/v1beta/models/text-embedding-004:batchEmbedContents", 200, embedding_response(2).to_string(), None);
+        let p = make_provider(&server.url(""));
+        let out = p.embed(&["a".to_string(), "b".to_string()], "text-embedding-004", Some(3)).await.unwrap();
+        assert_eq!(out, vec![vec![0.0, 0.5, -0.25], vec![1.0, 0.5, -0.25]]);
+    }
+
+    #[tokio::test]
+    async fn embed_sends_the_default_dimensionality_when_none_is_given() {
+        let server = embed_server(
+            "/v1beta/models/custom:batchEmbedContents",
+            200,
+            embedding_response(1).to_string(),
+            Some(("outputDimensionality", true)),
+        );
+        let p = make_provider(&server.url(""));
+        p.embed(&["a".to_string()], "custom", None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn embed_sends_the_requested_dimensionality() {
+        let server = embed_server(
+            "/v1beta/models/text-embedding-004:batchEmbedContents",
+            200,
+            embedding_response(1).to_string(),
+            Some(("outputDimensionality", true)),
+        );
+        let p = make_provider(&server.url(""));
+        p.embed(&["a".to_string()], "text-embedding-004", Some(768)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn embed_surfaces_a_non_json_error_body() {
+        let server = embed_server("/v1beta/models/m:batchEmbedContents", 500, "<html>boom</html>".to_string(), None);
+        let p = make_provider(&server.url(""));
+        let err = p.embed(&["a".to_string()], "m", None).await.unwrap_err().to_string();
+        assert!(err.contains("non-JSON"), "unexpected error: {err}");
+        assert!(err.contains("boom"), "the body should be included: {err}");
+    }
+
+    #[tokio::test]
+    async fn embed_surfaces_a_json_error_status() {
+        let server = embed_server(
+            "/v1beta/models/m:batchEmbedContents",
+            429,
+            r#"{"error":{"message":"quota"}}"#.to_string(),
+            None,
+        );
+        let p = make_provider(&server.url(""));
+        let err = p.embed(&["a".to_string()], "m", None).await.unwrap_err().to_string();
+        assert!(err.contains("429"), "unexpected error: {err}");
+        assert!(err.contains("quota"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn embed_rejects_a_short_response() {
+        let server = embed_server("/v1beta/models/m:batchEmbedContents", 200, embedding_response(1).to_string(), None);
+        let p = make_provider(&server.url(""));
+        let err = p
+            .embed(&["a".to_string(), "b".to_string()], "m", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected 2 embeddings"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn embed_rejects_inconsistent_dimensions() {
+        let server = embed_server(
+            "/v1beta/models/m:batchEmbedContents",
+            200,
+            r#"{"embeddings":[{"values":[1,2]},{"values":[1,2,3]}]}"#.to_string(),
+            None,
+        );
+        let p = make_provider(&server.url(""));
+        let err = p
+            .embed(&["a".to_string(), "b".to_string()], "m", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("inconsistent"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn embed_rejects_an_empty_batch_without_calling_the_api() {
+        let p = make_provider("http://127.0.0.1:1");
+        assert!(p.embed(&[], "m", None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn embed_rejects_zero_dimensions() {
+        let p = make_provider("http://127.0.0.1:1");
+        let err = p.embed(&["a".to_string()], "m", Some(0)).await.unwrap_err().to_string();
+        assert!(err.contains("greater than zero"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn with_dimensions_applies_to_every_request() {
+        let body = build_embedding_body("m", &["a".to_string(), "b".to_string()]).unwrap();
+        let body = with_dimensions(body, Some(1024)).unwrap();
+        let reqs = body["requests"].as_array().unwrap();
+        assert_eq!(reqs[0]["outputDimensionality"], 1024);
+        assert_eq!(reqs[1]["outputDimensionality"], 1024);
+    }
+
+    #[test]
+    fn with_dimensions_none_leaves_the_body_untouched() {
+        let body = build_embedding_body("m", &["a".to_string()]).unwrap();
+        let body = with_dimensions(body, None).unwrap();
+        assert!(body["requests"][0].get("outputDimensionality").is_none());
+    }
+
+    #[test]
+    fn with_dimensions_rejects_zero() {
+        let body = build_embedding_body("m", &["a".to_string()]).unwrap();
+        assert!(with_dimensions(body, Some(0)).is_err());
+    }
+
+    #[tokio::test]
+    async fn embed_rejects_an_oversized_batch() {
+        let p = make_provider("http://unused.invalid");
+        let inputs: Vec<String> = (0..=EMBEDDING_BATCH_MAX).map(|i| format!("input {i}")).collect();
+        let err = p.embed(&inputs, DEFAULT_EMBEDDING_MODEL, None).await.unwrap_err();
+        assert!(err.to_string().contains("exceeds the Gemini limit"));
+    }
+
+    #[tokio::test]
+    async fn embed_accepts_a_batch_at_the_limit() {
+        let body = embedding_response(EMBEDDING_BATCH_MAX).to_string();
+        let server = embed_server(
+            "/v1beta/models/text-embedding-004:batchEmbedContents",
+            200,
+            body,
+            None,
+        );
+        let p = make_provider(&server.url(""));
+        let inputs: Vec<String> = (0..EMBEDDING_BATCH_MAX).map(|i| format!("input {i}")).collect();
+        let out = p.embed(&inputs, DEFAULT_EMBEDDING_MODEL, None).await.unwrap();
+        assert_eq!(out.len(), EMBEDDING_BATCH_MAX);
+        assert!(dimensions_match(&out[0], &out[EMBEDDING_BATCH_MAX - 1]));
+    }
+
+    #[test]
+    fn embedding_body_uses_the_configured_model_and_dimensionality() {
+        let body = build_embedding_body("text-embedding-004", &["hello".to_string(), "world".to_string()]).unwrap();
+        assert!(body.get("model").is_none(), "the batch body carries the model per request");
+        let reqs = body["requests"].as_array().unwrap();
+        assert_eq!(reqs.len(), 2);
+        assert_eq!(reqs[0]["model"], "models/text-embedding-004");
+        assert_eq!(reqs[1]["model"], "models/text-embedding-004");
+        assert_eq!(reqs[0]["content"]["parts"][0]["text"], "hello");
+        assert_eq!(reqs[1]["content"]["parts"][0]["text"], "world");
+        assert!(
+            reqs[0].get("outputDimensionality").is_none(),
+            "dimensionality is applied separately so callers can override it"
+        );
+    }
+
+    #[test]
+    fn embedding_body_rejects_an_empty_batch() {
+        let err = build_embedding_body("text-embedding-004", &[]).unwrap_err();
+        assert!(err.to_string().contains("empty"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_embeddings_reads_vectors_in_order() {
+        let json = json!({
+            "embeddings": [
+                { "values": [0.1, 0.2, 0.3] },
+                { "values": [0.4, 0.5, 0.6] }
+            ]
+        });
+        let vecs = parse_embeddings(&json).unwrap();
+        assert_eq!(vecs.len(), 2);
+        assert_eq!(vecs[0], vec![0.1, 0.2, 0.3]);
+        assert_eq!(vecs[1], vec![0.4, 0.5, 0.6]);
+    }
+
+    #[test]
+    fn parse_embeddings_rejects_a_count_mismatch() {
+        let json = json!({ "embeddings": [{ "values": [0.1] }] });
+        let err = parse_embeddings_checked(&json, 2).unwrap_err();
+        assert!(err.to_string().contains("expected 2"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_embeddings_rejects_an_empty_response() {
+        let json = json!({ "embeddings": [] });
+        assert!(parse_embeddings(&json).is_err());
+    }
+
+    #[test]
+    fn embedding_endpoint_targets_batch_embed_contents() {
+        assert_eq!(
+            embedding_endpoint("https://x.example", "text-embedding-004"),
+            "https://x.example/v1beta/models/text-embedding-004:batchEmbedContents"
+        );
+    }
+
+    #[test]
+    fn embedding_does_not_tolerate_mismatched_dimensions() {
+        let a = vec![0.1; 768];
+        let b = vec![0.2; 384];
+        assert!(!dimensions_match(&a, &b));
+        assert!(dimensions_match(&a, &vec![0.3; 768]));
+    }
+
+    #[tokio::test]
+    async fn embed_returns_one_vector_per_input_in_order() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST").path("/v1beta/models/text-embedding-004:batchEmbedContents");
+            then.status(200).json_body(json!({
+                "embeddings": [
+                    { "values": [0.1, 0.2] },
+                    { "values": [0.3, 0.4] }
+                ]
+            }));
+        });
+        let provider = make_provider(&server.base_url());
+        let out = provider.embed(&["first".to_string(), "second".to_string()], "text-embedding-004", None).await.unwrap();
+        assert_eq!(out, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn embed_surfaces_api_errors() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST");
+            then.status(429).json_body(json!({ "error": { "message": "quota" } }));
+        });
+        let provider = make_provider(&server.base_url());
+        let err = provider.embed(&["x".to_string()], "text-embedding-004", None).await.unwrap_err();
+        assert!(err.to_string().contains("429"), "unexpected error: {err}");
+        mock.assert();
+    }
+
+    #[tokio::test]
+    async fn embed_rejects_non_json_responses() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method("POST");
+            then.status(200).body("<html>gateway</html>");
+        });
+        let provider = make_provider(&server.base_url());
+        assert!(provider.embed(&["x".to_string()], "text-embedding-004", None).await.is_err());
+        mock.assert();
     }
 
     #[test]

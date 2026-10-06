@@ -69,7 +69,7 @@ impl LlmProvider for ErrorLlm {
 
 fn query_app(agent: Arc<Agent>) -> Router {
     let llm = Arc::clone(agent.llm());
-    let qs = Arc::new(QueryState { agent, db: None, llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6, pricing: Arc::new(knowledge_server::cost::PricingTable::default()) });
+    let qs = Arc::new(QueryState { agent, db: None, llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6, pricing: Arc::new(knowledge_server::cost::PricingTable::default()), semantic: None });
     Router::new()
         .route("/query", post(handle_query))
         .route("/query/stream", post(handle_query_stream))
@@ -372,7 +372,7 @@ use knowledge_server::conversations::handlers as conv_handlers;
 
 fn query_app_with_db(agent: Arc<Agent>, db: Arc<Db>) -> Router {
     let llm = Arc::clone(agent.llm());
-    let qs = Arc::new(QueryState { agent, db: Some(Arc::clone(&db)), llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6, pricing: Arc::new(knowledge_server::cost::PricingTable::default()) });
+    let qs = Arc::new(QueryState { agent, db: Some(Arc::clone(&db)), llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6, pricing: Arc::new(knowledge_server::cost::PricingTable::default()), semantic: None });
     let query_router = Router::new()
         .route("/query/stream", post(handle_query_stream))
         .with_state(qs);
