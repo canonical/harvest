@@ -123,7 +123,7 @@ struct PausedConfirm {
 }
 
 fn selection_from_parts(provider_id: &Option<String>, model: &Option<String>) -> Option<ProviderSelection> {
-    provider_id.clone().map(|provider_id| ProviderSelection { provider_id, model: model.clone() })
+    provider_id.clone().map(|provider_id| ProviderSelection { provider_id, model: model.clone(), cache_breakpoint_index: None })
 }
 
 #[derive(Clone)]
@@ -133,6 +133,7 @@ pub struct ProjectState {
     pub agent_builder: Arc<ProjectAgentBuilder>,
     pub llm:           Arc<dyn crate::llm::LlmProvider>,
     pub llm_configs:   Arc<Vec<crate::config::LlmProviderConfig>>,
+    pub system_one_config: Option<crate::config::SystemOneConfig>,
     pub user_key_store: Option<Arc<crate::auth::user_keys::UserKeyStore>>,
     pub pricing:       Arc<crate::cost::PricingTable>,
     pub collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
@@ -156,6 +157,7 @@ impl ProjectState {
         agent_builder: Arc<ProjectAgentBuilder>,
         llm: Arc<dyn crate::llm::LlmProvider>,
         llm_configs: Arc<Vec<crate::config::LlmProviderConfig>>,
+        system_one_config: Option<crate::config::SystemOneConfig>,
         user_key_store: Option<Arc<crate::auth::user_keys::UserKeyStore>>,
         pricing: Arc<crate::cost::PricingTable>,
         collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
@@ -166,6 +168,7 @@ impl ProjectState {
             agent_builder,
             llm,
             llm_configs,
+            system_one_config,
             user_key_store,
             pricing,
             collocate_registry,
@@ -740,7 +743,16 @@ async fn drive_turn(
                         "type": "question", "conv_id": &conv_id,
                         "question": question, "choices": choices,
                     })),
-                    _ => None,
+                    AgentEvent::ConfirmAction { id, name, input, description } => Some(json!({
+                        "type": "confirm_action", "conv_id": &conv_id,
+                        "id": id, "name": name, "input": input, "description": description,
+                    })),
+                    AgentEvent::Error { message } => Some(json!({
+                        "type": "error", "conv_id": &conv_id, "message": message,
+                    })),
+                    AgentEvent::TitleUpdated { title } => Some(json!({
+                        "type": "title_updated", "conv_id": &conv_id, "title": title,
+                    })),
                 };
                 if let Some(data) = broadcast_data {
                     let _ = sender.send(data.to_string());
@@ -807,26 +819,6 @@ async fn drive_turn(
                 }
             });
         }
-
-        let mut v = if let AgentEvent::ToolCall { .. } = &event {
-            let mut v = serde_json::to_value(&event).unwrap_or(Value::Null);
-            if let Some(obj) = v.as_object_mut() {
-                if let Some(d) = &description { obj.insert("description".to_string(), json!(d)); }
-                if let Some(h) = &hostname    { obj.insert("hostname".to_string(),    json!(h)); }
-            }
-            v
-        } else {
-            serde_json::to_value(&event).unwrap_or(Value::Null)
-        };
-        if let Some(obj) = v.as_object_mut() {
-            obj.insert("conv_id".to_string(), json!(conv_id));
-        }
-        if let Ok(data) = serde_json::to_string(&v) {
-            let channel_map = channels.lock().await;
-            if let Some(sender) = channel_map.get(&project_id) {
-                let _ = sender.send(data);
-            }
-        }
     }
 
     if let Ok(Some(paused_turn)) = paused_rx.await {
@@ -876,10 +868,18 @@ pub async fn project_query_stream(
     let user_llm = crate::api::resolve_user_llm(
         &state.llm, &state.llm_configs, &state.user_key_store, &user.sub,
     ).await;
-    let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
+    let user_system_one = crate::api::resolve_user_system_one(
+        &state.system_one_config, &state.llm_configs, &state.user_key_store, &user.sub,
+    ).await;
+    let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) && user_system_one.is_none() {
         state.agent_builder.build_for_conversation(project_id.clone(), body.conversation_id.clone())
     } else {
-        state.agent_builder.build_for_conversation_with_llm(project_id.clone(), body.conversation_id.clone(), user_llm.clone())
+        state.agent_builder.build_for_conversation_with_llm_and_system_one(
+            project_id.clone(),
+            body.conversation_id.clone(),
+            user_llm.clone(),
+            user_system_one.or_else(|| state.agent_builder.system_one.clone()),
+        )
     };
     let raw_messages = load_project_messages_raw(&state.db, &project_id, &body.conversation_id).await;
     let raw_history = history_messages_from_raw(&raw_messages);
@@ -1324,10 +1324,18 @@ pub async fn resume_confirm_action(
     let user_llm = crate::api::resolve_user_llm(
         &state.llm, &state.llm_configs, &state.user_key_store, &user.sub,
     ).await;
-    let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
+    let user_system_one = crate::api::resolve_user_system_one(
+        &state.system_one_config, &state.llm_configs, &state.user_key_store, &user.sub,
+    ).await;
+    let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) && user_system_one.is_none() {
         state.agent_builder.build_for_conversation(project_id.clone(), conv_id.clone())
     } else {
-        state.agent_builder.build_for_conversation_with_llm(project_id.clone(), conv_id.clone(), user_llm.clone())
+        state.agent_builder.build_for_conversation_with_llm_and_system_one(
+            project_id.clone(),
+            conv_id.clone(),
+            user_llm.clone(),
+            user_system_one.or_else(|| state.agent_builder.system_one.clone()),
+        )
     };
     let raw_messages = load_project_messages_raw(&state.db, &project_id, &conv_id).await;
     let split = raw_messages.len().saturating_sub(2);
@@ -1527,6 +1535,87 @@ mod in_flight_tests {
         let state = empty_state();
         let events = build_catchup_events("c1", &state);
         assert!(events.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod drive_turn_broadcast_tests {
+    use crate::machines::MachineRegistry;
+    use crate::cost::PricingTable;
+    use super::*;
+    use async_trait::async_trait;
+    use crate::llm::types::{LlmResponse, Message, ModelInfo, ToolDefinition};
+
+    struct NoopProvider;
+    #[async_trait]
+    impl crate::llm::LlmProvider for NoopProvider {
+        fn id(&self) -> &str { "noop" }
+        fn kind(&self) -> &str { "noop" }
+        fn default_model(&self) -> &str { "noop-model" }
+        async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> { Ok(vec![]) }
+        async fn chat_with(
+            &self, _model: Option<&str>, _messages: &[Message], _tools: &[ToolDefinition],
+        ) -> anyhow::Result<LlmResponse> { unimplemented!("not used") }
+    }
+
+    fn count(messages: &[String], ty: &str) -> usize {
+        messages.iter().filter(|m| {
+            serde_json::from_str::<Value>(m).ok()
+                .and_then(|v| v["type"].as_str().map(|s| s == ty))
+                .unwrap_or(false)
+        }).count()
+    }
+
+    #[tokio::test]
+    async fn broadcasts_each_chain_event_exactly_once() {
+        let project_id = "proj-1".to_string();
+        let conv_id = "conv-1".to_string();
+        let (tx, mut rx) = broadcast::channel::<String>(128);
+        let channels = Arc::new(Mutex::new(HashMap::<String, broadcast::Sender<String>>::new()));
+        channels.lock().await.insert(project_id.clone(), tx);
+
+        let in_flight = Arc::new(RwLock::new(HashMap::<String, HashMap<String, InFlightState>>::new()));
+        in_flight.write().await
+            .entry(project_id.clone()).or_default()
+            .insert(conv_id.clone(), InFlightState::default());
+
+        let locks = Arc::new(RwLock::new(HashMap::<String, HashMap<String, String>>::new()));
+        locks.write().await.entry(project_id.clone()).or_default().insert(conv_id.clone(), "tester".into());
+
+        let db = Arc::new(Db::connect_without_migrating("postgresql://").unwrap());
+        let llm: Arc<dyn crate::llm::LlmProvider> = Arc::new(NoopProvider);
+        let registry = MachineRegistry::new();
+        let pricing = Arc::new(PricingTable::default());
+        let paused_confirmations = Arc::new(RwLock::new(HashMap::<String, PausedConfirm>::new()));
+
+        let (agent_tx, agent_rx) = mpsc::channel::<AgentEvent>(64);
+        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel::<Option<PausedTurn>>();
+
+        agent_tx.send(AgentEvent::Thinking { text: "a".into() }).await.unwrap();
+        agent_tx.send(AgentEvent::ToolCall { name: "t1".into(), input: json!({}) }).await.unwrap();
+        agent_tx.send(AgentEvent::ToolResult { name: "t1".into(), preview: "r1".into() }).await.unwrap();
+        agent_tx.send(AgentEvent::Thinking { text: "b".into() }).await.unwrap();
+        drop(agent_tx);
+        drop(paused_tx);
+
+        let channels_for_test = channels.clone();
+        drive_turn(
+            locks, channels.clone(), db, llm, registry, in_flight, paused_confirmations,
+            project_id.clone(), conv_id.clone(), "query".into(), "tester".into(),
+            vec![], TurnPersist::Continuation, None,
+            agent_rx, paused_rx,
+            "user-1".into(), pricing, "turn-1".into(),
+        ).await;
+
+        channels_for_test.lock().await.remove(&project_id);
+        let mut received = Vec::new();
+        while let Ok(m) = rx.recv().await { received.push(m); }
+
+        assert_eq!(count(&received, "thinking"), 2, "{:?}", received);
+        assert_eq!(count(&received, "tool_call"), 1, "{:?}", received);
+        assert_eq!(count(&received, "tool_result"), 1, "{:?}", received);
+        assert_eq!(count(&received, "unlock"), 1, "{:?}", received);
+        assert_eq!(count(&received, "done"), 0);
     }
 }
 

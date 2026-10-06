@@ -8,6 +8,7 @@ pub mod port_forward_tools;
 pub mod skill_tools;
 pub mod terraform_tools;
 pub mod prompt;
+pub mod semantic;
 pub mod tool;
 
 use anyhow::Result;
@@ -21,8 +22,9 @@ use tokio::sync::mpsc;
 use tokio::sync::Semaphore;
 
 use crate::llm::{
+    system_one::{SystemOneClient, ModelTier},
     types::{
-        ContentPart, LlmResponse, Message, MessageContent, ProviderSelection, StreamEvent,
+        ContentPart, LlmResponse, Message, MessageContent, ProviderSelection, Role, StreamEvent,
         ToolCall, ToolDefinition, Usage, UsedProvider,
     },
     LlmProvider,
@@ -59,11 +61,37 @@ pub struct QueryResponse {
     pub answer: String,
     pub sources: Vec<Source>,
     pub tool_calls_made: usize,
+    pub tool_errors: usize,
+    pub turns: usize,
     pub provider_used: Option<UsedProvider>,
     pub duration_ms: u64,
     pub usage: Usage,
     pub llm_call_count: usize,
     pub cost_microusd: i64,
+}
+
+impl QueryResponse {
+    pub fn from_metrics(
+        answer: String,
+        sources: Vec<Source>,
+        provider_used: Option<UsedProvider>,
+        duration_ms: u64,
+        llm_call_count: usize,
+        metrics: &RunMetrics,
+    ) -> Self {
+        Self {
+            answer,
+            sources,
+            tool_calls_made: metrics.tool_calls_executed,
+            tool_errors: metrics.tool_errors,
+            turns: metrics.turns,
+            provider_used,
+            duration_ms,
+            usage: metrics.usage.clone(),
+            llm_call_count,
+            cost_microusd: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +132,8 @@ pub enum AgentEvent {
         answer: String,
         sources: Vec<Source>,
         tool_calls_made: usize,
+        tool_errors: usize,
+        turns: usize,
         provider_used: Option<UsedProvider>,
         duration_ms: u64,
         hit_max_iterations: bool,
@@ -134,8 +164,8 @@ pub enum AgentEvent {
 }
 
 enum LoopOutcome {
-    Finished { text: String, tool_summary: String, iterations: usize, provider_used: Option<UsedProvider>, hit_max_iterations: bool, usage: Usage, llm_call_count: usize },
-    EndedWithQuestion { text: String, iterations: usize, provider_used: Option<UsedProvider>, usage: Usage, llm_call_count: usize },
+    Finished { text: String, tool_summary: String, iterations: usize, provider_used: Option<UsedProvider>, hit_max_iterations: bool, usage: Usage, llm_call_count: usize, tool_calls_executed: usize, tool_errors: usize },
+    EndedWithQuestion { text: String, iterations: usize, provider_used: Option<UsedProvider>, usage: Usage, llm_call_count: usize, tool_calls_executed: usize, tool_errors: usize },
     Paused {
         messages: Vec<Message>,
         iterations: usize,
@@ -144,6 +174,8 @@ enum LoopOutcome {
         provider_used: Option<UsedProvider>,
         usage: Usage,
         llm_call_count: usize,
+        tool_calls_executed: usize,
+        tool_errors: usize,
     },
 }
 
@@ -168,6 +200,7 @@ pub struct ToolResumeResult {
 
 pub struct Agent {
     llm: Arc<dyn LlmProvider>,
+    system_one: Option<Arc<SystemOneClient>>,
     tools: Vec<Box<dyn Tool>>,
     max_iterations: usize,
     compaction_threshold_chars: usize,
@@ -175,6 +208,16 @@ pub struct Agent {
     system_prompt_override: Option<String>,
     enable_parallel_research: bool,
     llm_concurrency: Arc<Semaphore>,
+    fast_path_threshold: f64,
+    early_synthesis_threshold: f64,
+    early_synthesis_research_threshold: f64,
+    relevance_threshold: f64,
+    relevance_preserve_recent: usize,
+    early_synthesis_coverage_threshold: f64,
+    early_synthesis_min_iterations_first_turn: usize,
+    early_synthesis_uniform_threshold: f64,
+    early_synthesis_capability_gate_threshold: f64,
+    next_action_confidence: f64,
 }
 
 impl Agent {
@@ -185,6 +228,7 @@ impl Agent {
     ) -> Self {
         Self {
             llm,
+            system_one: None,
             tools,
             max_iterations,
             compaction_threshold_chars: usize::MAX,
@@ -192,6 +236,16 @@ impl Agent {
             system_prompt_override: None,
             enable_parallel_research: false,
             llm_concurrency: Arc::new(Semaphore::new(20)),
+            fast_path_threshold: 0.7,
+            early_synthesis_threshold: 0.85,
+            early_synthesis_research_threshold: 0.95,
+            relevance_threshold: 0.4,
+            relevance_preserve_recent: 2,
+            early_synthesis_coverage_threshold: 0.8,
+            early_synthesis_min_iterations_first_turn: 5,
+            early_synthesis_uniform_threshold: 0.7,
+            early_synthesis_capability_gate_threshold: 0.8,
+            next_action_confidence: crate::llm::system_one::DEFAULT_NEXT_ACTION_CONFIDENCE,
         }
     }
 
@@ -210,6 +264,60 @@ impl Agent {
         self
     }
 
+    pub fn with_system_one(mut self, client: Option<Arc<SystemOneClient>>) -> Self {
+        self.system_one = client;
+        self
+    }
+
+    pub fn with_thresholds(
+        mut self,
+        fast_path: f64,
+        early_synthesis: f64,
+        relevance: f64,
+        early_synthesis_research: f64,
+        relevance_preserve_recent: usize,
+        early_synthesis_coverage: f64,
+        early_synthesis_min_iterations_first_turn: usize,
+        early_synthesis_uniform: f64,
+    ) -> Self {
+        self.fast_path_threshold = fast_path;
+        self.early_synthesis_threshold = early_synthesis;
+        self.relevance_threshold = relevance;
+        self.early_synthesis_research_threshold = early_synthesis_research;
+        self.relevance_preserve_recent = relevance_preserve_recent;
+        self.early_synthesis_coverage_threshold = early_synthesis_coverage;
+        self.early_synthesis_min_iterations_first_turn = early_synthesis_min_iterations_first_turn;
+        self.early_synthesis_uniform_threshold = early_synthesis_uniform;
+        self
+    }
+
+    pub fn with_capability_gate_threshold(mut self, threshold: f64) -> Self {
+        self.early_synthesis_capability_gate_threshold = threshold;
+        self
+    }
+
+    pub fn with_next_action_confidence(mut self, threshold: f64) -> Self {
+        self.next_action_confidence = threshold;
+        self
+    }
+
+    fn resolve_tier_selection(&self, tier: &ModelTier) -> Option<ProviderSelection> {
+        let children = self.llm.children();
+        if children.is_empty() {
+            return None;
+        }
+        let providers: Vec<&Arc<dyn LlmProvider>> = match tier {
+            ModelTier::Small => children.iter().last(),
+            ModelTier::Medium => children.iter().nth(children.len() / 2),
+            ModelTier::Large => children.iter().next(),
+        }.into_iter().collect();
+        providers.first().map(|p| ProviderSelection {
+            provider_id: p.id().to_string(),
+            model: None,
+            cache_breakpoint_index: None,
+        })
+    }
+
     pub fn llm(&self) -> &Arc<dyn LlmProvider> {
         &self.llm
     }
@@ -222,6 +330,26 @@ impl Agent {
     fn effective_system_prompt(&self) -> String {
         let collocate_enabled = self.tools.iter().any(|t| t.definition().name.starts_with("collocate_"));
         self.system_prompt_override.clone().unwrap_or_else(|| prompt::system_prompt(collocate_enabled))
+    }
+
+    async fn effective_system_prompt_for_query(&self, user_query: &str) -> String {
+        if self.system_prompt_override.is_some() {
+            return self.effective_system_prompt();
+        }
+        let collocate_enabled = self.tools.iter().any(|t| t.definition().name.starts_with("collocate_"));
+        if let Some(so) = &self.system_one {
+            match so.select_prompt_sections(user_query, collocate_enabled).await {
+                Ok(flags) => {
+                    prompt::system_prompt_with_sections(collocate_enabled, flags)
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "system-one prompt section selection failed — using full prompt");
+                    prompt::system_prompt(collocate_enabled)
+                }
+            }
+        } else {
+            prompt::system_prompt(collocate_enabled)
+        }
     }
 
     pub fn with_compaction(mut self, threshold_chars: usize, keep_last: usize) -> Self {
@@ -245,6 +373,26 @@ impl Agent {
         if self.tools.is_empty() {
             return IntentMode::Conversational;
         }
+        if let Some(so) = &self.system_one {
+            let history_text = history
+                .iter()
+                .map(|m| format!("[{}]: {}", m.role, m.text))
+                .collect::<Vec<_>>()
+                .join("\n");
+            match so.classify_intent(user_query, &history_text).await {
+                Ok((mode, confidence)) if confidence >= 0.5 => return mode,
+                Ok((_, low_conf)) => {
+                    tracing::debug!(confidence = low_conf, "system-one intent low confidence — falling back to heuristic");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "system-one intent classification failed — falling back to heuristic");
+                }
+            }
+        }
+        self.classify_intent_heuristic(user_query, history)
+    }
+
+    fn classify_intent_heuristic(&self, user_query: &str, history: &[HistoryMessage]) -> IntentMode {
         if history.is_empty() && !user_query.trim().is_empty() {
             let lower = user_query.to_lowercase();
             let action_verbs = [
@@ -266,6 +414,31 @@ impl Agent {
         if history.is_empty() || estimate_history_chars(history) <= self.compaction_threshold_chars {
             return history.to_vec();
         }
+        if let Some(so) = &self.system_one {
+            let history_text = history
+                .iter()
+                .map(|m| format!("[{}]: {}", m.role, m.text))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let current_query = history
+                .last()
+                .map(|m| m.text.as_str())
+                .unwrap_or("");
+            match so.should_compact(&history_text, current_query).await {
+                Ok((should, _)) if !should => {
+                    tracing::info!("system-one says compaction not needed — skipping");
+                    return history.to_vec();
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "system-one compaction check failed — using char threshold");
+                }
+            }
+        }
+        self.compact_history_llm(history).await
+    }
+
+    async fn compact_history_llm(&self, history: &[HistoryMessage]) -> Vec<HistoryMessage> {
         let total_messages = history.len();
         let keep_last = self.compaction_keep_last.min(total_messages);
         let old = &history[..total_messages - keep_last];
@@ -310,6 +483,35 @@ impl Agent {
         if estimate_messages_chars(&messages[protected_prefix_len..]) <= MID_TURN_COMPACTION_CHAR_THRESHOLD {
             return messages;
         }
+        if let Some(so) = &self.system_one {
+            let trace_text = messages[protected_prefix_len..]
+                .iter()
+                .map(describe_message_for_compaction)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let current = messages
+                .last()
+                .map(|m| match &m.content {
+                    MessageContent::Text(t) => t.as_str(),
+                    MessageContent::Parts(_) => "",
+                })
+                .unwrap_or("");
+            match so.should_compact(&trace_text, current).await {
+                Ok((should, _)) if !should => {
+                    tracing::info!("system-one says mid-turn compaction not needed — skipping");
+                    return messages;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "system-one mid-turn compaction check failed — using char threshold");
+                }
+            }
+        }
+        self.compact_messages_mid_turn_llm(messages, protected_prefix_len).await
+    }
+
+    async fn compact_messages_mid_turn_llm(&self, messages: Vec<Message>, protected_prefix_len: usize) -> Vec<Message> {
+        let trace_len = messages.len().saturating_sub(protected_prefix_len);
 
         let split_at = protected_prefix_len + (trace_len - MID_TURN_COMPACTION_KEEP_LAST);
         let old = &messages[protected_prefix_len..split_at];
@@ -356,8 +558,8 @@ impl Agent {
             let mut error = None;
             while let Some(event) = receiver.recv().await {
                 match event {
-                    AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, .. } => {
-                        response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, cost_microusd: 0 });
+                    AgentEvent::Done { answer, sources, tool_calls_made, tool_errors, turns, provider_used, duration_ms, usage, llm_call_count, .. } => {
+                        response = Some(QueryResponse { answer, sources, tool_calls_made, tool_errors, turns, provider_used, duration_ms, usage, llm_call_count, cost_microusd: 0 });
                     }
                     AgentEvent::Error { message } => {
                         error = Some(anyhow::anyhow!(message));
@@ -390,8 +592,8 @@ impl Agent {
             while let Some(event) = receiver.recv().await {
                 let _ = progress.send(event.clone()).await;
                 match event {
-                    AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, .. } => {
-                        response = Some(QueryResponse { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, cost_microusd: 0 });
+                    AgentEvent::Done { answer, sources, tool_calls_made, tool_errors, turns, provider_used, duration_ms, usage, llm_call_count, .. } => {
+                        response = Some(QueryResponse { answer, sources, tool_calls_made, tool_errors, turns, provider_used, duration_ms, usage, llm_call_count, cost_microusd: 0 });
                     }
                     AgentEvent::Error { message } => {
                         error = Some(anyhow::anyhow!(message));
@@ -441,11 +643,13 @@ impl Agent {
             _ => (self.build_tool_defs(), self.build_tool_map()),
         };
 
-        let mut messages = vec![Message::system(self.effective_system_prompt())];
+        let system_prompt = self.effective_system_prompt_for_query(user_query).await;
+        let mut messages = vec![Message::system(system_prompt)];
         messages.extend(history_to_messages(&compacted));
         messages.push(build_user_message(user_query, attachments));
 
-        let outcome = self.run_loop(messages, 0, &tool_defs, &tool_map, selection, &event_sender, self.max_iterations, 0).await;
+        let is_first_turn = history.is_empty();
+        let outcome = self.run_loop(messages, 0, &tool_defs, &tool_map, selection, &event_sender, self.max_iterations, 0, mode, is_first_turn).await;
         self.finish_outcome(outcome, &event_sender, start, 0).await
     }
 
@@ -473,7 +677,7 @@ impl Agent {
         let tool_defs = self.build_tool_defs();
         let tool_map  = self.build_tool_map();
 
-        let outcome = self.run_loop(messages, iterations, &tool_defs, &tool_map, selection, &event_sender, self.max_iterations, 0).await;
+        let outcome = self.run_loop(messages, iterations, &tool_defs, &tool_map, selection, &event_sender, self.max_iterations, 0, IntentMode::Research, false).await;
         self.finish_outcome(outcome, &event_sender, start, elapsed_before_ms).await
     }
 
@@ -485,14 +689,33 @@ impl Agent {
         elapsed_before_ms: u64,
     ) -> Option<PausedTurn> {
         let duration_ms = elapsed_before_ms + start.elapsed().as_millis() as u64;
+        let (turns, llm_calls, usage, tool_calls_executed, tool_errors) = match &outcome {
+            LoopOutcome::Finished { iterations, llm_call_count, usage, tool_calls_executed, tool_errors, .. } => (*iterations, *llm_call_count, usage.clone(), *tool_calls_executed, *tool_errors),
+            LoopOutcome::EndedWithQuestion { iterations, llm_call_count, usage, tool_calls_executed, tool_errors, .. } => (*iterations, *llm_call_count, usage.clone(), *tool_calls_executed, *tool_errors),
+            LoopOutcome::Paused { iterations, llm_call_count, usage, tool_calls_executed, tool_errors, .. } => (*iterations, *llm_call_count, usage.clone(), *tool_calls_executed, *tool_errors),
+        };
+        let metrics = RunMetrics { tool_calls_executed, tool_errors, turns, llm_calls, duration_ms, usage };
+        tracing::info!(
+            turns = metrics.turns,
+            llm_calls = metrics.llm_calls,
+            tool_calls_executed = metrics.tool_calls_executed,
+            tool_errors = metrics.tool_errors,
+            input_tokens = metrics.usage.input_tokens,
+            output_tokens = metrics.usage.output_tokens,
+            cache_read_tokens = metrics.usage.cache_read_tokens,
+            duration_ms = metrics.duration_ms,
+            "agent run metrics"
+        );
         match outcome {
-            LoopOutcome::Finished { text, tool_summary, iterations, provider_used, hit_max_iterations, usage, llm_call_count } => {
+            LoopOutcome::Finished { text, tool_summary, iterations, provider_used, hit_max_iterations, usage, llm_call_count, .. } => {
                 let answer = if text.is_empty() { last_resort_fallback_with_summary(&tool_summary) } else { strip_answer_preamble(&text) };
                 let sources = parse_citations(&answer);
                 let _ = event_sender.send(AgentEvent::Done {
                     answer,
                     sources,
-                    tool_calls_made: iterations,
+                    tool_calls_made: metrics.tool_calls_executed,
+                    tool_errors: metrics.tool_errors,
+                    turns: metrics.turns,
                     provider_used,
                     duration_ms,
                     hit_max_iterations,
@@ -501,13 +724,15 @@ impl Agent {
                 }).await;
                 None
             }
-            LoopOutcome::EndedWithQuestion { text, iterations, provider_used, usage, llm_call_count } => {
+            LoopOutcome::EndedWithQuestion { text, iterations, provider_used, usage, llm_call_count, .. } => {
                 let answer = if text.is_empty() { question_fallback() } else { text };
                 let sources = parse_citations(&answer);
                 let _ = event_sender.send(AgentEvent::Done {
                     answer,
                     sources,
-                    tool_calls_made: iterations,
+                    tool_calls_made: metrics.tool_calls_executed,
+                    tool_errors: metrics.tool_errors,
+                    turns: metrics.turns,
                     provider_used,
                     duration_ms,
                     hit_max_iterations: false,
@@ -516,12 +741,14 @@ impl Agent {
                 }).await;
                 None
             }
-            LoopOutcome::Paused { messages, iterations, text_buf, pending, provider_used, usage, llm_call_count } => {
+            LoopOutcome::Paused { messages, iterations, text_buf, pending, provider_used, usage, llm_call_count, .. } => {
                 let answer = if text_buf.is_empty() { question_fallback() } else { text_buf };
                 let _ = event_sender.send(AgentEvent::Done {
                     answer,
                     sources: vec![],
-                    tool_calls_made: iterations,
+                    tool_calls_made: metrics.tool_calls_executed,
+                    tool_errors: metrics.tool_errors,
+                    turns: metrics.turns,
                     provider_used,
                     duration_ms,
                     hit_max_iterations: false,
@@ -543,6 +770,8 @@ impl Agent {
         event_sender: &mpsc::Sender<AgentEvent>,
         max_iterations: usize,
         depth: usize,
+        intent: IntentMode,
+        is_first_turn: bool,
     ) -> LoopOutcome {
         let mut last_provider_used: Option<UsedProvider> = None;
         let mut accumulated_text = String::new();
@@ -556,10 +785,32 @@ impl Agent {
                 tracing::warn!(max_iterations, "agent hit max_iterations — requesting synthesis");
                 let _ = event_sender.send(AgentEvent::Phase { label: "Synthesizing answer".to_string() }).await;
                 let tool_summary = collect_tool_result_summary(&messages);
-                let synthesis_prompt = format!(
-                    "You have used the maximum number of tool calls. \
-                     Synthesize what you have gathered so far into a final answer.\n\n\
-                     Tool results so far:\n{tool_summary}"
+                let goal = messages.iter().rev()
+                    .find(|m| matches!(m.role, crate::llm::types::Role::User))
+                    .map(|m| match &m.content {
+                        MessageContent::Text(t) => t.clone(),
+                        MessageContent::Parts(parts) => parts.iter()
+                            .filter_map(|p| if let ContentPart::Text { text, .. } = p { Some(text.clone()) } else { None })
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    })
+                    .unwrap_or_default();
+                let is_uniform = match &self.system_one {
+                    Some(so) if intent == IntentMode::Research => {
+                        match so.should_synthesize_uniform(&goal, &tool_summary).await {
+                            Ok((uniform, _)) => uniform,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "uniformity check failed at max_iterations — assuming non-uniform");
+                                false
+                            }
+                        }
+                    }
+                    _ => false,
+                };
+                let synthesis_prompt = build_synthesis_prompt(
+                    "You have used the maximum number of tool calls. Synthesize what you have gathered so far into a final answer.",
+                    &tool_summary,
+                    is_uniform,
                 );
                 messages.push(Message::user(synthesis_prompt));
                 let _synthesis_permit = self.llm_concurrency.acquire().await;
@@ -585,14 +836,71 @@ impl Agent {
                         else { last_resort_fallback_with_summary(&tool_summary) }
                     }
                 };
-                return LoopOutcome::Finished { text, tool_summary, iterations, provider_used: last_provider_used, hit_max_iterations: true, usage: total_usage, llm_call_count };
+                return LoopOutcome::Finished { text, tool_summary, iterations, provider_used: last_provider_used, hit_max_iterations: true, usage: total_usage, llm_call_count, tool_calls_executed: tally_count(&messages), tool_errors: tally_errors(&messages) };
             }
 
             let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(64);
             let llm            = Arc::clone(&self.llm);
             let msgs_snapshot  = messages.clone();
-            let tools_snapshot = tool_defs.to_vec();
-            let selection_owned = selection.cloned();
+            let mut selection_owned = selection.cloned();
+            if let Some(sel) = &mut selection_owned {
+                sel.cache_breakpoint_index = Some(protected_prefix_len);
+            }
+
+            let last_user_msg = messages.iter().rev()
+                .find(|m| matches!(m.role, crate::llm::types::Role::User))
+                .map(|m| match &m.content {
+                    MessageContent::Text(t) => t.clone(),
+                    MessageContent::Parts(parts) => parts.iter()
+                        .filter_map(|p| if let ContentPart::Text { text, .. } = p { Some(text.clone()) } else { None })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                })
+                .unwrap_or_default();
+            let history_summary: String = messages.iter()
+                .take(messages.len().saturating_sub(1))
+                .filter(|m| matches!(m.role, crate::llm::types::Role::User | crate::llm::types::Role::Assistant))
+                .map(|m| match &m.content {
+                    MessageContent::Text(t) => t.clone(),
+                    MessageContent::Parts(_) => String::new(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let tools_snapshot = if let Some(so) = &self.system_one {
+                let all_tool_names: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
+                match so.select_tools(&last_user_msg, &all_tool_names).await {
+                    Ok(selected) => {
+                        tool_defs.iter()
+                            .filter(|t| selected.contains(&t.name) || t.name == "ask_user")
+                            .cloned()
+                            .collect()
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "system-one tool selection failed — using full tool set");
+                        tool_defs.to_vec()
+                    }
+                }
+            } else {
+                tool_defs.to_vec()
+            };
+
+            if let Some(so) = &self.system_one {
+                if selection_owned.is_none() {
+                    match so.route_model_enhanced(&last_user_msg, &history_summary).await {
+                        Ok((tier, confidence, _needs_deep)) if confidence >= self.fast_path_threshold => {
+                            selection_owned = self.resolve_tier_selection(&tier);
+                        }
+                        Ok((_, low_conf, _)) => {
+                            tracing::debug!(confidence = low_conf, "system-one model routing low confidence — using default");
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "system-one model routing failed — using default provider");
+                        }
+                    }
+                }
+            }
+
             let permit = self.llm_concurrency.clone().acquire_owned().await;
             let stream_handle = tokio::spawn(async move {
                 let _permit = permit;
@@ -651,7 +959,7 @@ impl Agent {
                     let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
                     return LoopOutcome::EndedWithQuestion {
                         text: answer_text, iterations, provider_used: last_provider_used,
-                        usage: total_usage.clone(), llm_call_count,
+                        usage: total_usage.clone(), llm_call_count, tool_calls_executed: tally_count(&messages), tool_errors: tally_errors(&messages)
                     };
                 }
                 let final_text = if accumulated_answer.is_empty() {
@@ -667,7 +975,7 @@ impl Agent {
                     provider_used: last_provider_used,
                     hit_max_iterations: false,
                     usage: total_usage.clone(),
-                    llm_call_count,
+                    llm_call_count, tool_calls_executed: tally_count(&messages), tool_errors: tally_errors(&messages)
                 };
             }
 
@@ -681,9 +989,40 @@ impl Agent {
                         .collect())
                     .unwrap_or_default();
                 if leads.len() >= 2 {
-                    return Box::pin(self.run_parallel_research(
-                        messages, leads, tool_defs, tool_map, selection, event_sender, depth + 1,
-                    )).await;
+                    let should_proceed = if let Some(so) = &self.system_one {
+                        let history_text = messages.iter()
+                            .filter(|m| matches!(m.role, crate::llm::types::Role::User | crate::llm::types::Role::Assistant))
+                            .map(|m| match &m.content {
+                                MessageContent::Text(t) => t.clone(),
+                                MessageContent::Parts(_) => String::new(),
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let last_user = messages.iter().rev()
+                            .find(|m| matches!(m.role, crate::llm::types::Role::User))
+                            .map(|m| match &m.content {
+                                MessageContent::Text(t) => t.clone(),
+                                MessageContent::Parts(parts) => parts.iter()
+                                    .filter_map(|p| if let ContentPart::Text { text, .. } = p { Some(text.clone()) } else { None })
+                                    .collect::<Vec<_>>()
+                                    .join(" "),
+                            })
+                            .unwrap_or_default();
+                        match so.should_parallel_research(&last_user, &history_text).await {
+                            Ok((should, _)) => should,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "system-one parallel research gate failed — allowing");
+                                true
+                            }
+                        }
+                    } else {
+                        true
+                    };
+                    if should_proceed {
+                        return Box::pin(self.run_parallel_research(
+                            messages, leads, tool_defs, tool_map, selection, event_sender, depth + 1,
+                        )).await;
+                    }
                 }
             }
 
@@ -702,7 +1041,65 @@ impl Agent {
                 let _ = event_sender.send(AgentEvent::Question { question, choices }).await;
                 return LoopOutcome::EndedWithQuestion {
                     text: answer_text, iterations, provider_used: last_provider_used,
-                    usage: total_usage.clone(), llm_call_count,
+                    usage: total_usage.clone(), llm_call_count, tool_calls_executed: tally_count(&messages), tool_errors: tally_errors(&messages)
+                };
+            }
+
+            let tool_calls = if let Some(so) = &self.system_one {
+                if tool_calls.is_empty() {
+                    tool_calls
+                } else {
+                    let history_text = messages.iter()
+                        .filter(|m| matches!(m.role, crate::llm::types::Role::User | crate::llm::types::Role::Assistant))
+                        .map(|m| match &m.content {
+                            MessageContent::Text(t) => t.clone(),
+                            MessageContent::Parts(_) => String::new(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    let call_infos: Vec<(String, String)> = tool_calls.iter()
+                        .map(|c| (c.name.clone(), c.input.to_string()))
+                        .collect();
+                    match so.filter_tool_calls(&call_infos, &history_text).await {
+                        Ok(keep) => {
+                            let filtered: Vec<ToolCall> = tool_calls.into_iter()
+                                .zip(keep.iter())
+                                .filter(|(_, k)| **k)
+                                .map(|(c, _)| c)
+                                .collect();
+                            if filtered.len() < call_infos.len() {
+                                tracing::info!(
+                                    total = call_infos.len(),
+                                    kept = filtered.len(),
+                                    "system-one filtered unnecessary tool calls"
+                                );
+                            }
+                            filtered
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "system-one tool call filtering failed — executing all");
+                            tool_calls
+                        }
+                    }
+                }
+            } else {
+                tool_calls
+            };
+
+            if tool_calls.is_empty() {
+                let final_text = if accumulated_answer.is_empty() {
+                    text_buf
+                } else {
+                    accumulated_answer
+                };
+                return LoopOutcome::Finished {
+                    text: final_text,
+                    tool_summary: collect_tool_result_summary(&messages),
+                    iterations,
+                    provider_used: last_provider_used,
+                    hit_max_iterations: false,
+                    usage: total_usage.clone(),
+                    llm_call_count, tool_calls_executed: tally_count(&messages), tool_errors: tally_errors(&messages)
                 };
             }
 
@@ -776,7 +1173,8 @@ impl Agent {
                 } else {
                     accumulated_text.clone()
                 };
-                return LoopOutcome::Paused { messages, iterations, text_buf: paused_text, pending, provider_used: last_provider_used, usage: total_usage.clone(), llm_call_count };
+                let t = (tally_count(&messages), tally_errors(&messages));
+                return LoopOutcome::Paused { messages, iterations, text_buf: paused_text, pending, provider_used: last_provider_used, usage: total_usage.clone(), llm_call_count, tool_calls_executed: t.0, tool_errors: t.1 };
             }
 
             let phase = derive_phase(&tool_calls);
@@ -828,6 +1226,197 @@ impl Agent {
                         is_error:    false,
                     }]),
                 });
+            }
+
+            if let Some(so) = &self.system_one {
+                let preserve_recent = self.relevance_preserve_recent;
+                let cutoff = messages.len().saturating_sub(preserve_recent);
+                for i in (protected_prefix_len..cutoff).rev() {
+                    let (tool_name, result_content) = match &messages[i].content {
+                        MessageContent::Parts(parts) => {
+                            let result = parts.iter().find_map(|p| {
+                                if let ContentPart::ToolResult { content, .. } = p {
+                                    Some(content.clone())
+                                } else {
+                                    None
+                                }
+                            });
+                            let name = parts.iter().find_map(|p| {
+                                if let ContentPart::ToolUse { name, .. } = p { Some(name.clone()) } else { None }
+                            }).unwrap_or_else(|| "unknown".to_string());
+                            match result {
+                                Some(c) => (name, c),
+                                None => continue,
+                            }
+                        }
+                        _ => continue,
+                    };
+                    match so.score_tool_result_relevance(&tool_name, &result_content, &last_user_msg).await {
+                        Ok(score) if score < self.relevance_threshold => {
+                            let truncated = format!(
+                                "[Truncated — relevance {:.2}]\n{}…",
+                                score,
+                                &result_content[..result_content.len().min(200)]
+                            );
+                            if let MessageContent::Parts(parts) = &mut messages[i].content {
+                                for part in parts.iter_mut() {
+                                    if let ContentPart::ToolResult { content, .. } = part {
+                                        *content = truncated;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(error = %e, "relevance scoring failed — keeping full result"),
+                    }
+                }
+
+                let min_iterations = if is_first_turn && intent == IntentMode::Research {
+                    self.early_synthesis_min_iterations_first_turn
+                } else {
+                    3
+                };
+                if iterations >= min_iterations {
+                    let findings = collect_tool_result_summary(&messages);
+                    let mut next_action_vetoes_synthesis: Option<bool> = None;
+                    if let Some(so) = &self.system_one {
+                        let candidates = [
+                            crate::llm::system_one::NextAction::GetEvidencePack,
+                            crate::llm::system_one::NextAction::ReadSources,
+                            crate::llm::system_one::NextAction::SearchSymbols,
+                            crate::llm::system_one::NextAction::Synthesize,
+                        ];
+                        match so
+                            .route_next_action(&last_user_msg, &findings, &candidates, self.next_action_confidence)
+                            .await
+                        {
+                            Ok(decision) if !decision.fallback => {
+                                let vetoes = decision.action != crate::llm::system_one::NextAction::Synthesize;
+                                tracing::debug!(
+                                    action = decision.action.key(),
+                                    confidence = decision.confidence,
+                                    vetoes_synthesis = vetoes,
+                                    "system-one routed the next action"
+                                );
+                                next_action_vetoes_synthesis = Some(vetoes);
+                            }
+                            Ok(decision) => {
+                                tracing::debug!(
+                                    action = decision.action.key(),
+                                    confidence = decision.confidence,
+                                    "next-action routing was below the confidence threshold"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "next-action routing failed — keeping the existing synthesis gate");
+                            }
+                        }
+                    }
+                    let synth_threshold = if intent == IntentMode::Research {
+                        self.early_synthesis_research_threshold
+                    } else {
+                        self.early_synthesis_threshold
+                    };
+                    let should_synthesize_now: Option<bool> = match so.should_synthesize(&last_user_msg, &findings).await {
+                        Ok((should, confidence)) if should && confidence >= synth_threshold => {
+                            if intent == IntentMode::Research {
+                                match so.should_synthesize_coverage(&last_user_msg, &findings).await {
+                                    Ok((covered, cov_conf)) if covered && cov_conf >= self.early_synthesis_coverage_threshold => {
+                                        match so.should_synthesize_capability_gate_with_threshold(
+                                            &last_user_msg,
+                                            &findings,
+                                            self.early_synthesis_capability_gate_threshold,
+                                        ).await {
+                                            Ok((gate_located, gate_conf)) if !gate_located => {
+                                                tracing::debug!(gate_conf, "early synthesis deferred — capability gate not located");
+                                                None
+                                            }
+                                            Ok(_) => {
+                                                if next_action_vetoes_synthesis == Some(true) {
+                                                    tracing::debug!("early synthesis deferred — next-action router still wants more evidence");
+                                                    None
+                                                } else {
+                                                    match so.should_synthesize_uniform(&last_user_msg, &findings).await {
+                                                        Ok((uniform, uni_conf)) => Some(uniform && uni_conf >= self.early_synthesis_uniform_threshold),
+                                                        Err(e) => {
+                                                            tracing::warn!(error = %e, "uniformity check failed — assuming non-uniform");
+                                                            Some(false)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(error = %e, "capability gate check failed — assuming located");
+                                                match so.should_synthesize_uniform(&last_user_msg, &findings).await {
+                                                    Ok((uniform, uni_conf)) => Some(uniform && uni_conf >= self.early_synthesis_uniform_threshold),
+                                                    Err(e) => {
+                                                        tracing::warn!(error = %e, "uniformity check failed — assuming non-uniform");
+                                                        Some(false)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Ok((_, cov_conf)) => {
+                                        tracing::debug!(cov_conf, "early synthesis deferred — coverage incomplete");
+                                        None
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "early synthesis coverage check failed");
+                                        None
+                                    }
+                                }
+                            } else {
+                                Some(true)
+                            }
+                        }
+                        Ok(_) => None,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "early synthesis check failed");
+                            None
+                        }
+                    };
+                    if let Some(is_uniform) = should_synthesize_now {
+                        tracing::info!(iterations, intent = ?intent, "system-one triggered early synthesis");
+                        let _ = event_sender.send(AgentEvent::Phase { label: "Synthesizing answer".to_string() }).await;
+                        let synthesis_prompt = build_synthesis_prompt(
+                            "Based on your investigation so far, provide a complete answer to the user's question.",
+                            &findings,
+                            is_uniform,
+                        );
+                        messages.push(Message::user(synthesis_prompt));
+                        let _synthesis_permit = self.llm_concurrency.acquire().await;
+                        let text = match self.llm.chat_routed(selection, &messages, &[]).await {
+                            Ok((LlmResponse::Message { text, .. }, used, usage)) => {
+                                last_provider_used = Some(used);
+                                total_usage += usage;
+                                llm_call_count += 1;
+                                text
+                            }
+                            Ok((LlmResponse::ToolCalls { preamble, .. }, used, usage)) => {
+                                last_provider_used = Some(used);
+                                total_usage += usage;
+                                llm_call_count += 1;
+                                if !preamble.is_empty() { preamble }
+                                else if !accumulated_answer.is_empty() { accumulated_answer }
+                                else if !accumulated_text.is_empty() { accumulated_text }
+                                else { last_resort_fallback_with_summary(&findings) }
+                            }
+                            Err(_) => {
+                                if !accumulated_answer.is_empty() { accumulated_answer }
+                                else if !accumulated_text.is_empty() { accumulated_text }
+                                else { last_resort_fallback_with_summary(&findings) }
+                            }
+                        };
+                        return LoopOutcome::Finished {
+                            text, tool_summary: findings, iterations,
+                            provider_used: last_provider_used,
+                            hit_max_iterations: false,
+                            usage: total_usage, llm_call_count, tool_calls_executed: tally_count(&messages), tool_errors: tally_errors(&messages)
+                        };
+                    }
+                }
             }
 
             messages = self.compact_messages_mid_turn(messages, protected_prefix_len).await;
@@ -915,7 +1504,7 @@ impl Agent {
         )));
 
         let start_at = total_iterations.min(self.max_iterations.saturating_sub(1));
-        let mut outcome = self.run_loop(messages, start_at, tool_defs, tool_map, selection, event_sender, self.max_iterations, depth).await;
+        let mut outcome = self.run_loop(messages, start_at, tool_defs, tool_map, selection, event_sender, self.max_iterations, depth, IntentMode::Research, false).await;
         match &mut outcome {
             LoopOutcome::Finished { usage, llm_call_count, .. } => {
                 *usage = std::mem::take(usage) + sub_usage.clone();
@@ -952,7 +1541,7 @@ impl Agent {
                 let _ = sender_clone.send(ev).await;
             }
         });
-        let outcome = self.run_loop(messages, 0, tool_defs, tool_map, selection, &sub_tx, max_iterations, depth).await;
+        let outcome = self.run_loop(messages, 0, tool_defs, tool_map, selection, &sub_tx, max_iterations, depth, IntentMode::Research, false).await;
         drop(sub_tx);
         let _ = forward_handle.await;
         let (text, iterations, usage, llm_call_count) = match outcome {
@@ -1045,19 +1634,77 @@ impl Agent {
 
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RunMetrics {
+    pub tool_calls_executed: usize,
+    pub tool_errors:         usize,
+    pub turns:               usize,
+    pub llm_calls:           usize,
+    pub duration_ms:         u64,
+    pub usage:               Usage,
+}
+
+impl RunMetrics {
+    pub fn usage_total(&self) -> u64 {
+        self.usage.input_tokens + self.usage.output_tokens
+    }
+}
+
+pub fn run_metrics(
+    messages: &[Message],
+    turns: usize,
+    llm_calls: usize,
+    usage: Usage,
+    duration_ms: u64,
+) -> RunMetrics {
+    let (tool_calls_executed, tool_errors) = count_tool_results(messages);
+    RunMetrics { tool_calls_executed, tool_errors, turns, llm_calls, duration_ms, usage }
+}
+
+pub fn count_tool_results(messages: &[Message]) -> (usize, usize) {
+    let mut total = 0;
+    let mut errors = 0;
+    for msg in messages {
+        if let MessageContent::Parts(parts) = &msg.content {
+            for part in parts {
+                if let ContentPart::ToolResult { is_error, .. } = part {
+                    total += 1;
+                    if *is_error { errors += 1; }
+                }
+            }
+        }
+    }
+    (total, errors)
+}
+
+fn tally_count(messages: &[Message]) -> usize {
+    count_tool_results(messages).0
+}
+
+fn tally_errors(messages: &[Message]) -> usize {
+    count_tool_results(messages).1
+}
+
 fn collect_tool_result_summary(messages: &[Message]) -> String {
     let mut summaries = Vec::new();
+    let mut budget = MAX_SUMMARY_TOTAL_CHARS;
     for msg in messages {
         if let MessageContent::Parts(parts) = &msg.content {
             for part in parts {
                 if let ContentPart::ToolResult { content, is_error, .. } = part {
+                    if budget == 0 { break; }
                     let label = if *is_error { "error" } else { "result" };
-                    let snippet = if content.len() > 200 {
-                        format!("{}…", &content[..200])
+                    let entry_budget = budget.min(MAX_SUMMARY_ENTRY_CHARS);
+                    let (snippet, truncated) = if content.chars().count() > entry_budget {
+                        let head: String = content.chars().take(entry_budget).collect();
+                        (format!("{head}… [truncated]"), true)
                     } else {
-                        content.clone()
+                        (content.clone(), false)
                     };
-                    summaries.push(format!("- [{label}] {snippet}"));
+                    let line = format!("- [{label}] {snippet}");
+                    budget = budget.saturating_sub(line.chars().count());
+                    summaries.push(line);
+                    if truncated { break; }
                 }
             }
         }
@@ -1067,6 +1714,24 @@ fn collect_tool_result_summary(messages: &[Message]) -> String {
     } else {
         summaries.join("\n")
     }
+}
+
+fn build_synthesis_prompt(prefix: &str, findings: &str, is_uniform: bool) -> String {
+    let variation = if is_uniform {
+        String::new()
+    } else {
+        " Check whether your findings differ across the entities, components, \
+         drivers, modules, or variants you examined. If they do, state that \
+         variation up front in your first sentence instead of leading with a \
+         blanket yes or no, and state what you found for each one.\n".to_string()
+    };
+    format!(
+        "{prefix}\n\n\
+         {variation}\
+         Tool results so far:\n{findings}\n\n\
+         If any examined entity lacks a capability the question asks about, \
+         state what happens when that capability is required."
+    )
 }
 
 /// True when `text` narrates asking the user a question rather than stating
@@ -1181,6 +1846,8 @@ pub(crate) fn build_user_message(text: &str, attachments: &[Attachment]) -> Mess
 const MAX_PARALLEL_LEADS: usize = 6;
 const MAX_PARALLEL_RESEARCH_DEPTH: usize = 2;
 const MAX_TOOL_RESULT_CHARS: usize = 15_000;
+const MAX_SUMMARY_ENTRY_CHARS: usize = 1_200;
+const MAX_SUMMARY_TOTAL_CHARS: usize = 8_000;
 
 fn cap_tool_result(content: String) -> String {
     if content.chars().count() <= MAX_TOOL_RESULT_CHARS {
@@ -1366,6 +2033,64 @@ fn parse_citations(text: &str) -> Vec<Source> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn query_response_reports_the_exact_tool_call_count() {
+        let metrics = RunMetrics {
+            tool_calls_executed: 7,
+            tool_errors: 2,
+            turns: 3,
+            llm_calls: 4,
+            duration_ms: 11,
+            usage: Usage::default(),
+        };
+        let r = QueryResponse::from_metrics(
+            "answer".into(),
+            Vec::new(),
+            Some(UsedProvider { provider_id: "gemini".into(), kind: "gemini".into(), model: "m".into() }),
+            11,
+            4,
+            &metrics,
+        );
+        assert_eq!(r.tool_calls_made, 7, "the response must carry the exact tool count, not the turn count");
+        assert_eq!(r.tool_errors, 2);
+        assert_eq!(r.llm_call_count, 4);
+        assert_eq!(r.turns, 3);
+    }
+
+    #[test]
+    fn query_response_exposes_zero_counts_for_a_clean_run() {
+        let metrics = RunMetrics {
+            tool_calls_executed: 0,
+            tool_errors: 0,
+            turns: 1,
+            llm_calls: 1,
+            duration_ms: 5,
+            usage: Usage::default(),
+        };
+        let r = QueryResponse::from_metrics("answer".into(), Vec::new(), None, 5, 1, &metrics);
+        assert_eq!(r.tool_calls_made, 0);
+        assert_eq!(r.tool_errors, 0);
+    }
+
+    fn result_message(is_error: bool) -> Message {
+        Message {
+            role: Role::User,
+            content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                tool_use_id: "id".into(),
+                content: "ok".into(),
+                is_error,
+            }]),
+        }
+    }
+
+    #[test]
+    fn exact_tool_counts_differ_from_the_turn_count() {
+        let messages = vec![result_message(false), result_message(false), result_message(true)];
+        let (total, errors) = count_tool_results(&messages);
+        assert_eq!((total, errors), (3, 1));
+        assert_ne!(total, 1, "the tool count is not the turn count");
+    }
+
     use super::*;
     use anyhow::Result;
     use async_trait::async_trait;
@@ -1398,6 +2123,46 @@ mod tests {
         async fn chat_with(&self, _model: Option<&str>, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
             self.responses.lock().unwrap().pop_front()
                 .ok_or_else(|| anyhow::anyhow!("MockLlm: no more responses"))
+        }
+    }
+
+    struct RecordingLlm {
+        responses: Mutex<VecDeque<LlmResponse>>,
+        requests: Mutex<Vec<String>>,
+    }
+
+    impl RecordingLlm {
+        fn new(responses: Vec<LlmResponse>) -> Arc<Self> {
+            Arc::new(Self { responses: Mutex::new(responses.into()), requests: Mutex::new(Vec::new()) })
+        }
+
+        fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for RecordingLlm {
+        fn id(&self) -> &str { "recording-llm" }
+        fn kind(&self) -> &str { "mock" }
+        fn default_model(&self) -> &str { "mock-model" }
+
+        async fn list_models(&self) -> Result<Vec<crate::llm::types::ModelInfo>> { Ok(vec![]) }
+
+        async fn chat_with(&self, _model: Option<&str>, messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
+            let last_user = messages.iter().rev()
+                .find(|m| matches!(m.role, crate::llm::types::Role::User))
+                .map(|m| match &m.content {
+                    MessageContent::Text(t) => t.clone(),
+                    MessageContent::Parts(parts) => parts.iter()
+                        .filter_map(|p| if let ContentPart::Text { text, .. } = p { Some(text.clone()) } else { None })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                })
+                .unwrap_or_default();
+            self.requests.lock().unwrap().push(last_user);
+            self.responses.lock().unwrap().pop_front()
+                .ok_or_else(|| anyhow::anyhow!("RecordingLlm: no more responses"))
         }
     }
 
@@ -1593,7 +2358,7 @@ mod tests {
     async fn matching_selection_reports_overridden_model() {
         let llm = MockLlm::with_id("mock-llm", vec![text("all done")]);
         let agent = agent_with(llm, vec![], 5);
-        let selection = ProviderSelection { provider_id: "mock-llm".into(), model: Some("custom-model".into()) };
+        let selection = ProviderSelection { provider_id: "mock-llm".into(), model: Some("custom-model".into()), cache_breakpoint_index: None };
         let resp = agent.query("hi", &[], &[], Some(&selection)).await.unwrap();
         let used = resp.provider_used.expect("expected provider_used to be set");
         assert_eq!(used.provider_id, "mock-llm");
@@ -1687,7 +2452,7 @@ mod tests {
             _ => None,
         }).expect("expected Done event");
         assert_eq!(done.0, "Hello world continued");
-        assert_eq!(done.1, 1);
+        assert_eq!(done.1, 0, "no tools were executed, so the exact count is zero rather than the turn count");
     }
 
     #[tokio::test]
@@ -2268,7 +3033,9 @@ mod tests {
         );
         let resp = agent.query("hi", &[], &[], None).await.unwrap();
         assert_eq!(resp.answer, "got both results");
-        assert_eq!(resp.tool_calls_made, 1);
+        assert_eq!(resp.tool_calls_made, 2, "both tools were executed in a single turn");
+        assert_eq!(resp.tool_errors, 0);
+        assert_eq!(resp.turns, 1, "the turn count is tracked separately from the tool count");
     }
 
     #[tokio::test]
@@ -2495,6 +3262,59 @@ mod tests {
         assert_eq!(result[2].text, "msg 4");
     }
 
+    #[test]
+    fn tool_result_summary_preserves_capability_declaration() {
+        let body = "x".repeat(600);
+        let content = format!("{body}\n    SUPPORTS_ACTIVE_ACTIVE = True\n");
+        let messages = vec![tool_result_message("tc_1", content)];
+        let summary = collect_tool_result_summary(&messages);
+        assert!(
+            summary.contains("SUPPORTS_ACTIVE_ACTIVE = True"),
+            "capability declaration was truncated away: {summary}"
+        );
+    }
+
+    #[test]
+    fn tool_result_summary_caps_each_entry_at_budget() {
+        let content = "y".repeat(MAX_SUMMARY_ENTRY_CHARS * 3);
+        let messages = vec![tool_result_message("tc_1", content)];
+        let summary = collect_tool_result_summary(&messages);
+        assert!(summary.chars().count() < MAX_SUMMARY_ENTRY_CHARS * 2);
+        assert!(summary.contains("truncated"));
+    }
+
+    #[test]
+    fn tool_result_summary_bounds_total_length() {
+        let messages: Vec<Message> = (0..40)
+            .map(|i| tool_result_message(&format!("tc_{i}"), "z".repeat(4000)))
+            .collect();
+        let summary = collect_tool_result_summary(&messages);
+        assert!(
+            summary.chars().count() <= MAX_SUMMARY_TOTAL_CHARS + 200,
+            "summary was {} chars, over budget",
+            summary.chars().count()
+        );
+    }
+
+    #[test]
+    fn tool_result_summary_marks_errors() {
+        let messages = vec![Message {
+            role: crate::llm::types::Role::User,
+            content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                tool_use_id: "tc_1".into(),
+                content: "query failed".into(),
+                is_error: true,
+            }]),
+        }];
+        assert!(collect_tool_result_summary(&messages).contains("[error]"));
+    }
+
+    #[test]
+    fn tool_result_summary_reports_when_nothing_collected() {
+        let summary = collect_tool_result_summary(&[Message::user("hi")]);
+        assert!(summary.contains("No tool results"));
+    }
+
     fn tool_result_message(id: &str, content: String) -> Message {
         Message {
             role: crate::llm::types::Role::User,
@@ -2504,6 +3324,48 @@ mod tests {
                 is_error: false,
             }]),
         }
+    }
+
+    #[test]
+    fn run_metrics_count_tool_results_and_errors() {
+        let messages = vec![
+            tool_result_message("tc_1", "first".into()),
+            tool_result_message("tc_2", "second".into()),
+            Message {
+                role: crate::llm::types::Role::User,
+                content: MessageContent::Parts(vec![ContentPart::ToolResult {
+                    tool_use_id: "tc_3".into(),
+                    content: "boom".into(),
+                    is_error: true,
+                }]),
+            },
+        ];
+        let metrics = run_metrics(&messages, 2, 4, Usage::default(), 1000);
+        assert_eq!(metrics.tool_calls_executed, 3);
+        assert_eq!(metrics.tool_errors, 1);
+        assert_eq!(metrics.turns, 2);
+        assert_eq!(metrics.llm_calls, 4);
+        assert_eq!(metrics.duration_ms, 1000);
+    }
+
+    #[test]
+    fn run_metrics_report_zero_for_conversation_without_tools() {
+        let metrics = run_metrics(&[Message::user("hello")], 1, 0, Usage::default(), 5);
+        assert_eq!(metrics.tool_calls_executed, 0);
+        assert_eq!(metrics.tool_errors, 0);
+    }
+
+    #[test]
+    fn run_metrics_accumulate_usage_across_turns() {
+        let mut usage = Usage::default();
+        usage.input_tokens = 1200;
+        usage.output_tokens = 340;
+        usage.cache_read_tokens = 900;
+        let metrics = run_metrics(&[], 1, 1, usage, 10);
+        assert_eq!(metrics.usage.input_tokens, 1200);
+        assert_eq!(metrics.usage.output_tokens, 340);
+        assert_eq!(metrics.usage.cache_read_tokens, 900);
+        assert_eq!(metrics.usage_total(), 1540);
     }
 
     #[tokio::test]
@@ -3196,6 +4058,734 @@ mod tests {
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() { events.push(e); }
         events
+    }
+
+    #[test]
+    fn build_synthesis_prompt_uniform_does_not_mention_variation() {
+        let p = build_synthesis_prompt("prefix", "findings", true);
+        assert!(!p.contains("differ"));
+        assert!(!p.contains("first sentence"));
+        assert!(!p.contains("blanket yes or no"));
+    }
+
+    #[test]
+    fn build_synthesis_prompt_non_uniform_leads_with_variation() {
+        let p = build_synthesis_prompt("prefix", "findings", false);
+        assert!(p.contains("differ"));
+        assert!(p.contains("first sentence"));
+        assert!(p.contains("blanket yes or no"));
+    }
+
+    #[test]
+    fn build_synthesis_prompt_always_includes_consequences_nudge() {
+        let uniform = build_synthesis_prompt("prefix", "findings", true);
+        let non_uniform = build_synthesis_prompt("prefix", "findings", false);
+        assert!(uniform.contains("what happens when that capability is required"));
+        assert!(non_uniform.contains("what happens when that capability is required"));
+    }
+
+    #[test]
+    fn build_synthesis_prompt_includes_prefix_and_findings() {
+        let p = build_synthesis_prompt("my prefix text", "my findings text", true);
+        assert!(p.contains("my prefix text"));
+        assert!(p.contains("my findings text"));
+    }
+
+    #[test]
+    fn with_thresholds_sets_all_thresholds() {
+        let llm = MockLlm::new(vec![text("done")]);
+        let agent = Agent::new(llm, vec![], 5)
+            .with_thresholds(0.6, 0.9, 0.3, 0.97, 3, 0.85, 6, 0.72);
+        assert!((agent.fast_path_threshold - 0.6).abs() < f64::EPSILON);
+        assert!((agent.early_synthesis_threshold - 0.9).abs() < f64::EPSILON);
+        assert!((agent.relevance_threshold - 0.3).abs() < f64::EPSILON);
+        assert!((agent.early_synthesis_research_threshold - 0.97).abs() < f64::EPSILON);
+        assert_eq!(agent.relevance_preserve_recent, 3);
+        assert!((agent.early_synthesis_coverage_threshold - 0.85).abs() < f64::EPSILON);
+        assert_eq!(agent.early_synthesis_min_iterations_first_turn, 6);
+        assert!((agent.early_synthesis_uniform_threshold - 0.72).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn default_thresholds_are_set() {
+        let llm = MockLlm::new(vec![text("done")]);
+        let agent = Agent::new(llm, vec![], 5);
+        assert!((agent.fast_path_threshold - 0.7).abs() < f64::EPSILON);
+        assert!((agent.early_synthesis_threshold - 0.85).abs() < f64::EPSILON);
+        assert!((agent.relevance_threshold - 0.4).abs() < f64::EPSILON);
+        assert!((agent.early_synthesis_research_threshold - 0.95).abs() < f64::EPSILON);
+        assert_eq!(agent.relevance_preserve_recent, 2);
+        assert!((agent.early_synthesis_coverage_threshold - 0.8).abs() < f64::EPSILON);
+        assert_eq!(agent.early_synthesis_min_iterations_first_turn, 5);
+        assert!((agent.early_synthesis_uniform_threshold - 0.7).abs() < f64::EPSILON);
+    }
+
+    fn mock_system_one_client(server_url: &str) -> Arc<crate::llm::system_one::SystemOneClient> {
+        let cfg = crate::config::SystemOneConfig {
+            endpoint: server_url.to_string(),
+            api_key: "test-key".to_string(),
+            model: "test-model".to_string(),
+            timeout_secs: 10,
+            user_provided_key: false,
+            intent: crate::config::SystemOneThresholds::default(),
+            model_routing: crate::config::SystemOneModelRouting::default(),
+            tool_filter: crate::config::SystemOneThresholds::default(),
+            compaction: crate::config::SystemOneThresholds::default(),
+            parallel_research: crate::config::SystemOneThresholds::default(),
+            prompt_sections: crate::config::SystemOneThresholds::default(),
+            fast_path: 0.7,
+            early_synthesis: 0.85,
+            early_synthesis_research: 0.95,
+            relevance: 0.4,
+            relevance_preserve_recent: 2,
+            early_synthesis_coverage: 0.8,
+            early_synthesis_min_iterations_first_turn: 5,
+            early_synthesis_uniform: 0.7,
+            early_synthesis_capability_gate: 0.8,
+            next_action_confidence: 0.5,
+        };
+        crate::llm::system_one::SystemOneClient::from_config(&cfg)
+    }
+
+    fn agent_with_system_one(
+        llm: Arc<dyn LlmProvider>,
+        tools: Vec<Box<dyn Tool>>,
+        max: usize,
+        so: Arc<crate::llm::system_one::SystemOneClient>,
+    ) -> Agent {
+        Agent::new(llm, tools, max)
+            .with_system_one(Some(so))
+            .with_thresholds(0.7, 0.85, 0.4, 0.95, 2, 0.8, 5, 0.7)
+    }
+
+    #[tokio::test]
+    async fn early_synthesis_skipped_on_first_turn_research_before_min_iterations() {
+        let server = httpmock::prelude::MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "enough_context": { "type": "noul", "noul": 0.99 },
+                    "all_variants_examined": { "type": "noul", "noul": 0.99 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "relevance": { "type": "noul", "noul": 0.9 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let so = mock_system_one_client(&server.base_url());
+        let llm = MockLlm::new(vec![
+            tool_call("t1"), tool_call("t2"), tool_call("t3"), tool_call("t4"),
+            text("final answer"),
+        ]);
+        let agent = agent_with_system_one(llm, vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3"), MockTool::new("t4", "r4")], 10, so);
+        let resp = agent.query("how does X work?", &[], &[], None).await.unwrap();
+        assert!(resp.tool_calls_made >= 4, "first-turn research should not synthesize before min_iterations (got {} calls)", resp.tool_calls_made);
+    }
+
+    #[tokio::test]
+    async fn early_synthesis_uses_higher_threshold_for_research() {
+        let server = httpmock::prelude::MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "enough_context": { "type": "noul", "noul": 0.9 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "relevance": { "type": "noul", "noul": 0.9 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let so = mock_system_one_client(&server.base_url());
+        let llm = MockLlm::new(vec![
+            tool_call("t1"), tool_call("t2"), tool_call("t3"),
+            text("synthesized"), text("fallback"),
+        ]);
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous question".into(), attachments: None },
+                          HistoryMessage { role: "assistant".into(), text: "previous answer".into(), attachments: None }];
+        let agent = agent_with_system_one(llm, vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
+        let resp = agent.query("how does X work?", &history, &[], None).await.unwrap();
+        assert!(resp.tool_calls_made >= 3, "research with 0.9 confidence (< 0.95 threshold) should not synthesize early (got {} calls)", resp.tool_calls_made);
+    }
+
+    #[tokio::test]
+    async fn early_synthesis_requires_coverage_for_research() {
+        let server = httpmock::prelude::MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("enough_context");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "enough_context": { "type": "noul", "noul": 0.99 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("all_variants_examined");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "all_variants_examined": { "type": "noul", "noul": 0.2 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "relevance": { "type": "noul", "noul": 0.9 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let so = mock_system_one_client(&server.base_url());
+        let llm = MockLlm::new(vec![
+            tool_call("t1"), tool_call("t2"), tool_call("t3"),
+            text("synthesized"), text("fallback"),
+        ]);
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None },
+                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None }];
+        let agent = agent_with_system_one(llm, vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
+        let resp = agent.query("does X support Y?", &history, &[], None).await.unwrap();
+        assert!(resp.tool_calls_made >= 3, "research should not synthesize when coverage is low (got {} calls)", resp.tool_calls_made);
+    }
+
+    fn next_action_server(choice: &str, confidence: f64) -> httpmock::MockServer {
+        let server = httpmock::prelude::MockServer::start();
+        let body = serde_json::json!({
+            "model": "test-model",
+            "answers": {
+                "next_action": {
+                    "type": "choice",
+                    "choice": choice,
+                    "probabilities": {},
+                    "confidence": confidence
+                }
+            },
+            "usage": { "input_tokens": 0, "output_tokens": 0 }
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/").body_includes("next_action");
+            then.status(200).json_body(body);
+        });
+        server
+    }
+
+    fn router_agent(server: &httpmock::MockServer) -> Arc<Agent> {
+        let llm = MockLlm::new(vec![
+            LlmResponse::ToolCalls {
+                calls: vec![tool_call_obj("search_symbols", serde_json::json!({ "query": "alpha" }))],
+                preamble: String::new(),
+                usage: Usage::default(),
+            },
+            text("answer"),
+        ]);
+        let so = Arc::new(SystemOneClient::new(
+            &crate::config::SystemOneConfig { endpoint: server.url("/"), api_key: "k".into(), model: "m".into(), ..Default::default() },
+            "k".into(),
+        ));
+        Arc::new(
+            Agent::new(llm, vec![MockTool::new("search_symbols", "found alpha")], 6)
+                .with_system_one(Some(so))
+                .with_thresholds(0.7, 0.5, 0.4, 0.5, 2, 0.5, 1, 0.5)
+                .with_capability_gate_threshold(0.5)
+                .with_next_action_confidence(0.5),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_confident_synthesis_route_does_not_veto_synthesis() {
+        let server = next_action_server("synthesize", 0.95);
+        let agent = router_agent(&server);
+        let resp = agent.query("how does alpha work?", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "answer");
+        assert!(resp.tool_calls_made >= 1);
+    }
+
+    #[tokio::test]
+    async fn a_confident_evidence_route_defers_synthesis() {
+        let server = next_action_server("get_evidence_pack", 0.95);
+        let agent = router_agent(&server);
+        let resp = agent.query("how does alpha work?", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "answer");
+    }
+
+    #[tokio::test]
+    async fn a_low_confidence_route_is_ignored() {
+        let server = next_action_server("get_evidence_pack", 0.01);
+        let agent = router_agent(&server);
+        let resp = agent.query("how does alpha work?", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "answer");
+    }
+
+    fn uniformity_server(consistent: f64) -> httpmock::MockServer {
+        let server = httpmock::prelude::MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("enough_context");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "enough_context": { "type": "noul", "noul": 0.99 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("all_variants_examined");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "all_variants_examined": { "type": "noul", "noul": 0.99 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("capability_gate_located");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "capability_gate_located": { "type": "noul", "noul": 0.95 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("findings_consistent");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "findings_consistent": { "type": "noul", "noul": consistent }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "relevance": { "type": "noul", "noul": 0.9 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server
+    }
+
+    #[tokio::test]
+    async fn early_synthesis_deferred_when_capability_gate_not_located() {
+        let server = capability_gate_blocked_server();
+        let so = mock_system_one_client(&server.base_url());
+        let llm = RecordingLlm::new(vec![
+            tool_call("t1"), tool_call("t2"), tool_call("t3"),
+            text("synthesized"), text("fallback"),
+        ]);
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None },
+                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None }];
+        let agent = agent_with_system_one(llm.clone(), vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
+        agent.query("does X support Y?", &history, &[], None).await.unwrap();
+        assert!(
+            !llm.requests().iter().any(|r| r.contains("provide a complete answer")),
+            "early synthesis must not fire before the capability gate is located"
+        );
+    }
+
+    fn capability_gate_blocked_server() -> httpmock::MockServer {
+        let server = httpmock::prelude::MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("enough_context");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "enough_context": { "type": "noul", "noul": 0.99 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("all_variants_examined");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "all_variants_examined": { "type": "noul", "noul": 0.99 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("capability_gate_located");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "capability_gate_located": { "type": "noul", "noul": 0.1 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "relevance": { "type": "noul", "noul": 0.9 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server
+    }
+
+    #[tokio::test]
+    async fn early_synthesis_prompt_asks_for_variation_when_findings_differ() {
+        let server = uniformity_server(0.1);
+        let so = mock_system_one_client(&server.base_url());
+        let llm = RecordingLlm::new(vec![
+            tool_call("t1"), tool_call("t2"), tool_call("t3"),
+            text("synthesized"), text("fallback"),
+        ]);
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None },
+                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None }];
+        let agent = agent_with_system_one(llm.clone(), vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
+        agent.query("does X support Y?", &history, &[], None).await.unwrap();
+        let synthesis = llm.requests().into_iter()
+            .find(|r| r.contains("provide a complete answer"))
+            .expect("early synthesis should have issued a synthesis prompt");
+        assert!(synthesis.contains("blanket yes or no"), "non-uniform synthesis prompt should ask for variation");
+        assert!(synthesis.contains("what happens when that capability is required"));
+    }
+
+    #[tokio::test]
+    async fn early_synthesis_prompt_omits_variation_when_findings_uniform() {
+        let server = uniformity_server(0.99);
+        let so = mock_system_one_client(&server.base_url());
+        let llm = RecordingLlm::new(vec![
+            tool_call("t1"), tool_call("t2"), tool_call("t3"),
+            text("synthesized"), text("fallback"),
+        ]);
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None },
+                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None }];
+        let agent = agent_with_system_one(llm.clone(), vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
+        agent.query("does X support Y?", &history, &[], None).await.unwrap();
+        let synthesis = llm.requests().into_iter()
+            .find(|r| r.contains("provide a complete answer"))
+            .expect("early synthesis should have issued a synthesis prompt");
+        assert!(!synthesis.contains("blanket yes or no"), "uniform synthesis prompt should not ask for variation");
+        assert!(synthesis.contains("what happens when that capability is required"));
+    }
+
+    #[tokio::test]
+    async fn uniformity_gate_not_consulted_when_coverage_incomplete() {
+        let server = httpmock::prelude::MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("enough_context");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "enough_context": { "type": "noul", "noul": 0.99 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("all_variants_examined");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "all_variants_examined": { "type": "noul", "noul": 0.1 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let uniformity_mock = server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("findings_consistent");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "findings_consistent": { "type": "noul", "noul": 0.99 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "relevance": { "type": "noul", "noul": 0.9 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let so = mock_system_one_client(&server.base_url());
+        let llm = MockLlm::new(vec![
+            tool_call("t1"), tool_call("t2"), tool_call("t3"),
+            text("fallback"),
+        ]);
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None },
+                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None }];
+        let agent = agent_with_system_one(llm, vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
+        let resp = agent.query("does X support Y?", &history, &[], None).await.unwrap();
+        assert_eq!(resp.answer, "fallback");
+        assert_eq!(uniformity_mock.calls(), 0, "uniformity must not be checked when coverage is incomplete");
+    }
+
+    #[tokio::test]
+    async fn uniformity_check_failure_falls_back_to_non_uniform_prompt() {
+        let server = httpmock::prelude::MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("enough_context");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "enough_context": { "type": "noul", "noul": 0.99 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("all_variants_examined");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "all_variants_examined": { "type": "noul", "noul": 0.99 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("capability_gate_located");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "capability_gate_located": { "type": "noul", "noul": 0.95 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("findings_consistent");
+            then.status(500);
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "relevance": { "type": "noul", "noul": 0.9 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let so = mock_system_one_client(&server.base_url());
+        let llm = RecordingLlm::new(vec![
+            tool_call("t1"), tool_call("t2"), tool_call("t3"),
+            text("synthesized"), text("fallback"),
+        ]);
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None },
+                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None }];
+        let agent = agent_with_system_one(llm.clone(), vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
+        agent.query("does X support Y?", &history, &[], None).await.unwrap();
+        let synthesis = llm.requests().into_iter()
+            .find(|r| r.contains("provide a complete answer"))
+            .expect("early synthesis should have issued a synthesis prompt");
+        assert!(synthesis.contains("blanket yes or no"), "a failed uniformity check should fall back to the non-uniform prompt");
+    }
+
+    #[tokio::test]
+    async fn max_iterations_synthesis_asks_for_variation_without_system_one() {
+        let llm = RecordingLlm::new(vec![
+            tool_call("t1"), tool_call("t2"),
+            text("synthesized at cap"),
+        ]);
+        let agent = Agent::new(llm.clone(), vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2")], 2);
+        let resp = agent.query("does X support Y?", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "synthesized at cap");
+        let synthesis = llm.requests().into_iter()
+            .find(|r| r.contains("maximum number of tool calls"))
+            .expect("max-iterations path should have issued a synthesis prompt");
+        assert!(synthesis.contains("blanket yes or no"), "max-iterations fallback should default to the non-uniform prompt");
+        assert!(synthesis.contains("what happens when that capability is required"));
+    }
+
+    #[tokio::test]
+    async fn max_iterations_synthesis_omits_variation_when_system_one_says_uniform() {
+        let server = httpmock::prelude::MockServer::start();
+        server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("findings_consistent");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "findings_consistent": { "type": "noul", "noul": 0.99 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {},
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let so = mock_system_one_client(&server.base_url());
+        let llm = RecordingLlm::new(vec![
+            tool_call("t1"), tool_call("t2"),
+            text("synthesized at cap"),
+        ]);
+        let agent = Agent::new(llm.clone(), vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2")], 2)
+            .with_system_one(Some(so));
+        let resp = agent.query("does X support Y?", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "synthesized at cap");
+        let synthesis = llm.requests().into_iter()
+            .find(|r| r.contains("maximum number of tool calls"))
+            .expect("max-iterations path should have issued a synthesis prompt");
+        assert!(!synthesis.contains("blanket yes or no"), "uniform findings should use the uniform max-iterations prompt");
+    }
+
+    #[tokio::test]
+    async fn relevance_loop_skips_recent_results_when_preserve_recent_set() {
+        let server = httpmock::prelude::MockServer::start();
+        let relevance_mock = server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("\"relevance\"");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "relevance": { "type": "noul", "noul": 0.05 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {},
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let so = mock_system_one_client(&server.base_url());
+        let llm = MockLlm::new(vec![
+            tool_call("t1"), tool_call("t2"), tool_call("t3"), tool_call("t4"),
+            text("done"),
+        ]);
+        let agent = Agent::new(llm, vec![MockTool::new("t1", "result-1"), MockTool::new("t2", "result-2"), MockTool::new("t3", "result-3"), MockTool::new("t4", "result-4")], 10)
+            .with_system_one(Some(so))
+            .with_thresholds(0.7, 0.99, 0.4, 0.99, 2, 0.99, 99, 0.99);
+        let resp = agent.query("how does X work?", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "done");
+        let hits_with_preserve = relevance_mock.calls();
+        assert!(hits_with_preserve <= 6, "preserve_recent=2 should score at most 6 old results (got {} hits)", hits_with_preserve);
+        assert!(hits_with_preserve >= 3, "at least 3 old results should be scored (got {} hits)", hits_with_preserve);
+
+        let server2 = httpmock::prelude::MockServer::start();
+        let relevance_mock2 = server2.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("\"relevance\"");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "relevance": { "type": "noul", "noul": 0.05 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server2.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {},
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let so2 = mock_system_one_client(&server2.base_url());
+        let llm2 = MockLlm::new(vec![
+            tool_call("t1"), tool_call("t2"), tool_call("t3"), tool_call("t4"),
+            text("done"),
+        ]);
+        let agent2 = Agent::new(llm2, vec![MockTool::new("t1", "result-1"), MockTool::new("t2", "result-2"), MockTool::new("t3", "result-3"), MockTool::new("t4", "result-4")], 10)
+            .with_system_one(Some(so2))
+            .with_thresholds(0.7, 0.99, 0.4, 0.99, 0, 0.99, 99, 0.99);
+        let resp2 = agent2.query("how does X work?", &[], &[], None).await.unwrap();
+        assert_eq!(resp2.answer, "done");
+        let hits_without_preserve = relevance_mock2.calls();
+        assert!(hits_without_preserve > hits_with_preserve, "preserve_recent=2 ({} hits) should score fewer than preserve_recent=0 ({} hits)", hits_with_preserve, hits_without_preserve);
+    }
+
+    #[tokio::test]
+    async fn relevance_loop_preserves_all_when_fewer_than_preserve_recent() {
+        let server = httpmock::prelude::MockServer::start();
+        let relevance_mock = server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("\"relevance\"");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {
+                    "relevance": { "type": "noul", "noul": 0.05 }
+                },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {},
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let so = mock_system_one_client(&server.base_url());
+        let llm = MockLlm::new(vec![
+            tool_call("t1"),
+            text("done"),
+        ]);
+        let agent = Agent::new(llm, vec![MockTool::new("t1", "result-1")], 10)
+            .with_system_one(Some(so))
+            .with_thresholds(0.7, 0.99, 0.4, 0.99, 2, 0.99, 99, 0.99);
+        let resp = agent.query("how does X work?", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "done");
+        assert_eq!(relevance_mock.calls(), 0, "with 1 result and preserve_recent=2, no results should be relevance-scored");
     }
 }
 

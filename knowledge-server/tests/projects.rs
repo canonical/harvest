@@ -84,12 +84,17 @@ fn projects_app_with_llm(db: Arc<Db>, llm: Arc<dyn knowledge_server::llm::LlmPro
         registry:                   Arc::clone(&registry),
         skills:                     Arc::new(knowledge_server::skills::SkillStore::new(Arc::clone(&db))),
         lxd:                        None,
+        system_one:                 None,
+        collocate:                  None,
+        collocate_registry:         knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
         server_url:                 "http://localhost".into(),
         max_iterations:             4,
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last:       6,
+        thresholds:                 None,
+        semantic:  None,
     });
-    let state = Arc::new(ProjectState::new(db, agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, Arc::new(knowledge_server::cost::PricingTable::default())));
+    let state = Arc::new(ProjectState::new(db, agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, None, Arc::new(knowledge_server::cost::PricingTable::default()), knowledge_server::collocate::sessions::SessionContainerRegistry::new()));
 
     Router::new()
         .route("/projects",     route_get(list_projects).post(create_project))
