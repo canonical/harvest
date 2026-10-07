@@ -6,6 +6,13 @@ use std::sync::Arc;
 
 use crate::graph::model::ParsedFile;
 
+/// Version of what the parsers extract. Bump it whenever a parser change alters the symbols
+/// or edges written to the database: versions ingested by an older parser are re-ingested on
+/// the next harvest instead of silently keeping the old, incomplete data.
+///
+/// 1: Python dotted base classes (`module.Parent`) and docstrings.
+pub const PARSER_VERSION: i32 = 1;
+
 pub trait LanguageParser: Send + Sync {
     fn language_name(&self) -> &str;
     fn extensions(&self) -> &[&'static str];

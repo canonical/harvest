@@ -1,7 +1,8 @@
 use knowledge_harvester::graph::{
     model::{ClassNode, FunctionNode, ImportNode, ParsedFile},
-    writer::GraphWriter,
+    writer::{GraphWriter, IngestionStatus},
 };
+use knowledge_harvester::parser::PARSER_VERSION;
 use harvest_db::test_support::TestDb;
 use knowledge_harvester::graph::model::CallRef;
 use serde_json::json;
@@ -220,4 +221,40 @@ async fn write_version_stores_symbols_calls_and_class_links() {
 
     let imports = db.query("SELECT target, line FROM code_imports", json!({})).await.unwrap();
     assert_eq!(imports, vec![json!({ "target": "std::collections::HashMap", "line": 1 })]);
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn version_ingested_by_an_older_parser_is_stale_until_reingested() {
+    setup!(writer, test_db);
+    writer.upsert_version("r", "v1", 0, false).await.unwrap();
+    writer.write_version("r", "v1", &[]).await.unwrap();
+    assert_eq!(writer.ingestion_status("r", "v1").await.unwrap(), IngestionStatus::Current);
+
+    test_db.db.execute(
+        "UPDATE versions SET parser_version = $pv",
+        json!({ "pv": PARSER_VERSION - 1 }),
+    ).await.unwrap();
+    assert_eq!(
+        writer.ingestion_status("r", "v1").await.unwrap(),
+        IngestionStatus::Stale { parser_version: PARSER_VERSION - 1 },
+    );
+    assert!(!writer.is_ingested("r", "v1").await.unwrap(), "a stale version must be harvested again");
+
+    writer.write_version("r", "v1", &[]).await.unwrap();
+    assert_eq!(writer.ingestion_status("r", "v1").await.unwrap(), IngestionStatus::Current);
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn reingesting_keeps_the_old_data_visible_until_the_new_data_is_written() {
+    setup!(writer, test_db);
+    writer.upsert_version("r", "v1", 0, false).await.unwrap();
+    writer.write_version("r", "v1", &[]).await.unwrap();
+    writer.upsert_version("r", "v1", 0, false).await.unwrap();
+    let rows = test_db.db.query(
+        "SELECT ingested FROM code_versions WHERE repo = 'r' AND tag = 'v1'",
+        json!({}),
+    ).await.unwrap();
+    assert_eq!(rows[0]["ingested"], json!(true));
 }
