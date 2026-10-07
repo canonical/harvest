@@ -1,4 +1,3 @@
-//! Kept in its own test binary: these tests flip the process-wide `run_sql` availability flag.
 
 use std::sync::Arc;
 

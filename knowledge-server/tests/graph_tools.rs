@@ -111,7 +111,6 @@ async fn list_repositories_empty_graph_returns_empty_array() {
     assert!(result.is_empty());
 }
 
-
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn search_symbols_finds_function_by_name() {
@@ -177,7 +176,6 @@ async fn search_symbols_matches_fragments_and_ranks_exact_names_first() {
     assert_eq!(result[0]["score"], 1000.0);
 }
 
-
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_symbol_source_returns_source_for_known_function() {
@@ -206,7 +204,6 @@ async fn get_symbol_source_returns_empty_for_unknown_name() {
     ).unwrap();
     assert!(result.is_empty());
 }
-
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
@@ -239,7 +236,6 @@ async fn get_file_symbols_does_not_include_source_text() {
     }
 }
 
-
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn find_callers_returns_alpha_as_caller_of_beta() {
@@ -268,7 +264,6 @@ async fn find_callers_returns_empty_for_uncalled_function() {
     ).unwrap();
     assert!(result.is_empty(), "expected no callers for alpha, got: {result:?}");
 }
-
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
@@ -301,7 +296,6 @@ async fn find_callees_returns_empty_for_leaf_function() {
     assert!(result.is_empty(), "beta calls nothing, got: {result:?}");
 }
 
-
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_imports_returns_seeded_import() {
@@ -330,7 +324,6 @@ async fn get_imports_returns_empty_for_file_with_no_imports() {
     ).unwrap();
     assert!(result.is_empty());
 }
-
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
@@ -369,7 +362,6 @@ async fn compare_symbol_sources_differ_between_versions() {
     assert!(v1_source.contains("x: i32"),     "v1 should have param 'x'");
     assert!(v2_source.contains("value: i32"), "v2 should have param 'value'");
 }
-
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]

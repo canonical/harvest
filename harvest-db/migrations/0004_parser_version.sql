@@ -1,5 +1,3 @@
--- Which harvester parser version produced each ingested version. A version ingested by an
--- older parser is missing whatever later parser fixes extract, so the harvester re-ingests it.
 ALTER TABLE versions ADD COLUMN IF NOT EXISTS parser_version integer NOT NULL DEFAULT 0;
 
 CREATE OR REPLACE VIEW code_versions AS
