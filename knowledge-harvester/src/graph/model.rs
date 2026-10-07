@@ -60,6 +60,8 @@ pub struct ClassNode {
     pub embeds: Vec<String>,
     pub uses: Vec<String>,
     pub docstring: Option<String>,
+    #[serde(default)]
+    pub decorators: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
