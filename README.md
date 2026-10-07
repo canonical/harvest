@@ -522,21 +522,25 @@ DELETE /admin/skills/:id         — delete a global skill
 
 ## Agent tools
 
-The standard project agent has access to these tools. Each maps to one or more Neo4j queries or an agent RPC.
+The standard project agent has access to these tools. Each maps to one or more PostgreSQL queries or an agent RPC.
 
 ### Graph tools
 
 | Tool | Description |
 |------|-------------|
-| `list_repositories` | All repos and their ingested versions |
-| `search_symbols` | Full-text search for functions/classes by name |
+| `list_repositories` | All repos and their ingested versions, flagging versions indexed by an older parser |
+| `search_symbols` | Ranked search for functions/classes; lists a directory page by page with `path_prefix` and `offset` |
+| `find_subclasses` | Every class inheriting from a class, directly or indirectly |
+| `read_sources` | Source of several files or symbols in one call |
+| `get_capability_matrix` | Effective value of a capability constant across classes, following inheritance |
+| `get_evidence_pack` | Capability matrix plus symbol sources in one call |
 | `get_symbol_source` | Full source text of a specific function or class |
 | `get_file_symbols` | All symbols defined in a file |
 | `find_callers` | Functions that call a given function |
 | `find_callees` | Functions called by a given function |
 | `get_imports` | Import declarations for a file |
 | `compare_symbol_across_versions` | Source diff for a symbol between two versions |
-| `run_cypher` | Arbitrary read-only Cypher for custom traversals |
+| `run_sql` | Read-only SQL over the `code_*` views; offered only when the `harvest_graph_reader` role is usable |
 
 ### Machine, skill, and infra tools
 
