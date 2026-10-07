@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -465,7 +466,6 @@ impl Tool for SearchSymbolsTool {
         let limit   = clamp_limit(&params);
         let offset  = params["offset"].as_i64().unwrap_or(0).max(0);
 
-        // One extra row reveals whether another page exists.
         let mut params = json!({
             "query": q,
             "repo": repo,
@@ -740,8 +740,6 @@ impl Tool for CompareSymbolAcrossVersionsTool {
 
 static RUN_SQL_AVAILABLE: AtomicBool = AtomicBool::new(true);
 
-/// Whether `run_sql` is offered to the model. Set once at startup from [`probe_run_sql`];
-/// a tool that can only fail wastes a model round trip every time it is called.
 pub fn run_sql_available() -> bool {
     RUN_SQL_AVAILABLE.load(Ordering::Relaxed)
 }
@@ -750,8 +748,6 @@ pub fn set_run_sql_available(available: bool) {
     RUN_SQL_AVAILABLE.store(available, Ordering::Relaxed);
 }
 
-/// Checks that the database user can switch to the read-only role `run_sql` runs as. When it
-/// cannot, logs the statements an administrator must run to enable it.
 pub async fn probe_run_sql(db: &Db) -> bool {
     let probe = async {
         let tx = db.begin().await?;
@@ -815,6 +811,7 @@ pub struct AncestorVisit {
     pub file:  String,
     pub depth: usize,
     pub value: Option<String>,
+    pub bases: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -869,36 +866,107 @@ pub fn resolve_effective_capabilities(visits: &[AncestorVisit]) -> Vec<Effective
         }
     }
     order.iter().map(|root| {
-        let mut candidates: Vec<&AncestorVisit> = visits.iter()
-            .filter(|v| &v.root == root && v.value.is_some())
-            .collect();
-        candidates.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.name.cmp(&b.name)));
-        let nearest_depth = candidates.first().map(|c| c.depth);
-        let same_depth: Vec<&&AncestorVisit> = candidates.iter()
-            .filter(|c| Some(c.depth) == nearest_depth)
-            .collect();
-        let ambiguous = same_depth.len() > 1;
-        let chosen = if ambiguous { None } else { candidates.first().copied() };
-        let (value, defined_on, defined_in, depth) = match chosen {
-            Some(c) => (
-                c.value.clone(),
-                Some(c.name.clone()),
-                Some(c.file.clone()),
-                Some(c.depth),
-            ),
-            None => (None, None, None, None),
-        };
-        let inherited = depth.map(|d| d > 0).unwrap_or(false);
-        EffectiveCapability {
-            class: root.clone(),
-            value,
-            defined_on,
-            defined_in,
-            depth,
-            inherited,
-            ambiguous,
+        let mut definitions: HashMap<&str, Vec<&AncestorVisit>> = HashMap::new();
+        for v in visits.iter().filter(|v| &v.root == root) {
+            let same_name = definitions.entry(v.name.as_str()).or_default();
+            match same_name.iter_mut().find(|d| d.file == v.file) {
+                Some(existing) if v.depth < existing.depth => *existing = v,
+                Some(_) => {}
+                None => same_name.push(v),
+            }
         }
+        for same_name in definitions.values_mut() {
+            if same_name.iter().any(|d| !is_test_path(&d.file)) {
+                same_name.retain(|d| !is_test_path(&d.file));
+            }
+            same_name.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.file.cmp(&b.file)));
+        }
+
+        let mro = linearize(root, &definitions, &mut Vec::new());
+        let mut resolved = EffectiveCapability {
+            class: root.clone(),
+            value: None,
+            defined_on: None,
+            defined_in: None,
+            depth: None,
+            inherited: false,
+            ambiguous: false,
+        };
+        for name in &mro {
+            let Some(same_name) = definitions.get(name.as_str()) else { continue };
+            let declaring: Vec<&&AncestorVisit> = same_name.iter().filter(|d| d.value.is_some()).collect();
+            let Some(first) = declaring.first() else { continue };
+            let disagree = declaring.iter().any(|d| d.value != first.value)
+                || (declaring.len() < same_name.len());
+            if same_name.len() > 1 && disagree {
+                resolved.ambiguous = true;
+                break;
+            }
+            resolved.value = first.value.clone();
+            resolved.defined_on = Some(first.name.clone());
+            resolved.defined_in = Some(first.file.clone());
+            resolved.depth = Some(first.depth);
+            resolved.inherited = first.depth > 0;
+            break;
+        }
+        resolved
     }).collect()
+}
+
+fn linearize(name: &str, definitions: &HashMap<&str, Vec<&AncestorVisit>>, stack: &mut Vec<String>) -> Vec<String> {
+    let Some(definition) = definitions.get(name).and_then(|d| d.first()) else {
+        return vec![name.to_string()];
+    };
+    if stack.iter().any(|s| s == name) {
+        return vec![name.to_string()];
+    }
+    stack.push(name.to_string());
+    let parents: Vec<Vec<String>> = definition.bases.iter()
+        .map(|base| linearize(base, definitions, stack))
+        .collect();
+    stack.pop();
+
+    let mut sequences = parents.clone();
+    sequences.push(definition.bases.clone());
+    let tail = c3_merge(sequences).unwrap_or_else(|| {
+        let mut seen: Vec<String> = Vec::new();
+        for class in parents.into_iter().flatten() {
+            if !seen.contains(&class) {
+                seen.push(class);
+            }
+        }
+        seen
+    });
+    let mut mro = vec![name.to_string()];
+    mro.extend(tail.into_iter().filter(|c| c != name));
+    mro
+}
+
+pub fn is_test_path(file: &str) -> bool {
+    let file_name = file.rsplit('/').next().unwrap_or(file);
+    file.starts_with("tests/") || file.starts_with("test/")
+        || file.contains("/tests/") || file.contains("/test/")
+        || file_name.starts_with("test_") || file_name.ends_with("_test.py") || file_name == "conftest.py"
+}
+
+fn c3_merge(mut sequences: Vec<Vec<String>>) -> Option<Vec<String>> {
+    let mut merged = Vec::new();
+    loop {
+        sequences.retain(|s| !s.is_empty());
+        if sequences.is_empty() {
+            return Some(merged);
+        }
+        let head = sequences.iter()
+            .map(|s| &s[0])
+            .find(|candidate| !sequences.iter().any(|s| s[1..].contains(candidate)))?
+            .clone();
+        for sequence in sequences.iter_mut() {
+            if sequence[0] == head {
+                sequence.remove(0);
+            }
+        }
+        merged.push(head);
+    }
 }
 
 pub fn capability_names_from_params(params: &Value) -> Vec<String> {
@@ -962,8 +1030,6 @@ pub fn capability_matrix_definition() -> ToolDefinition {
     }
 }
 
-/// One class reached by the capability walk, with what is needed to spot inheritance the
-/// walk could not follow.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WalkedClass {
     pub root:           String,
@@ -974,12 +1040,9 @@ pub struct WalkedClass {
     pub header:         String,
 }
 
-/// A break in the inheritance walk started from `root`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InheritanceGap {
-    /// `class` declares parents in its source but the index recorded none.
     BasesNotRecorded { root: String, class: String },
-    /// A recorded parent has no class definition in the indexed version.
     ParentNotIndexed { root: String, parent: String },
 }
 
@@ -1007,8 +1070,6 @@ pub fn inheritance_gaps(walked: &[WalkedClass]) -> Vec<InheritanceGap> {
             if IMPLICIT_PYTHON_BASES.contains(&base.as_str()) {
                 continue;
             }
-            // Any visit under the same root counts: a cyclic or diamond hierarchy reaches a
-            // parent once, possibly at a shallower depth.
             let reached = walked.iter().any(|w| w.root == class.root && &w.name == base);
             if !reached {
                 gaps.push(InheritanceGap::ParentNotIndexed { root: class.root.clone(), parent: base.clone() });
@@ -1018,9 +1079,6 @@ pub fn inheritance_gaps(walked: &[WalkedClass]) -> Vec<InheritanceGap> {
     gaps
 }
 
-/// The parent classes named in a Python class statement, e.g. `["driver.VolumeDriver"]` for
-/// `class LVMVolumeDriver(driver.VolumeDriver):`. Keyword arguments such as `metaclass=` and
-/// the implicit `object` base are left out.
 pub fn python_declared_bases(source: &str) -> Vec<String> {
     let Some(class_at) = source.find("class ") else { return Vec::new() };
     let statement = &source[class_at..];
@@ -1048,8 +1106,6 @@ pub fn python_declared_bases(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// Bases that never carry a project's capability flags, so their absence from the index is
-/// not worth a warning.
 const IMPLICIT_PYTHON_BASES: &[&str] = &["object", "ABC", "Generic", "Protocol", "Exception", "BaseException"];
 
 const CAPABILITY_HEADER_CHARS: i32 = 400;
@@ -1116,21 +1172,20 @@ impl Tool for GetCapabilityMatrixTool {
                 let depth = row["depth"].as_i64().unwrap_or(0).max(0) as usize;
                 let window = row["source_window"].as_str().unwrap_or_default();
                 let value = extract_capability_value(window, capability);
+                let bases: Vec<String> = row["bases"].as_array()
+                    .map(|a| a.iter().filter_map(|b| b.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
                 walked.push(WalkedClass {
                     root: root.clone(),
                     name: name.clone(),
                     file: file.clone(),
                     depth,
-                    recorded_bases: row["bases"].as_array()
-                        .map(|a| a.iter().filter_map(|b| b.as_str().map(String::from)).collect())
-                        .unwrap_or_default(),
+                    recorded_bases: bases.clone(),
                     header: row["header"].as_str().unwrap_or_default().to_string(),
                 });
-                visits.push(AncestorVisit { root, name, file, depth, value });
+                visits.push(AncestorVisit { root, name, file, depth, value, bases });
             }
             let effective = resolve_effective_capabilities(&visits);
-            // A gap only matters for a class whose value it leaves unresolved: a value found
-            // on the class or a nearer ancestor wins regardless of what lies beyond the gap.
             let unresolved: Vec<&str> = effective.iter()
                 .filter(|e| e.value.is_none())
                 .map(|e| e.class.as_str())
@@ -1250,8 +1305,6 @@ pub fn reject_non_select(sql: &str) -> Result<()> {
     Ok(())
 }
 
-/// Runs model-written SQL in a read-only transaction as the `harvest_graph_reader` role,
-/// which can only see the code_* views, and always rolls back.
 pub async fn run_read_only_sql(db: &Db, sql: &str, params: Value) -> Result<Vec<Value>> {
     reject_non_select(sql)?;
     let tx = db.begin().await?;
@@ -1494,7 +1547,6 @@ impl Tool for FindSubclassesTool {
         let repo    = params["repo"].as_str().unwrap_or("").trim().to_string();
         let version = params["version"].as_str().unwrap_or("").trim().to_string();
         let class   = params["class"].as_str().unwrap_or("").trim();
-        // Bases are stored without their module prefix, so `driver.VolumeDriver` is `VolumeDriver`.
         let class   = class.rsplit('.').next().unwrap_or(class).to_string();
         let path_prefix = params["path_prefix"].as_str().unwrap_or("").trim().to_string();
         if repo.is_empty() || version.is_empty() || class.is_empty() {
@@ -1639,12 +1691,17 @@ mod tests {
     }
 
     fn visit(root: &str, name: &str, depth: usize, value: Option<&str>) -> AncestorVisit {
+        visit_with_bases(root, name, depth, value, &[])
+    }
+
+    fn visit_with_bases(root: &str, name: &str, depth: usize, value: Option<&str>, bases: &[&str]) -> AncestorVisit {
         AncestorVisit {
             root: root.into(),
             name: name.into(),
             file: format!("pkg/{}.py", name.to_lowercase()),
             depth,
             value: value.map(|v| v.to_string()),
+            bases: bases.iter().map(|b| b.to_string()).collect(),
         }
     }
 
@@ -1706,7 +1763,7 @@ mod tests {
     #[test]
     fn resolve_prefers_own_value_over_ancestor() {
         let visits = vec![
-            visit("Leaf", "Leaf", 0, Some("True")),
+            visit_with_bases("Leaf", "Leaf", 0, Some("True"), &["Base"]),
             visit("Leaf", "Base", 1, Some("False")),
         ];
         let resolved = resolve_effective_capabilities(&visits);
@@ -1721,8 +1778,8 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_nearest_defining_ancestor() {
         let visits = vec![
-            visit("Leaf", "Leaf", 0, None),
-            visit("Leaf", "Middle", 1, Some("True")),
+            visit_with_bases("Leaf", "Leaf", 0, None, &["Middle"]),
+            visit_with_bases("Leaf", "Middle", 1, Some("True"), &["Base"]),
             visit("Leaf", "Base", 2, Some("False")),
         ];
         let resolved = resolve_effective_capabilities(&visits);
@@ -1735,7 +1792,7 @@ mod tests {
     #[test]
     fn resolve_reports_undefined_when_no_ancestor_declares_it() {
         let visits = vec![
-            visit("Leaf", "Leaf", 0, None),
+            visit_with_bases("Leaf", "Leaf", 0, None, &["Base"]),
             visit("Leaf", "Base", 1, None),
         ];
         let resolved = resolve_effective_capabilities(&visits);
@@ -1750,14 +1807,117 @@ mod tests {
     }
 
     #[test]
-    fn resolve_flags_ambiguous_when_two_ancestors_at_same_depth_define_it() {
+    fn resolve_follows_declaration_order_between_parents_at_the_same_depth() {
         let visits = vec![
-            visit("Leaf", "Leaf", 0, None),
+            visit_with_bases("Leaf", "Leaf", 0, None, &["BaseA", "BaseB"]),
             visit("Leaf", "BaseA", 1, Some("True")),
             visit("Leaf", "BaseB", 1, Some("False")),
         ];
         let resolved = resolve_effective_capabilities(&visits);
-        assert!(resolved[0].ambiguous, "two same-depth definitions must be flagged");
+        assert!(!resolved[0].ambiguous);
+        assert_eq!(resolved[0].value.as_deref(), Some("True"));
+        assert_eq!(resolved[0].defined_on.as_deref(), Some("BaseA"));
+    }
+
+    #[test]
+    fn resolve_uses_c3_order_in_a_diamond() {
+        let visits = vec![
+            visit_with_bases("Driver", "Driver", 0, None, &["Mixin", "Iscsi"]),
+            visit_with_bases("Driver", "Mixin", 1, None, &["Base"]),
+            visit_with_bases("Driver", "Iscsi", 1, Some("True"), &["Base"]),
+            visit("Driver", "Base", 2, Some("False")),
+            visit("Driver", "Base", 2, Some("False")),
+        ];
+        let resolved = resolve_effective_capabilities(&visits);
+        assert!(!resolved[0].ambiguous);
+        assert_eq!(resolved[0].value.as_deref(), Some("True"));
+        assert_eq!(resolved[0].defined_on.as_deref(), Some("Iscsi"));
+    }
+
+    #[test]
+    fn reaching_the_same_ancestor_twice_is_not_ambiguous() {
+        let visits = vec![
+            visit_with_bases("Fc", "Fc", 0, None, &["Common", "FibreChannel"]),
+            visit_with_bases("Fc", "Common", 1, None, &["Base"]),
+            visit_with_bases("Fc", "FibreChannel", 1, None, &["Base"]),
+            visit("Fc", "Base", 2, Some("False")),
+            visit("Fc", "Base", 2, Some("False")),
+        ];
+        let resolved = resolve_effective_capabilities(&visits);
+        assert!(!resolved[0].ambiguous);
+        assert_eq!(resolved[0].value.as_deref(), Some("False"));
+        assert_eq!(resolved[0].depth, Some(2));
+    }
+
+    #[test]
+    fn resolve_flags_ambiguous_when_same_named_classes_disagree() {
+        let mut other = visit("Leaf", "Base", 1, Some("True"));
+        other.file = "other/base.py".into();
+        let visits = vec![
+            visit_with_bases("Leaf", "Leaf", 0, None, &["Base"]),
+            visit("Leaf", "Base", 1, Some("False")),
+            other,
+        ];
+        let resolved = resolve_effective_capabilities(&visits);
+        assert!(resolved[0].ambiguous, "two different classes named Base disagree");
+        assert_eq!(resolved[0].value, None);
+    }
+
+    #[test]
+    fn same_named_classes_that_agree_are_not_ambiguous() {
+        let mut other = visit("Leaf", "Base", 1, Some("False"));
+        other.file = "other/base.py".into();
+        let visits = vec![
+            visit_with_bases("Leaf", "Leaf", 0, None, &["Base"]),
+            visit("Leaf", "Base", 1, Some("False")),
+            other,
+        ];
+        let resolved = resolve_effective_capabilities(&visits);
+        assert!(!resolved[0].ambiguous);
+        assert_eq!(resolved[0].value.as_deref(), Some("False"));
+    }
+
+    #[test]
+    fn test_doubles_do_not_make_the_real_class_ambiguous() {
+        let mut mock = visit_with_bases("PowerFlexDriver", "PowerFlexDriver", 0, None, &["PowerFlexDriver"]);
+        mock.file = "cinder/tests/unit/volume/drivers/dell_emc/powerflex/mocks.py".into();
+        let mut real = visit_with_bases("PowerFlexDriver", "PowerFlexDriver", 0, Some("True"), &["VolumeDriver"]);
+        real.file = "cinder/volume/drivers/dell_emc/powerflex/driver.py".into();
+        let resolved = resolve_effective_capabilities(&[mock, real]);
+        assert!(!resolved[0].ambiguous);
+        assert_eq!(resolved[0].value.as_deref(), Some("True"));
+        assert_eq!(resolved[0].defined_in.as_deref(), Some("cinder/volume/drivers/dell_emc/powerflex/driver.py"));
+    }
+
+    #[test]
+    fn test_paths_are_recognised() {
+        for path in ["tests/a.py", "cinder/tests/unit/x.py", "pkg/test/x.py", "pkg/test_x.py", "pkg/x_test.py", "conftest.py"] {
+            assert!(is_test_path(path), "{path}");
+        }
+        for path in ["cinder/volume/drivers/lvm.py", "pkg/contest.py", "pkg/testing_utils.py"] {
+            assert!(!is_test_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn inconsistent_hierarchy_falls_back_without_panicking() {
+        let visits = vec![
+            visit_with_bases("X", "X", 0, None, &["B", "A"]),
+            visit_with_bases("X", "A", 1, None, &["B"]),
+            visit("X", "B", 1, Some("1")),
+        ];
+        let resolved = resolve_effective_capabilities(&visits);
+        assert_eq!(resolved[0].value.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn cyclic_bases_terminate() {
+        let visits = vec![
+            visit_with_bases("A", "A", 0, None, &["B"]),
+            visit_with_bases("A", "B", 1, None, &["A"]),
+        ];
+        let resolved = resolve_effective_capabilities(&visits);
+        assert_eq!(resolved[0].value, None);
     }
 
     #[test]
@@ -1775,7 +1935,7 @@ mod tests {
     fn resolve_handles_matrix_of_several_roots() {
         let visits = vec![
             visit("Nfs", "Nfs", 0, Some("True")),
-            visit("Iscsi", "Iscsi", 0, None),
+            visit_with_bases("Iscsi", "Iscsi", 0, None, &["Base"]),
             visit("Iscsi", "Base", 1, Some("False")),
         ];
         let resolved = resolve_effective_capabilities(&visits);
