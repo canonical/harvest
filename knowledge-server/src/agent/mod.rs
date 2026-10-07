@@ -2133,7 +2133,9 @@ fn parse_citations(text: &str) -> Vec<Source> {
     // support a claim about the file's overall purpose). Line 0 doubles as the
     // "no specific line" sentinel, matching how an explicit ":0" already parses.
     let bracket_re = Regex::new(r"\[([^\[\]]+)\]").unwrap();
-    let citation_re = Regex::new(r"^([^:\s]+):([^:\s]+):([^:\s]+)(?::(\d+(?:[–-]\d+)?(?:,\d+(?:[–-]\d+)?)*))?$").unwrap();
+    // Repository names are display names and may contain spaces and parentheses, e.g.
+    // "cinder (upstream openstack)"; the version and file never contain whitespace.
+    let citation_re = Regex::new(r"^([^:\s\[\]](?:[^:\[\]]*[^:\s\[\]])?):([^:\s]+):([^:\s]+)(?::(\d+(?:[–-]\d+)?(?:,\d+(?:[–-]\d+)?)*))?$").unwrap();
     let mut seen = HashSet::new();
     let mut sources = Vec::new();
 
@@ -3256,6 +3258,30 @@ mod tests {
         assert_eq!(sources[0].file, "src/lib.rs");
         assert_eq!(sources[0].line, 0);
         assert_eq!(sources[0].end_line, None);
+    }
+
+    #[test]
+    fn citation_with_spaces_and_parentheses_in_the_repo_name_is_parsed() {
+        let text = "Defaults to False [cinder (upstream openstack):unmaintained/2024.1:cinder/interface/__init__.py:22-25] \
+                    and [cinder (upstream openstack):unmaintained/2024.1:cinder/volume/drivers/lvm.py:81].";
+        let sources = parse_citations(text);
+        assert_eq!(sources.len(), 2, "{sources:?}");
+        assert_eq!(sources[0].repo, "cinder (upstream openstack)");
+        assert_eq!(sources[0].version, "unmaintained/2024.1");
+        assert_eq!(sources[0].file, "cinder/interface/__init__.py");
+        assert_eq!((sources[0].line, sources[0].end_line), (22, Some(25)));
+        assert_eq!(sources[1].line, 81);
+    }
+
+    #[test]
+    fn bracketed_prose_with_colons_is_not_a_citation() {
+        for text in [
+            "[Note: see the driver: lvm.py]",
+            "[repo:v1: src/lib.rs:1]",
+            "[my repo :v1:src/lib.rs:1]",
+        ] {
+            assert!(parse_citations(text).is_empty(), "{text}");
+        }
     }
 
     #[test]
