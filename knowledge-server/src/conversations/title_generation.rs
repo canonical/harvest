@@ -172,7 +172,7 @@ mod tests {
     }
 
     fn msg(role: &str, text: &str) -> HistoryMessage {
-        HistoryMessage { role: role.into(), text: text.into(), attachments: None }
+        HistoryMessage { role: role.into(), text: text.into(), ..Default::default() }
     }
 
     #[test]

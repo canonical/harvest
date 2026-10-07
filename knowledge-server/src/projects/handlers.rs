@@ -434,6 +434,7 @@ async fn save_project_turn(
         "username": username,
         "attachments": attachments_meta,
     }));
+    let (chain, enumerations) = crate::agent::chain::split_enumerations(chain);
     let mut assistant_message = json!({
         "role": "assistant",
         "text": assistant_text,
@@ -445,6 +446,9 @@ async fn save_project_turn(
         "llm_call_count": llm_call_count,
         "cost_microusd": pricing.price_call(usage, provider_used.map(|p| p.kind.as_str()).unwrap_or(""), provider_used.map(|p| p.model.as_str()).unwrap_or("")),
     });
+    if !enumerations.is_empty() {
+        assistant_message["enumerations"] = json!(enumerations);
+    }
     if let Some(question) = question {
         assistant_message["question"] = question;
     }
@@ -658,6 +662,7 @@ async fn drive_turn(
                 chain_builder.tool_call(name, input, description.as_deref(), hostname.as_deref());
             }
             AgentEvent::ToolResult { name, preview } => chain_builder.tool_result(name, preview),
+            AgentEvent::Enumeration { tool, input, result } => chain_builder.enumeration(tool, input, result),
             AgentEvent::Question { question, choices } => {
                 pending_question = Some(json!({ "question": question, "choices": choices }));
             }
@@ -753,6 +758,7 @@ async fn drive_turn(
                     AgentEvent::TitleUpdated { title } => Some(json!({
                         "type": "title_updated", "conv_id": &conv_id, "title": title,
                     })),
+                    AgentEvent::Enumeration { .. } => None,
                 };
                 if let Some(data) = broadcast_data {
                     let _ = sender.send(data.to_string());

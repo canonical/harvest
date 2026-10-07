@@ -159,6 +159,7 @@ pub async fn handle_query_stream(
                 AgentEvent::Thinking { text } => chain_builder.thinking(text),
                 AgentEvent::ToolCall { name, input } => chain_builder.tool_call(name, input, None, None),
                 AgentEvent::ToolResult { name, preview } => chain_builder.tool_result(name, preview),
+                AgentEvent::Enumeration { tool, input, result } => chain_builder.enumeration(tool, input, result),
                 AgentEvent::Question { question, choices } => {
                     pending_question = Some(json!({ "question": question, "choices": choices }));
                 }
@@ -213,7 +214,9 @@ pub async fn handle_query_stream(
                 });
             }
 
-            let _ = tx.send(event).await;
+            if !matches!(event, AgentEvent::Enumeration { .. }) {
+                let _ = tx.send(event).await;
+            }
         }
     });
 
