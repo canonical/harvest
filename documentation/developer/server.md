@@ -389,33 +389,43 @@ Deployment-scoped agents use specialised system prompts (see `prompt.rs`) that f
 
 ## Graph Query Tools
 
-These graph tools are exposed to the LLM (defined in `agent/graph_tools.rs`). Each maps to one or more Cypher queries. The full tool set also includes machine, skill, infra, terraform, artifact, secret, and interaction tools — see the [README "Agent tools"](../../README.md#agent-tools) table for the complete list and `agent/*_tools.rs` for the implementations.
+These graph tools are exposed to the LLM (defined in `agent/graph_tools.rs`). Each runs one or more PostgreSQL queries against the `code_*` views. The full tool set also includes machine, skill, infra, terraform, artifact, secret, and interaction tools — see the [README "Agent tools"](../../README.md#agent-tools) table for the complete list and `agent/*_tools.rs` for the implementations.
 
 ### `list_repositories`
 
-Returns all known repository names and their versions.
-
-```cypher
-MATCH (r:Repository)-[:HAS_VERSION]->(v:Version {ingested: true})
-RETURN r.name AS repo, collect(v.tag) AS versions
-ORDER BY r.name
-```
+Returns each repository with its ingested versions. Versions indexed by an older harvester parser (`versions.parser_version` below `knowledge_harvester::parser::PARSER_VERSION`) are listed under `stale_versions`; they lack data that later parser fixes extract, such as dotted Python base classes.
 
 ### `search_symbols`
 
-Full-text search for functions or classes by name fragment across a repo/version.
+Ranked search for functions or classes across names, signatures, file paths, docstrings, and capability constants in class bodies, optionally blended with semantic search.
 
-Parameters: `query: String`, `repo?: String`, `version?: String`, `kind?: "function" | "class" | "any"`
+Parameters: `query: String` (may be empty when `path_prefix` is set), `repo?: String`, `version?: String`, `kind?: "function" | "class" | "any"`, `path_prefix?: String`, `limit?: Integer` (max 50), `offset?: Integer`
 
-```cypher
-CALL db.index.fulltext.queryNodes("symbol_names", $query)
-YIELD node, score
-WHERE ($repo    IS NULL OR node.repo    = $repo)
-  AND ($version IS NULL OR node.version = $version)
-RETURN node.repo, node.version, node.file, node.name,
-       node.start_line, node.end_line, score
-ORDER BY score DESC LIMIT 20
-```
+When more results exist past `offset + limit`, the last entry is `{"more_results": true, "next_offset": N}`. An empty `query` with a `path_prefix` lists every symbol under that directory, page by page.
+
+### `find_subclasses`
+
+Lists every class that inherits from a class, directly or through intermediate classes, following the `bases` arrays. Each row gives the subclass's file, line, the parent it inherits through, and its depth.
+
+Parameters: `repo: String`, `version: String`, `class: String`, `path_prefix?: String`
+
+### `read_sources`
+
+Fetches the source of several files or named symbols in one call.
+
+Parameters: `repo: String`, `version: String`, `files?: [String]`, `names?: [String]`
+
+### `get_capability_matrix`
+
+Resolves the effective value of a class-level capability constant (e.g. `SUPPORTS_ACTIVE_ACTIVE`) for several classes, following inheritance to the declaring ancestor. Adds a `bases_not_recorded` warning when a Python class names parents in its source but the index recorded none (a stale index), and `parents_not_indexed` when a parent is not defined in the indexed version.
+
+Parameters: `repo: String`, `version: String`, `classes: [String]`, `capability: String | [String]`
+
+### `get_evidence_pack`
+
+The capability matrix plus the source of named symbols, in one call within a fixed budget.
+
+Parameters: `repo: String`, `version: String`, `classes?: [String]`, `capability?: String | [String]`, `symbols?: [String]`
 
 ### `get_symbol_source`
 
@@ -459,13 +469,13 @@ Returns the source text of a symbol for two versions side-by-side.
 
 Parameters: `repo: String`, `version_a: String`, `version_b: String`, `file: String`, `name: String`
 
-### `run_cypher` *(power tool)*
+### `run_sql` *(power tool)*
 
-Executes an arbitrary **read-only** Cypher query composed by the LLM. The driver connection uses `AccessMode::Read` so writes are rejected at the protocol level.
+Executes a single model-written, read-only `SELECT` against the `code_*` views, in a read-only transaction that always rolls back and runs as the `harvest_graph_reader` role.
 
 Parameters: `query: String`, `params?: Object`
 
-Example use: "find all classes that implement trait X and are imported by module Y", or any traversal that crosses multiple relationship types not covered by the fixed tools.
+At startup the server checks that its database user can switch to `harvest_graph_reader`. The migration creates the role only when the database user has `CREATEROLE`; when the check fails, `run_sql` is not offered to the model and the server logs the `CREATE ROLE` / `GRANT` statements an administrator needs to run before restarting.
 
 ---
 
