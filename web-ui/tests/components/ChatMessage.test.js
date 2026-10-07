@@ -234,10 +234,10 @@ describe('ChatMessage — sources', () => {
     expect(nums).toEqual(['1', '3', '2']);
   });
 
-  it('shows the sources section expanded by default when there are few sources', () => {
+  it('shows the sources section collapsed by default even when there are few sources', () => {
     const w = mount(ChatMessage, { props: { msg: assistantWithSources } });
-    expect(w.find('.sources-toggle').attributes('aria-expanded')).toBe('true');
-    expect(w.find('.source-groups').isVisible()).toBe(true);
+    expect(w.find('.sources-toggle').attributes('aria-expanded')).toBe('false');
+    expect(w.find('.source-groups').isVisible()).toBe(false);
   });
 
   it('shows the sources section collapsed by default when there are many sources', () => {
