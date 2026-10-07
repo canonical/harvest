@@ -159,16 +159,25 @@ When asked to list all implementations of something — drivers, plugins,
 backends, handlers — enumerate them completely instead of sampling search
 results:
 
-1. Find the base class or interface they share.
-2. Call `find_subclasses` on it, with `path_prefix` set to the directory that
-   holds the implementations when one exists. To list a directory without a
-   shared base class, call `search_symbols` with an empty `query`, a
-   `path_prefix`, and `kind`, and follow `next_offset` until no
-   `more_results` entry is returned.
-3. Leave out abstract bases, mixins, and test fakes unless asked, and say how
-   many remain.
+1. Prefer the framework's own registration. Look at the decorators shown on
+   one known implementation; if implementations are registered with a
+   decorator, list exactly those with `search_symbols` (empty `query`,
+   `decorator`, `kind: class`, `path_prefix`) or `find_subclasses` with
+   `decorator`.
+2. Otherwise call `find_subclasses` on the base class they share, with
+   `path_prefix` set to the directory that holds them. If the result says a
+   broader ancestor has more subclasses, call it on that ancestor instead.
+3. Read every page: follow `offset` / `next_offset` until nothing more is
+   reported.
+4. Classes marked `+` have subclasses of their own and are usually abstract
+   bases or shared helpers; leave them and test fakes out unless asked, and
+   say how many you left out.
 
-Never present a partial list as complete. If the list may be incomplete, say
+Answer with the exact count and the complete list. For a long list use a
+compact table or one line per entry, grouped by file or vendor, with one
+file-level citation per row. When asked for all of something, never answer
+with a sample, "for example", or "includes".
+Never present a partial list as complete: if the list may be incomplete, say
 why (for example a stale index) and what is missing."#.to_string());
 
     sections.push(r#"## Knowledge Graph Schema
@@ -183,14 +192,15 @@ Read-only views, for `run_sql` when it is offered:
                       ('Function' or 'Class'), name, kind, signature,
                       start_line, end_line, source, impl_type, bases (text[],
                       parent class names without module prefix), traits,
-                      embeds, uses, docstring
+                      embeds, uses, docstring, decorators (text[], e.g.
+                      interface.volumedriver, without arguments)
   code_imports      — id, file_id, repo, version, file, target, line
   code_edges        — relation ('CALLS', 'INHERITS', 'IMPLEMENTS', 'USES',
                       'EMBEDS'), line, repo, version, src_id, src_label,
                       src_file, src_name, dst_id, dst_label, dst_file, dst_name
 
 Filter every query on `repo` and `version`. A class's source starts at its
-`class` line, so decorators are not included."#.to_string());
+`class` line; its decorators are in the `decorators` column."#.to_string());
 
     sections.push(r#"## When NOT to Call Tools
 
@@ -653,6 +663,16 @@ mod tests {
         assert!(section.contains("find_subclasses"));
         assert!(section.contains("path_prefix"));
         assert!(section.contains("Never present a partial list as complete"));
+    }
+
+    #[test]
+    fn system_prompt_prefers_registration_decorators_and_full_counts() {
+        let prompt = system_prompt(false);
+        let section = prompt.split("## Listing Every Implementation").nth(1).expect("section missing");
+        assert!(section.contains("`decorator`"));
+        assert!(section.contains("broader ancestor"));
+        assert!(section.contains("exact count"));
+        assert!(section.contains("never answer\nwith a sample"));
     }
 
     #[test]
