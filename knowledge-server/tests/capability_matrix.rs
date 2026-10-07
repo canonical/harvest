@@ -59,7 +59,6 @@ async fn seed() -> Seeded {
         ("RootDriver", file_ids[0], base_source.to_string(), Vec::<String>::new()),
         ("NaiveDriver", file_ids[1], naive_source.to_string(), vec!["RootDriver".to_string()]),
         ("ActiveDriver", file_ids[2], active_source.to_string(), vec!["RootDriver".to_string()]),
-        // Indexed by a harvester that dropped dotted bases: the source names a parent, the index none.
         ("StaleDriver", file_ids[3], "class StaleDriver(base.RootDriver):\n    pass\n".to_string(), Vec::new()),
         ("ExternalDriver", file_ids[4], "class ExternalDriver(lib.RemoteDriver):\n    pass\n".to_string(), vec!["RemoteDriver".to_string()]),
     ];

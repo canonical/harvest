@@ -10,7 +10,6 @@ use crate::parser::PARSER_VERSION;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestionStatus {
     NotIngested,
-    /// Ingested by an older parser, so it lacks later parser fixes.
     Stale { parser_version: i32 },
     Current,
 }
@@ -36,8 +35,6 @@ impl GraphWriter {
         Ok(())
     }
 
-    /// True when the version is ingested by the current parser. A version ingested by an
-    /// older parser counts as not ingested, so it is harvested again.
     pub async fn is_ingested(&self, repo: &str, tag: &str) -> Result<bool> {
         Ok(self.ingestion_status(repo, tag).await? == IngestionStatus::Current)
     }
@@ -126,7 +123,6 @@ async fn ensure_version(tx: &Tx, repo: &str, tag: &str) -> Result<i64> {
         .ok_or_else(|| anyhow!("could not resolve version {repo}:{tag}"))
 }
 
-/// Keeps the last entry for each key, mirroring how repeated names overwrite one another.
 fn last_by_key(items: Vec<Value>, key: &str) -> Vec<Value> {
     let mut seen = HashSet::new();
     let mut kept: Vec<Value> = items.into_iter().rev()

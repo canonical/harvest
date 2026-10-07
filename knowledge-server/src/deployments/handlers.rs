@@ -591,8 +591,6 @@ fn require_agent_in_project(state: &ProjectState, agent_id: &str, project_id: &s
     if belongs { Ok(()) } else { Err(err(StatusCode::NOT_FOUND, "agent not found in this project")) }
 }
 
-/// Relays live terraform output lines onto the project's shared SSE bus (the same one
-/// `/projects/:pid/events` uses for chat) so the browser can tail a run while it's in flight.
 fn spawn_output_relay(
     state:         &ProjectState,
     project_id:    &str,
@@ -694,8 +692,6 @@ async fn execute_and_record(
     }
 }
 
-/// Core logic behind `POST .../deploy`, extractor-free so it stays testable independent of
-/// the axum handler wrapper below.
 pub(crate) async fn deploy_deployment_core(
     state:         &ProjectState,
     project_id:    &str,
@@ -1118,10 +1114,6 @@ pub async fn generate_design_stream(
     Ok(response)
 }
 
-/// Saves the model's response as the deployment's design document. Called
-/// deterministically after every design generation turn — the model is no
-/// longer asked to save the document itself via tool calls, so this is the
-/// only path that ever creates or relinks a design_doc.
 async fn save_design_doc(
     db:         &Arc<Db>,
     project_id:    &str,
