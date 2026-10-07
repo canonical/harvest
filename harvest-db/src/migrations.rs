@@ -8,7 +8,6 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (4, include_str!("../migrations/0004_parser_version.sql")),
 ];
 
-/// Changes whenever a migration is added or edited.
 pub fn fingerprint() -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for (version, sql) in MIGRATIONS {
@@ -19,7 +18,7 @@ pub fn fingerprint() -> u64 {
     hash
 }
 
-const MIGRATION_LOCK_KEY: i64 = 0x4841_5256_4553_54; // "HARVEST"
+const MIGRATION_LOCK_KEY: i64 = 0x4841_5256_4553_54;
 
 pub async fn run(client: &mut Client) -> Result<()> {
     client.batch_execute(

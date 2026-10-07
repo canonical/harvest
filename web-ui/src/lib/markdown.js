@@ -3,11 +3,6 @@ import { markedHighlight } from 'marked-highlight';
 import hljs from 'highlight.js';
 import { escapeHtml as esc } from './utils.js';
 
-// The line number (and range) is optional: a citation can point at a whole
-// file ([repo:version:file]) rather than one location, matching how the
-// backend's parse_citations treats a missing line as "no specific line".
-// Repository names are display names and may contain spaces and parentheses,
-// e.g. "cinder (upstream openstack)"; the version and file never contain whitespace.
 const BRACKET_RE = /\[([^\[\]]+)\]/g;
 const CITATION_ONE_RE = /^([^:\s\[\]](?:[^:\[\]]*[^:\s\[\]])?):([^:\s]+):([^:\s]+)(?::(\d+(?:[–-]\d+)?(?:,\d+(?:[–-]\d+)?)*))?$/;
 
@@ -61,8 +56,6 @@ marked.use({
 
 const LINE_RANGE_RE = /^(\d+)(?:[–-](\d+))?/;
 
-// The label is inserted before markdown parsing, so paths like `__init__.py`
-// would otherwise turn into emphasis inside the link.
 function labelHtml(label) {
   return esc(label).replace(/[_*~`]/g, (c) => `&#${c.charCodeAt(0)};`);
 }
@@ -102,8 +95,6 @@ export function renderMarkdown(text, repoUrlMap = {}, citationIndex = {}) {
   return marked.parse(substituteCitations(text, repoUrlMap, citationIndex), { async: false });
 }
 
-// `line` falsy (0/null/undefined) means "no specific line" — link to the bare
-// file with no anchor, rather than a nonsensical #L0.
 export function buildFileUrl(repoUrl, version, file, line = null, endLine = null) {
   const base = normalizeRepoUrl(repoUrl);
   if (!base) return null;
@@ -115,7 +106,6 @@ export function buildFileUrl(repoUrl, version, file, line = null, endLine = null
     const anchor = line ? `#lines-${line}${endLine ? `:${endLine}` : ''}` : '';
     return `${base}/src/${version}/${file}${anchor}`;
   }
-  // GitHub, and the default for any other/self-hosted git host.
   const anchor = line ? `#L${line}${endLine ? `-L${endLine}` : ''}` : '';
   return `${base}/blob/${version}/${file}${anchor}`;
 }
