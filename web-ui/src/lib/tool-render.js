@@ -3,6 +3,10 @@ import { escapeHtml as esc } from './utils.js';
 
 const KIND_PLURALS = { class: 'classes', function: 'functions' };
 
+function decoratedSuffix(decorator) {
+  return decorator ? ` decorated @${String(decorator).replace(/^@/, '')}` : '';
+}
+
 export function describeToolCall(name, input, { hostname } = {}) {
   switch (name) {
     case 'list_repositories': return 'Discovering available repositories';
@@ -11,17 +15,18 @@ export function describeToolCall(name, input, { hostname } = {}) {
     case 'search_symbols': {
       const scope = input.repo ? ` in ${input.repo}` : '';
       const kinds = KIND_PLURALS[input.kind] ?? 'symbols';
-      if (!input.query && input.path_prefix) {
-        return `Listing ${kinds} under ${input.path_prefix}${scope}`;
+      const decorated = decoratedSuffix(input.decorator);
+      const under = input.path_prefix ? ` under ${input.path_prefix}` : '';
+      if (!input.query && (input.path_prefix || input.decorator)) {
+        return `Listing ${kinds}${decorated}${under}${scope}`;
       }
       const q = input.query || 'symbols';
       const kind = KIND_PLURALS[input.kind] ? ` ${KIND_PLURALS[input.kind]}` : '';
-      const under = input.path_prefix ? ` under ${input.path_prefix}` : '';
-      return `Searching for "${q}"${kind}${under}${scope}`;
+      return `Searching for "${q}"${kind}${decorated}${under}${scope}`;
     }
     case 'find_subclasses': {
       const under = input.path_prefix ? ` under ${input.path_prefix}` : '';
-      return `Finding subclasses of ${input.class ?? 'class'}${under}`;
+      return `Finding subclasses of ${input.class ?? 'class'}${decoratedSuffix(input.decorator)}${under}`;
     }
     case 'read_sources': {
       const count = (input.files?.length ?? 0) + (input.names?.length ?? 0);
