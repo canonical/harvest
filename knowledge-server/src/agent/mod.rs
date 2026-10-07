@@ -39,11 +39,41 @@ pub struct Attachment {
     pub data: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct HistoryMessage {
     pub role: String,
     pub text: String,
     pub attachments: Option<Vec<Attachment>>,
+    #[serde(default)]
+    pub enumerations: Vec<EnumerationRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnumerationRecord {
+    pub tool: String,
+    pub input: serde_json::Value,
+    pub result: String,
+}
+
+const ENUMERATION_RESULT_MAX_CHARS: usize = 12_500;
+const ENUMERATION_TURNS_REPLAYED: usize = 2;
+
+pub fn is_enumeration_call(name: &str, input: &serde_json::Value) -> bool {
+    match name {
+        "find_subclasses" => true,
+        "search_symbols" => input["query"].as_str().map(str::trim).unwrap_or("").is_empty(),
+        _ => false,
+    }
+}
+
+fn enumeration_reference(records: &[EnumerationRecord]) -> String {
+    let mut out = String::from(
+        "\n\n[Complete tool results this answer was based on, kept so follow-up questions can be checked against them]",
+    );
+    for record in records {
+        out.push_str(&format!("\n{} {}:\n{}", record.tool, record.input, record.result));
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,6 +182,7 @@ pub enum AgentEvent {
         duration_ms: u64,
     },
     ParallelResearchMergeStarted { duration_ms: u64 },
+    Enumeration { tool: String, input: serde_json::Value, result: String },
 }
 
 enum LoopOutcome {
@@ -445,7 +476,7 @@ impl Agent {
         );
 
         let mut result = Vec::with_capacity(1 + keep_last);
-        result.push(HistoryMessage { role: "summary".into(), text: summary, attachments: None });
+        result.push(HistoryMessage { role: "summary".into(), text: summary, ..Default::default() });
         result.extend_from_slice(recent);
         result
     }
@@ -1118,6 +1149,13 @@ impl Agent {
                             name:    call.name.clone(),
                             preview,
                         }).await;
+                        if is_enumeration_call(&call.name, &call.input) && !result.starts_with("error:") {
+                            let _ = event_sender.send(AgentEvent::Enumeration {
+                                tool:   call.name.clone(),
+                                input:  call.input.clone(),
+                                result: result.chars().take(ENUMERATION_RESULT_MAX_CHARS).collect(),
+                            }).await;
+                        }
                         messages.push(Message {
                             role: crate::llm::types::Role::User,
                             content: MessageContent::Parts(vec![ContentPart::ToolResult {
@@ -1172,6 +1210,13 @@ impl Agent {
                     name:    call.name.clone(),
                     preview,
                 }).await;
+                if is_enumeration_call(&call.name, &call.input) && !result.starts_with("error:") {
+                    let _ = event_sender.send(AgentEvent::Enumeration {
+                        tool:   call.name.clone(),
+                        input:  call.input.clone(),
+                        result: result.chars().take(ENUMERATION_RESULT_MAX_CHARS).collect(),
+                    }).await;
+                }
                 messages.push(Message {
                     role: crate::llm::types::Role::User,
                     content: MessageContent::Parts(vec![ContentPart::ToolResult {
@@ -2041,9 +2086,17 @@ fn describe_message_for_compaction(message: &Message) -> String {
 }
 
 fn history_to_messages(history: &[HistoryMessage]) -> Vec<Message> {
-    history.iter().map(|entry| {
+    let replayed: Vec<usize> = history.iter().enumerate().rev()
+        .filter(|(_, m)| m.role == "assistant" && !m.enumerations.is_empty())
+        .map(|(i, _)| i)
+        .take(ENUMERATION_TURNS_REPLAYED)
+        .collect();
+    history.iter().enumerate().map(|(index, entry)| {
         let attachments = entry.attachments.as_deref().unwrap_or(&[]);
         match entry.role.as_str() {
+            "assistant" if replayed.contains(&index) => {
+                Message::assistant_text(format!("{}{}", entry.text, enumeration_reference(&entry.enumerations)))
+            }
             "assistant" => Message::assistant_text(&entry.text),
             "summary" => Message::user(format!("[Summary of prior conversation]\n{}", entry.text)),
             _ => build_user_message(&entry.text, attachments),
@@ -2388,7 +2441,7 @@ mod tests {
     #[test]
     fn history_message_with_image_attachment_becomes_parts() {
         let att = Attachment { name: "img.jpg".into(), mime_type: "image/jpeg".into(), data: "data".into() };
-        let entry = HistoryMessage { role: "user".into(), text: "see".into(), attachments: Some(vec![att]) };
+        let entry = HistoryMessage { role: "user".into(), text: "see".into(), attachments: Some(vec![att]), ..Default::default() };
         let msgs = history_to_messages(&[entry]);
         assert_eq!(msgs.len(), 1);
         assert!(matches!(msgs[0].content, MessageContent::Parts(_)));
@@ -2396,7 +2449,7 @@ mod tests {
 
     #[test]
     fn history_message_without_attachments_is_text() {
-        let entry = HistoryMessage { role: "user".into(), text: "hello".into(), attachments: None };
+        let entry = HistoryMessage { role: "user".into(), text: "hello".into(), attachments: None, ..Default::default() };
         let msgs = history_to_messages(&[entry]);
         assert!(matches!(msgs[0].content, MessageContent::Text(_)));
     }
@@ -2737,6 +2790,82 @@ mod tests {
         assert!(phase_pos < tool_pos, "Phase event must arrive before ToolCall");
     }
 
+    #[test]
+    fn enumeration_calls_are_subclass_listings_and_empty_query_searches() {
+        assert!(is_enumeration_call("find_subclasses", &serde_json::json!({ "class": "BaseVD" })));
+        assert!(is_enumeration_call("search_symbols", &serde_json::json!({ "query": "", "path_prefix": "a/" })));
+        assert!(is_enumeration_call("search_symbols", &serde_json::json!({ "decorator": "x" })));
+        assert!(!is_enumeration_call("search_symbols", &serde_json::json!({ "query": "Driver" })));
+        assert!(!is_enumeration_call("read_sources", &serde_json::json!({})));
+    }
+
+    #[tokio::test]
+    async fn enumeration_results_are_emitted_in_full() {
+        let listing = format!("200 subclasses of BaseVD\n{}", "pkg/a.py:1 A <- BaseVD\n".repeat(200));
+        let llm = MockLlm::new(vec![tool_call("find_subclasses"), text("done")]);
+        let agent = Arc::new(agent_with(llm, vec![MockTool::new("find_subclasses", &listing)], 5));
+        let events = collect_agent_events(agent, "list the drivers").await;
+        let recorded = events.iter().find_map(|e| match e {
+            AgentEvent::Enumeration { tool, result, .. } => Some((tool.clone(), result.clone())),
+            _ => None,
+        }).expect("an enumeration event");
+        assert_eq!(recorded.0, "find_subclasses");
+        assert_eq!(recorded.1, listing, "the record must not be cut to the preview size");
+    }
+
+    #[tokio::test]
+    async fn ordinary_tool_results_are_not_recorded_as_enumerations() {
+        let search = LlmResponse::ToolCalls {
+            calls: vec![tool_call_obj("search_symbols", serde_json::json!({ "query": "Driver" }))],
+            preamble: String::new(),
+            usage: Usage::default(),
+        };
+        let llm = MockLlm::new(vec![search, text("done")]);
+        let agent = Arc::new(agent_with(llm, vec![MockTool::new("search_symbols", "hits")], 5));
+        let events = collect_agent_events(agent, "where is X?").await;
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Enumeration { .. })));
+    }
+
+    fn assistant_with_enumeration(text: &str, result: &str) -> HistoryMessage {
+        HistoryMessage {
+            role: "assistant".into(),
+            text: text.into(),
+            enumerations: vec![EnumerationRecord {
+                tool: "find_subclasses".into(),
+                input: serde_json::json!({ "class": "BaseVD" }),
+                result: result.into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn message_text(message: &Message) -> String {
+        match &message.content {
+            MessageContent::Text(t) => t.clone(),
+            MessageContent::Parts(parts) => parts.iter()
+                .filter_map(|p| if let ContentPart::Text { text, .. } = p { Some(text.clone()) } else { None })
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+
+    #[test]
+    fn history_replays_enumeration_results_for_the_last_two_answers() {
+        let history = vec![
+            HistoryMessage { role: "user".into(), text: "q1".into(), ..Default::default() },
+            assistant_with_enumeration("a1", "LIST-ONE"),
+            HistoryMessage { role: "user".into(), text: "q2".into(), ..Default::default() },
+            assistant_with_enumeration("a2", "LIST-TWO"),
+            HistoryMessage { role: "user".into(), text: "q3".into(), ..Default::default() },
+            assistant_with_enumeration("a3", "LIST-THREE"),
+        ];
+        let texts: Vec<String> = history_to_messages(&history).iter().map(message_text).collect();
+        assert_eq!(texts[1], "a1", "older answers are replayed as plain text");
+        assert!(texts[3].starts_with("a2") && texts[3].contains("LIST-TWO"), "{}", texts[3]);
+        assert!(texts[5].starts_with("a3") && texts[5].contains("LIST-THREE"), "{}", texts[5]);
+        assert!(texts[5].contains("find_subclasses {\"class\":\"BaseVD\"}"), "{}", texts[5]);
+    }
+
     #[tokio::test]
     async fn query_streaming_emits_updated_phase_when_tools_change() {
         let llm = MockLlm::new(vec![
@@ -2812,8 +2941,8 @@ mod tests {
         let llm = MockLlm::new(vec![]);
         let agent = agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5);
         let history = vec![
-            HistoryMessage { role: "user".into(), text: "how does retry work?".into(), attachments: None },
-            HistoryMessage { role: "assistant".into(), text: "The retry logic lives in retry.rs…".into(), attachments: None },
+            HistoryMessage { role: "user".into(), text: "how does retry work?".into(), attachments: None, ..Default::default() },
+            HistoryMessage { role: "assistant".into(), text: "The retry logic lives in retry.rs…".into(), attachments: None, ..Default::default() },
         ];
         let mode = agent.classify_intent("what does that mean?", &history, None).await;
         assert_eq!(mode, IntentMode::Research);
@@ -3067,8 +3196,8 @@ mod tests {
         ]);
         let agent = Arc::new(agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5));
         let history = vec![
-            HistoryMessage { role: "user".into(), text: "how does retry work?".into(), attachments: None },
-            HistoryMessage { role: "assistant".into(), text: "The retry logic lives in retry.rs…".into(), attachments: None },
+            HistoryMessage { role: "user".into(), text: "how does retry work?".into(), attachments: None, ..Default::default() },
+            HistoryMessage { role: "assistant".into(), text: "The retry logic lives in retry.rs…".into(), attachments: None, ..Default::default() },
         ];
         let (tx, mut rx) = mpsc::channel::<AgentEvent>(128);
         agent.query_streaming("what does that mean?", &history, &[], None, tx).await;
@@ -3268,22 +3397,22 @@ mod tests {
 
     #[test]
     fn estimate_counts_text_chars_of_single_message() {
-        let entry = HistoryMessage { role: "user".into(), text: "hello".into(), attachments: None };
+        let entry = HistoryMessage { role: "user".into(), text: "hello".into(), attachments: None, ..Default::default() };
         assert_eq!(estimate_history_chars(&[entry]), 5);
     }
 
     #[test]
     fn estimate_sums_chars_across_messages() {
         let msgs = vec![
-            HistoryMessage { role: "user".into(), text: "hi".into(), attachments: None },
-            HistoryMessage { role: "assistant".into(), text: "hello".into(), attachments: None },
+            HistoryMessage { role: "user".into(), text: "hi".into(), attachments: None, ..Default::default() },
+            HistoryMessage { role: "assistant".into(), text: "hello".into(), attachments: None, ..Default::default() },
         ];
         assert_eq!(estimate_history_chars(&msgs), 7);
     }
 
     #[test]
     fn summary_role_renders_as_user_message_with_prefix() {
-        let entry = HistoryMessage { role: "summary".into(), text: "old stuff".into(), attachments: None };
+        let entry = HistoryMessage { role: "summary".into(), text: "old stuff".into(), attachments: None, ..Default::default() };
         let msgs = history_to_messages(&[entry]);
         assert_eq!(msgs.len(), 1);
         assert!(matches!(msgs[0].role, crate::llm::types::Role::User));
@@ -3301,7 +3430,7 @@ mod tests {
         let agent = Agent::new(MockLlm::new(vec![]), vec![], 5)
             .with_compaction(1000, 6);
         let history = vec![
-            HistoryMessage { role: "user".into(), text: "short".into(), attachments: None },
+            HistoryMessage { role: "user".into(), text: "short".into(), attachments: None, ..Default::default() },
         ];
         let result = agent.compact_history(&history).await;
         assert_eq!(result.len(), 1);
@@ -3321,9 +3450,9 @@ mod tests {
         let agent = Agent::new(MockLlm::new(vec![text("summary of old stuff")]), vec![], 5)
             .with_compaction(5, 1);
         let history = vec![
-            HistoryMessage { role: "user".into(), text: "message one".into(), attachments: None },
-            HistoryMessage { role: "assistant".into(), text: "response one".into(), attachments: None },
-            HistoryMessage { role: "user".into(), text: "recent message".into(), attachments: None },
+            HistoryMessage { role: "user".into(), text: "message one".into(), attachments: None, ..Default::default() },
+            HistoryMessage { role: "assistant".into(), text: "response one".into(), attachments: None, ..Default::default() },
+            HistoryMessage { role: "user".into(), text: "recent message".into(), attachments: None, ..Default::default() },
         ];
         let result = agent.compact_history(&history).await;
         assert_eq!(result.len(), 2);
@@ -3341,6 +3470,7 @@ mod tests {
             role: "user".into(),
             text: format!("msg {i}"),
             attachments: None,
+            ..Default::default()
         }).collect();
         let result = agent.compact_history(&history).await;
         assert_eq!(result.len(), 3);
@@ -3523,8 +3653,8 @@ mod tests {
             5,
         ).with_compaction(5, 1);
         let history = vec![
-            HistoryMessage { role: "user".into(), text: "message one".into(), attachments: None },
-            HistoryMessage { role: "assistant".into(), text: "response one".into(), attachments: None },
+            HistoryMessage { role: "user".into(), text: "message one".into(), attachments: None, ..Default::default() },
+            HistoryMessage { role: "assistant".into(), text: "response one".into(), attachments: None, ..Default::default() },
         ];
         let resp = agent.query("new question", &history, &[], None).await.unwrap();
         assert_eq!(resp.answer, "final answer");
@@ -3540,8 +3670,8 @@ mod tests {
             ).with_compaction(5, 1)
         );
         let history = vec![
-            HistoryMessage { role: "user".into(), text: "message one".into(), attachments: None },
-            HistoryMessage { role: "assistant".into(), text: "response one".into(), attachments: None },
+            HistoryMessage { role: "user".into(), text: "message one".into(), attachments: None, ..Default::default() },
+            HistoryMessage { role: "assistant".into(), text: "response one".into(), attachments: None, ..Default::default() },
         ];
         let (event_sender, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
         agent.query_streaming("new question", &history, &[], None, event_sender).await;
@@ -3943,8 +4073,8 @@ mod tests {
         ]);
         let agent = Arc::new(agent_with(llm, vec![MockTool::new("search_symbols", "ok")], 5));
         let events = collect_agent_events_with_history(agent, "what does that mean?", &[
-            HistoryMessage { role: "user".into(), text: "how does X work?".into(), attachments: None },
-            HistoryMessage { role: "assistant".into(), text: "X works like...".into(), attachments: None },
+            HistoryMessage { role: "user".into(), text: "how does X work?".into(), attachments: None, ..Default::default() },
+            HistoryMessage { role: "assistant".into(), text: "X works like...".into(), attachments: None, ..Default::default() },
         ]).await;
 
         let has_question = events.iter().any(|e| matches!(e, AgentEvent::Question { question, .. } if question == "Which aspect?"));
@@ -4448,8 +4578,8 @@ mod tests {
             tool_call("t1"), tool_call("t2"), tool_call("t3"),
             text("synthesized"), text("fallback"),
         ]);
-        let history = vec![HistoryMessage { role: "user".into(), text: "previous question".into(), attachments: None },
-                          HistoryMessage { role: "assistant".into(), text: "previous answer".into(), attachments: None }];
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous question".into(), attachments: None, ..Default::default() },
+                          HistoryMessage { role: "assistant".into(), text: "previous answer".into(), attachments: None, ..Default::default() }];
         let agent = agent_with_system_one(llm, vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
         let resp = agent.query("how does X work?", &history, &[], None).await.unwrap();
         assert!(resp.tool_calls_made >= 3, "research with 0.9 confidence (< 0.95 threshold) should not synthesize early (got {} calls)", resp.tool_calls_made);
@@ -4495,8 +4625,8 @@ mod tests {
             tool_call("t1"), tool_call("t2"), tool_call("t3"),
             text("synthesized"), text("fallback"),
         ]);
-        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None },
-                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None }];
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None, ..Default::default() },
+                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None, ..Default::default() }];
         let agent = agent_with_system_one(llm, vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
         let resp = agent.query("does X support Y?", &history, &[], None).await.unwrap();
         assert!(resp.tool_calls_made >= 3, "research should not synthesize when coverage is low (got {} calls)", resp.tool_calls_made);
@@ -4637,8 +4767,8 @@ mod tests {
             tool_call("t1"), tool_call("t2"), tool_call("t3"),
             text("synthesized"), text("fallback"),
         ]);
-        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None },
-                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None }];
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None, ..Default::default() },
+                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None, ..Default::default() }];
         let agent = agent_with_system_one(llm.clone(), vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
         agent.query("does X support Y?", &history, &[], None).await.unwrap();
         assert!(
@@ -4703,8 +4833,8 @@ mod tests {
             tool_call("t1"), tool_call("t2"), tool_call("t3"),
             text("synthesized"), text("fallback"),
         ]);
-        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None },
-                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None }];
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None, ..Default::default() },
+                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None, ..Default::default() }];
         let agent = agent_with_system_one(llm.clone(), vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
         agent.query("does X support Y?", &history, &[], None).await.unwrap();
         let synthesis = llm.requests().into_iter()
@@ -4722,8 +4852,8 @@ mod tests {
             tool_call("t1"), tool_call("t2"), tool_call("t3"),
             text("synthesized"), text("fallback"),
         ]);
-        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None },
-                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None }];
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None, ..Default::default() },
+                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None, ..Default::default() }];
         let agent = agent_with_system_one(llm.clone(), vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
         agent.query("does X support Y?", &history, &[], None).await.unwrap();
         let synthesis = llm.requests().into_iter()
@@ -4784,8 +4914,8 @@ mod tests {
             tool_call("t1"), tool_call("t2"), tool_call("t3"),
             text("fallback"),
         ]);
-        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None },
-                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None }];
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None, ..Default::default() },
+                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None, ..Default::default() }];
         let agent = agent_with_system_one(llm, vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
         let resp = agent.query("does X support Y?", &history, &[], None).await.unwrap();
         assert_eq!(resp.answer, "fallback");
@@ -4848,8 +4978,8 @@ mod tests {
             tool_call("t1"), tool_call("t2"), tool_call("t3"),
             text("synthesized"), text("fallback"),
         ]);
-        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None },
-                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None }];
+        let history = vec![HistoryMessage { role: "user".into(), text: "previous".into(), attachments: None, ..Default::default() },
+                          HistoryMessage { role: "assistant".into(), text: "answer".into(), attachments: None, ..Default::default() }];
         let agent = agent_with_system_one(llm.clone(), vec![MockTool::new("t1", "r1"), MockTool::new("t2", "r2"), MockTool::new("t3", "r3")], 10, so);
         agent.query("does X support Y?", &history, &[], None).await.unwrap();
         let synthesis = llm.requests().into_iter()

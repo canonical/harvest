@@ -69,6 +69,7 @@ fn build_assistant_message(
     llm_call_count: usize,
     cost_microusd: i64,
 ) -> Value {
+    let (chain, enumerations) = crate::agent::chain::split_enumerations(chain);
     let mut assistant_message = json!({
         "role": "assistant",
         "text": assistant_text,
@@ -82,6 +83,9 @@ fn build_assistant_message(
         "llm_call_count": llm_call_count,
         "cost_microusd": cost_microusd,
     });
+    if !enumerations.is_empty() {
+        assistant_message["enumerations"] = json!(enumerations);
+    }
     if let Some(question) = question {
         assistant_message["question"] = question;
     }
@@ -287,6 +291,27 @@ pub async fn delete(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn assistant_message_stores_enumerations_outside_the_chain_and_history_reads_them_back() {
+        let chain = vec![
+            json!({ "type": "tool_call", "name": "find_subclasses", "input": {}, "status": "done", "preview": "x" }),
+            json!({ "type": "enumeration", "tool": "find_subclasses", "input": { "class": "BaseVD" }, "result": "full" }),
+        ];
+        let msg = build_assistant_message("answer", &[], 1, 0, 1, chain, None, None, None, 0, &Usage::default(), 1, 0);
+        assert_eq!(msg["chain"].as_array().unwrap().len(), 1);
+        assert_eq!(msg["enumerations"][0]["result"], "full");
+        let history = history_messages_from_raw(&[msg]);
+        assert_eq!(history[0].enumerations.len(), 1);
+        assert_eq!(history[0].enumerations[0].tool, "find_subclasses");
+        assert_eq!(history[0].enumerations[0].result, "full");
+    }
+
+    #[test]
+    fn assistant_message_without_enumerations_has_no_enumerations_field() {
+        let msg = build_assistant_message("hi", &[], 0, 0, 0, vec![], None, None, None, 0, &Usage::default(), 0, 0);
+        assert!(msg.get("enumerations").is_none());
+    }
+
     use super::*;
 
     fn used_provider() -> UsedProvider {

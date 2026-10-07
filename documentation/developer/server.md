@@ -399,15 +399,17 @@ Returns each repository with its ingested versions. Versions indexed by an older
 
 Ranked search for functions or classes across names, signatures, file paths, docstrings, and capability constants in class bodies, optionally blended with semantic search.
 
-Parameters: `query: String` (may be empty when `path_prefix` is set), `repo?: String`, `version?: String`, `kind?: "function" | "class" | "any"`, `path_prefix?: String`, `limit?: Integer` (max 50), `offset?: Integer`
+Parameters: `query: String` (may be empty when `path_prefix` or `decorator` is set), `repo?: String`, `version?: String`, `kind?: "function" | "class" | "any"`, `path_prefix?: String`, `decorator?: String`, `limit?: Integer` (max 50), `offset?: Integer`
 
-When more results exist past `offset + limit`, the last entry is `{"more_results": true, "next_offset": N}`. An empty `query` with a `path_prefix` lists every symbol under that directory, page by page.
+When more results exist past `offset + limit`, the last entry is `{"more_results": true, "next_offset": N}`. An empty `query` with a `path_prefix` lists every symbol under that directory, page by page. `decorator` keeps only classes carrying that decorator (matched exactly or on its last dotted segment), so `decorator: "interface.volumedriver"` lists every Cinder volume driver the framework registers.
 
 ### `find_subclasses`
 
-Lists every class that inherits from a class, directly or through intermediate classes, following the `bases` arrays. Each row gives the subclass's file, line, the parent it inherits through, and its depth.
+Lists every class that inherits from a class, directly or through intermediate classes, following the `bases` arrays. Output is one line per class, `file:line Class <- parent @decorators`, with `+` marking classes that have subclasses of their own (usually abstract bases or helpers). The header gives the total; results are paged with `offset`/`limit` and kept under a fixed character budget, ending with the offset to request next. On the first page, if an ancestor of the requested class has subclasses that do not go through it, a note names that ancestor and how many it adds.
 
-Parameters: `repo: String`, `version: String`, `class: String`, `path_prefix?: String`
+Parameters: `repo: String`, `version: String`, `class: String`, `path_prefix?: String`, `decorator?: String`, `offset?: Integer`, `limit?: Integer` (max 400, default 150)
+
+Results of `find_subclasses`, and of `search_symbols` calls with an empty query, are stored with the assistant message (`enumerations`) and replayed to the model for the two most recent answers, so follow-up questions can be checked against the complete list rather than the prose answer.
 
 ### `read_sources`
 

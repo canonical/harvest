@@ -91,6 +91,15 @@ impl ChainBuilder {
         }));
     }
 
+    pub fn enumeration(&mut self, tool: &str, input: &Value, result: &str) {
+        self.chain.push(json!({
+            "type": "enumeration",
+            "tool": tool,
+            "input": input,
+            "result": result,
+        }));
+    }
+
     fn flush_pending(&mut self) {
         if !self.pending_thinking_delta.is_empty() {
             let text = std::mem::take(&mut self.pending_thinking_delta);
@@ -107,6 +116,14 @@ impl ChainBuilder {
     }
 }
 
+pub fn split_enumerations(chain: Vec<Value>) -> (Vec<Value>, Vec<Value>) {
+    let (enumerations, steps): (Vec<Value>, Vec<Value>) = chain.into_iter().partition(|e| e["type"] == "enumeration");
+    let enumerations = enumerations.into_iter()
+        .map(|e| json!({ "tool": e["tool"], "input": e["input"], "result": e["result"] }))
+        .collect();
+    (steps, enumerations)
+}
+
 impl Default for ChainBuilder {
     fn default() -> Self {
         Self::new()
@@ -115,6 +132,22 @@ impl Default for ChainBuilder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn enumerations_are_split_out_of_the_visible_chain() {
+        let mut b = ChainBuilder::new();
+        b.tool_call("find_subclasses", &json!({ "class": "BaseVD" }), None, None);
+        b.tool_result("find_subclasses", "127 subclasses");
+        b.enumeration("find_subclasses", &json!({ "class": "BaseVD" }), "127 subclasses\nfull list");
+        let (steps, enumerations) = split_enumerations(b.finish());
+        assert!(steps.iter().all(|e| e["type"] != "enumeration"));
+        assert_eq!(steps.len(), 1);
+        assert_eq!(enumerations, vec![json!({
+            "tool": "find_subclasses",
+            "input": { "class": "BaseVD" },
+            "result": "127 subclasses\nfull list",
+        })]);
+    }
+
     use super::*;
 
     #[test]
