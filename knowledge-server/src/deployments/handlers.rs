@@ -1130,7 +1130,7 @@ async fn save_design_doc(
 ) -> Result<String, String> {
     let content = format!("{}\n", answer.trim());
     if content.trim().is_empty()
-        || content.trim() == crate::agent::last_resort_fallback()
+        || crate::agent::is_incomplete_answer(&content)
         || content.trim() == crate::agent::question_fallback()
     {
         return Err("the model did not produce a usable design document".to_string());

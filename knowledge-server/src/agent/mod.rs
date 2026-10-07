@@ -164,7 +164,7 @@ pub enum AgentEvent {
 }
 
 enum LoopOutcome {
-    Finished { text: String, tool_summary: String, iterations: usize, provider_used: Option<UsedProvider>, hit_max_iterations: bool, usage: Usage, llm_call_count: usize, tool_calls_executed: usize, tool_errors: usize },
+    Finished { text: String, iterations: usize, provider_used: Option<UsedProvider>, hit_max_iterations: bool, usage: Usage, llm_call_count: usize, tool_calls_executed: usize, tool_errors: usize },
     EndedWithQuestion { text: String, iterations: usize, provider_used: Option<UsedProvider>, usage: Usage, llm_call_count: usize, tool_calls_executed: usize, tool_errors: usize },
     Paused {
         messages: Vec<Message>,
@@ -513,7 +513,10 @@ impl Agent {
     async fn compact_messages_mid_turn_llm(&self, messages: Vec<Message>, protected_prefix_len: usize) -> Vec<Message> {
         let trace_len = messages.len().saturating_sub(protected_prefix_len);
 
-        let split_at = protected_prefix_len + (trace_len - MID_TURN_COMPACTION_KEEP_LAST);
+        let split_at = compaction_split_point(&messages, protected_prefix_len, protected_prefix_len + (trace_len - MID_TURN_COMPACTION_KEEP_LAST));
+        if split_at <= protected_prefix_len {
+            return messages;
+        }
         let old = &messages[protected_prefix_len..split_at];
         let old_text = old.iter().map(describe_message_for_compaction).collect::<Vec<_>>().join("\n");
         let prompt = format!(
@@ -707,8 +710,13 @@ impl Agent {
             "agent run metrics"
         );
         match outcome {
-            LoopOutcome::Finished { text, tool_summary, iterations, provider_used, hit_max_iterations, usage, llm_call_count, .. } => {
-                let answer = if text.is_empty() { last_resort_fallback_with_summary(&tool_summary) } else { strip_answer_preamble(&text) };
+            LoopOutcome::Finished { text, iterations, provider_used, hit_max_iterations, usage, llm_call_count, .. } => {
+                let answer = if text.trim().is_empty() {
+                    let reason = if hit_max_iterations { IncompleteReason::ToolLimit } else { IncompleteReason::EmptyReply };
+                    incomplete_answer(&reason)
+                } else {
+                    strip_answer_preamble(&text)
+                };
                 let sources = parse_citations(&answer);
                 let _ = event_sender.send(AgentEvent::Done {
                     answer,
@@ -780,21 +788,13 @@ impl Agent {
         let mut total_usage = Usage::default();
         let mut llm_call_count: usize = 0;
         let protected_prefix_len = messages.len();
+        let goal = latest_user_text(&messages);
+        let mut scored_tool_results: HashSet<u64> = HashSet::new();
         loop {
             if iterations >= max_iterations {
                 tracing::warn!(max_iterations, "agent hit max_iterations — requesting synthesis");
                 let _ = event_sender.send(AgentEvent::Phase { label: "Synthesizing answer".to_string() }).await;
                 let tool_summary = collect_tool_result_summary(&messages);
-                let goal = messages.iter().rev()
-                    .find(|m| matches!(m.role, crate::llm::types::Role::User))
-                    .map(|m| match &m.content {
-                        MessageContent::Text(t) => t.clone(),
-                        MessageContent::Parts(parts) => parts.iter()
-                            .filter_map(|p| if let ContentPart::Text { text, .. } = p { Some(text.clone()) } else { None })
-                            .collect::<Vec<_>>()
-                            .join(" "),
-                    })
-                    .unwrap_or_default();
                 let is_uniform = match &self.system_one {
                     Some(so) if intent == IntentMode::Research => {
                         match so.should_synthesize_uniform(&goal, &tool_summary).await {
@@ -812,31 +812,9 @@ impl Agent {
                     &tool_summary,
                     is_uniform,
                 );
-                messages.push(Message::user(synthesis_prompt));
-                let _synthesis_permit = self.llm_concurrency.acquire().await;
-                let text = match self.llm.chat_routed(selection, &messages, &[]).await {
-                    Ok((LlmResponse::Message { text, usage }, used, _)) => {
-                        last_provider_used = Some(used);
-                        total_usage += usage;
-                        llm_call_count += 1;
-                        text
-                    }
-                    Ok((LlmResponse::ToolCalls { preamble, usage, .. }, used, _)) => {
-                        last_provider_used = Some(used);
-                        total_usage += usage;
-                        llm_call_count += 1;
-                        if !preamble.is_empty() { preamble }
-                        else if !accumulated_answer.is_empty() { accumulated_answer }
-                        else if !accumulated_text.is_empty() { accumulated_text }
-                        else { last_resort_fallback_with_summary(&tool_summary) }
-                    }
-                    Err(_) => {
-                        if !accumulated_answer.is_empty() { accumulated_answer }
-                        else if !accumulated_text.is_empty() { accumulated_text }
-                        else { last_resort_fallback_with_summary(&tool_summary) }
-                    }
-                };
-                return LoopOutcome::Finished { text, tool_summary, iterations, provider_used: last_provider_used, hit_max_iterations: true, usage: total_usage, llm_call_count, tool_calls_executed: tally_count(&messages), tool_errors: tally_errors(&messages) };
+                let synthesis = self.synthesize(&mut messages, synthesis_prompt, selection, &mut last_provider_used, &mut total_usage, &mut llm_call_count).await;
+                let text = synthesis.into_answer(&accumulated_answer, &accumulated_text, IncompleteReason::ToolLimit);
+                return LoopOutcome::Finished { text, iterations, provider_used: last_provider_used, hit_max_iterations: true, usage: total_usage, llm_call_count, tool_calls_executed: tally_count(&messages), tool_errors: tally_errors(&messages) };
             }
 
             let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(64);
@@ -847,16 +825,6 @@ impl Agent {
                 sel.cache_breakpoint_index = Some(protected_prefix_len);
             }
 
-            let last_user_msg = messages.iter().rev()
-                .find(|m| matches!(m.role, crate::llm::types::Role::User))
-                .map(|m| match &m.content {
-                    MessageContent::Text(t) => t.clone(),
-                    MessageContent::Parts(parts) => parts.iter()
-                        .filter_map(|p| if let ContentPart::Text { text, .. } = p { Some(text.clone()) } else { None })
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                })
-                .unwrap_or_default();
             let history_summary: String = messages.iter()
                 .take(messages.len().saturating_sub(1))
                 .filter(|m| matches!(m.role, crate::llm::types::Role::User | crate::llm::types::Role::Assistant))
@@ -869,7 +837,7 @@ impl Agent {
 
             let tools_snapshot = if let Some(so) = &self.system_one {
                 let all_tool_names: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
-                match so.select_tools(&last_user_msg, &all_tool_names).await {
+                match so.select_tools(&goal, &all_tool_names).await {
                     Ok(selected) => {
                         tool_defs.iter()
                             .filter(|t| selected.contains(&t.name) || t.name == "ask_user")
@@ -887,7 +855,7 @@ impl Agent {
 
             if let Some(so) = &self.system_one {
                 if selection_owned.is_none() {
-                    match so.route_model_enhanced(&last_user_msg, &history_summary).await {
+                    match so.route_model_enhanced(&goal, &history_summary).await {
                         Ok((tier, confidence, _needs_deep)) if confidence >= self.fast_path_threshold => {
                             selection_owned = self.resolve_tier_selection(&tier);
                         }
@@ -931,11 +899,20 @@ impl Agent {
                 }
             }
 
-            match stream_handle.await {
-                Ok(Ok(used)) => last_provider_used = Some(used),
-                Ok(Err(e)) => tracing::warn!(error = %e, "chat_stream failed"),
-                Err(e) => tracing::warn!(error = %e, "chat_stream task panicked"),
-            }
+            let stream_error: Option<String> = match stream_handle.await {
+                Ok(Ok(used)) => {
+                    last_provider_used = Some(used);
+                    None
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "chat_stream failed");
+                    Some(e.to_string())
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "chat_stream task panicked");
+                    Some(format!("the model request task failed: {e}"))
+                }
+            };
 
             if !text_buf.is_empty() {
                 accumulated_text.push_str(&text_buf);
@@ -962,15 +939,38 @@ impl Agent {
                         usage: total_usage.clone(), llm_call_count, tool_calls_executed: tally_count(&messages), tool_errors: tally_errors(&messages)
                     };
                 }
-                let final_text = if accumulated_answer.is_empty() {
+                let mut final_text = if accumulated_answer.is_empty() {
                     text_buf
                 } else {
                     accumulated_answer.push_str(&text_buf);
                     accumulated_answer
                 };
+                if final_text.trim().is_empty() {
+                    // The model failed or replied with nothing (reasoning models can spend the
+                    // whole reply on hidden reasoning). Ask once more for an answer, without tools,
+                    // from what was already gathered rather than ending on an empty message.
+                    let reason = match stream_error {
+                        Some(e) => IncompleteReason::ModelError(e),
+                        None => IncompleteReason::EmptyReply,
+                    };
+                    tracing::warn!(?reason, iteration = iterations, "model produced no answer text — attempting recovery synthesis");
+                    final_text = if tally_count(&messages) > 0 {
+                        let _ = event_sender.send(AgentEvent::Phase { label: "Synthesizing answer".to_string() }).await;
+                        let prompt = build_synthesis_prompt(
+                            "Write your final answer to the user's question now, using only the tool results you already have.",
+                            &collect_tool_result_summary(&messages),
+                            false,
+                        );
+                        let synthesis = self.synthesize(&mut messages, prompt, selection, &mut last_provider_used, &mut total_usage, &mut llm_call_count).await;
+                        synthesis.into_answer("", "", reason)
+                    } else {
+                        incomplete_answer(&reason)
+                    };
+                } else if let Some(e) = stream_error {
+                    final_text.push_str(&format!("\n\n_The response was cut off because the model request failed: {}_", short_error(&e)));
+                }
                 return LoopOutcome::Finished {
                     text: final_text,
-                    tool_summary: collect_tool_result_summary(&messages),
                     iterations,
                     provider_used: last_provider_used,
                     hit_max_iterations: false,
@@ -998,17 +998,7 @@ impl Agent {
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
-                        let last_user = messages.iter().rev()
-                            .find(|m| matches!(m.role, crate::llm::types::Role::User))
-                            .map(|m| match &m.content {
-                                MessageContent::Text(t) => t.clone(),
-                                MessageContent::Parts(parts) => parts.iter()
-                                    .filter_map(|p| if let ContentPart::Text { text, .. } = p { Some(text.clone()) } else { None })
-                                    .collect::<Vec<_>>()
-                                    .join(" "),
-                            })
-                            .unwrap_or_default();
-                        match so.should_parallel_research(&last_user, &history_text).await {
+                        match so.should_parallel_research(&goal, &history_text).await {
                             Ok((should, _)) => should,
                             Err(e) => {
                                 tracing::warn!(error = %e, "system-one parallel research gate failed — allowing");
@@ -1094,7 +1084,6 @@ impl Agent {
                 };
                 return LoopOutcome::Finished {
                     text: final_text,
-                    tool_summary: collect_tool_result_summary(&messages),
                     iterations,
                     provider_used: last_provider_used,
                     hit_max_iterations: false,
@@ -1181,21 +1170,14 @@ impl Agent {
             let _ = event_sender.send(AgentEvent::Phase { label: phase.to_string() }).await;
 
             let has_search = tool_calls.iter().any(|c| c.name == "search_symbols");
-            let has_deep = tool_calls.iter().any(|c| matches!(c.name.as_str(),
-                "get_symbol_source" | "get_file_symbols" | "find_callers" | "find_callees" | "get_imports"
-            ));
+            let has_deep = tool_calls.iter().any(|c| is_deep_read_tool(&c.name));
             if has_search && !has_deep {
                 consecutive_searches += 1;
             } else if has_deep {
                 consecutive_searches = 0;
             }
-            if consecutive_searches >= 3 {
-                messages.push(Message::user(
-                    "You have searched multiple times without diving deeper. \
-                     Pick the most relevant result from your previous searches and \
-                     retrieve its source with get_symbol_source, or use find_callers/find_callees \
-                     to trace relationships. Synthesize your answer from what you already have."
-                ));
+            let nudge_after_results = consecutive_searches >= 3;
+            if nudge_after_results {
                 consecutive_searches = 0;
             }
 
@@ -1227,37 +1209,28 @@ impl Agent {
                     }]),
                 });
             }
+            if nudge_after_results {
+                // Attached to the tool result rather than sent as a separate user message: a user
+                // message between a tool call and its result breaks the provider message order,
+                // and the model reads a user-role nudge as the user speaking.
+                append_to_last_tool_result(&mut messages, SEARCH_NUDGE);
+            }
 
             if let Some(so) = &self.system_one {
                 let preserve_recent = self.relevance_preserve_recent;
                 let cutoff = messages.len().saturating_sub(preserve_recent);
+                let tool_names = tool_names_by_call_id(&messages);
                 for i in (protected_prefix_len..cutoff).rev() {
-                    let (tool_name, result_content) = match &messages[i].content {
-                        MessageContent::Parts(parts) => {
-                            let result = parts.iter().find_map(|p| {
-                                if let ContentPart::ToolResult { content, .. } = p {
-                                    Some(content.clone())
-                                } else {
-                                    None
-                                }
-                            });
-                            let name = parts.iter().find_map(|p| {
-                                if let ContentPart::ToolUse { name, .. } = p { Some(name.clone()) } else { None }
-                            }).unwrap_or_else(|| "unknown".to_string());
-                            match result {
-                                Some(c) => (name, c),
-                                None => continue,
-                            }
-                        }
-                        _ => continue,
-                    };
-                    match so.score_tool_result_relevance(&tool_name, &result_content, &last_user_msg).await {
+                    let Some((tool_use_id, result_content)) = first_tool_result(&messages[i]) else { continue };
+                    // Keyed on content as well as id: Gemini reuses the tool name as the call id.
+                    if !scored_tool_results.insert(relevance_key(&tool_use_id, &result_content)) {
+                        continue;
+                    }
+                    let tool_name = tool_names.get(&tool_use_id).map(String::as_str).unwrap_or("unknown");
+                    match so.score_tool_result_relevance(tool_name, &result_content, &goal).await {
                         Ok(score) if score < self.relevance_threshold => {
-                            let truncated = format!(
-                                "[Truncated — relevance {:.2}]\n{}…",
-                                score,
-                                &result_content[..result_content.len().min(200)]
-                            );
+                            let head: String = result_content.chars().take(200).collect();
+                            let truncated = format!("[Truncated — relevance {score:.2}]\n{head}…");
                             if let MessageContent::Parts(parts) = &mut messages[i].content {
                                 for part in parts.iter_mut() {
                                     if let ContentPart::ToolResult { content, .. } = part {
@@ -1288,7 +1261,7 @@ impl Agent {
                             crate::llm::system_one::NextAction::Synthesize,
                         ];
                         match so
-                            .route_next_action(&last_user_msg, &findings, &candidates, self.next_action_confidence)
+                            .route_next_action(&goal, &findings, &candidates, self.next_action_confidence)
                             .await
                         {
                             Ok(decision) if !decision.fallback => {
@@ -1318,13 +1291,13 @@ impl Agent {
                     } else {
                         self.early_synthesis_threshold
                     };
-                    let should_synthesize_now: Option<bool> = match so.should_synthesize(&last_user_msg, &findings).await {
+                    let should_synthesize_now: Option<bool> = match so.should_synthesize(&goal, &findings).await {
                         Ok((should, confidence)) if should && confidence >= synth_threshold => {
                             if intent == IntentMode::Research {
-                                match so.should_synthesize_coverage(&last_user_msg, &findings).await {
+                                match so.should_synthesize_coverage(&goal, &findings).await {
                                     Ok((covered, cov_conf)) if covered && cov_conf >= self.early_synthesis_coverage_threshold => {
                                         match so.should_synthesize_capability_gate_with_threshold(
-                                            &last_user_msg,
+                                            &goal,
                                             &findings,
                                             self.early_synthesis_capability_gate_threshold,
                                         ).await {
@@ -1337,7 +1310,7 @@ impl Agent {
                                                     tracing::debug!("early synthesis deferred — next-action router still wants more evidence");
                                                     None
                                                 } else {
-                                                    match so.should_synthesize_uniform(&last_user_msg, &findings).await {
+                                                    match so.should_synthesize_uniform(&goal, &findings).await {
                                                         Ok((uniform, uni_conf)) => Some(uniform && uni_conf >= self.early_synthesis_uniform_threshold),
                                                         Err(e) => {
                                                             tracing::warn!(error = %e, "uniformity check failed — assuming non-uniform");
@@ -1348,7 +1321,7 @@ impl Agent {
                                             }
                                             Err(e) => {
                                                 tracing::warn!(error = %e, "capability gate check failed — assuming located");
-                                                match so.should_synthesize_uniform(&last_user_msg, &findings).await {
+                                                match so.should_synthesize_uniform(&goal, &findings).await {
                                                     Ok((uniform, uni_conf)) => Some(uniform && uni_conf >= self.early_synthesis_uniform_threshold),
                                                     Err(e) => {
                                                         tracing::warn!(error = %e, "uniformity check failed — assuming non-uniform");
@@ -1385,32 +1358,10 @@ impl Agent {
                             &findings,
                             is_uniform,
                         );
-                        messages.push(Message::user(synthesis_prompt));
-                        let _synthesis_permit = self.llm_concurrency.acquire().await;
-                        let text = match self.llm.chat_routed(selection, &messages, &[]).await {
-                            Ok((LlmResponse::Message { text, .. }, used, usage)) => {
-                                last_provider_used = Some(used);
-                                total_usage += usage;
-                                llm_call_count += 1;
-                                text
-                            }
-                            Ok((LlmResponse::ToolCalls { preamble, .. }, used, usage)) => {
-                                last_provider_used = Some(used);
-                                total_usage += usage;
-                                llm_call_count += 1;
-                                if !preamble.is_empty() { preamble }
-                                else if !accumulated_answer.is_empty() { accumulated_answer }
-                                else if !accumulated_text.is_empty() { accumulated_text }
-                                else { last_resort_fallback_with_summary(&findings) }
-                            }
-                            Err(_) => {
-                                if !accumulated_answer.is_empty() { accumulated_answer }
-                                else if !accumulated_text.is_empty() { accumulated_text }
-                                else { last_resort_fallback_with_summary(&findings) }
-                            }
-                        };
+                        let synthesis = self.synthesize(&mut messages, synthesis_prompt, selection, &mut last_provider_used, &mut total_usage, &mut llm_call_count).await;
+                        let text = synthesis.into_answer(&accumulated_answer, &accumulated_text, IncompleteReason::EmptyReply);
                         return LoopOutcome::Finished {
-                            text, tool_summary: findings, iterations,
+                            text, iterations,
                             provider_used: last_provider_used,
                             hit_max_iterations: false,
                             usage: total_usage, llm_call_count, tool_calls_executed: tally_count(&messages), tool_errors: tally_errors(&messages)
@@ -1557,6 +1508,37 @@ impl Agent {
             duration_ms: lead_start.elapsed().as_millis() as u64,
         }).await;
         (text, iterations, usage, llm_call_count)
+    }
+
+    /// Asks the model, without tools, for a final answer from the conversation so far. The
+    /// request is appended to `messages`, and usage is added to the turn's running totals.
+    async fn synthesize(
+        &self,
+        messages: &mut Vec<Message>,
+        prompt: String,
+        selection: Option<&ProviderSelection>,
+        last_provider_used: &mut Option<UsedProvider>,
+        total_usage: &mut Usage,
+        llm_call_count: &mut usize,
+    ) -> Synthesis {
+        messages.push(Message::user(prompt));
+        let _synthesis_permit = self.llm_concurrency.acquire().await;
+        match self.llm.chat_routed(selection, messages, &[]).await {
+            Ok((response, used, usage)) => {
+                *last_provider_used = Some(used);
+                *total_usage += usage;
+                *llm_call_count += 1;
+                let text = match response {
+                    LlmResponse::Message { text, .. } => text,
+                    LlmResponse::ToolCalls { preamble, .. } => preamble,
+                };
+                Synthesis { text, error: None }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "synthesis request failed");
+                Synthesis { text: String::new(), error: Some(e.to_string()) }
+            }
+        }
     }
 
     async fn execute_tool_call(
@@ -1752,20 +1734,152 @@ fn is_ask_user_narration(text: &str) -> bool {
     announces_asking || (future_tense && lower.contains("question"))
 }
 
-pub(crate) fn last_resort_fallback() -> String {
-    "I reached the tool-call limit before completing my analysis. \
-     Please ask a more specific question or try again."
-        .to_string()
+/// Why a turn ended without an answer from the model.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum IncompleteReason {
+    ToolLimit,
+    ModelError(String),
+    EmptyReply,
 }
 
-pub(crate) fn last_resort_fallback_with_summary(tool_summary: &str) -> String {
-    if tool_summary.is_empty() || tool_summary == "No tool results were collected." {
-        return last_resort_fallback();
+const INCOMPLETE_ANSWER_PREFIX: &str = "I couldn't finish this answer";
+
+/// The answer shown when the model produced none. It names the actual cause and never
+/// dumps raw tool output in place of an answer.
+pub(crate) fn incomplete_answer(reason: &IncompleteReason) -> String {
+    match reason {
+        IncompleteReason::ToolLimit => format!(
+            "{INCOMPLETE_ANSWER_PREFIX}: I used the maximum number of tool calls for one turn \
+             before I had enough to answer. Ask a narrower question (for example about one \
+             component or one file), or ask me to continue."
+        ),
+        IncompleteReason::ModelError(e) => format!(
+            "{INCOMPLETE_ANSWER_PREFIX}: the request to the model failed ({}). Please try again, \
+             or pick a different model.",
+            short_error(e)
+        ),
+        IncompleteReason::EmptyReply => format!(
+            "{INCOMPLETE_ANSWER_PREFIX}: the model returned an empty reply. Please try again, or \
+             pick a different model."
+        ),
     }
-    format!(
-        "I reached the tool-call limit before completing my analysis. \
-         Here is what I found so far:\n\n{tool_summary}"
+}
+
+/// True for the placeholder answers produced by [`incomplete_answer`].
+pub(crate) fn is_incomplete_answer(text: &str) -> bool {
+    text.trim_start().starts_with(INCOMPLETE_ANSWER_PREFIX)
+}
+
+const MAX_ERROR_CHARS_IN_ANSWER: usize = 300;
+
+fn short_error(error: &str) -> String {
+    let single_line = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    if single_line.chars().count() <= MAX_ERROR_CHARS_IN_ANSWER {
+        return single_line;
+    }
+    let head: String = single_line.chars().take(MAX_ERROR_CHARS_IN_ANSWER).collect();
+    format!("{head}…")
+}
+
+struct Synthesis {
+    text: String,
+    error: Option<String>,
+}
+
+impl Synthesis {
+    /// The synthesized text, else the best text streamed earlier in the turn, else an
+    /// explanation of why there is no answer.
+    fn into_answer(self, accumulated_answer: &str, accumulated_text: &str, reason_if_empty: IncompleteReason) -> String {
+        if !self.text.trim().is_empty() {
+            return self.text;
+        }
+        if !accumulated_answer.trim().is_empty() {
+            return accumulated_answer.to_string();
+        }
+        if !accumulated_text.trim().is_empty() {
+            return accumulated_text.to_string();
+        }
+        let reason = match self.error {
+            Some(e) => IncompleteReason::ModelError(e),
+            None => reason_if_empty,
+        };
+        incomplete_answer(&reason)
+    }
+}
+
+/// The text of the most recent user message that the user (or a caller acting as the user)
+/// wrote. Tool results travel as user-role messages too, so those are skipped.
+fn latest_user_text(messages: &[Message]) -> String {
+    messages.iter().rev()
+        .filter(|m| matches!(m.role, Role::User))
+        .find_map(|m| match &m.content {
+            MessageContent::Text(t) => Some(t.clone()),
+            MessageContent::Parts(parts) => {
+                let text = parts.iter()
+                    .filter_map(|p| if let ContentPart::Text { text, .. } = p { Some(text.as_str()) } else { None })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if text.is_empty() { None } else { Some(text) }
+            }
+        })
+        .unwrap_or_default()
+}
+
+/// Tools that read source or resolved facts, as opposed to locating candidates.
+fn is_deep_read_tool(name: &str) -> bool {
+    matches!(name,
+        "get_symbol_source" | "get_file_symbols" | "find_callers" | "find_callees" | "get_imports"
+        | "read_sources" | "get_evidence_pack" | "get_capability_matrix" | "find_subclasses"
     )
+}
+
+const SEARCH_NUDGE: &str = "[Note from Harvest, not from the user] You have run several searches \
+in a row without reading any results. Read the most relevant results with read_sources (or \
+get_evidence_pack for a capability question) instead of searching again, then answer from what \
+you already have.";
+
+fn append_to_last_tool_result(messages: &mut [Message], note: &str) {
+    for message in messages.iter_mut().rev() {
+        if let MessageContent::Parts(parts) = &mut message.content {
+            for part in parts.iter_mut().rev() {
+                if let ContentPart::ToolResult { content, .. } = part {
+                    content.push_str("\n\n");
+                    content.push_str(note);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn tool_names_by_call_id(messages: &[Message]) -> HashMap<String, String> {
+    let mut names = HashMap::new();
+    for message in messages {
+        if let MessageContent::Parts(parts) = &message.content {
+            for part in parts {
+                if let ContentPart::ToolUse { id, name, .. } = part {
+                    names.insert(id.clone(), name.clone());
+                }
+            }
+        }
+    }
+    names
+}
+
+fn relevance_key(tool_use_id: &str, content: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tool_use_id.hash(&mut hasher);
+    content.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn first_tool_result(message: &Message) -> Option<(String, String)> {
+    let MessageContent::Parts(parts) = &message.content else { return None };
+    parts.iter().find_map(|p| match p {
+        ContentPart::ToolResult { tool_use_id, content, .. } => Some((tool_use_id.clone(), content.clone())),
+        _ => None,
+    })
 }
 
 pub(crate) fn question_fallback() -> String {
@@ -1809,9 +1923,10 @@ fn strip_answer_preamble(text: &str) -> String {
 fn derive_phase(tool_calls: &[ToolCall]) -> &'static str {
     let has = |name: &str| tool_calls.iter().any(|c| c.name == name);
 
-    if has("find_callers") || has("find_callees") || has("run_cypher") {
+    if has("find_callers") || has("find_callees") || has("find_subclasses") || has("run_sql") {
         "Tracing relationships"
-    } else if has("get_symbol_source") || has("get_file_symbols") || has("get_imports") || has("compare_symbol_across_versions") {
+    } else if has("get_symbol_source") || has("get_file_symbols") || has("get_imports") || has("compare_symbol_across_versions")
+        || has("read_sources") || has("get_evidence_pack") || has("get_capability_matrix") {
         "Reading source"
     } else if has("list_repositories") || has("search_symbols") {
         "Searching codebase"
@@ -1921,6 +2036,17 @@ pub(crate) fn estimate_history_chars(history: &[HistoryMessage]) -> usize {
 
 const MID_TURN_COMPACTION_CHAR_THRESHOLD: usize = 150_000;
 const MID_TURN_COMPACTION_KEEP_LAST: usize = 6;
+
+/// Moves a proposed compaction split back so the kept tail never starts with tool results
+/// whose tool call would be summarized away. Providers reject a tool result that does not
+/// follow its call, so an orphaned result makes every later request in the turn fail.
+fn compaction_split_point(messages: &[Message], protected_prefix_len: usize, proposed: usize) -> usize {
+    let mut split_at = proposed.min(messages.len());
+    while split_at > protected_prefix_len && messages.get(split_at).and_then(first_tool_result).is_some() {
+        split_at -= 1;
+    }
+    split_at
+}
 
 fn estimate_messages_chars(messages: &[Message]) -> usize {
     messages.iter().map(message_chars).sum()
@@ -2509,7 +2635,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn normal_completion_with_empty_text_uses_tool_summary_not_bare_fallback() {
+    async fn normal_completion_with_empty_text_explains_instead_of_dumping_results() {
         let llm = MockLlm::new(vec![
             tool_call("my_tool"),
             text(""),
@@ -2517,7 +2643,9 @@ mod tests {
         let agent = agent_with(llm, vec![MockTool::new("my_tool", "found something useful")], 5);
         let resp = agent.query("hi", &[], &[], None).await.unwrap();
         assert!(resp.tool_calls_made < 5, "should finish before hitting max_iterations, got {}", resp.tool_calls_made);
-        assert!(resp.answer.contains("found something useful"), "answer should surface tool results, got: {}", resp.answer);
+        assert!(is_incomplete_answer(&resp.answer), "got: {}", resp.answer);
+        assert!(!resp.answer.contains("found something useful"), "raw tool output must not be the answer, got: {}", resp.answer);
+        assert!(!resp.answer.contains("maximum number of tool calls"), "the tool limit was not hit, got: {}", resp.answer);
     }
 
     #[tokio::test]
@@ -2602,8 +2730,8 @@ mod tests {
     }
 
     #[test]
-    fn derive_phase_tracing_for_run_cypher() {
-        let calls = vec![tool_call_obj("run_cypher", "MATCH (n) RETURN n")];
+    fn derive_phase_tracing_for_run_sql() {
+        let calls = vec![tool_call_obj("run_sql", "SELECT 1")];
         assert_eq!(derive_phase(&calls), "Tracing relationships");
     }
 
@@ -3387,7 +3515,9 @@ mod tests {
         let big_result = "x".repeat(20_000);
         let mut messages = protected.clone();
         for i in 0..10 {
-            messages.push(tool_result_message(&format!("tc_{i}"), big_result.clone()));
+            let id = format!("tc_{i}");
+            messages.push(tool_use_message(&[id.as_str()]));
+            messages.push(tool_result_message(&id, big_result.clone()));
         }
         let result = agent.compact_messages_mid_turn(messages.clone(), protected.len()).await;
 
@@ -3400,13 +3530,17 @@ mod tests {
         for (kept, original) in result[protected.len() + 1..].iter().zip(&messages[kept_start..]) {
             match (&kept.content, &original.content) {
                 (MessageContent::Parts(a), MessageContent::Parts(b)) => {
-                    let ContentPart::ToolResult { tool_use_id: a_id, .. } = &a[0] else { panic!("expected tool result") };
-                    let ContentPart::ToolResult { tool_use_id: b_id, .. } = &b[0] else { panic!("expected tool result") };
-                    assert_eq!(a_id, b_id);
+                    let id_of = |part: &ContentPart| match part {
+                        ContentPart::ToolResult { tool_use_id, .. } => tool_use_id.clone(),
+                        ContentPart::ToolUse { id, .. } => id.clone(),
+                        other => panic!("expected a tool call or result, got {other:?}"),
+                    };
+                    assert_eq!(id_of(&a[0]), id_of(&b[0]));
                 }
-                other => panic!("expected matching tool-result parts, got {other:?}"),
+                other => panic!("expected matching tool parts, got {other:?}"),
             }
         }
+        assert!(first_tool_result(&result[protected.len() + 1]).is_none(), "the kept tail must start with a tool call");
     }
 
     #[tokio::test]
@@ -4005,22 +4139,180 @@ mod tests {
     }
 
     #[test]
-    fn last_resort_fallback_still_mentions_tool_limit() {
-        let fb = last_resort_fallback();
-        assert!(fb.to_lowercase().contains("tool-call limit"), "last_resort_fallback should still mention tool-call limit");
+    fn incomplete_answer_names_the_actual_cause() {
+        let limit = incomplete_answer(&IncompleteReason::ToolLimit);
+        assert!(limit.contains("maximum number of tool calls"), "{limit}");
+        let failed = incomplete_answer(&IncompleteReason::ModelError("HTTP 400: bad tool order".into()));
+        assert!(failed.contains("HTTP 400: bad tool order"), "{failed}");
+        assert!(!failed.contains("tool calls"), "a model failure must not be blamed on the tool limit: {failed}");
+        let empty = incomplete_answer(&IncompleteReason::EmptyReply);
+        assert!(empty.contains("empty reply"), "{empty}");
+        for answer in [limit, failed, empty] {
+            assert!(is_incomplete_answer(&answer), "{answer}");
+        }
+        assert!(!is_incomplete_answer("The handler lives in foo.rs."));
     }
 
     #[test]
-    fn last_resort_fallback_with_summary_includes_tool_results() {
-        let fb = last_resort_fallback_with_summary("- [result] found the handler in foo.rs");
-        assert!(fb.contains("found the handler in foo.rs"));
-        assert!(fb.to_lowercase().contains("tool-call limit"));
+    fn incomplete_answer_shortens_long_errors_to_one_line() {
+        let long = format!("line one\nline two {}", "x".repeat(1000));
+        let answer = incomplete_answer(&IncompleteReason::ModelError(long));
+        assert!(!answer.contains('\n'), "{answer}");
+        assert!(answer.chars().count() < 600, "{answer}");
     }
 
     #[test]
-    fn last_resort_fallback_with_summary_falls_back_when_no_tool_results() {
-        let fb = last_resort_fallback_with_summary("No tool results were collected.");
-        assert_eq!(fb, last_resort_fallback());
+    fn latest_user_text_skips_tool_results() {
+        let messages = vec![
+            Message::system("system"),
+            Message::user("Which drivers support HA?"),
+            Message { role: Role::Assistant, content: MessageContent::Parts(vec![ContentPart::ToolUse {
+                id: "tc_1".into(), name: "search_symbols".into(), input: serde_json::json!({}), thought_signature: None,
+            }]) },
+            result_message(false),
+        ];
+        assert_eq!(latest_user_text(&messages), "Which drivers support HA?");
+    }
+
+    #[test]
+    fn append_to_last_tool_result_keeps_the_note_inside_the_result() {
+        let mut messages = vec![Message::user("q"), result_message(false), result_message(false)];
+        append_to_last_tool_result(&mut messages, "NOTE");
+        let contents: Vec<String> = messages.iter().filter_map(first_tool_result).map(|(_, c)| c).collect();
+        assert_eq!(contents, vec!["ok".to_string(), "ok\n\nNOTE".to_string()]);
+        assert_eq!(messages.len(), 3, "the note must not add a message");
+    }
+
+    #[test]
+    fn batch_reads_count_as_reading_source() {
+        for name in ["read_sources", "get_evidence_pack", "get_capability_matrix", "get_symbol_source"] {
+            assert!(is_deep_read_tool(name), "{name}");
+        }
+        assert!(!is_deep_read_tool("search_symbols"));
+    }
+
+    fn tool_use_message(ids: &[&str]) -> Message {
+        Message { role: Role::Assistant, content: MessageContent::Parts(ids.iter().map(|id| ContentPart::ToolUse {
+            id: (*id).into(), name: "read_sources".into(), input: serde_json::json!({}), thought_signature: None,
+        }).collect()) }
+    }
+
+    #[test]
+    fn compaction_split_never_orphans_tool_results() {
+        // prefix: system + user; then a call with four results, then a call with one result.
+        let mut messages = vec![Message::system("s"), Message::user("q"), tool_use_message(&["a", "b", "c", "d"])];
+        messages.extend((0..4).map(|_| result_message(false)));
+        messages.push(tool_use_message(&["e"]));
+        messages.push(result_message(false));
+        // Keeping the last 6 would start the tail on the third result of the first call.
+        let proposed = messages.len() - 6;
+        assert!(first_tool_result(&messages[proposed]).is_some());
+        let split = compaction_split_point(&messages, 2, proposed);
+        assert_eq!(split, 2, "the split must move back to the tool call that owns the results");
+        assert!(first_tool_result(&messages[split]).is_none());
+    }
+
+    #[test]
+    fn compaction_split_keeps_a_split_that_starts_at_a_tool_call() {
+        let mut messages = vec![Message::system("s"), Message::user("q"), tool_use_message(&["a"]), result_message(false)];
+        messages.push(tool_use_message(&["b"]));
+        messages.push(result_message(false));
+        assert_eq!(compaction_split_point(&messages, 2, 4), 4);
+    }
+
+    /// Plays back a script in which any step may fail, and records every request's messages.
+    struct ScriptedLlm {
+        steps: Mutex<VecDeque<std::result::Result<LlmResponse, String>>>,
+        requests: Mutex<Vec<Vec<Message>>>,
+    }
+
+    impl ScriptedLlm {
+        fn new(steps: Vec<std::result::Result<LlmResponse, String>>) -> Arc<Self> {
+            Arc::new(Self { steps: Mutex::new(steps.into()), requests: Mutex::new(Vec::new()) })
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ScriptedLlm {
+        fn id(&self) -> &str { "scripted-llm" }
+        fn kind(&self) -> &str { "mock" }
+        fn default_model(&self) -> &str { "mock-model" }
+
+        async fn list_models(&self) -> Result<Vec<crate::llm::types::ModelInfo>> { Ok(vec![]) }
+
+        async fn chat_with(&self, _model: Option<&str>, messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
+            self.requests.lock().unwrap().push(messages.to_vec());
+            match self.steps.lock().unwrap().pop_front() {
+                Some(Ok(response)) => Ok(response),
+                Some(Err(e)) => Err(anyhow::anyhow!(e)),
+                None => Err(anyhow::anyhow!("ScriptedLlm: no more steps")),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_reply_after_tool_calls_is_recovered_by_synthesis() {
+        let llm = MockLlm::new(vec![tool_call("my_tool"), text(""), text("The handler is in foo.rs.")]);
+        let agent = agent_with(llm, vec![MockTool::new("my_tool", "found something useful")], 5);
+        let resp = agent.query("where is the handler?", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "The handler is in foo.rs.");
+    }
+
+    #[tokio::test]
+    async fn stream_failure_is_not_reported_as_the_tool_limit() {
+        let llm = ScriptedLlm::new(vec![
+            Ok(tool_call("my_tool")),
+            Err("OpenAI-compat API error 400: invalid message order".into()),
+            Err("OpenAI-compat API error 400: invalid message order".into()),
+        ]);
+        let agent = agent_with(llm, vec![MockTool::new("my_tool", "{\"raw\": \"json\"}")], 20);
+        let resp = agent.query("q", &[], &[], None).await.unwrap();
+        assert!(is_incomplete_answer(&resp.answer), "{}", resp.answer);
+        assert!(resp.answer.contains("invalid message order"), "{}", resp.answer);
+        assert!(!resp.answer.contains("tool calls"), "{}", resp.answer);
+        assert!(!resp.answer.contains("raw"), "raw tool output must not be shown as the answer: {}", resp.answer);
+    }
+
+    #[tokio::test]
+    async fn stream_failure_after_tool_calls_recovers_with_synthesis() {
+        let llm = ScriptedLlm::new(vec![
+            Ok(tool_call("my_tool")),
+            Err("connection reset".into()),
+            Ok(text("Recovered answer.")),
+        ]);
+        let agent = agent_with(llm, vec![MockTool::new("my_tool", "result")], 20);
+        let resp = agent.query("q", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "Recovered answer.");
+    }
+
+    #[tokio::test]
+    async fn search_nudge_never_separates_a_tool_call_from_its_result() {
+        let search = || LlmResponse::ToolCalls {
+            calls: vec![ToolCall { id: "tc_s".into(), name: "search_symbols".into(), input: serde_json::json!({ "query": "x" }), thought_signature: None }],
+            preamble: String::new(),
+            usage: Usage::default(),
+        };
+        let llm = ScriptedLlm::new(vec![Ok(search()), Ok(search()), Ok(search()), Ok(text("done"))]);
+        let agent = agent_with(Arc::clone(&llm) as Arc<dyn LlmProvider>, vec![MockTool::new("search_symbols", "hits")], 10);
+        let resp = agent.query("find x", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "done");
+
+        let requests = llm.requests.lock().unwrap();
+        let last = requests.last().expect("at least one request");
+        for (i, message) in last.iter().enumerate() {
+            let MessageContent::Parts(parts) = &message.content else { continue };
+            if parts.iter().any(|p| matches!(p, ContentPart::ToolUse { .. })) {
+                let next = last.get(i + 1).expect("a tool call must be followed by its result");
+                assert!(first_tool_result(next).is_some(), "message after a tool call must be its result, got {:?}", next.content);
+            }
+        }
+        let nudged = last.iter().filter_map(first_tool_result).any(|(_, c)| c.contains("Note from Harvest"));
+        assert!(nudged, "the nudge should be attached to a tool result");
+        assert!(
+            !last.iter().any(|m| matches!(&m.content, MessageContent::Text(t) if t.contains("searched")
+                || t.contains("Note from Harvest"))),
+            "the nudge must not be sent as a user message",
+        );
     }
 
     // ── Fix 6: synthesis ToolCalls with preamble uses preamble ──
@@ -4681,6 +4973,45 @@ mod tests {
             .find(|r| r.contains("maximum number of tool calls"))
             .expect("max-iterations path should have issued a synthesis prompt");
         assert!(!synthesis.contains("blanket yes or no"), "uniform findings should use the uniform max-iterations prompt");
+    }
+
+    #[tokio::test]
+    async fn relevance_scoring_sees_the_question_and_survives_multibyte_results() {
+        let server = httpmock::prelude::MockServer::start();
+        let relevance_with_goal = server.mock(|when, then| {
+            when.method("POST").path("/")
+                .body_includes("\"relevance\"")
+                .body_includes("which drivers support HA");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": { "relevance": { "type": "noul", "noul": 0.05 } },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {},
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let so = mock_system_one_client(&server.base_url());
+        // One ASCII byte then 3-byte characters, so byte offsets 200 and 2000 fall mid-character.
+        let multibyte = format!("x{}", "…".repeat(1500));
+        let llm = MockLlm::new(vec![
+            tool_call("t1"), tool_call("t2"), tool_call("t3"), tool_call("t4"),
+            text("done"),
+        ]);
+        let tools: Vec<Box<dyn Tool>> = (1..=4)
+            .map(|i| MockTool::new(&format!("t{i}"), &multibyte) as Box<dyn Tool>)
+            .collect();
+        let agent = Agent::new(llm, tools, 10)
+            .with_system_one(Some(so))
+            .with_thresholds(0.7, 0.99, 0.4, 0.99, 2, 0.99, 99, 0.99);
+        let resp = agent.query("which drivers support HA?", &[], &[], None).await.unwrap();
+        assert_eq!(resp.answer, "done");
+        assert!(relevance_with_goal.calls() >= 1, "relevance scoring must be asked about the user's question, not an empty goal");
     }
 
     #[tokio::test]
