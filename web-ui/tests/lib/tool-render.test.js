@@ -30,10 +30,31 @@ describe('describeToolCall', () => {
     expect(label).toContain('build-box');
   });
 
-  it('describes run_cypher without leaking the raw query', () => {
-    const label = describeToolCall('run_cypher', { query: 'MATCH (n:Function) RETURN n LIMIT 5' });
-    expect(label).not.toContain('MATCH');
+  it('describes run_sql without leaking the raw query', () => {
+    const label = describeToolCall('run_sql', { query: 'SELECT name FROM code_symbols LIMIT 5' });
+    expect(label).not.toContain('SELECT');
     expect(label.toLowerCase()).toContain('graph');
+  });
+
+  it('pluralizes symbol kinds correctly', () => {
+    expect(describeToolCall('search_symbols', { query: 'Driver', kind: 'class' })).toBe('Searching for "Driver" classes');
+    expect(describeToolCall('search_symbols', { query: 'run', kind: 'function' })).toBe('Searching for "run" functions');
+    expect(describeToolCall('search_symbols', { query: 'x', kind: 'any' })).toBe('Searching for "x"');
+  });
+
+  it('describes a directory listing by its path', () => {
+    const label = describeToolCall('search_symbols', { query: '', path_prefix: 'cinder/volume/drivers/', kind: 'class', repo: 'cinder' });
+    expect(label).toBe('Listing classes under cinder/volume/drivers/ in cinder');
+  });
+
+  it('describes find_subclasses with its base class', () => {
+    expect(describeToolCall('find_subclasses', { class: 'BaseVD', path_prefix: 'cinder/volume/drivers/' }))
+      .toBe('Finding subclasses of BaseVD under cinder/volume/drivers/');
+  });
+
+  it('describes capability lookups by capability name', () => {
+    expect(describeToolCall('get_capability_matrix', { capability: 'SUPPORTS_ACTIVE_ACTIVE', classes: ['A'] }))
+      .toBe('Resolving SUPPORTS_ACTIVE_ACTIVE across classes');
   });
 
   it('describes create_lxd_agent', () => {
