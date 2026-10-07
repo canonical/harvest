@@ -602,7 +602,7 @@ impl SystemOneClient {
         tool_result: &str,
         goal: &str,
     ) -> Result<f64> {
-        let truncated = &tool_result[..tool_result.len().min(2000)];
+        let truncated: String = tool_result.chars().take(2000).collect();
         let mut questions = HashMap::new();
         questions.insert(
             "relevance".to_string(),
