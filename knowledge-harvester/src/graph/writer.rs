@@ -5,6 +5,15 @@ use harvest_db::{Db, Tx};
 use serde_json::{json, Value};
 
 use super::model::ParsedFile;
+use crate::parser::PARSER_VERSION;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestionStatus {
+    NotIngested,
+    /// Ingested by an older parser, so it lacks later parser fixes.
+    Stale { parser_version: i32 },
+    Current,
+}
 
 const CLASS_LINKS: &[(&str, &str)] = &[
     ("bases", "INHERITS"),
@@ -27,12 +36,22 @@ impl GraphWriter {
         Ok(())
     }
 
+    /// True when the version is ingested by the current parser. A version ingested by an
+    /// older parser counts as not ingested, so it is harvested again.
     pub async fn is_ingested(&self, repo: &str, tag: &str) -> Result<bool> {
+        Ok(self.ingestion_status(repo, tag).await? == IngestionStatus::Current)
+    }
+
+    pub async fn ingestion_status(&self, repo: &str, tag: &str) -> Result<IngestionStatus> {
         let rows = self.db.query(
-            "SELECT 1 AS ok FROM code_versions WHERE repo = $repo AND tag = $tag AND ingested LIMIT 1",
+            "SELECT parser_version FROM code_versions WHERE repo = $repo AND tag = $tag AND ingested LIMIT 1",
             json!({ "repo": repo, "tag": tag }),
         ).await?;
-        Ok(!rows.is_empty())
+        Ok(match rows.first().and_then(|r| r["parser_version"].as_i64()) {
+            None => IngestionStatus::NotIngested,
+            Some(v) if v < i64::from(PARSER_VERSION) => IngestionStatus::Stale { parser_version: v as i32 },
+            Some(_) => IngestionStatus::Current,
+        })
     }
 
     pub async fn ingested_versions(&self, repo: &str) -> Result<Vec<String>> {
@@ -62,7 +81,8 @@ impl GraphWriter {
              INSERT INTO versions (repository_id, tag, timestamp, ingested)
              SELECT id, $tag, $timestamp::bigint, $ingested::boolean FROM r
              ON CONFLICT (repository_id, tag)
-                 DO UPDATE SET timestamp = EXCLUDED.timestamp, ingested = EXCLUDED.ingested",
+                 DO UPDATE SET timestamp = EXCLUDED.timestamp,
+                               ingested  = versions.ingested OR EXCLUDED.ingested",
             json!({ "repo": repo, "tag": tag, "timestamp": timestamp, "ingested": ingested }),
         ).await?;
         Ok(())
@@ -81,7 +101,10 @@ impl GraphWriter {
         for (column, relation) in CLASS_LINKS {
             link_class_edges(&tx, version_id, column, relation).await?;
         }
-        tx.execute("UPDATE versions SET ingested = true WHERE id = $vid", json!({ "vid": version_id })).await?;
+        tx.execute(
+            "UPDATE versions SET ingested = true, parser_version = $pv WHERE id = $vid",
+            json!({ "vid": version_id, "pv": PARSER_VERSION }),
+        ).await?;
         tx.commit().await
     }
 }
