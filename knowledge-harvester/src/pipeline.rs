@@ -8,8 +8,8 @@ use harvest_db::Db;
 
 use crate::config::{Config, RepoConfig};
 use crate::git::GitClient;
-use crate::graph::writer::GraphWriter;
-use crate::parser::ParserRegistry;
+use crate::graph::writer::{GraphWriter, IngestionStatus};
+use crate::parser::{ParserRegistry, PARSER_VERSION};
 
 pub struct Pipeline {
     repositories: Vec<RepoConfig>,
@@ -121,10 +121,20 @@ impl Pipeline {
         self.emit(format!("Found {} ref(s) to process.", tags.len()));
 
         for tag in tags {
-            if !force && self.writer.is_ingested(&repo.name, &tag.name).await? {
-                self.emit(format!("Ref '{}' already ingested, skipping.", tag.name));
-                tracing::debug!(repo = repo.name, tag = tag.name, "already ingested, skipping");
-                continue;
+            match self.writer.ingestion_status(&repo.name, &tag.name).await? {
+                IngestionStatus::Current if !force => {
+                    self.emit(format!("Ref '{}' already ingested, skipping.", tag.name));
+                    tracing::debug!(repo = repo.name, tag = tag.name, "already ingested, skipping");
+                    continue;
+                }
+                IngestionStatus::Stale { parser_version } => {
+                    self.emit(format!(
+                        "Ref '{}' was ingested by an older parser (version {parser_version}, current {PARSER_VERSION}); re-ingesting.",
+                        tag.name,
+                    ));
+                    tracing::info!(repo = repo.name, tag = tag.name, parser_version, current = PARSER_VERSION, "re-ingesting stale version");
+                }
+                _ => {}
             }
             self.process_version(&repo_path, &repo.name, &tag.name, tag.timestamp).await?;
         }
