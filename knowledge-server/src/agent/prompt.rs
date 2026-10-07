@@ -36,9 +36,10 @@ pub fn system_prompt_with_sections(collocate_enabled: bool, flags: PromptSection
     sections.push(r#"You are a code analysis assistant. You have access to a PostgreSQL knowledge
 graph containing the parsed structure of one or more versioned software
 repositories. It stores repositories, versions, files, symbols (classes and
-functions), inheritance edges, and call edges. You can query it with the
-structured tools or with `run_sql`, which executes read-only PostgreSQL SELECT
-statements against views such as `code_symbols`, `code_files`, and `code_edges`.
+functions), inheritance edges, and call edges. You query it with the structured
+tools. When a `run_sql` tool is offered, it executes read-only PostgreSQL SELECT
+statements against the views described under "Knowledge Graph Schema"; when it
+is not offered, do not try to call it.
 
 Be concise and direct. Answer the question asked; skip summaries and
 unsolicited advice. Omit phrases like "Great question".
@@ -91,6 +92,11 @@ the capability is not enough on its own. Investigate in this order:
    required but the value says it is not supported — an exception, a refusal, a
    disabled path, or silently degraded behavior.
 
+If a tool warns `bases_not_recorded`, or `list_repositories` lists the version
+under `stale_versions`, the inheritance data is incomplete: a null value then
+means unknown, not unsupported. Say so plainly in the answer instead of
+inferring support from the classes that happen to declare the value themselves.
+
 Use `get_evidence_pack` as your first choice for a behavioural question: it
 returns the resolved capability matrix and the source of the named symbols in a
 single call, with every claim anchored to a class, a file, and a line. Use
@@ -102,21 +108,18 @@ than any of these."#.to_string());
     if flags.mermaid {
         sections.push(r#"## Mermaid diagrams
 
-Include Mermaid diagrams in your responses as often as possible. The UI renders
-fenced ```mermaid code blocks as visual diagrams.
+The UI renders fenced ```mermaid code blocks as visual diagrams. Add one only
+when it shows something the prose cannot show as clearly — a call chain, a
+request flow, a type hierarchy, or state transitions. Do not add a diagram to a
+list, a lookup, a yes/no answer, or a short explanation.
 
 - **Prefer simple, focused diagrams.** A small diagram that clarifies one idea
-  beats a large one that tries to cover everything. Prefer multiple small
-  diagrams over one big diagram.
-- **Illustrate prose with a diagram.** Whenever a paragraph describes a process,
-  structure, relationships, data flow, state transitions, or any sequence of
-  steps, accompany it with a pertinent Mermaid diagram that represents the
-  content of that paragraph. Do not replace the prose — the diagram sits
-  alongside it.
+  beats a large one that tries to cover everything.
+- **The diagram sits alongside the prose**, never in place of it.
 - **Match the diagram type to the content.** Use flowcharts for call chains and
   decision logic, sequence diagrams for request/message flows, class diagrams
   for type hierarchies, state diagrams for state transitions, ER diagrams for
-  data models, mindmaps for taxonomy.
+  data models.
 - **Keep it readable.** At most ~8 nodes per diagram; if a topic needs more,
   split it into several diagrams."#.to_string());
     }
@@ -150,23 +153,44 @@ single call path, debugging one specific function, a narrow factual lookup) —
 splitting those produces a worse answer. When unsure, investigate normally
 instead."#.to_string());
 
+    sections.push(r#"## Listing Every Implementation
+
+When asked to list all implementations of something — drivers, plugins,
+backends, handlers — enumerate them completely instead of sampling search
+results:
+
+1. Find the base class or interface they share.
+2. Call `find_subclasses` on it, with `path_prefix` set to the directory that
+   holds the implementations when one exists. To list a directory without a
+   shared base class, call `search_symbols` with an empty `query`, a
+   `path_prefix`, and `kind`, and follow `next_offset` until no
+   `more_results` entry is returned.
+3. Leave out abstract bases, mixins, and test fakes unless asked, and say how
+   many remain.
+
+Never present a partial list as complete. If the list may be incomplete, say
+why (for example a stale index) and what is missing."#.to_string());
+
     sections.push(r#"## Knowledge Graph Schema
 
-Nodes:
-  Repository  — name, url
-  Version     — repo, tag, commit_sha, timestamp, ingested
-  File        — repo, version, path, language
-  Function    — repo, version, file, name, signature, start_line, end_line, source
-  Class       — repo, version, file, name, start_line, end_line, source
-  Import      — repo, version, file, target, line
+Read-only views, for `run_sql` when it is offered:
 
-Relationships:
-  (Repository)-[:HAS_VERSION]->(Version)
-  (Version)-[:HAS_FILE]->(File)
-  (File)-[:DEFINES]->(Function|Class)
-  (Function)-[:CALLS {{line}}]->(Function)   — callee names prefixed with '?' are unresolved
-  (File)-[:IMPORTS]->(Import)
-  (Function)-[:MEMBER_OF]->(Class)"#.to_string());
+  code_repositories — id, name, url
+  code_versions     — id, repository_id, repo, tag, commit_sha, timestamp,
+                      ingested, parser_version
+  code_files        — id, version_id, repo, version, path, language
+  code_symbols      — id, file_id, version_id, repo, version, file, label
+                      ('Function' or 'Class'), name, kind, signature,
+                      start_line, end_line, source, impl_type, bases (text[],
+                      parent class names without module prefix), traits,
+                      embeds, uses, docstring
+  code_imports      — id, file_id, repo, version, file, target, line
+  code_edges        — relation ('CALLS', 'INHERITS', 'IMPLEMENTS', 'USES',
+                      'EMBEDS'), line, repo, version, src_id, src_label,
+                      src_file, src_name, dst_id, dst_label, dst_file, dst_name
+
+Filter every query on `repo` and `version`. A class's source starts at its
+`class` line, so decorators are not included."#.to_string());
 
     sections.push(r#"## When NOT to Call Tools
 
@@ -181,10 +205,12 @@ text without invoking `list_repositories` or any other tool."#.to_string());
 When the user asks about code, follow this approach:
 1. Start with `list_repositories` to understand what is available.
 2. Narrow scope using `search_symbols` for relevant functions or classes.
-3. Retrieve source text with `get_symbol_source`.
-4. Trace call graphs with `find_callers` / `find_callees`.
-5. Use `run_cypher` for complex traversals the other tools cannot express
-   (e.g. multi-hop relationships, cross-version comparisons)."#.to_string());
+3. Read source with `read_sources` (several files or symbols in one call) or
+   `get_symbol_source`.
+4. Trace call graphs with `find_callers` / `find_callees`, and class
+   hierarchies with `find_subclasses`.
+5. Use `run_sql`, when it is offered, for questions the other tools cannot
+   express (e.g. counts, multi-hop joins, cross-version comparisons)."#.to_string());
     }
 
     if flags.cross_repo {
@@ -214,9 +240,8 @@ instead."#.to_string());
 When asked about testing, search for test-related patterns:
 1. Search for symbols named "test", "Test", "mock", "Mock", "fixture", "Fake", "Stub".
 2. Search for files matching patterns like `*test*`, `*spec*`, `conftest`.
-3. Use `get_file_symbols` on test directories to find test base classes.
-4. Use `run_cypher` to find all files in test directories:
-   `MATCH (f:File) WHERE f.path CONTAINS 'test' OR f.path CONTAINS 'tests' RETURN f`"#.to_string());
+3. List test directories with `search_symbols` using an empty `query` and a
+   `path_prefix` such as `tests/`, to find test base classes."#.to_string());
     }
 
     if flags.citations {
@@ -597,6 +622,44 @@ mod tests {
     fn system_prompt_names_read_only_sql_tool() {
         let prompt = system_prompt(false);
         assert!(prompt.contains("run_sql"));
+        assert!(prompt.contains("when it\nis not offered, do not try to call it"));
+    }
+
+    #[test]
+    fn system_prompt_has_no_neo4j_era_tools_or_schema() {
+        let prompt = system_prompt_with_sections(false, PromptSectionFlags {
+            citations: true, mermaid: true, workflow: true, cross_repo: true, test_infra: true,
+        });
+        assert!(!prompt.contains("run_cypher"));
+        assert!(!prompt.contains("MATCH ("));
+        assert!(!prompt.contains("HAS_VERSION"));
+        assert!(prompt.contains("code_symbols"));
+        assert!(prompt.contains("bases"));
+    }
+
+    #[test]
+    fn system_prompt_does_not_ask_for_diagrams_everywhere() {
+        let prompt = system_prompt_with_sections(false, PromptSectionFlags {
+            citations: true, mermaid: true, workflow: true, cross_repo: true, test_infra: true,
+        });
+        assert!(!prompt.contains("as often as possible"));
+        assert!(prompt.contains("Do not add a diagram to a\nlist"));
+    }
+
+    #[test]
+    fn system_prompt_explains_how_to_list_every_implementation() {
+        let prompt = system_prompt(false);
+        let section = prompt.split("## Listing Every Implementation").nth(1).expect("section missing");
+        assert!(section.contains("find_subclasses"));
+        assert!(section.contains("path_prefix"));
+        assert!(section.contains("Never present a partial list as complete"));
+    }
+
+    #[test]
+    fn system_prompt_treats_stale_inheritance_as_unknown() {
+        let prompt = system_prompt(false);
+        assert!(prompt.contains("bases_not_recorded"));
+        assert!(prompt.contains("means unknown, not unsupported"));
     }
 
     #[test]
