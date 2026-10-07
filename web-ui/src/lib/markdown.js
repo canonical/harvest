@@ -6,8 +6,10 @@ import { escapeHtml as esc } from './utils.js';
 // The line number (and range) is optional: a citation can point at a whole
 // file ([repo:version:file]) rather than one location, matching how the
 // backend's parse_citations treats a missing line as "no specific line".
+// Repository names are display names and may contain spaces and parentheses,
+// e.g. "cinder (upstream openstack)"; the version and file never contain whitespace.
 const BRACKET_RE = /\[([^\[\]]+)\]/g;
-const CITATION_ONE_RE = /^([^:\s]+):([^:\s]+):([^:\s]+)(?::(\d+(?:[–-]\d+)?(?:,\d+(?:[–-]\d+)?)*))?$/;
+const CITATION_ONE_RE = /^([^:\s\[\]](?:[^:\[\]]*[^:\s\[\]])?):([^:\s]+):([^:\s]+)(?::(\d+(?:[–-]\d+)?(?:,\d+(?:[–-]\d+)?)*))?$/;
 
 function splitCitationBody(body) {
   const groups = [];
@@ -59,6 +61,12 @@ marked.use({
 
 const LINE_RANGE_RE = /^(\d+)(?:[–-](\d+))?/;
 
+// The label is inserted before markdown parsing, so paths like `__init__.py`
+// would otherwise turn into emphasis inside the link.
+function labelHtml(label) {
+  return esc(label).replace(/[_*~`]/g, (c) => `&#${c.charCodeAt(0)};`);
+}
+
 function renderOneCitation(repo, version, file, lineRaw, repoUrlMap, citationIndex) {
   let startLine = 0, endLine = null;
   if (lineRaw) {
@@ -74,10 +82,10 @@ function renderOneCitation(repo, version, file, lineRaw, repoUrlMap, citationInd
   const repoUrl = repoUrlMap[repo];
   const fileUrl = repoUrl ? buildFileUrl(repoUrl, version, file, startLine, endLine) : null;
   if (fileUrl) {
-    return `<a href="${esc(fileUrl)}" class="citation" target="_blank" rel="noopener noreferrer" title="${esc(title)}">${esc(label)}</a>`;
+    return `<a href="${esc(fileUrl)}" class="citation" target="_blank" rel="noopener noreferrer" title="${esc(title)}">${labelHtml(label)}</a>`;
   }
   const escapedMatch = `[${repo}:${version}:${file}${lineRaw ? `:${lineRaw}` : ''}]`.replace(/[<>"&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '"': '&quot;', '&': '&amp;' }[c]));
-  return `<span class="citation" data-citation="${escapedMatch}" title="${esc(title)}">${esc(label)}</span>`;
+  return `<span class="citation" data-citation="${escapedMatch}" title="${esc(title)}">${labelHtml(label)}</span>`;
 }
 
 export function substituteCitations(text, repoUrlMap = {}, citationIndex = {}) {

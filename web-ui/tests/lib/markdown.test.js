@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderMarkdown, buildFileUrl, buildCitationIndex, substituteCitations } from '../../src/lib/markdown.js';
+import { renderMarkdown, buildFileUrl, buildCitationIndex, substituteCitations, parseCitations } from '../../src/lib/markdown.js';
 
 describe('substituteCitations', () => {
   const sources = [{ repo: 'acme/repo', version: 'main', file: 'src/lib.rs', line: 42 }];
@@ -127,5 +127,27 @@ describe('renderMarkdown citations', () => {
   it('accepts an en-dash range separator', () => {
     const html = renderMarkdown('See [acme/repo:main:src/lib.rs:42–50]', { 'acme/repo': 'https://github.com/acme/repo' }, citationIndex);
     expect(html).toContain('href="https://github.com/acme/repo/blob/main/src/lib.rs#L42-L50"');
+  });
+});
+
+describe('citations whose repository name has spaces and parentheses', () => {
+  const repo = 'cinder (upstream openstack)';
+  const text = `Defaults to False [${repo}:unmaintained/2024.1:cinder/interface/__init__.py:22-25].`;
+
+  it('parses them', () => {
+    expect(parseCitations(text)).toEqual([
+      { repo, version: 'unmaintained/2024.1', file: 'cinder/interface/__init__.py', line: 22 },
+    ]);
+  });
+
+  it('renders them as links and keeps the path out of markdown emphasis', () => {
+    const html = renderMarkdown(text, { [repo]: 'https://opendev.org/openstack/cinder' }, {});
+    expect(html).toContain('class="citation"');
+    expect(html).toContain('cinder/interface/__init__.py#L22-L25');
+    expect(html).not.toContain('<strong>init</strong>');
+  });
+
+  it('leaves bracketed prose alone', () => {
+    expect(parseCitations('[Note: see the driver: lvm.py]')).toEqual([]);
   });
 });
