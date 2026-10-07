@@ -86,6 +86,24 @@ async fn list_repositories_returns_ingested_repos() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn list_repositories_flags_versions_indexed_by_an_older_parser() {
+    setup!(client, test_db);
+    let tool = ListRepositoriesTool(Arc::clone(&client));
+    let fresh: Vec<Value> = serde_json::from_str(&tool.execute(json!({})).await.unwrap()).unwrap();
+    let myrepo = fresh.iter().find(|r| r["repo"] == "myrepo").unwrap();
+    assert!(myrepo.get("stale_versions").is_none(), "freshly written versions are current: {myrepo}");
+
+    test_db.db.execute(
+        "UPDATE versions SET parser_version = 0 WHERE tag = 'v1.0'",
+        json!({}),
+    ).await.unwrap();
+    let stale: Vec<Value> = serde_json::from_str(&tool.execute(json!({})).await.unwrap()).unwrap();
+    let myrepo = stale.iter().find(|r| r["repo"] == "myrepo").unwrap();
+    assert_eq!(myrepo["stale_versions"], json!(["v1.0"]));
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_repositories_empty_graph_returns_empty_array() {
     let test_db = TestDb::new().await;
     let tool = ListRepositoriesTool(Arc::new(test_db.db.clone()));
@@ -731,6 +749,7 @@ async fn hybrid_sql_executes_the_full_lexical_cte_chain() {
     let sql = hybrid_sql_for(&client).await;
     let params = json!({
         "query": "alpha", "repo": "myrepo", "version": "", "kind": "any", "limit": 10,
+        "path_prefix": "", "offset": 0,
         "qvec": "[0.0]", "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
     });
     let rows = client
@@ -747,6 +766,7 @@ async fn hybrid_sql_reports_capability_matches() {
     let sql = hybrid_sql_for(&client).await;
     let params = json!({
         "query": "i32", "repo": "myrepo", "version": "", "kind": "any", "limit": 10,
+        "path_prefix": "", "offset": 0,
         "qvec": "[0.0]", "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
     });
     let rows = client
@@ -787,4 +807,121 @@ async fn disabling_semantic_search_leaves_the_tool_set_unchanged() {
         .collect();
     assert_eq!(plain, with_none);
     assert!(plain.contains(&"search_symbols".to_string()));
+}
+
+fn py_class(repo: &str, file: &str, name: &str, line: u32, bases: &[&str]) -> ClassNode {
+    let declared = if bases.is_empty() { String::new() } else { format!("(mod.{})", bases.join(", mod.")) };
+    ClassNode {
+        repo: repo.into(), version: "v1".into(), file: file.into(),
+        name: name.into(), kind: "class".into(), start_line: line, end_line: line + 2,
+        source: format!("class {name}{declared}:\n    pass\n"),
+        bases: bases.iter().map(|b| b.to_string()).collect(),
+        traits: vec![], embeds: vec![], uses: vec![], docstring: None,
+    }
+}
+
+async fn seed_hierarchy(client: &Arc<harvest_db::Db>) {
+    let writer = GraphWriter::new(client.as_ref().clone());
+    writer.upsert_repository("tree", "https://example.com/tree.git").await.unwrap();
+    writer.upsert_version("tree", "v1", 1, false).await.unwrap();
+    let file = |path: &str, classes: Vec<ClassNode>| ParsedFile {
+        path: path.into(), language: "python".into(), functions: vec![], classes, imports: vec![],
+    };
+    writer.write_version("tree", "v1", &[
+        file("pkg/base.py", vec![py_class("tree", "pkg/base.py", "Base", 1, &[])]),
+        file("pkg/drivers/mid.py", vec![py_class("tree", "pkg/drivers/mid.py", "Mid", 3, &["Base"])]),
+        file("pkg/drivers/leaf.py", vec![
+            py_class("tree", "pkg/drivers/leaf.py", "LeafA", 5, &["Mid"]),
+            py_class("tree", "pkg/drivers/leaf.py", "LeafB", 20, &["Mid", "Base"]),
+        ]),
+        file("pkg/other.py", vec![
+            py_class("tree", "pkg/other.py", "Other", 1, &["Base"]),
+            py_class("tree", "pkg/other.py", "Unrelated", 9, &[]),
+        ]),
+    ]).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn find_subclasses_returns_direct_and_indirect_subclasses() {
+    setup!(client, _test_db);
+    seed_hierarchy(&client).await;
+    let tool = FindSubclassesTool(Arc::clone(&client));
+    let rows: Vec<Value> = serde_json::from_str(
+        &tool.execute(json!({ "repo": "tree", "version": "v1", "class": "Base" })).await.unwrap()
+    ).unwrap();
+    assert_eq!(names_from(&rows), ["LeafA", "LeafB", "Mid", "Other"]);
+    let leaf_b = rows.iter().find(|r| r["name"] == "LeafB").unwrap();
+    assert_eq!(leaf_b["depth"], 1, "the nearest path to the base wins");
+    let leaf_a = rows.iter().find(|r| r["name"] == "LeafA").unwrap();
+    assert_eq!((leaf_a["parent"].clone(), leaf_a["depth"].clone()), (json!("Mid"), json!(2)));
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn find_subclasses_filters_by_directory_and_accepts_a_module_prefix() {
+    setup!(client, _test_db);
+    seed_hierarchy(&client).await;
+    let tool = FindSubclassesTool(Arc::clone(&client));
+    let rows: Vec<Value> = serde_json::from_str(
+        &tool.execute(json!({
+            "repo": "tree", "version": "v1", "class": "mod.Base", "path_prefix": "pkg/drivers/"
+        })).await.unwrap()
+    ).unwrap();
+    assert_eq!(names_from(&rows), ["LeafA", "LeafB", "Mid"]);
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn find_subclasses_explains_an_empty_result() {
+    setup!(client, _test_db);
+    seed_hierarchy(&client).await;
+    let tool = FindSubclassesTool(Arc::clone(&client));
+    let out = tool.execute(json!({ "repo": "tree", "version": "v1", "class": "Unrelated" })).await.unwrap();
+    assert!(out.starts_with("No subclasses"), "{out}");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn search_symbols_lists_a_directory_page_by_page() {
+    setup!(client, _test_db);
+    seed_hierarchy(&client).await;
+    let tool = SearchSymbolsTool::new(Arc::clone(&client));
+    let page = |offset: i64| {
+        let tool = &tool;
+        async move {
+            let out = tool.execute(json!({
+                "query": "", "path_prefix": "pkg/drivers/", "repo": "tree", "version": "v1",
+                "kind": "class", "limit": 2, "offset": offset,
+            })).await.unwrap();
+            serde_json::from_str::<Vec<Value>>(&out).unwrap()
+        }
+    };
+    let first = page(0).await;
+    assert_eq!(names_from(&first).len(), 2, "{first:?}");
+    assert_eq!(first.last().unwrap()["next_offset"], 2, "a further page must be announced: {first:?}");
+    let second = page(2).await;
+    assert_eq!(names_from(&second).len(), 1, "{second:?}");
+    assert!(second.iter().all(|r| r.get("more_results").is_none()), "{second:?}");
+
+    let mut all = names_from(&first);
+    all.extend(names_from(&second));
+    all.sort();
+    assert_eq!(all, ["LeafA", "LeafB", "Mid"], "every class under the directory exactly once");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn search_symbols_requires_a_query_or_a_path_prefix() {
+    setup!(client, _test_db);
+    let tool = SearchSymbolsTool::new(Arc::clone(&client));
+    assert!(tool.execute(json!({ "query": "" })).await.is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn all_tools_includes_find_subclasses() {
+    setup!(client, _test_db);
+    let names: Vec<String> = all_tools(Arc::clone(&client)).iter().map(|t| t.definition().name).collect();
+    assert!(names.contains(&"find_subclasses".to_string()), "{names:?}");
 }
