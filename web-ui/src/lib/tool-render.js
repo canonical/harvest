@@ -1,16 +1,36 @@
 import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
 import { escapeHtml as esc } from './utils.js';
 
+const KIND_PLURALS = { class: 'classes', function: 'functions' };
+
 export function describeToolCall(name, input, { hostname } = {}) {
   switch (name) {
     case 'list_repositories': return 'Discovering available repositories';
     case 'list_agents':       return 'Checking connected agents';
     case 'list_skills':       return 'Listing available skills';
     case 'search_symbols': {
-      const q = input.query ?? 'symbols';
-      const kind = input.kind && input.kind !== 'any' ? ` ${input.kind}s` : '';
       const scope = input.repo ? ` in ${input.repo}` : '';
-      return `Searching for "${q}"${kind}${scope}`;
+      const kinds = KIND_PLURALS[input.kind] ?? 'symbols';
+      if (!input.query && input.path_prefix) {
+        return `Listing ${kinds} under ${input.path_prefix}${scope}`;
+      }
+      const q = input.query || 'symbols';
+      const kind = KIND_PLURALS[input.kind] ? ` ${KIND_PLURALS[input.kind]}` : '';
+      const under = input.path_prefix ? ` under ${input.path_prefix}` : '';
+      return `Searching for "${q}"${kind}${under}${scope}`;
+    }
+    case 'find_subclasses': {
+      const under = input.path_prefix ? ` under ${input.path_prefix}` : '';
+      return `Finding subclasses of ${input.class ?? 'class'}${under}`;
+    }
+    case 'read_sources': {
+      const count = (input.files?.length ?? 0) + (input.names?.length ?? 0);
+      return count > 0 ? `Reading ${count} source${count === 1 ? '' : 's'}` : 'Reading sources';
+    }
+    case 'get_capability_matrix':
+    case 'get_evidence_pack': {
+      const capability = Array.isArray(input.capability) ? input.capability.join(', ') : input.capability;
+      return capability ? `Resolving ${capability} across classes` : 'Gathering evidence';
     }
     case 'get_symbol_source':
       return `Reading source of ${input.name ?? 'symbol'}`;
@@ -28,7 +48,7 @@ export function describeToolCall(name, input, { hostname } = {}) {
         ? `Comparing ${sym} ${input.version_a} → ${input.version_b}`
         : `Comparing ${sym} across versions`;
     }
-    case 'run_cypher': return 'Querying the code graph';
+    case 'run_sql': return 'Querying the code graph';
     case 'run_command': {
       const cmd = typeof input.command === 'string'
         ? (input.command.length > 28 ? input.command.slice(0, 28).trimEnd() + '…' : input.command)
