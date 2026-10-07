@@ -34,7 +34,7 @@ async fn seed() -> Seeded {
         .and_then(|r| r["id"].as_i64())
         .expect("version id");
 
-    let files = ["pkg/base.py", "pkg/naive.py", "pkg/active.py"];
+    let files = ["pkg/base.py", "pkg/naive.py", "pkg/active.py", "pkg/stale.py", "pkg/external.py"];
     let mut file_ids = Vec::new();
     for path in files {
         let id: i64 = db
@@ -59,6 +59,9 @@ async fn seed() -> Seeded {
         ("RootDriver", file_ids[0], base_source.to_string(), Vec::<String>::new()),
         ("NaiveDriver", file_ids[1], naive_source.to_string(), vec!["RootDriver".to_string()]),
         ("ActiveDriver", file_ids[2], active_source.to_string(), vec!["RootDriver".to_string()]),
+        // Indexed by a harvester that dropped dotted bases: the source names a parent, the index none.
+        ("StaleDriver", file_ids[3], "class StaleDriver(base.RootDriver):\n    pass\n".to_string(), Vec::new()),
+        ("ExternalDriver", file_ids[4], "class ExternalDriver(lib.RemoteDriver):\n    pass\n".to_string(), vec!["RemoteDriver".to_string()]),
     ];
 
     for (name, file_id, source, bases) in classes {
@@ -255,4 +258,53 @@ async fn cycles_in_bases_terminate() {
         .expect("cyclic bases must not hang or error");
     let rows: Vec<Value> = serde_json::from_str(&out).unwrap();
     assert_eq!(row_for(&rows, "A")["value"], Value::Null);
+    assert!(rows.iter().all(|r| r["warning"].is_null()), "a cycle is not a missing parent: {rows:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn warns_when_declared_bases_were_not_recorded() {
+    let seeded = seed().await;
+    let rows = run_matrix(&seeded.db, &["StaleDriver", "NaiveDriver"], "SUPPORTS_ACTIVE_ACTIVE").await;
+
+    assert_eq!(row_for(&rows, "StaleDriver")["value"], Value::Null);
+    let warning = rows
+        .iter()
+        .find(|r| r["warning"] == "bases_not_recorded")
+        .expect("a class whose source names parents but whose index has none must be flagged");
+    assert_eq!(warning["classes"], json!(["StaleDriver"]));
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn warns_when_a_parent_is_not_in_the_repository() {
+    let seeded = seed().await;
+    let rows = run_matrix(&seeded.db, &["ExternalDriver"], "SUPPORTS_ACTIVE_ACTIVE").await;
+
+    let warning = rows
+        .iter()
+        .find(|r| r["warning"] == "parents_not_indexed")
+        .expect("an unresolvable parent must be reported");
+    assert_eq!(warning["parents"], json!(["RemoteDriver"]));
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn complete_hierarchies_carry_no_inheritance_warning() {
+    let seeded = seed().await;
+    let rows = run_matrix(&seeded.db, &["ActiveDriver", "NaiveDriver", "RootDriver"], "SUPPORTS_ACTIVE_ACTIVE").await;
+    assert!(rows.iter().all(|r| r["warning"].is_null()), "unexpected warning in {rows:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn no_inheritance_warning_when_the_class_declares_the_value_itself() {
+    let seeded = seed().await;
+    seeded.db.execute(
+        "UPDATE symbols SET source = $src WHERE name = 'StaleDriver'",
+        json!({ "src": "class StaleDriver(base.RootDriver):\n    SUPPORTS_ACTIVE_ACTIVE = True\n" }),
+    ).await.unwrap();
+    let rows = run_matrix(&seeded.db, &["StaleDriver"], "SUPPORTS_ACTIVE_ACTIVE").await;
+    assert_eq!(row_for(&rows, "StaleDriver")["value"], "True");
+    assert!(rows.iter().all(|r| r["warning"].is_null()), "the value does not depend on the missing bases: {rows:?}");
 }

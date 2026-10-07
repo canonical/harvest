@@ -104,6 +104,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    graph_tools::set_run_sql_available(graph_tools::probe_run_sql(&db).await);
     let global_tools = graph_tools::all_tools_with_semantic(Arc::clone(&db), semantic_handle.clone());
     let (fast_path, early_synthesis, relevance, early_synth_research, rel_preserve, synth_coverage, synth_min_first, synth_uniform, synth_capability_gate, next_action_confidence) = match &config.system_one {
         Some(so_cfg) if so_cfg.is_enabled() => (

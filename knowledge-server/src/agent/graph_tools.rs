@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::llm::types::ToolDefinition;
@@ -14,7 +15,10 @@ impl Tool for ListRepositoriesTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "list_repositories".into(),
-            description: "Return all known repositories and their fully-ingested versions."
+            description: "Return all known repositories and their fully-ingested versions. \
+                          Versions listed under `stale_versions` were indexed by an older \
+                          harvester and may lack inheritance and docstrings; say so when an \
+                          answer depends on them."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -27,11 +31,21 @@ impl Tool for ListRepositoriesTool {
     async fn execute(&self, _params: Value) -> Result<String> {
         let rows = self.0.query(
             "SELECT r.name AS repo, count(*) AS version_count,
-                    (array_agg(v.tag ORDER BY v.timestamp DESC))[1:10] AS versions
+                    (array_agg(v.tag ORDER BY v.timestamp DESC))[1:10] AS versions,
+                    coalesce(array_agg(v.tag ORDER BY v.timestamp DESC)
+                             FILTER (WHERE v.parser_version < $parser_version), '{}') AS stale_versions
              FROM repositories r JOIN versions v ON v.repository_id = r.id AND v.ingested
              GROUP BY r.name ORDER BY r.name",
-            json!({}),
+            json!({ "parser_version": knowledge_harvester::parser::PARSER_VERSION }),
         ).await?;
+        let rows: Vec<Value> = rows.into_iter().map(|mut row| {
+            if row["stale_versions"].as_array().is_some_and(|a| a.is_empty()) {
+                if let Some(obj) = row.as_object_mut() {
+                    obj.remove("stale_versions");
+                }
+            }
+            row
+        }).collect();
         Ok(serde_json::to_string_pretty(&rows)?)
     }
 }
@@ -80,12 +94,16 @@ pub fn search_symbols_definition() -> ToolDefinition {
                       constants declared inside a class body, and definition text — so a single \
                       search is enough to find the declaration that gates a capability, not just \
                       the method that implements it. Each result carries a short preview so you \
-                      can triage without fetching the full source."
+                      can triage without fetching the full source. To list everything under a \
+                      directory, pass `path_prefix` with an empty `query` and page with `offset`; \
+                      a final `more_results` entry tells you the next offset."
             .into(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "query":   { "type": "string", "description": "Name fragment, path fragment, or term to search for" },
+                "query":   { "type": "string", "description": "Name fragment, path fragment, or term to search for. May be empty when path_prefix is set" },
+                "path_prefix": { "type": "string", "description": "Only symbols whose file path starts with this, e.g. cinder/volume/drivers/ (optional)" },
+                "offset":  { "type": "integer", "description": "Skip this many results, for paging (default 0)" },
                 "repo":    { "type": "string", "description": "Filter to this repository (optional)" },
                 "version": { "type": "string", "description": "Filter to this version tag (optional)" },
                 "kind":    { "type": "string", "enum": ["function", "class", "any"],
@@ -240,6 +258,7 @@ WITH signals AS (
     WHERE ($repo = '' OR cs.repo = $repo)
       AND ($version = '' OR cs.version = $version)
       AND ($kind = 'any' OR lower(cs.label) = $kind)
+      AND ($path_prefix = '' OR starts_with(cs.file, $path_prefix))
 ), matched AS (
     SELECT s.*,
            lower(s.label) = 'class'
@@ -271,8 +290,8 @@ SELECT repo, version, file, name, start_line, lower(label) AS kind,
 FROM matched
 WHERE name_trgm OR name_sub OR cap_match OR sig_trgm OR sig_sub
    OR path_trgm OR path_sub OR doc_trgm OR doc_sub
-ORDER BY score DESC, name
-LIMIT $limit
+ORDER BY score DESC, file, name
+LIMIT $limit OFFSET $offset
 "#;
 
 pub struct SearchSymbolsTool(pub Arc<Db>, pub Option<Arc<SemanticHandle>>);
@@ -329,6 +348,7 @@ WITH lexical AS (
     WHERE ($repo = '' OR cs.repo = $repo)
       AND ($version = '' OR cs.version = $version)
       AND ($kind = 'any' OR lower(cs.label) = $kind)
+      AND ($path_prefix = '' OR starts_with(cs.file, $path_prefix))
 ), lexical_matched AS (
     SELECT l.*,
            lower(l.label) = 'class'
@@ -376,8 +396,8 @@ SELECT ls.repo, ls.version, ls.file, ls.name, ls.start_line, lower(ls.label) AS 
 FROM lexical_scored ls
 LEFT JOIN semantic_scored ss ON ss.id = ls.id
 WHERE ls.lexical_score > 0 OR ss.semantic_score IS NOT NULL
-ORDER BY score DESC, ls.name
-LIMIT $limit
+ORDER BY score DESC, ls.file, ls.name
+LIMIT $limit OFFSET $offset
 "#;
 
 #[derive(Clone)]
@@ -434,24 +454,30 @@ impl Tool for SearchSymbolsTool {
 
     async fn execute(&self, params: Value) -> Result<String> {
         let q = params["query"].as_str().unwrap_or("").trim().to_string();
-        if q.is_empty() {
-            anyhow::bail!("search_symbols requires a non-empty query");
+        let path_prefix = params["path_prefix"].as_str().unwrap_or("").trim().to_string();
+        if q.is_empty() && path_prefix.is_empty() {
+            anyhow::bail!("search_symbols requires a non-empty query or a path_prefix");
         }
         let repo    = params["repo"].as_str().unwrap_or("").trim().to_string();
         let version = params["version"].as_str().unwrap_or("").trim().to_string();
         let kind    = params["kind"].as_str().unwrap_or("any").trim().to_string();
         let kind    = if kind.is_empty() { "any".to_string() } else { kind };
         let limit   = clamp_limit(&params);
+        let offset  = params["offset"].as_i64().unwrap_or(0).max(0);
 
+        // One extra row reveals whether another page exists.
         let mut params = json!({
             "query": q,
             "repo": repo,
             "version": version,
             "kind": kind,
-            "limit": limit as i64,
+            "path_prefix": path_prefix,
+            "limit": limit as i64 + 1,
+            "offset": offset,
         });
 
-        let hybrid = match self.semantic_query_embedding(&q).await {
+        let embed = if q.is_empty() { None } else { self.semantic_query_embedding(&q).await };
+        let hybrid = match embed {
             Some(v) => {
                 params["qvec"] = json!(v);
                 params["qmodel"] = json!(self.1.as_ref().unwrap().model);
@@ -462,18 +488,23 @@ impl Tool for SearchSymbolsTool {
             None => None,
         };
 
-        let rows = self.0.query(hybrid.unwrap_or(SEARCH_SQL), params).await?;
+        let mut rows = self.0.query(hybrid.unwrap_or(SEARCH_SQL), params).await?;
 
         if rows.is_empty() {
             let hint = if repo.is_empty() || version.is_empty() {
                 " Pass repo and version to search a specific codebase."
+            } else if offset > 0 {
+                " There are no more results past this offset."
             } else {
                 " Try a shorter fragment, a file path fragment, or a term from a class body."
             };
-            return Ok(format!("No symbols found for {q:?}.{hint}"));
+            let scope = if path_prefix.is_empty() { String::new() } else { format!(" under {path_prefix:?}") };
+            return Ok(format!("No symbols found for {q:?}{scope}.{hint}"));
         }
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
 
-        let mut results: Vec<Value> = Vec::with_capacity(rows.len());
+        let mut results: Vec<Value> = Vec::with_capacity(rows.len() + 1);
         for row in &rows {
             let signature = row["signature"].as_str().unwrap_or_default();
             let source = row["source"].as_str().unwrap_or_default();
@@ -488,6 +519,12 @@ impl Tool for SearchSymbolsTool {
                 "matched_on": row["matched_on"],
                 "score": row["score"],
                 "preview": source_preview(basis, SEARCH_PREVIEW_CHARS),
+            }));
+        }
+        if has_more {
+            results.push(json!({
+                "more_results": true,
+                "next_offset": offset + limit as i64,
             }));
         }
 
@@ -701,6 +738,46 @@ impl Tool for CompareSymbolAcrossVersionsTool {
     }
 }
 
+static RUN_SQL_AVAILABLE: AtomicBool = AtomicBool::new(true);
+
+/// Whether `run_sql` is offered to the model. Set once at startup from [`probe_run_sql`];
+/// a tool that can only fail wastes a model round trip every time it is called.
+pub fn run_sql_available() -> bool {
+    RUN_SQL_AVAILABLE.load(Ordering::Relaxed)
+}
+
+pub fn set_run_sql_available(available: bool) {
+    RUN_SQL_AVAILABLE.store(available, Ordering::Relaxed);
+}
+
+/// Checks that the database user can switch to the read-only role `run_sql` runs as. When it
+/// cannot, logs the statements an administrator must run to enable it.
+pub async fn probe_run_sql(db: &Db) -> bool {
+    let probe = async {
+        let tx = db.begin().await?;
+        tx.batch_execute(&format!("SET LOCAL ROLE {GRAPH_READER_ROLE}")).await?;
+        tx.rollback().await?;
+        anyhow::Ok(())
+    };
+    match probe.await {
+        Ok(()) => true,
+        Err(e) => {
+            let user = db.query("SELECT current_user AS u", json!({})).await.ok()
+                .and_then(|rows| rows.first().and_then(|r| r["u"].as_str().map(String::from)))
+                .unwrap_or_else(|| "<harvest database user>".to_string());
+            tracing::error!(
+                error = %e,
+                "run_sql is disabled: the database user cannot switch to the read-only role {GRAPH_READER_ROLE}. \
+                 To enable it, run as a PostgreSQL superuser and restart the server:\n\
+                 CREATE ROLE {GRAPH_READER_ROLE} NOLOGIN;\n\
+                 GRANT SELECT ON code_repositories, code_versions, code_files, code_symbols, code_imports, code_edges TO {GRAPH_READER_ROLE};\n\
+                 GRANT {GRAPH_READER_ROLE} TO \"{user}\";"
+            );
+            false
+        }
+    }
+}
+
 pub struct RunSqlTool(pub Arc<Db>);
 
 #[async_trait]
@@ -885,6 +962,97 @@ pub fn capability_matrix_definition() -> ToolDefinition {
     }
 }
 
+/// One class reached by the capability walk, with what is needed to spot inheritance the
+/// walk could not follow.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WalkedClass {
+    pub root:           String,
+    pub name:           String,
+    pub file:           String,
+    pub depth:          usize,
+    pub recorded_bases: Vec<String>,
+    pub header:         String,
+}
+
+/// A break in the inheritance walk started from `root`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InheritanceGap {
+    /// `class` declares parents in its source but the index recorded none.
+    BasesNotRecorded { root: String, class: String },
+    /// A recorded parent has no class definition in the indexed version.
+    ParentNotIndexed { root: String, parent: String },
+}
+
+impl InheritanceGap {
+    pub fn root(&self) -> &str {
+        match self {
+            Self::BasesNotRecorded { root, .. } | Self::ParentNotIndexed { root, .. } => root,
+        }
+    }
+}
+
+pub fn inheritance_gaps(walked: &[WalkedClass]) -> Vec<InheritanceGap> {
+    let mut gaps = Vec::new();
+    for class in walked {
+        if class.recorded_bases.is_empty() {
+            if class.file.ends_with(".py") && !python_declared_bases(&class.header).is_empty() {
+                gaps.push(InheritanceGap::BasesNotRecorded { root: class.root.clone(), class: class.name.clone() });
+            }
+            continue;
+        }
+        if class.depth as i32 >= CAPABILITY_MAX_DEPTH {
+            continue;
+        }
+        for base in &class.recorded_bases {
+            if IMPLICIT_PYTHON_BASES.contains(&base.as_str()) {
+                continue;
+            }
+            // Any visit under the same root counts: a cyclic or diamond hierarchy reaches a
+            // parent once, possibly at a shallower depth.
+            let reached = walked.iter().any(|w| w.root == class.root && &w.name == base);
+            if !reached {
+                gaps.push(InheritanceGap::ParentNotIndexed { root: class.root.clone(), parent: base.clone() });
+            }
+        }
+    }
+    gaps
+}
+
+/// The parent classes named in a Python class statement, e.g. `["driver.VolumeDriver"]` for
+/// `class LVMVolumeDriver(driver.VolumeDriver):`. Keyword arguments such as `metaclass=` and
+/// the implicit `object` base are left out.
+pub fn python_declared_bases(source: &str) -> Vec<String> {
+    let Some(class_at) = source.find("class ") else { return Vec::new() };
+    let statement = &source[class_at..];
+    let Some(colon) = statement.find(':') else { return Vec::new() };
+    let head = &statement[..colon];
+    let (Some(open), Some(close)) = (head.find('('), head.rfind(')')) else { return Vec::new() };
+    if close <= open {
+        return Vec::new();
+    }
+    let mut bases = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for c in head[open + 1..close].chars() {
+        match c {
+            '(' | '[' => { depth += 1; current.push(c); }
+            ')' | ']' => { depth = depth.saturating_sub(1); current.push(c); }
+            ',' if depth == 0 => { bases.push(std::mem::take(&mut current)); }
+            _ => current.push(c),
+        }
+    }
+    bases.push(current);
+    bases.into_iter()
+        .map(|b| b.split_whitespace().collect::<String>())
+        .filter(|b| !b.is_empty() && !b.contains('=') && b != "object")
+        .collect()
+}
+
+/// Bases that never carry a project's capability flags, so their absence from the index is
+/// not worth a warning.
+const IMPLICIT_PYTHON_BASES: &[&str] = &["object", "ABC", "Generic", "Protocol", "Exception", "BaseException"];
+
+const CAPABILITY_HEADER_CHARS: i32 = 400;
 const CAPABILITY_MAX_DEPTH: i32 = 12;
 const CAPABILITY_WINDOW_CHARS: i32 = 600;
 const CAPABILITY_WINDOW_LEAD: i32 = 300;
@@ -918,6 +1086,8 @@ impl Tool for GetCapabilityMatrixTool {
 
         let mut report: Vec<Value> = Vec::new();
         let mut missing: Vec<String> = Vec::new();
+        let mut bases_not_recorded: Vec<String> = Vec::new();
+        let mut parents_not_indexed: Vec<String> = Vec::new();
         for capability in &capabilities {
             let rows = self.0.query(
                 CAPABILITY_WALK_SQL,
@@ -929,11 +1099,13 @@ impl Tool for GetCapabilityMatrixTool {
                     "max_depth": CAPABILITY_MAX_DEPTH,
                     "window": CAPABILITY_WINDOW_CHARS,
                     "lead": CAPABILITY_WINDOW_LEAD,
+                    "header": CAPABILITY_HEADER_CHARS,
                 }),
             ).await?;
 
             let mut visits: Vec<AncestorVisit> = Vec::new();
             let mut found: Vec<String> = Vec::new();
+            let mut walked: Vec<WalkedClass> = Vec::new();
             for row in &rows {
                 let root = row["root"].as_str().unwrap_or_default().to_string();
                 if !found.contains(&root) {
@@ -944,7 +1116,37 @@ impl Tool for GetCapabilityMatrixTool {
                 let depth = row["depth"].as_i64().unwrap_or(0).max(0) as usize;
                 let window = row["source_window"].as_str().unwrap_or_default();
                 let value = extract_capability_value(window, capability);
+                walked.push(WalkedClass {
+                    root: root.clone(),
+                    name: name.clone(),
+                    file: file.clone(),
+                    depth,
+                    recorded_bases: row["bases"].as_array()
+                        .map(|a| a.iter().filter_map(|b| b.as_str().map(String::from)).collect())
+                        .unwrap_or_default(),
+                    header: row["header"].as_str().unwrap_or_default().to_string(),
+                });
                 visits.push(AncestorVisit { root, name, file, depth, value });
+            }
+            let effective = resolve_effective_capabilities(&visits);
+            // A gap only matters for a class whose value it leaves unresolved: a value found
+            // on the class or a nearer ancestor wins regardless of what lies beyond the gap.
+            let unresolved: Vec<&str> = effective.iter()
+                .filter(|e| e.value.is_none())
+                .map(|e| e.class.as_str())
+                .collect();
+            for gap in inheritance_gaps(&walked) {
+                if !unresolved.contains(&gap.root()) {
+                    continue;
+                }
+                match gap {
+                    InheritanceGap::BasesNotRecorded { class, .. } => {
+                        if !bases_not_recorded.contains(&class) { bases_not_recorded.push(class); }
+                    }
+                    InheritanceGap::ParentNotIndexed { parent, .. } => {
+                        if !parents_not_indexed.contains(&parent) { parents_not_indexed.push(parent); }
+                    }
+                }
             }
 
             for class in &classes {
@@ -953,7 +1155,7 @@ impl Tool for GetCapabilityMatrixTool {
                 }
             }
 
-            for effective in resolve_effective_capabilities(&visits) {
+            for effective in effective {
                 report.push(json!({
                     "capability": capability,
                     "class": effective.class,
@@ -979,6 +1181,24 @@ impl Tool for GetCapabilityMatrixTool {
                 "detail": "these classes were not present in this repository version, so no value is reported for them",
             }));
         }
+        if !bases_not_recorded.is_empty() {
+            report.push(json!({
+                "warning": "bases_not_recorded",
+                "classes": bases_not_recorded,
+                "detail": "these classes declare parent classes in their source, but the index recorded none, \
+                           so inherited values could not be followed and a null value here means unknown, \
+                           not unsupported. The repository version was probably indexed by an older \
+                           harvester and needs re-ingesting; tell the user instead of guessing",
+            }));
+        }
+        if !parents_not_indexed.is_empty() {
+            report.push(json!({
+                "warning": "parents_not_indexed",
+                "parents": parents_not_indexed,
+                "detail": "these parent classes are not defined in this repository version (for example an \
+                           external library), so values they might declare are unknown",
+            }));
+        }
         Ok(serde_json::to_string_pretty(&report)?)
     }
 }
@@ -986,14 +1206,14 @@ impl Tool for GetCapabilityMatrixTool {
 const CAPABILITY_WALK_SQL: &str = r#"
 WITH RECURSIVE walk AS (
     SELECT s.name AS root, s.id, s.name, s.file, 0 AS depth,
-           ARRAY[s.id] AS visited, s.source
+           ARRAY[s.id] AS visited, s.source, s.bases
     FROM code_symbols s
     WHERE s.repo = $repo AND s.version = $version
       AND s.label = 'Class'
       AND s.name = ANY($classes)
   UNION ALL
     SELECT w.root, p.id, p.name, p.file, w.depth + 1,
-           w.visited || p.id, p.source
+           w.visited || p.id, p.source, p.bases
     FROM walk w
     CROSS JOIN LATERAL unnest(
         (SELECT c.bases FROM code_symbols c WHERE c.id = w.id)
@@ -1006,7 +1226,8 @@ WITH RECURSIVE walk AS (
     WHERE w.depth < $max_depth
       AND NOT (p.id = ANY(w.visited))
 )
-SELECT root, name, file, depth,
+SELECT root, name, file, depth, coalesce(bases, '{}') AS bases,
+       left(source, $header::int) AS header,
        CASE
          WHEN strpos(source, $capability) > 0
          THEN substring(source FROM greatest(strpos(source, $capability) - $lead::int, 1) FOR $window::int)
@@ -1213,6 +1434,109 @@ impl Tool for GetEvidencePackTool {
     }
 }
 
+const SUBCLASSES_MAX_DEPTH: i32 = 12;
+const SUBCLASSES_MAX_ROWS: usize = 400;
+
+const SUBCLASSES_SQL: &str = r#"
+WITH RECURSIVE sub AS (
+    SELECT c.id, c.name, $class::text AS parent, 1 AS depth, ARRAY[c.id] AS visited
+    FROM code_symbols c
+    WHERE c.repo = $repo AND c.version = $version AND c.label = 'Class'
+      AND $class = ANY(c.bases)
+  UNION ALL
+    SELECT c.id, c.name, s.name, s.depth + 1, s.visited || c.id
+    FROM sub s
+    JOIN code_symbols c
+      ON c.repo = $repo AND c.version = $version AND c.label = 'Class'
+     AND s.name = ANY(c.bases)
+    WHERE s.depth < $max_depth
+      AND NOT (c.id = ANY(s.visited))
+), nearest AS (
+    SELECT DISTINCT ON (id) id, parent, depth FROM sub ORDER BY id, depth
+)
+SELECT cs.name, cs.file, cs.start_line, n.parent, n.depth
+FROM nearest n JOIN code_symbols cs ON cs.id = n.id
+WHERE $path_prefix = '' OR starts_with(cs.file, $path_prefix)
+ORDER BY cs.file, cs.start_line
+"#;
+
+pub fn find_subclasses_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "find_subclasses".into(),
+        description: "List every class that inherits from a class, directly or through \
+                      intermediate classes, in one call. Use it to enumerate the implementations \
+                      of a plugin or driver interface (for example every subclass of a base driver \
+                      class), optionally restricted to a directory with `path_prefix`. Returns \
+                      each subclass's file, line, the parent it inherits through, and its depth."
+            .into(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "repo":        { "type": "string", "description": "Repository name" },
+                "version":     { "type": "string", "description": "Version tag" },
+                "class":       { "type": "string", "description": "Name of the base class, without module prefix" },
+                "path_prefix": { "type": "string", "description": "Only subclasses whose file path starts with this (optional)" }
+            },
+            "required": ["repo", "version", "class"]
+        }),
+    }
+}
+
+pub struct FindSubclassesTool(pub Arc<Db>);
+
+#[async_trait]
+impl Tool for FindSubclassesTool {
+    fn definition(&self) -> ToolDefinition {
+        find_subclasses_definition()
+    }
+
+    async fn execute(&self, params: Value) -> Result<String> {
+        let repo    = params["repo"].as_str().unwrap_or("").trim().to_string();
+        let version = params["version"].as_str().unwrap_or("").trim().to_string();
+        let class   = params["class"].as_str().unwrap_or("").trim();
+        // Bases are stored without their module prefix, so `driver.VolumeDriver` is `VolumeDriver`.
+        let class   = class.rsplit('.').next().unwrap_or(class).to_string();
+        let path_prefix = params["path_prefix"].as_str().unwrap_or("").trim().to_string();
+        if repo.is_empty() || version.is_empty() || class.is_empty() {
+            anyhow::bail!("find_subclasses requires repo, version and class");
+        }
+
+        let rows = self.0.query(SUBCLASSES_SQL, json!({
+            "repo": repo,
+            "version": version,
+            "class": class,
+            "path_prefix": path_prefix,
+            "max_depth": SUBCLASSES_MAX_DEPTH,
+        })).await?;
+
+        if rows.is_empty() {
+            return Ok(format!(
+                "No subclasses of {class:?} found in {repo}:{version}{}. Check the class name with \
+                 search_symbols; if the version is listed under stale_versions by list_repositories, \
+                 its inheritance data is incomplete.",
+                if path_prefix.is_empty() { String::new() } else { format!(" under {path_prefix:?}") },
+            ));
+        }
+
+        let total = rows.len();
+        let mut results: Vec<Value> = rows.iter().take(SUBCLASSES_MAX_ROWS).map(|row| json!({
+            "name": row["name"],
+            "file": row["file"],
+            "line": row["start_line"],
+            "parent": row["parent"],
+            "depth": row["depth"],
+        })).collect();
+        if total > SUBCLASSES_MAX_ROWS {
+            results.push(json!({
+                "truncated": true,
+                "total": total,
+                "detail": "narrow the search with path_prefix to see the rest",
+            }));
+        }
+        Ok(serde_json::to_string(&results)?)
+    }
+}
+
 pub fn all_tools(db: Arc<Db>) -> Vec<Box<dyn Tool>> {
     all_tools_with_semantic(db, None)
 }
@@ -1222,7 +1546,7 @@ pub fn all_tools_with_semantic(db: Arc<Db>, semantic: Option<Arc<SemanticHandle>
         Some(handle) => SearchSymbolsTool::with_semantic(Arc::clone(&db), handle),
         None => SearchSymbolsTool::new(Arc::clone(&db)),
     };
-    vec![
+    let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(ListRepositoriesTool(Arc::clone(&db))),
         Box::new(search),
         Box::new(GetSymbolSourceTool(Arc::clone(&db))),
@@ -1234,14 +1558,56 @@ pub fn all_tools_with_semantic(db: Arc<Db>, semantic: Option<Arc<SemanticHandle>
         Box::new(GetCapabilityMatrixTool(Arc::clone(&db))),
         Box::new(ReadSourcesTool(Arc::clone(&db))),
         Box::new(GetEvidencePackTool(Arc::clone(&db))),
-        Box::new(RunSqlTool(db)),
-    ]
+        Box::new(FindSubclassesTool(Arc::clone(&db))),
+    ];
+    if run_sql_available() {
+        tools.push(Box::new(RunSqlTool(db)));
+    }
+    tools
 }
 
 #[cfg(test)]
 mod tests {
     use super::reject_non_select;
     use super::*;
+
+    #[test]
+    fn python_declared_bases_reads_dotted_and_multiple_parents() {
+        assert_eq!(python_declared_bases("class LVMVolumeDriver(driver.VolumeDriver):\n    pass"), vec!["driver.VolumeDriver"]);
+        assert_eq!(
+            python_declared_bases("class TatlinFCVolumeDriver(tatlin_common.TatlinCommonVolumeDriver,\n                           driver.FibreChannelDriver):\n"),
+            vec!["tatlin_common.TatlinCommonVolumeDriver", "driver.FibreChannelDriver"],
+        );
+        assert_eq!(python_declared_bases("class BaseVD(object, metaclass=abc.ABCMeta):\n"), Vec::<String>::new());
+        assert_eq!(python_declared_bases("class Plain:\n    x = 1"), Vec::<String>::new());
+        assert_eq!(python_declared_bases("class G(Generic[T, U], Base):\n"), vec!["Generic[T,U]", "Base"]);
+    }
+
+    fn walked(root: &str, name: &str, depth: usize, file: &str, bases: &[&str], header: &str) -> WalkedClass {
+        WalkedClass {
+            root: root.into(), name: name.into(), file: file.into(), depth,
+            recorded_bases: bases.iter().map(|b| b.to_string()).collect(), header: header.into(),
+        }
+    }
+
+    #[test]
+    fn inheritance_gaps_flag_unrecorded_bases_only_for_python_classes_with_parents() {
+        let classes = vec![
+            walked("LVM", "LVM", 0, "drivers/lvm.py", &[], "class LVM(driver.VolumeDriver):"),
+            walked("Root", "Root", 0, "root.py", &[], "class Root(object):"),
+            walked("Rs", "Rs", 0, "src/lib.rs", &[], "struct Rs(u8);"),
+        ];
+        assert_eq!(inheritance_gaps(&classes), vec![InheritanceGap::BasesNotRecorded { root: "LVM".into(), class: "LVM".into() }]);
+    }
+
+    #[test]
+    fn inheritance_gaps_flag_parents_missing_from_the_walk() {
+        let classes = vec![
+            walked("A", "A", 0, "a.py", &["B", "External", "object"], "class A(B, External, object):"),
+            walked("A", "B", 1, "b.py", &[], "class B:"),
+        ];
+        assert_eq!(inheritance_gaps(&classes), vec![InheritanceGap::ParentNotIndexed { root: "A".into(), parent: "External".into() }]);
+    }
 
     #[test]
     fn accepts_select_statements() {
