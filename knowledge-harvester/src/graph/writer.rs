@@ -182,24 +182,26 @@ async fn write_file(tx: &Tx, version_id: i64, file: &ParsedFile) -> Result<()> {
             "embeds":     c.embeds,
             "uses":       c.uses,
             "docstring":  c.docstring,
+            "decorators": c.decorators,
         })).collect(), "name");
         tx.execute(
             "INSERT INTO symbols (file_id, version_id, label, name, kind, start_line, end_line,
-                                  source, bases, traits, embeds, uses, docstring)
+                                  source, bases, traits, embeds, uses, docstring, decorators)
              SELECT $file_id, $vid, 'Class', c->>'name', c->>'kind',
                     (c->>'start_line')::int, (c->>'end_line')::int, c->>'source',
                     ARRAY(SELECT jsonb_array_elements_text(c->'bases')),
                     ARRAY(SELECT jsonb_array_elements_text(c->'traits')),
                     ARRAY(SELECT jsonb_array_elements_text(c->'embeds')),
                     ARRAY(SELECT jsonb_array_elements_text(c->'uses')),
-                    c->>'docstring'
+                    c->>'docstring',
+                    ARRAY(SELECT jsonb_array_elements_text(coalesce(c->'decorators', '[]'::jsonb)))
              FROM jsonb_array_elements($classes::jsonb) AS c
              ON CONFLICT (file_id, label, name) DO UPDATE SET
                  kind = EXCLUDED.kind, start_line = EXCLUDED.start_line,
                  end_line = EXCLUDED.end_line, source = EXCLUDED.source,
                  bases = EXCLUDED.bases, traits = EXCLUDED.traits,
                  embeds = EXCLUDED.embeds, uses = EXCLUDED.uses,
-                 docstring = EXCLUDED.docstring",
+                 docstring = EXCLUDED.docstring, decorators = EXCLUDED.decorators",
             json!({ "file_id": file_id, "vid": version_id, "classes": classes }),
         ).await?;
     }

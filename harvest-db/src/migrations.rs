@@ -6,6 +6,7 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (2, include_str!("../migrations/0002_docstring_and_search.sql")),
     (3, include_str!("../migrations/0003_semantic.sql")),
     (4, include_str!("../migrations/0004_parser_version.sql")),
+    (5, include_str!("../migrations/0005_decorators.sql")),
 ];
 
 pub fn fingerprint() -> u64 {

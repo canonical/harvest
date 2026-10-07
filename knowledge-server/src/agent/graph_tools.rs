@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -97,13 +97,16 @@ pub fn search_symbols_definition() -> ToolDefinition {
                       the method that implements it. Each result carries a short preview so you \
                       can triage without fetching the full source. To list everything under a \
                       directory, pass `path_prefix` with an empty `query` and page with `offset`; \
-                      a final `more_results` entry tells you the next offset."
+                      a final `more_results` entry tells you the next offset. `decorator` keeps only \
+                      classes carrying that decorator, which lists everything a framework registers \
+                      with it."
             .into(),
         parameters: json!({
             "type": "object",
             "properties": {
                 "query":   { "type": "string", "description": "Name fragment, path fragment, or term to search for. May be empty when path_prefix is set" },
                 "path_prefix": { "type": "string", "description": "Only symbols whose file path starts with this, e.g. cinder/volume/drivers/ (optional)" },
+                "decorator": { "type": "string", "description": "Only classes decorated with this, e.g. interface.volumedriver or volumedriver (optional)" },
                 "offset":  { "type": "integer", "description": "Skip this many results, for paging (default 0)" },
                 "repo":    { "type": "string", "description": "Filter to this repository (optional)" },
                 "version": { "type": "string", "description": "Filter to this version tag (optional)" },
@@ -260,6 +263,9 @@ WITH signals AS (
       AND ($version = '' OR cs.version = $version)
       AND ($kind = 'any' OR lower(cs.label) = $kind)
       AND ($path_prefix = '' OR starts_with(cs.file, $path_prefix))
+      AND ($decorator = '' OR EXISTS (
+            SELECT 1 FROM unnest(cs.decorators) d
+            WHERE d = $decorator OR right(d, length($decorator) + 1) = '.' || $decorator))
 ), matched AS (
     SELECT s.*,
            lower(s.label) = 'class'
@@ -267,7 +273,7 @@ WITH signals AS (
     FROM signals s
 )
 SELECT repo, version, file, name, start_line, lower(label) AS kind,
-       signature, source, docstring,
+       signature, source, docstring, coalesce(decorators, '{}') AS decorators,
        array_remove(ARRAY[
            CASE WHEN name = $query                 THEN 'exact_name' END,
            CASE WHEN name_sub                      THEN 'name' END,
@@ -350,6 +356,9 @@ WITH lexical AS (
       AND ($version = '' OR cs.version = $version)
       AND ($kind = 'any' OR lower(cs.label) = $kind)
       AND ($path_prefix = '' OR starts_with(cs.file, $path_prefix))
+      AND ($decorator = '' OR EXISTS (
+            SELECT 1 FROM unnest(cs.decorators) d
+            WHERE d = $decorator OR right(d, length($decorator) + 1) = '.' || $decorator))
 ), lexical_matched AS (
     SELECT l.*,
            lower(l.label) = 'class'
@@ -380,7 +389,7 @@ WITH lexical AS (
       AND ($version = '' OR s.version = $version)
 )
 SELECT ls.repo, ls.version, ls.file, ls.name, ls.start_line, lower(ls.label) AS kind,
-       ls.signature, ls.source, ls.docstring,
+       ls.signature, ls.source, ls.docstring, coalesce(ls.decorators, '{}') AS decorators,
        array_remove(ARRAY[
            CASE WHEN ls.name = $query                 THEN 'exact_name' END,
            CASE WHEN ls.name_sub                      THEN 'name' END,
@@ -456,8 +465,9 @@ impl Tool for SearchSymbolsTool {
     async fn execute(&self, params: Value) -> Result<String> {
         let q = params["query"].as_str().unwrap_or("").trim().to_string();
         let path_prefix = params["path_prefix"].as_str().unwrap_or("").trim().to_string();
-        if q.is_empty() && path_prefix.is_empty() {
-            anyhow::bail!("search_symbols requires a non-empty query or a path_prefix");
+        let decorator = params["decorator"].as_str().unwrap_or("").trim().trim_start_matches('@').to_string();
+        if q.is_empty() && path_prefix.is_empty() && decorator.is_empty() {
+            anyhow::bail!("search_symbols requires a non-empty query, a path_prefix or a decorator");
         }
         let repo    = params["repo"].as_str().unwrap_or("").trim().to_string();
         let version = params["version"].as_str().unwrap_or("").trim().to_string();
@@ -472,6 +482,7 @@ impl Tool for SearchSymbolsTool {
             "version": version,
             "kind": kind,
             "path_prefix": path_prefix,
+            "decorator": decorator,
             "limit": limit as i64 + 1,
             "offset": offset,
         });
@@ -509,7 +520,7 @@ impl Tool for SearchSymbolsTool {
             let signature = row["signature"].as_str().unwrap_or_default();
             let source = row["source"].as_str().unwrap_or_default();
             let basis = if !signature.is_empty() { signature } else { source };
-            results.push(json!({
+            let mut result = json!({
                 "repo": row["repo"],
                 "version": row["version"],
                 "file": row["file"],
@@ -519,7 +530,11 @@ impl Tool for SearchSymbolsTool {
                 "matched_on": row["matched_on"],
                 "score": row["score"],
                 "preview": source_preview(basis, SEARCH_PREVIEW_CHARS),
-            }));
+            });
+            if row["decorators"].as_array().is_some_and(|d| !d.is_empty()) {
+                result["decorators"] = row["decorators"].clone();
+            }
+            results.push(result);
         }
         if has_more {
             results.push(json!({
@@ -1488,7 +1503,10 @@ impl Tool for GetEvidencePackTool {
 }
 
 const SUBCLASSES_MAX_DEPTH: i32 = 12;
-const SUBCLASSES_MAX_ROWS: usize = 400;
+const SUBCLASSES_PAGE_DEFAULT: usize = 150;
+const SUBCLASSES_PAGE_MAX: usize = 400;
+const SUBCLASSES_BUDGET_CHARS: usize = 12_000;
+const SUBCLASSES_MAX_ANCESTORS_CHECKED: usize = 8;
 
 const SUBCLASSES_SQL: &str = r#"
 WITH RECURSIVE sub AS (
@@ -1506,11 +1524,35 @@ WITH RECURSIVE sub AS (
       AND NOT (c.id = ANY(s.visited))
 ), nearest AS (
     SELECT DISTINCT ON (id) id, parent, depth FROM sub ORDER BY id, depth
+), found AS (
+    SELECT cs.name, cs.file, cs.start_line, n.parent, n.depth, cs.bases,
+           coalesce(cs.decorators, '{}') AS decorators
+    FROM nearest n JOIN code_symbols cs ON cs.id = n.id
 )
-SELECT cs.name, cs.file, cs.start_line, n.parent, n.depth
-FROM nearest n JOIN code_symbols cs ON cs.id = n.id
-WHERE $path_prefix = '' OR starts_with(cs.file, $path_prefix)
-ORDER BY cs.file, cs.start_line
+SELECT f.name, f.file, f.start_line, f.parent, f.depth, f.decorators,
+       EXISTS (SELECT 1 FROM found f2 WHERE f.name = ANY(f2.bases)) AS has_subclasses
+FROM found f
+WHERE ($path_prefix = '' OR starts_with(f.file, $path_prefix))
+  AND ($decorator = '' OR EXISTS (
+        SELECT 1 FROM unnest(f.decorators) d
+        WHERE d = $decorator OR right(d, length($decorator) + 1) = '.' || $decorator))
+ORDER BY f.file, f.start_line
+"#;
+
+const ANCESTORS_SQL: &str = r#"
+WITH RECURSIVE up AS (
+    SELECT c.id, c.name, c.bases, 0 AS depth, ARRAY[c.id] AS visited
+    FROM code_symbols c
+    WHERE c.repo = $repo AND c.version = $version AND c.label = 'Class' AND c.name = $class
+  UNION ALL
+    SELECT p.id, p.name, p.bases, u.depth + 1, u.visited || p.id
+    FROM up u
+    CROSS JOIN LATERAL unnest(u.bases) AS b(base_name)
+    JOIN code_symbols p
+      ON p.repo = $repo AND p.version = $version AND p.label = 'Class' AND p.name = b.base_name
+    WHERE u.depth < $max_depth AND NOT (p.id = ANY(u.visited))
+)
+SELECT name, min(depth) AS depth FROM up WHERE depth > 0 GROUP BY name ORDER BY min(depth), name
 "#;
 
 pub fn find_subclasses_definition() -> ToolDefinition {
@@ -1518,9 +1560,15 @@ pub fn find_subclasses_definition() -> ToolDefinition {
         name: "find_subclasses".into(),
         description: "List every class that inherits from a class, directly or through \
                       intermediate classes, in one call. Use it to enumerate the implementations \
-                      of a plugin or driver interface (for example every subclass of a base driver \
-                      class), optionally restricted to a directory with `path_prefix`. Returns \
-                      each subclass's file, line, the parent it inherits through, and its depth."
+                      of a plugin or driver interface, optionally restricted to a directory with \
+                      `path_prefix` and to classes carrying a decorator with `decorator` (for \
+                      example the decorator a framework uses to register implementations). \
+                      Returns one line per class with its file, line, the parent it inherits \
+                      through and its decorators; `+` marks classes that have subclasses of \
+                      their own, usually abstract bases or shared helpers. The header gives the \
+                      total; page with `offset` when told there are more. When a broader ancestor \
+                      has subclasses that do not go through the requested class, the result says \
+                      so: query that ancestor for the complete set."
             .into(),
         parameters: json!({
             "type": "object",
@@ -1528,7 +1576,10 @@ pub fn find_subclasses_definition() -> ToolDefinition {
                 "repo":        { "type": "string", "description": "Repository name" },
                 "version":     { "type": "string", "description": "Version tag" },
                 "class":       { "type": "string", "description": "Name of the base class, without module prefix" },
-                "path_prefix": { "type": "string", "description": "Only subclasses whose file path starts with this (optional)" }
+                "path_prefix": { "type": "string", "description": "Only subclasses whose file path starts with this (optional)" },
+                "decorator":   { "type": "string", "description": "Only subclasses decorated with this, e.g. interface.volumedriver or volumedriver (optional)" },
+                "offset":      { "type": "integer", "description": "Skip this many subclasses, for paging (default 0)" },
+                "limit":       { "type": "integer", "description": format!("Maximum subclasses per page, up to {SUBCLASSES_PAGE_MAX} (default {SUBCLASSES_PAGE_DEFAULT})") }
             },
             "required": ["repo", "version", "class"]
         }),
@@ -1536,6 +1587,79 @@ pub fn find_subclasses_definition() -> ToolDefinition {
 }
 
 pub struct FindSubclassesTool(pub Arc<Db>);
+
+struct SubclassQuery<'a> {
+    repo: &'a str,
+    version: &'a str,
+    path_prefix: &'a str,
+    decorator: &'a str,
+}
+
+impl FindSubclassesTool {
+    async fn subclasses(&self, query: &SubclassQuery<'_>, class: &str) -> Result<Vec<Value>> {
+        self.0.query(SUBCLASSES_SQL, json!({
+            "repo": query.repo,
+            "version": query.version,
+            "class": class,
+            "path_prefix": query.path_prefix,
+            "decorator": query.decorator,
+            "max_depth": SUBCLASSES_MAX_DEPTH,
+        })).await
+    }
+
+    async fn broader_ancestor(&self, query: &SubclassQuery<'_>, class: &str, found: &[Value]) -> Result<Option<(String, usize)>> {
+        let ancestors = self.0.query(ANCESTORS_SQL, json!({
+            "repo": query.repo,
+            "version": query.version,
+            "class": class,
+            "max_depth": SUBCLASSES_MAX_DEPTH,
+        })).await?;
+        let known: HashSet<(String, String)> = found.iter().map(subclass_key).collect();
+        let mut best: Option<(String, usize)> = None;
+        let candidates = ancestors.iter()
+            .filter_map(|row| row["name"].as_str())
+            .filter(|name| !IMPLICIT_PYTHON_BASES.contains(name))
+            .take(SUBCLASSES_MAX_ANCESTORS_CHECKED);
+        for ancestor in candidates {
+            let rows = self.subclasses(query, ancestor).await?;
+            let extra = rows.iter()
+                .filter(|row| row["name"].as_str() != Some(class))
+                .filter(|row| !known.contains(&subclass_key(row)))
+                .count();
+            if extra > best.as_ref().map(|(_, n)| *n).unwrap_or(0) {
+                best = Some((ancestor.to_string(), extra));
+            }
+        }
+        Ok(best)
+    }
+}
+
+fn subclass_key(row: &Value) -> (String, String) {
+    (
+        row["name"].as_str().unwrap_or_default().to_string(),
+        row["file"].as_str().unwrap_or_default().to_string(),
+    )
+}
+
+pub fn render_subclass_line(row: &Value) -> String {
+    let marker = if row["has_subclasses"].as_bool().unwrap_or(false) { "+" } else { "" };
+    let decorators: Vec<String> = row["decorators"].as_array()
+        .map(|a| a.iter().filter_map(|d| d.as_str().map(|d| format!("@{d}"))).collect())
+        .unwrap_or_default();
+    let mut line = format!(
+        "{}:{} {}{} <- {}",
+        row["file"].as_str().unwrap_or_default(),
+        row["start_line"].as_i64().unwrap_or(0),
+        row["name"].as_str().unwrap_or_default(),
+        marker,
+        row["parent"].as_str().unwrap_or_default(),
+    );
+    if !decorators.is_empty() {
+        line.push(' ');
+        line.push_str(&decorators.join(" "));
+    }
+    line
+}
 
 #[async_trait]
 impl Tool for FindSubclassesTool {
@@ -1549,43 +1673,79 @@ impl Tool for FindSubclassesTool {
         let class   = params["class"].as_str().unwrap_or("").trim();
         let class   = class.rsplit('.').next().unwrap_or(class).to_string();
         let path_prefix = params["path_prefix"].as_str().unwrap_or("").trim().to_string();
+        let decorator = params["decorator"].as_str().unwrap_or("").trim().trim_start_matches('@').to_string();
         if repo.is_empty() || version.is_empty() || class.is_empty() {
             anyhow::bail!("find_subclasses requires repo, version and class");
         }
+        let offset = params["offset"].as_u64().unwrap_or(0) as usize;
+        let limit = match params["limit"].as_u64() {
+            Some(n) if n > 0 => (n as usize).min(SUBCLASSES_PAGE_MAX),
+            _ => SUBCLASSES_PAGE_DEFAULT,
+        };
+        let query = SubclassQuery { repo: &repo, version: &version, path_prefix: &path_prefix, decorator: &decorator };
 
-        let rows = self.0.query(SUBCLASSES_SQL, json!({
-            "repo": repo,
-            "version": version,
-            "class": class,
-            "path_prefix": path_prefix,
-            "max_depth": SUBCLASSES_MAX_DEPTH,
-        })).await?;
+        let rows = self.subclasses(&query, &class).await?;
+        let mut scope = String::new();
+        if !path_prefix.is_empty() {
+            scope.push_str(&format!(" under {path_prefix}"));
+        }
+        if !decorator.is_empty() {
+            scope.push_str(&format!(" decorated @{decorator}"));
+        }
+
+        let hint = if offset == 0 {
+            self.broader_ancestor(&query, &class, &rows).await?.map(|(ancestor, extra)| format!(
+                "Note: {class} inherits from {ancestor}, which has {extra} more subclasses{scope} that do not go \
+                 through {class}. Call find_subclasses with class={ancestor} for the complete set."
+            ))
+        } else {
+            None
+        };
 
         if rows.is_empty() {
-            return Ok(format!(
-                "No subclasses of {class:?} found in {repo}:{version}{}. Check the class name with \
+            let mut out = format!(
+                "No subclasses of {class:?} found in {repo}:{version}{scope}. Check the class name with \
                  search_symbols; if the version is listed under stale_versions by list_repositories, \
-                 its inheritance data is incomplete.",
-                if path_prefix.is_empty() { String::new() } else { format!(" under {path_prefix:?}") },
-            ));
+                 its inheritance data is incomplete."
+            );
+            if let Some(hint) = hint {
+                out.push('\n');
+                out.push_str(&hint);
+            }
+            return Ok(out);
         }
 
         let total = rows.len();
-        let mut results: Vec<Value> = rows.iter().take(SUBCLASSES_MAX_ROWS).map(|row| json!({
-            "name": row["name"],
-            "file": row["file"],
-            "line": row["start_line"],
-            "parent": row["parent"],
-            "depth": row["depth"],
-        })).collect();
-        if total > SUBCLASSES_MAX_ROWS {
-            results.push(json!({
-                "truncated": true,
-                "total": total,
-                "detail": "narrow the search with path_prefix to see the rest",
-            }));
+        let mut lines: Vec<String> = Vec::new();
+        let mut used = 0usize;
+        for row in rows.iter().skip(offset).take(limit) {
+            let line = render_subclass_line(row);
+            if used + line.len() + 1 > SUBCLASSES_BUDGET_CHARS && !lines.is_empty() {
+                break;
+            }
+            used += line.len() + 1;
+            lines.push(line);
         }
-        Ok(serde_json::to_string(&results)?)
+        let shown_end = offset + lines.len();
+        let mut out = if lines.is_empty() {
+            format!("{total} subclasses of {class} in {repo}:{version}{scope}; none past offset {offset}.")
+        } else {
+            format!(
+                "{total} subclasses of {class} in {repo}:{version}{scope} (showing {}-{shown_end}). \
+                 Each line: file:line Class <- parent it inherits through, then decorators; \
+                 + marks classes with subclasses of their own.\n{}",
+                offset + 1,
+                lines.join("\n"),
+            )
+        };
+        if shown_end < total {
+            out.push_str(&format!("\nMore: {} subclasses not shown; call again with offset={shown_end}.", total - shown_end));
+        }
+        if let Some(hint) = hint {
+            out.push('\n');
+            out.push_str(&hint);
+        }
+        Ok(out)
     }
 }
 

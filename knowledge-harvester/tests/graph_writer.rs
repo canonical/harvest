@@ -62,6 +62,7 @@ fn make_file(repo: &str, version: &str, path: &str) -> ParsedFile {
             embeds: vec![],
             uses: vec![],
             docstring: None,
+            decorators: vec![],
         }],
         imports: vec![ImportNode {
             repo: repo.to_string(),
