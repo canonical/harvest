@@ -47,6 +47,13 @@ describe('describeToolCall', () => {
     expect(label).toBe('Listing classes under cinder/volume/drivers/ in cinder');
   });
 
+  it('describes decorator filters', () => {
+    expect(describeToolCall('search_symbols', { query: '', decorator: 'interface.volumedriver', kind: 'class', path_prefix: 'cinder/volume/drivers/' }))
+      .toBe('Listing classes decorated @interface.volumedriver under cinder/volume/drivers/');
+    expect(describeToolCall('find_subclasses', { class: 'BaseVD', decorator: '@interface.volumedriver' }))
+      .toBe('Finding subclasses of BaseVD decorated @interface.volumedriver');
+  });
+
   it('describes find_subclasses with its base class', () => {
     expect(describeToolCall('find_subclasses', { class: 'BaseVD', path_prefix: 'cinder/volume/drivers/' }))
       .toBe('Finding subclasses of BaseVD under cinder/volume/drivers/');
