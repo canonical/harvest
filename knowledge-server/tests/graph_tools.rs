@@ -38,7 +38,7 @@ async fn seed_graph(writer: &GraphWriter) {
             repo: "myrepo".into(), version: "v1.0".into(), file: "src/lib.rs".into(),
             name: "MyStruct".into(), kind: "struct".into(), start_line: 11, end_line: 13,
             source: "struct MyStruct { x: i32 }".into(),
-            bases: vec![], traits: vec![], embeds: vec![], uses: vec![], docstring: None,
+            bases: vec![], traits: vec![], embeds: vec![], uses: vec![], docstring: None, decorators: vec![],
         }],
         imports: vec![ImportNode {
             repo: "myrepo".into(), version: "v1.0".into(), file: "src/lib.rs".into(),
@@ -476,7 +476,7 @@ async fn search_symbols_matches_capability_constant_inside_a_class() {
             repo: "caprepo".into(), version: "v1.0".into(), file: "pkg/driver.py".into(),
             name: "NfsDriver".into(), kind: "class".into(), start_line: 1, end_line: 4,
             source: "class NfsDriver(Base):\n    SUPPORTS_ACTIVE_ACTIVE = True\n".into(),
-            bases: vec!["Base".into()], traits: vec![], embeds: vec![], uses: vec![], docstring: None,
+            bases: vec!["Base".into()], traits: vec![], embeds: vec![], uses: vec![], docstring: None, decorators: vec![],
         }],
         imports: vec![],
     }]).await.unwrap();
@@ -507,7 +507,7 @@ async fn search_symbols_ranks_capability_above_path_match() {
             repo: "rankrepo".into(), version: "v1.0".into(), file: "pkg/other.py".into(),
             name: "NfsDriver".into(), kind: "class".into(), start_line: 1, end_line: 3,
             source: "class NfsDriver(Base):\n    SUPPORTS_ACTIVE_ACTIVE = True\n".into(),
-            bases: vec![], traits: vec![], embeds: vec![], uses: vec![], docstring: None,
+            bases: vec![], traits: vec![], embeds: vec![], uses: vec![], docstring: None, decorators: vec![],
         }],
         imports: vec![],
     }, ParsedFile {
@@ -519,7 +519,7 @@ async fn search_symbols_ranks_capability_above_path_match() {
             file: "pkg/SUPPORTS_ACTIVE_ACTIVE_helper.py".into(),
             name: "Helper".into(), kind: "class".into(), start_line: 1, end_line: 2,
             source: "class Helper:\n    pass".into(),
-            bases: vec![], traits: vec![], embeds: vec![], uses: vec![], docstring: None,
+            bases: vec![], traits: vec![], embeds: vec![], uses: vec![], docstring: None, decorators: vec![],
         }],
         imports: vec![],
     }]).await.unwrap();
@@ -741,7 +741,7 @@ async fn hybrid_sql_executes_the_full_lexical_cte_chain() {
     let sql = hybrid_sql_for(&client).await;
     let params = json!({
         "query": "alpha", "repo": "myrepo", "version": "", "kind": "any", "limit": 10,
-        "path_prefix": "", "offset": 0,
+        "path_prefix": "", "offset": 0, "decorator": "",
         "qvec": "[0.0]", "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
     });
     let rows = client
@@ -758,7 +758,7 @@ async fn hybrid_sql_reports_capability_matches() {
     let sql = hybrid_sql_for(&client).await;
     let params = json!({
         "query": "i32", "repo": "myrepo", "version": "", "kind": "any", "limit": 10,
-        "path_prefix": "", "offset": 0,
+        "path_prefix": "", "offset": 0, "decorator": "",
         "qvec": "[0.0]", "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
     });
     let rows = client
@@ -802,6 +802,10 @@ async fn disabling_semantic_search_leaves_the_tool_set_unchanged() {
 }
 
 fn py_class(repo: &str, file: &str, name: &str, line: u32, bases: &[&str]) -> ClassNode {
+    py_decorated_class(repo, file, name, line, bases, &[])
+}
+
+fn py_decorated_class(repo: &str, file: &str, name: &str, line: u32, bases: &[&str], decorators: &[&str]) -> ClassNode {
     let declared = if bases.is_empty() { String::new() } else { format!("(mod.{})", bases.join(", mod.")) };
     ClassNode {
         repo: repo.into(), version: "v1".into(), file: file.into(),
@@ -809,6 +813,7 @@ fn py_class(repo: &str, file: &str, name: &str, line: u32, bases: &[&str]) -> Cl
         source: format!("class {name}{declared}:\n    pass\n"),
         bases: bases.iter().map(|b| b.to_string()).collect(),
         traits: vec![], embeds: vec![], uses: vec![], docstring: None,
+        decorators: decorators.iter().map(|d| d.to_string()).collect(),
     }
 }
 
@@ -819,18 +824,41 @@ async fn seed_hierarchy(client: &Arc<harvest_db::Db>) {
     let file = |path: &str, classes: Vec<ClassNode>| ParsedFile {
         path: path.into(), language: "python".into(), functions: vec![], classes, imports: vec![],
     };
+    let registered = &["registry.driver"];
     writer.write_version("tree", "v1", &[
-        file("pkg/base.py", vec![py_class("tree", "pkg/base.py", "Base", 1, &[])]),
+        file("pkg/root.py", vec![py_class("tree", "pkg/root.py", "Root", 1, &[])]),
+        file("pkg/base.py", vec![py_class("tree", "pkg/base.py", "Base", 1, &["Root"])]),
+        file("pkg/drivers/direct.py", vec![py_decorated_class("tree", "pkg/drivers/direct.py", "Direct", 2, &["Root"], registered)]),
         file("pkg/drivers/mid.py", vec![py_class("tree", "pkg/drivers/mid.py", "Mid", 3, &["Base"])]),
         file("pkg/drivers/leaf.py", vec![
-            py_class("tree", "pkg/drivers/leaf.py", "LeafA", 5, &["Mid"]),
-            py_class("tree", "pkg/drivers/leaf.py", "LeafB", 20, &["Mid", "Base"]),
+            py_decorated_class("tree", "pkg/drivers/leaf.py", "LeafA", 5, &["Mid"], registered),
+            py_decorated_class("tree", "pkg/drivers/leaf.py", "LeafB", 20, &["Mid", "Base"], registered),
         ]),
         file("pkg/other.py", vec![
-            py_class("tree", "pkg/other.py", "Other", 1, &["Base"]),
+            py_decorated_class("tree", "pkg/other.py", "Other", 1, &["Base"], registered),
             py_class("tree", "pkg/other.py", "Unrelated", 9, &[]),
         ]),
     ]).await.unwrap();
+}
+
+fn subclass_lines(out: &str) -> Vec<&str> {
+    out.lines()
+        .filter(|l| l.contains(" <- ") && l.split_whitespace().next().is_some_and(|t| t.contains(':')))
+        .collect()
+}
+
+fn subclass_names(out: &str) -> Vec<String> {
+    subclass_lines(out).iter()
+        .filter_map(|l| l.split_whitespace().nth(1))
+        .map(|n| n.trim_end_matches('+').to_string())
+        .collect()
+}
+
+async fn subclasses_of(client: &Arc<harvest_db::Db>, params: Value) -> String {
+    let mut params = params;
+    params["repo"] = json!("tree");
+    params["version"] = json!("v1");
+    FindSubclassesTool(Arc::clone(client)).execute(params).await.unwrap()
 }
 
 #[tokio::test]
@@ -838,15 +866,26 @@ async fn seed_hierarchy(client: &Arc<harvest_db::Db>) {
 async fn find_subclasses_returns_direct_and_indirect_subclasses() {
     setup!(client, _test_db);
     seed_hierarchy(&client).await;
-    let tool = FindSubclassesTool(Arc::clone(&client));
-    let rows: Vec<Value> = serde_json::from_str(
-        &tool.execute(json!({ "repo": "tree", "version": "v1", "class": "Base" })).await.unwrap()
-    ).unwrap();
-    assert_eq!(names_from(&rows), ["LeafA", "LeafB", "Mid", "Other"]);
-    let leaf_b = rows.iter().find(|r| r["name"] == "LeafB").unwrap();
-    assert_eq!(leaf_b["depth"], 1, "the nearest path to the base wins");
-    let leaf_a = rows.iter().find(|r| r["name"] == "LeafA").unwrap();
-    assert_eq!((leaf_a["parent"].clone(), leaf_a["depth"].clone()), (json!("Mid"), json!(2)));
+    let out = subclasses_of(&client, json!({ "class": "Base" })).await;
+    assert!(out.starts_with("4 subclasses of Base"), "{out}");
+    let mut names = subclass_names(&out);
+    names.sort();
+    assert_eq!(names, ["LeafA", "LeafB", "Mid", "Other"], "{out}");
+    let lines = subclass_lines(&out);
+    assert!(lines.iter().any(|l| l.starts_with("pkg/drivers/leaf.py:20 LeafB <- Base @registry.driver")), "nearest path wins: {out}");
+    assert!(lines.iter().any(|l| l.starts_with("pkg/drivers/leaf.py:5 LeafA <- Mid")), "{out}");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn find_subclasses_marks_classes_that_have_subclasses() {
+    setup!(client, _test_db);
+    seed_hierarchy(&client).await;
+    let out = subclasses_of(&client, json!({ "class": "Root" })).await;
+    let lines = subclass_lines(&out);
+    assert!(lines.iter().any(|l| l.contains(" Mid+ <- ")), "{out}");
+    assert!(lines.iter().any(|l| l.contains(" Base+ <- ")), "{out}");
+    assert!(lines.iter().any(|l| l.contains(" LeafA <- ")), "{out}");
 }
 
 #[tokio::test]
@@ -854,13 +893,57 @@ async fn find_subclasses_returns_direct_and_indirect_subclasses() {
 async fn find_subclasses_filters_by_directory_and_accepts_a_module_prefix() {
     setup!(client, _test_db);
     seed_hierarchy(&client).await;
-    let tool = FindSubclassesTool(Arc::clone(&client));
-    let rows: Vec<Value> = serde_json::from_str(
-        &tool.execute(json!({
-            "repo": "tree", "version": "v1", "class": "mod.Base", "path_prefix": "pkg/drivers/"
-        })).await.unwrap()
-    ).unwrap();
-    assert_eq!(names_from(&rows), ["LeafA", "LeafB", "Mid"]);
+    let out = subclasses_of(&client, json!({ "class": "mod.Base", "path_prefix": "pkg/drivers/" })).await;
+    let mut names = subclass_names(&out);
+    names.sort();
+    assert_eq!(names, ["LeafA", "LeafB", "Mid"], "{out}");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn find_subclasses_filters_by_decorator() {
+    setup!(client, _test_db);
+    seed_hierarchy(&client).await;
+    for decorator in ["registry.driver", "driver", "@registry.driver"] {
+        let out = subclasses_of(&client, json!({ "class": "Root", "decorator": decorator })).await;
+        let mut names = subclass_names(&out);
+        names.sort();
+        assert_eq!(names, ["Direct", "LeafA", "LeafB", "Other"], "{decorator}: {out}");
+    }
+    let out = subclasses_of(&client, json!({ "class": "Root", "decorator": "river" })).await;
+    assert!(subclass_names(&out).is_empty(), "a partial segment must not match: {out}");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn find_subclasses_points_at_a_broader_ancestor() {
+    setup!(client, _test_db);
+    seed_hierarchy(&client).await;
+    let out = subclasses_of(&client, json!({ "class": "Base", "path_prefix": "pkg/drivers/" })).await;
+    assert!(
+        out.contains("Base inherits from Root, which has 1 more subclasses under pkg/drivers/ that do not go through Base"),
+        "{out}",
+    );
+    let out = subclasses_of(&client, json!({ "class": "Root" })).await;
+    assert!(!out.contains("Note:"), "the root has no broader ancestor: {out}");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn find_subclasses_pages_with_offset() {
+    setup!(client, _test_db);
+    seed_hierarchy(&client).await;
+    let first = subclasses_of(&client, json!({ "class": "Root", "limit": 2 })).await;
+    assert!(first.starts_with("6 subclasses of Root"), "{first}");
+    assert!(first.contains("(showing 1-2)"), "{first}");
+    assert!(first.contains("call again with offset=2"), "{first}");
+    let mut all = subclass_names(&first);
+    for offset in [2, 4] {
+        let page = subclasses_of(&client, json!({ "class": "Root", "limit": 2, "offset": offset })).await;
+        all.extend(subclass_names(&page));
+    }
+    all.sort();
+    assert_eq!(all, ["Base", "Direct", "LeafA", "LeafB", "Mid", "Other"]);
 }
 
 #[tokio::test]
@@ -868,9 +951,23 @@ async fn find_subclasses_filters_by_directory_and_accepts_a_module_prefix() {
 async fn find_subclasses_explains_an_empty_result() {
     setup!(client, _test_db);
     seed_hierarchy(&client).await;
-    let tool = FindSubclassesTool(Arc::clone(&client));
-    let out = tool.execute(json!({ "repo": "tree", "version": "v1", "class": "Unrelated" })).await.unwrap();
+    let out = subclasses_of(&client, json!({ "class": "Unrelated" })).await;
     assert!(out.starts_with("No subclasses"), "{out}");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn search_symbols_lists_classes_by_decorator() {
+    setup!(client, _test_db);
+    seed_hierarchy(&client).await;
+    let tool = SearchSymbolsTool::new(Arc::clone(&client));
+    let rows: Vec<Value> = serde_json::from_str(&tool.execute(json!({
+        "query": "", "decorator": "registry.driver", "repo": "tree", "version": "v1", "kind": "class",
+    })).await.unwrap()).unwrap();
+    let mut names = names_from(&rows);
+    names.sort();
+    assert_eq!(names, ["Direct", "LeafA", "LeafB", "Other"]);
+    assert!(rows.iter().all(|r| r["decorators"] == json!(["registry.driver"])), "{rows:?}");
 }
 
 #[tokio::test]
@@ -893,13 +990,13 @@ async fn search_symbols_lists_a_directory_page_by_page() {
     assert_eq!(names_from(&first).len(), 2, "{first:?}");
     assert_eq!(first.last().unwrap()["next_offset"], 2, "a further page must be announced: {first:?}");
     let second = page(2).await;
-    assert_eq!(names_from(&second).len(), 1, "{second:?}");
+    assert_eq!(names_from(&second).len(), 2, "{second:?}");
     assert!(second.iter().all(|r| r.get("more_results").is_none()), "{second:?}");
 
     let mut all = names_from(&first);
     all.extend(names_from(&second));
     all.sort();
-    assert_eq!(all, ["LeafA", "LeafB", "Mid"], "every class under the directory exactly once");
+    assert_eq!(all, ["Direct", "LeafA", "LeafB", "Mid"], "every class under the directory exactly once");
 }
 
 #[tokio::test]

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::graph::model::ParsedFile;
 
-pub const PARSER_VERSION: i32 = 1;
+pub const PARSER_VERSION: i32 = 2;
 
 pub trait LanguageParser: Send + Sync {
     fn language_name(&self) -> &str;

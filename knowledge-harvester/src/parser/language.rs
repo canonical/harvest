@@ -166,6 +166,7 @@ impl LanguageParser for RustParser {
                             embeds: vec![],
                             uses,
                             docstring: leading_doc_comment(source, tn),
+                            decorators: Vec::new(),
                         });
                     }
                 }
@@ -282,6 +283,7 @@ impl LanguageParser for PythonParser {
                         embeds: vec![],
                         uses: vec![],
                         docstring: python_docstring(source, cls_n),
+                        decorators: python_decorators(source, cls_n),
                     });
                 }
             }
@@ -506,6 +508,7 @@ impl LanguageParser for GoParser {
                         embeds,
                         uses: vec![],
                         docstring: leading_doc_comment(source, ts_n),
+                        decorators: Vec::new(),
                     });
                 }
             }
@@ -612,6 +615,25 @@ fn python_docstring(source: &str, node: tree_sitter::Node) -> Option<String> {
     if !matches!(literal.kind(), "string" | "concatenated_string") { return None; }
     let text = strip_docstring_quotes(&source[literal.byte_range()]);
     if text.is_empty() { None } else { Some(text) }
+}
+
+fn python_decorators(source: &str, node: tree_sitter::Node) -> Vec<String> {
+    let Some(parent) = node.parent().filter(|p| p.kind() == "decorated_definition") else { return Vec::new() };
+    let mut decorators = Vec::new();
+    for i in 0..parent.named_child_count() {
+        let Some(decorator) = parent.named_child(i).filter(|c| c.kind() == "decorator") else { continue };
+        let Some(expression) = decorator.named_child(0) else { continue };
+        let target = if expression.kind() == "call" {
+            expression.child_by_field_name("function").unwrap_or(expression)
+        } else {
+            expression
+        };
+        let name: String = source[target.byte_range()].split_whitespace().collect();
+        if !name.is_empty() {
+            decorators.push(name);
+        }
+    }
+    decorators
 }
 
 fn python_import_target(source: &str, node: tree_sitter::Node) -> String {
@@ -969,6 +991,24 @@ mod tests {
     #[test] fn python_single_inheritance() {
         let pf = parse_python("class Child(Parent):\n    pass");
         assert_eq!(pf.classes[0].bases, vec!["Parent"]);
+    }
+
+    #[test] fn python_class_decorators_are_captured_in_order() {
+        let pf = parse_python(
+            "@interface.volumedriver\n@six.add_metaclass(abc.ABCMeta)\n@registered\nclass LVMVolumeDriver(driver.VolumeDriver):\n    pass\n",
+        );
+        assert_eq!(pf.classes[0].decorators, vec!["interface.volumedriver", "six.add_metaclass", "registered"]);
+        assert_eq!(pf.classes[0].start_line, 4);
+    }
+
+    #[test] fn python_undecorated_class_has_no_decorators() {
+        let pf = parse_python("class Plain:\n    pass\n");
+        assert!(pf.classes[0].decorators.is_empty());
+    }
+
+    #[test] fn python_method_decorators_are_not_class_decorators() {
+        let pf = parse_python("class A:\n    @staticmethod\n    def f():\n        pass\n");
+        assert!(pf.classes[0].decorators.is_empty());
     }
 
     #[test] fn python_dotted_base_inheritance() {
