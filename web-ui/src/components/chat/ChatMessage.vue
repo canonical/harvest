@@ -446,8 +446,6 @@ const sourceLinks = computed(() => (props.msg.sources ?? []).map(src => ({
   title: sourceTitle(src),
 })));
 
-const SOURCES_COLLAPSE_THRESHOLD = 5;
-
 const sourceGroups = computed(() => {
   const groups = [];
   const byKey = new Map();
@@ -470,5 +468,5 @@ const sourceGroups = computed(() => {
   return groups;
 });
 
-const sourcesExpanded = ref((props.msg.sources ?? []).length <= SOURCES_COLLAPSE_THRESHOLD);
+const sourcesExpanded = ref(false);
 </script>
