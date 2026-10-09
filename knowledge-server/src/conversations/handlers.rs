@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::agent::HistoryMessage;
 use crate::auth::jwt::Claims;
+use crate::conversations::summary::{effective_history, StoredSummary};
 use crate::llm::types::{Usage, UsedProvider};
 use harvest_db::Db;
 
@@ -19,24 +20,21 @@ const CONVERSATION_TITLE_TRUNCATE_CHARS: usize = 57;
 
 type ApiError = (StatusCode, Json<Value>);
 
-pub async fn load_user_messages_raw(
+async fn load_user_conversation(
     db: &Db,
     user_id: &str,
     conv_id: &str,
-) -> anyhow::Result<Vec<Value>> {
+) -> anyhow::Result<(Vec<Value>, Option<StoredSummary>)> {
     let rows = db.query(
-        "SELECT messages FROM conversations WHERE id = $cid AND user_id = $uid",
+        "SELECT messages, summary, summary_upto FROM conversations WHERE id = $cid AND user_id = $uid",
         json!({ "uid": user_id, "cid": conv_id }),
     ).await?;
-    let row = match rows.into_iter().next() {
-        Some(r) => r,
-        None => return Ok(vec![]),
-    };
-    let messages_str = match row.get("messages").and_then(|v| v.as_str()) {
-        Some(s) => s.to_string(),
-        None => return Ok(vec![]),
-    };
-    Ok(serde_json::from_str(&messages_str).unwrap_or_default())
+    let Some(row) = rows.into_iter().next() else { return Ok((vec![], None)) };
+    let messages = row.get("messages")
+        .and_then(|v| v.as_str())
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    Ok((messages, StoredSummary::from_row(&row)))
 }
 
 pub fn history_messages_from_raw(raw: &[Value]) -> Vec<HistoryMessage> {
@@ -48,8 +46,8 @@ pub async fn load_conversation_context(
     user_id: &str,
     conv_id: &str,
 ) -> anyhow::Result<(Vec<Value>, Vec<HistoryMessage>)> {
-    let raw = load_user_messages_raw(db, user_id, conv_id).await?;
-    let history = history_messages_from_raw(&raw);
+    let (raw, stored_summary) = load_user_conversation(db, user_id, conv_id).await?;
+    let history = effective_history(&history_messages_from_raw(&raw), stored_summary.as_ref());
     Ok((raw, history))
 }
 
@@ -263,7 +261,8 @@ pub async fn update(
 
     state.db.query(
         "UPDATE conversations
-         SET title = $title, messages = $messages, message_count = $count, updated_at = $now
+         SET title = $title, messages = $messages, message_count = $count, updated_at = $now,
+             summary = NULL, summary_upto = 0
          WHERE id = $cid AND user_id = $uid
          RETURNING id",
         json!({
