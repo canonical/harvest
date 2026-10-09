@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::agent::{Agent, AgentEvent, Attachment, HistoryMessage, PausedTurn, PendingConfirmCall, Source, ToolResumeResult};
 use crate::llm::types::{Message, ProviderSelection, Usage, UsedProvider};
+use crate::conversations::summary::{effective_history, refresh as refresh_summary, StoredSummary};
 use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::api::ProjectAgentBuilder;
 use crate::auth::jwt::Claims;
@@ -381,27 +382,29 @@ async fn load_project_messages_raw(
     project_id: &str,
     conv_id: &str,
 ) -> Vec<Value> {
+    load_project_conversation(db, project_id, conv_id).await.0
+}
+
+async fn load_project_conversation(
+    db: &Db,
+    project_id: &str,
+    conv_id: &str,
+) -> (Vec<Value>, Option<StoredSummary>) {
     let rows = db.query(
-        "SELECT messages FROM conversations WHERE id = $cid AND project_id = $pid",
+        "SELECT messages, summary, summary_upto FROM conversations WHERE id = $cid AND project_id = $pid",
         json!({ "pid": project_id, "cid": conv_id }),
     ).await.unwrap_or_default();
 
-    rows.into_iter().next()
-        .and_then(|r| r.get("messages").and_then(|v| v.as_str()).map(|s| s.to_string()))
-        .and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
-        .unwrap_or_default()
+    let Some(row) = rows.into_iter().next() else { return (vec![], None) };
+    let messages = row.get("messages")
+        .and_then(|v| v.as_str())
+        .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
+        .unwrap_or_default();
+    (messages, StoredSummary::from_row(&row))
 }
 
 fn history_messages_from_raw(raw: &[Value]) -> Vec<HistoryMessage> {
     raw.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect()
-}
-
-async fn load_project_history(
-    db: &Db,
-    project_id: &str,
-    conv_id: &str,
-) -> Vec<HistoryMessage> {
-    history_messages_from_raw(&load_project_messages_raw(db, project_id, conv_id).await)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -808,7 +811,10 @@ async fn drive_turn(
             let query_t    = query.clone();
             let answer_t   = answer.clone();
             let prior_t    = history.clone();
-            let count_t    = history.len() + 2;
+            let count_t    = match &persist {
+                TurnPersist::New { prior_messages, .. } => prior_messages.len() + 2,
+                TurnPersist::Continuation => history.len() + 2,
+            };
             tokio::spawn(async move {
                 if let Some(new_title) = maybe_regenerate_title(
                     &db_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, count_t,
@@ -887,9 +893,9 @@ pub async fn project_query_stream(
             user_system_one.or_else(|| state.agent_builder.system_one.clone()),
         )
     };
-    let raw_messages = load_project_messages_raw(&state.db, &project_id, &body.conversation_id).await;
+    let (raw_messages, stored_summary) = load_project_conversation(&state.db, &project_id, &body.conversation_id).await;
     let raw_history = history_messages_from_raw(&raw_messages);
-    let history = agent.compact_history(&raw_history).await;
+    let history = effective_history(&raw_history, stored_summary.as_ref());
 
     state.broadcast(&project_id, json!({
         "type": "lock",
@@ -965,6 +971,8 @@ pub async fn project_query_stream(
             let _ = paused_tx.send(paused);
         });
 
+        let db_for_summary = Arc::clone(&db);
+        let conv_for_summary = conv_id.clone();
         drive_turn(
             locks, channels, db, llm, registry, in_flight, paused_confirmations,
             project_id_owned, conv_id, query, username, history,
@@ -973,6 +981,7 @@ pub async fn project_query_stream(
             agent_rx, paused_rx,
             user_id, pricing, turn_id,
         ).await;
+        refresh_summary(&db_for_summary, &agent, &conv_for_summary).await;
     });
 
     Json(json!({"ok": true})).into_response()
@@ -1237,7 +1246,8 @@ pub async fn update_conversation(
     let messages_json = body.messages.to_string();
     state.db.query(
         "UPDATE conversations
-         SET title = $title, messages = $messages, message_count = $count, updated_at = $now
+         SET title = $title, messages = $messages, message_count = $count, updated_at = $now,
+             summary = NULL, summary_upto = 0
          WHERE id = $cid AND project_id = $pid
          RETURNING id",
         json!({
@@ -1343,10 +1353,10 @@ pub async fn resume_confirm_action(
             user_system_one.or_else(|| state.agent_builder.system_one.clone()),
         )
     };
-    let raw_messages = load_project_messages_raw(&state.db, &project_id, &conv_id).await;
+    let (raw_messages, stored_summary) = load_project_conversation(&state.db, &project_id, &conv_id).await;
     let split = raw_messages.len().saturating_sub(2);
     let (prior_raw, tail_raw) = raw_messages.split_at(split);
-    let prior_history = agent.compact_history(&history_messages_from_raw(prior_raw)).await;
+    let prior_history = effective_history(&history_messages_from_raw(prior_raw), stored_summary.as_ref());
     let (query, username) = tail_raw.iter()
         .find(|m| m["role"] == "user")
         .map(|m| (
@@ -1398,6 +1408,8 @@ pub async fn resume_confirm_action(
             let _ = paused_tx.send(out);
         });
 
+        let db_for_summary = Arc::clone(&db);
+        let conv_for_summary = conv_id_owned.clone();
         drive_turn(
             locks, channels, db, llm, registry, in_flight, paused_confirmations,
             project_id_owned, conv_id_owned, query, username, prior_history,
@@ -1406,6 +1418,7 @@ pub async fn resume_confirm_action(
             agent_rx, paused_rx,
             user_id, pricing, turn_id,
         ).await;
+        refresh_summary(&db_for_summary, &agent, &conv_for_summary).await;
     });
 
     Ok(Json(json!({ "ok": true, "resumed": true })))
@@ -1849,11 +1862,13 @@ pub async fn project_query(
     } else {
         state.agent_builder.build_for_conversation_with_llm(project_id.clone(), body.conversation_id.clone().unwrap_or_default(), user_llm.clone())
     };
-    let raw_history = match &body.conversation_id {
-        Some(conv_id) => load_project_history(&state.db, &project_id, conv_id).await,
+    let history = match &body.conversation_id {
+        Some(conv_id) => {
+            let (raw, stored_summary) = load_project_conversation(&state.db, &project_id, conv_id).await;
+            effective_history(&history_messages_from_raw(&raw), stored_summary.as_ref())
+        }
         None => vec![],
     };
-    let history = agent.compact_history(&raw_history).await;
     let attachments = body.attachments.as_deref().unwrap_or(&[]);
     let selection = selection_from_parts(&body.provider_id, &body.model);
     match agent.query(&body.query, &history, attachments, selection.as_ref()).await {

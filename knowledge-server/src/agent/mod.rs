@@ -416,9 +416,29 @@ impl Agent {
         IntentMode::default()
     }
 
+    pub fn history_needs_compaction(&self, history: &[HistoryMessage]) -> bool {
+        !history.is_empty() && estimate_history_chars(history) > self.compaction_threshold_chars
+    }
+
+    pub fn compaction_keep_last(&self) -> usize {
+        self.compaction_keep_last
+    }
+
     pub async fn compact_history(&self, history: &[HistoryMessage]) -> Vec<HistoryMessage> {
-        if history.is_empty() || estimate_history_chars(history) <= self.compaction_threshold_chars {
-            return history.to_vec();
+        match self.summarize_history(history).await {
+            Some((summary, kept)) => {
+                let mut result = Vec::with_capacity(1 + kept);
+                result.push(HistoryMessage { role: "summary".into(), text: summary, ..Default::default() });
+                result.extend_from_slice(&history[history.len() - kept..]);
+                result
+            }
+            None => history.to_vec(),
+        }
+    }
+
+    pub async fn summarize_history(&self, history: &[HistoryMessage]) -> Option<(String, usize)> {
+        if !self.history_needs_compaction(history) {
+            return None;
         }
         if let Some(so) = &self.system_one {
             let history_text = history
@@ -433,7 +453,7 @@ impl Agent {
             match so.should_compact(&history_text, current_query).await {
                 Ok((should, _)) if !should => {
                     tracing::info!("system-one says compaction not needed — skipping");
-                    return history.to_vec();
+                    return None;
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -441,14 +461,16 @@ impl Agent {
                 }
             }
         }
-        self.compact_history_llm(history).await
+        self.summarize_older_messages(history).await
     }
 
-    async fn compact_history_llm(&self, history: &[HistoryMessage]) -> Vec<HistoryMessage> {
+    async fn summarize_older_messages(&self, history: &[HistoryMessage]) -> Option<(String, usize)> {
         let total_messages = history.len();
         let keep_last = self.compaction_keep_last.min(total_messages);
         let old = &history[..total_messages - keep_last];
-        let recent = &history[total_messages - keep_last..];
+        if old.is_empty() {
+            return None;
+        }
 
         let conversation_text = old
             .iter()
@@ -465,7 +487,7 @@ impl Agent {
             Ok(LlmResponse::Message { text, .. }) => text,
             _ => {
                 tracing::warn!("compaction LLM call failed — using full history");
-                return history.to_vec();
+                return None;
             }
         };
 
@@ -475,10 +497,7 @@ impl Agent {
             "compacted conversation history"
         );
 
-        let mut result = Vec::with_capacity(1 + keep_last);
-        result.push(HistoryMessage { role: "summary".into(), text: summary, ..Default::default() });
-        result.extend_from_slice(recent);
-        result
+        Some((summary, keep_last))
     }
 
     async fn compact_messages_mid_turn(&self, messages: Vec<Message>, protected_prefix_len: usize) -> Vec<Message> {
@@ -641,10 +660,7 @@ impl Agent {
         event_sender: mpsc::Sender<AgentEvent>,
     ) -> Option<PausedTurn> {
         let start = Instant::now();
-        let (mode, compacted) = tokio::join!(
-            self.classify_intent(user_query, history, selection),
-            self.compact_history(history),
-        );
+        let mode = self.classify_intent(user_query, history, selection).await;
         let _ = event_sender.send(AgentEvent::Intent { mode }).await;
 
         let (tool_defs, tool_map) = match mode {
@@ -654,7 +670,7 @@ impl Agent {
 
         let system_prompt = self.effective_system_prompt_for_query(user_query).await;
         let mut messages = vec![Message::system(system_prompt)];
-        messages.extend(history_to_messages(&compacted));
+        messages.extend(history_to_messages(history));
         messages.push(build_user_message(user_query, attachments));
 
         let is_first_turn = history.is_empty();
@@ -3646,9 +3662,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_compacts_history_over_threshold() {
+    async fn query_leaves_history_compaction_to_the_caller() {
         let agent = Agent::new(
-            MockLlm::new(vec![text("compact summary"), text("final answer")]),
+            MockLlm::new(vec![text("final answer")]),
             vec![],
             5,
         ).with_compaction(5, 1);
@@ -3661,10 +3677,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn query_streaming_compacts_history_over_threshold() {
+    async fn query_streaming_leaves_history_compaction_to_the_caller() {
         let agent = Arc::new(
             Agent::new(
-                MockLlm::new(vec![text("compact summary"), text("streaming answer")]),
+                MockLlm::new(vec![text("streaming answer")]),
                 vec![],
                 5,
             ).with_compaction(5, 1)
