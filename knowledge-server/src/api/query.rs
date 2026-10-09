@@ -17,6 +17,7 @@ use crate::agent::{chain::ChainBuilder, Agent, AgentEvent, Attachment};
 use crate::api::{resolve_user_llm, QueryState};
 use crate::auth::jwt::Claims;
 use crate::conversations::handlers::{append_user_turn, load_conversation_context};
+use crate::conversations::summary::spawn_refresh as spawn_summary_refresh;
 use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::llm::types::ProviderSelection;
 
@@ -56,14 +57,14 @@ pub async fn handle_query(
                 .with_parallel_research(true),
         )
     };
-    let compacted = agent.compact_history(&history).await;
-    match agent.query(&req.query, &compacted, attachments, selection.as_ref()).await {
+    match agent.query(&req.query, &history, attachments, selection.as_ref()).await {
         Ok(response) => {
             if let (Some(db), Some(cid)) = (&qs.db, &req.conversation_id) {
                 let att_meta: Vec<_> = attachments.iter()
                     .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
                     .collect();
                 let turn_id = uuid::Uuid::new_v4().to_string();
+                let msg_count = raw_messages.len() + 2;
                 let _ = append_user_turn(
                     db, &user.sub, cid,
                     &req.query, &user.name, &att_meta, raw_messages,
@@ -72,12 +73,12 @@ pub async fn handle_query(
                     vec![], None, None, response.provider_used.as_ref(), response.duration_ms,
                     &response.usage, response.llm_call_count, &turn_id, &qs.pricing,
                 ).await;
+                spawn_summary_refresh(Arc::clone(db), Arc::clone(&agent), cid.clone());
 
-                let msg_count = compacted.len() + 2;
                 let db_t   = Arc::clone(db);
                 let llm_t     = Arc::clone(agent.llm());
                 let cid_t     = cid.clone();
-                let prior_t   = compacted.clone();
+                let prior_t   = history.clone();
                 let query_t   = req.query.clone();
                 let answer_t  = response.answer.clone();
                 tokio::spawn(async move {
@@ -137,15 +138,13 @@ pub async fn handle_query_stream(
     tokio::spawn(async move {
         let (raw_messages, history) =
             load_context_if_needed(&qs_ctx, &user_id, conv_id.as_deref()).await;
-        let compacted = agent.compact_history(&history).await;
-
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         let query_for_agent     = query.clone();
-        let compacted_for_agent = compacted.clone();
+        let history_for_agent   = history.clone();
         let selection_for_agent = selection.clone();
         let agent_for_query     = Arc::clone(&agent);
         tokio::spawn(async move {
-            agent_for_query.query_streaming(&query_for_agent, &compacted_for_agent, &attachments, selection_for_agent.as_ref(), agent_tx).await;
+            agent_for_query.query_streaming(&query_for_agent, &history_for_agent, &attachments, selection_for_agent.as_ref(), agent_tx).await;
         });
 
         let mut chain_builder = ChainBuilder::new();
@@ -196,12 +195,13 @@ pub async fn handle_query_stream(
                     provider_used.as_ref(), *duration_ms,
                     usage, *llm_call_count, &turn_id, &qs_ctx.pricing,
                 ).await;
+                spawn_summary_refresh(Arc::clone(db), Arc::clone(&agent), cid.clone());
 
-                let msg_count = compacted.len() + 2;
+                let msg_count = raw_messages.len() + 2;
                 let db_t  = Arc::clone(db);
                 let llm_t    = Arc::clone(&llm);
                 let cid_t    = cid.clone();
-                let prior_t  = compacted.clone();
+                let prior_t  = history.clone();
                 let query_t  = query.clone();
                 let answer_t = answer.clone();
                 let tx_t     = tx.clone();
