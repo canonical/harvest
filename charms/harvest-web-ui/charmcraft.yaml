@@ -1,0 +1,54 @@
+name: harvest-web-ui
+type: charm
+title: Harvest web UI
+summary: Static Harvest web interface served behind haproxy.
+description: |
+  Serves the Harvest single page application from the harvest snap. API paths
+  are routed by the haproxy charm straight to harvest-server units, so web UI
+  units only serve static files and can be scaled independently. Hashed assets
+  of the previous release stay available during rolling upgrades.
+links:
+  source: https://github.com/thinking-dragon/harvest
+assumes:
+  - juju >= 3.3
+base: ubuntu@24.04
+platforms:
+  amd64:
+parts:
+  charm:
+    plugin: charm
+    source: .
+    charm-requirements:
+      - requirements.txt
+    build-packages:
+      - git
+
+requires:
+  haproxy-route:
+    interface: haproxy-route
+    limit: 1
+    optional: true
+  harvest-api:
+    interface: harvest_api
+    limit: 1
+
+resources:
+  harvest-snap:
+    type: file
+    filename: harvest.snap
+    description: Optional harvest snap; when attached it is installed instead of the store channel.
+
+config:
+  options:
+    snap-channel:
+      type: string
+      default: latest/edge
+      description: Store channel of the harvest snap.
+    hostname:
+      type: string
+      default: ""
+      description: Public hostname; must match the hostname used by harvest-server.
+    port:
+      type: int
+      default: 8080
+      description: Port the UI is served on.

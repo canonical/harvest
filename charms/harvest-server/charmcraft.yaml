@@ -1,0 +1,130 @@
+name: harvest-server
+type: charm
+title: Harvest server
+summary: Harvest knowledge graph API server, deployable active/active.
+description: |
+  Runs the Harvest knowledge-server from the harvest snap. Units share one
+  Charmed PostgreSQL database, coordinate through it (locks, presence, event
+  bus, agent directory) and are load balanced by the haproxy charm through the
+  haproxy-route interface. Any number of units can serve traffic at once.
+links:
+  source: https://github.com/thinking-dragon/harvest
+assumes:
+  - juju >= 3.3
+base: ubuntu@24.04
+platforms:
+  amd64:
+parts:
+  charm:
+    plugin: charm
+    source: .
+    charm-requirements:
+      - requirements.txt
+    build-packages:
+      - git
+
+requires:
+  database:
+    interface: postgresql_client
+    limit: 1
+  haproxy-route:
+    interface: haproxy-route
+    limit: 1
+    optional: true
+
+provides:
+  harvest-api:
+    interface: harvest_api
+    optional: true
+  cos-agent:
+    interface: cos_agent
+    optional: true
+
+peers:
+  harvest-peers:
+    interface: harvest_peers
+  restart:
+    interface: rolling_op
+
+resources:
+  harvest-snap:
+    type: file
+    filename: harvest.snap
+    description: Optional harvest snap; when attached it is installed instead of the store channel.
+
+config:
+  options:
+    snap-channel:
+      type: string
+      default: latest/edge
+      description: Store channel of the harvest snap.
+    hostname:
+      type: string
+      default: ""
+      description: Public hostname routed to Harvest by haproxy. Defaults to the haproxy external-hostname.
+    llm-providers:
+      type: string
+      default: ""
+      description: |
+        TOML [[llm]] blocks copied into server.toml. Values may reference keys of
+        llm-secret as ${secret:<key>}.
+    llm-secret:
+      type: secret
+      description: Juju secret whose keys can be referenced from llm-providers.
+    allow-local-login:
+      type: boolean
+      default: true
+      description: Allow email and password accounts.
+    oidc-issuer-url:
+      type: string
+      default: ""
+      description: OIDC issuer URL; enables OIDC login together with oidc-client-id and oidc-secret.
+    oidc-client-id:
+      type: string
+      default: ""
+      description: OIDC client id.
+    oidc-display-name:
+      type: string
+      default: ""
+      description: Name shown on the OIDC login button.
+    oidc-secret:
+      type: secret
+      description: Juju secret holding client-secret for OIDC.
+    google-client-id:
+      type: string
+      default: ""
+      description: Google OAuth client id; enables Google login together with google-secret.
+    google-secret:
+      type: secret
+      description: Juju secret holding client-secret for Google OAuth.
+    import-secrets:
+      type: secret
+      description: |
+        Juju secret with jwt-secret and user-key-encryption-key to keep the keys of an
+        existing deployment. Without it the leader generates new ones.
+    pool-size:
+      type: int
+      default: 16
+      description: Database connections per unit.
+    max-iterations:
+      type: int
+      default: 25
+      description: Maximum agent iterations per turn.
+    drain-timeout:
+      type: int
+      default: 120
+      description: Seconds a stopping unit waits for running turns before aborting them.
+    active-active:
+      type: boolean
+      default: true
+      description: Allow more than one unit. Set to false to force a single unit.
+    extra-toml:
+      type: string
+      default: ""
+      description: Additional server.toml sections (for example [lxd], [collocate] or [semantic]).
+
+actions:
+  run-migrations:
+    description: Apply pending database migrations now.
+  show-status:
+    description: Report the node id, schema versions and readiness of this unit.
