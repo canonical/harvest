@@ -34,7 +34,7 @@ impl Tool for ListAgentsTool {
     }
 
     async fn execute(&self, _params: Value) -> Result<String> {
-        let agents = self.registry.agents_for_project(&self.project_id);
+        let agents = self.registry.agents_for_project(&self.project_id).await;
         Ok(serde_json::to_string_pretty(&agents)?)
     }
 

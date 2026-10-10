@@ -7,6 +7,35 @@ use std::time::Duration;
 use harvest_db::Db;
 
 static RUNNING: LazyLock<DashMap<String, ()>> = LazyLock::new(DashMap::new);
+static PROCESS_ID: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().to_string());
+const GENERATION_LEASE_SECS: f64 = 300.0;
+
+pub async fn try_acquire_generation(db: &Db, deployment_id: &str) -> bool {
+    db.query(
+        "INSERT INTO design_pdf_cache (deployment_id, generating_node, generating_until)
+         VALUES ($did, $node, now() + make_interval(secs => $lease::float8))
+         ON CONFLICT (deployment_id) DO UPDATE
+         SET generating_node = EXCLUDED.generating_node, generating_until = EXCLUDED.generating_until
+         WHERE design_pdf_cache.generating_until IS NULL OR design_pdf_cache.generating_until < now()
+         RETURNING deployment_id",
+        json!({ "did": deployment_id, "node": *PROCESS_ID, "lease": GENERATION_LEASE_SECS }),
+    ).await.map(|rows| !rows.is_empty()).unwrap_or(false)
+}
+
+pub async fn release_generation(db: &Db, deployment_id: &str) {
+    let _ = db.execute(
+        "UPDATE design_pdf_cache SET generating_node = NULL, generating_until = NULL
+         WHERE deployment_id = $did AND generating_node = $node",
+        json!({ "did": deployment_id, "node": *PROCESS_ID }),
+    ).await;
+}
+
+async fn generating_elsewhere(db: &Db, deployment_id: &str) -> bool {
+    db.query(
+        "SELECT 1 AS busy FROM design_pdf_cache WHERE deployment_id = $did AND generating_until > now()",
+        json!({ "did": deployment_id }),
+    ).await.map(|rows| !rows.is_empty()).unwrap_or(false)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesignVersion {
@@ -196,9 +225,9 @@ fn is_running(deployment_id: &str) -> bool {
     RUNNING.contains_key(deployment_id)
 }
 
-async fn wait_until_idle(deployment_id: &str, timeout: Duration) {
+async fn wait_until_idle(db: &Db, deployment_id: &str, timeout: Duration) {
     let deadline = tokio::time::Instant::now() + timeout;
-    while is_running(deployment_id) {
+    while is_running(deployment_id) || generating_elsewhere(db, deployment_id).await {
         if tokio::time::Instant::now() >= deadline {
             return;
         }
@@ -228,7 +257,10 @@ pub fn schedule_regeneration(db: Arc<Db>, project_id: String, deployment_id: Str
         return;
     }
     tokio::spawn(async move {
-        run_regeneration(&db, &project_id, &deployment_id).await;
+        if try_acquire_generation(&db, &deployment_id).await {
+            run_regeneration(&db, &project_id, &deployment_id).await;
+            release_generation(&db, &deployment_id).await;
+        }
         RUNNING.remove(&deployment_id);
     });
 }
@@ -268,7 +300,8 @@ pub async fn resolve_for_serving(
     };
     let cache = load_cache_state(&db, &project_id, &deployment_id).await?;
 
-    match decide_serve(&cache, &input.version, is_running(&deployment_id)) {
+    let regenerating = is_running(&deployment_id) || generating_elsewhere(&db, &deployment_id).await;
+    match decide_serve(&cache, &input.version, regenerating) {
         ServeDecision::ServeReady => {
             let bytes = load_ready_bytes(&db, &project_id, &deployment_id).await?.unwrap_or_default();
             Ok(ResolvedPdf::Bytes { data: bytes, stale: false })
@@ -284,9 +317,10 @@ pub async fn resolve_for_serving(
             if trigger {
                 schedule_regeneration(db.clone(), project_id.clone(), deployment_id.clone());
             }
-            wait_until_idle(&deployment_id, Duration::from_secs(30)).await;
+            wait_until_idle(&db, &deployment_id, Duration::from_secs(30)).await;
             let cache = load_cache_state(&db, &project_id, &deployment_id).await?;
-            match decide_serve(&cache, &input.version, is_running(&deployment_id)) {
+            let regenerating = is_running(&deployment_id) || generating_elsewhere(&db, &deployment_id).await;
+            match decide_serve(&cache, &input.version, regenerating) {
                 ServeDecision::ServeReady => {
                     let bytes = load_ready_bytes(&db, &project_id, &deployment_id).await?.unwrap_or_default();
                     Ok(ResolvedPdf::Bytes { data: bytes, stale: false })

@@ -16,11 +16,12 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+use tokio::sync::mpsc;
 use tokio_stream::{wrappers::BroadcastStream, Stream};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentEvent, Attachment, HistoryMessage, PausedTurn, PendingConfirmCall, Source, ToolResumeResult};
+use super::live::{build_catchup_events, seq_filter, ProjectLive};
 use crate::llm::types::{Message, ProviderSelection, Usage, UsedProvider};
 use crate::conversations::summary::{effective_history, refresh as refresh_summary, StoredSummary};
 use crate::conversations::title_generation::maybe_regenerate_title;
@@ -29,95 +30,20 @@ use crate::auth::jwt::Claims;
 use harvest_db::Db;
 
 const PROJECT_NAME_MAX_CHARS: usize = 100;
+const PAUSED_TURN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
-#[derive(Clone, Debug)]
-enum InFlightEvent {
-    Thinking   { text: String },
-    TextDelta  { text: String },
-    ToolCall   { name: String, input: Value, description: Option<String>, hostname: Option<String> },
-    ToolResult { name: String, preview: String },
-}
-
-#[derive(Clone, Default)]
-pub struct InFlightState {
-    query:       String,
-    username:    String,
-    attachments: Vec<Value>,
-    events:      Vec<InFlightEvent>,
-}
-
-fn record_in_flight(
-    state:    &mut InFlightState,
-    event:    &AgentEvent,
-    description: Option<String>,
-    hostname:    Option<String>,
-) {
-    match event {
-        AgentEvent::ThinkingDelta { text } => {
-            if let Some(InFlightEvent::Thinking { text: t }) = state.events.last_mut() {
-                t.push_str(text);
-            } else {
-                state.events.push(InFlightEvent::Thinking { text: text.clone() });
-            }
-        }
-        AgentEvent::Thinking { text } => {
-            state.events.push(InFlightEvent::Thinking { text: text.clone() });
-        }
-        AgentEvent::TextDelta { text } => {
-            if let Some(InFlightEvent::TextDelta { text: t }) = state.events.last_mut() {
-                t.push_str(text);
-            } else {
-                state.events.push(InFlightEvent::TextDelta { text: text.clone() });
-            }
-        }
-        AgentEvent::ToolCall { name, input } => {
-            state.events.push(InFlightEvent::ToolCall {
-                name: name.clone(), input: input.clone(), description, hostname,
-            });
-        }
-        AgentEvent::ToolResult { name, preview } => {
-            state.events.push(InFlightEvent::ToolResult {
-                name: name.clone(), preview: preview.clone(),
-            });
-        }
-        _ => {}
-    }
-}
-
-fn build_catchup_events(cid: &str, state: &InFlightState) -> Vec<Value> {
-    state.events.iter().map(|ev| match ev {
-        InFlightEvent::Thinking { text } => json!({
-            "type": "thinking", "conv_id": cid, "text": text,
-        }),
-        InFlightEvent::TextDelta { text } => json!({
-            "type": "text_delta", "conv_id": cid, "text": text,
-        }),
-        InFlightEvent::ToolCall { name, input, description, hostname } => {
-            let mut v = json!({
-                "type": "tool_call", "conv_id": cid,
-                "name": name, "input": input,
-            });
-            if let Some(d) = description { v["description"] = json!(d); }
-            if let Some(h) = hostname    { v["hostname"]    = json!(h); }
-            v
-        }
-        InFlightEvent::ToolResult { name, preview } => json!({
-            "type": "tool_result", "conv_id": cid,
-            "name": name, "preview": preview,
-        }),
-    }).collect()
-}
-
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct ResolvedConfirmItem {
     content:  String,
     is_error: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 struct PausedConfirm {
     messages:   Vec<Message>,
     iterations: usize,
     pending:    Vec<PendingConfirmCall>,
+    #[serde(default)]
     resolved:   HashMap<String, ResolvedConfirmItem>,
     selection:  Option<ProviderSelection>,
     elapsed_ms: u64,
@@ -138,20 +64,11 @@ pub struct ProjectState {
     pub user_key_store: Option<Arc<crate::auth::user_keys::UserKeyStore>>,
     pub pricing:       Arc<crate::cost::PricingTable>,
     pub collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
-    pub locks:     Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
-    pub channels:  Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
-    pub presence:  Arc<RwLock<HashMap<String, HashMap<String, UserPresence>>>>,
-    pub in_flight: Arc<RwLock<HashMap<String, HashMap<String, InFlightState>>>>,
-    paused_confirmations: Arc<RwLock<HashMap<String, PausedConfirm>>>,
-}
-
-#[derive(Clone)]
-pub struct UserPresence {
-    pub name:    String,
-    pub conv_id: Option<String>,
+    pub live:          Arc<ProjectLive>,
 }
 
 impl ProjectState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db: Arc<Db>,
         agent: Arc<Agent>,
@@ -163,6 +80,23 @@ impl ProjectState {
         pricing: Arc<crate::cost::PricingTable>,
         collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
     ) -> Self {
+        let live = ProjectLive::standalone(Arc::clone(&db));
+        Self::with_live(db, agent, agent_builder, llm, llm_configs, system_one_config, user_key_store, pricing, collocate_registry, live)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_live(
+        db: Arc<Db>,
+        agent: Arc<Agent>,
+        agent_builder: Arc<ProjectAgentBuilder>,
+        llm: Arc<dyn crate::llm::LlmProvider>,
+        llm_configs: Arc<Vec<crate::config::LlmProviderConfig>>,
+        system_one_config: Option<crate::config::SystemOneConfig>,
+        user_key_store: Option<Arc<crate::auth::user_keys::UserKeyStore>>,
+        pricing: Arc<crate::cost::PricingTable>,
+        collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
+        live: Arc<ProjectLive>,
+    ) -> Self {
         Self {
             db,
             agent,
@@ -173,27 +107,12 @@ impl ProjectState {
             user_key_store,
             pricing,
             collocate_registry,
-            locks:     Arc::new(RwLock::new(HashMap::new())),
-            channels:  Arc::new(Mutex::new(HashMap::new())),
-            presence:  Arc::new(RwLock::new(HashMap::new())),
-            in_flight: Arc::new(RwLock::new(HashMap::new())),
-            paused_confirmations: Arc::new(RwLock::new(HashMap::new())),
+            live,
         }
-    }
-
-    async fn get_or_create_channel(&self, project_id: &str) -> broadcast::Sender<String> {
-        let mut channels = self.channels.lock().await;
-        channels
-            .entry(project_id.to_string())
-            .or_insert_with(|| broadcast::channel(128).0)
-            .clone()
     }
 
     async fn broadcast(&self, project_id: &str, msg: String) {
-        let channels = self.channels.lock().await;
-        if let Some(sender) = channels.get(project_id) {
-            let _ = sender.send(msg);
-        }
+        self.live.broadcast(project_id, msg);
     }
 }
 
@@ -210,39 +129,24 @@ impl<S: Stream + Unpin> Stream for GuardedStream<S> {
 }
 
 struct PresenceGuard {
-    project_id: String,
-    user_id:    String,
-    user_name:  String,
-    channels:   Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
-    presence:   Arc<RwLock<HashMap<String, HashMap<String, UserPresence>>>>,
+    connection_id: String,
+    live:          Arc<ProjectLive>,
 }
 
 impl Drop for PresenceGuard {
     fn drop(&mut self) {
-        let project_id = self.project_id.clone();
-        let user_id    = self.user_id.clone();
-        let user_name  = self.user_name.clone();
-        let channels   = Arc::clone(&self.channels);
-        let presence   = Arc::clone(&self.presence);
-        tokio::spawn(async move {
-            {
-                let mut presence_map = presence.write().await;
-                if let Some(users) = presence_map.get_mut(&project_id) {
-                    users.remove(&user_id);
+        let connection_id = self.connection_id.clone();
+        let live = Arc::clone(&self.live);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(e) = live.leave(&connection_id).await {
+                    tracing::warn!(error = %e, "failed to record presence leave");
                 }
-            }
-            let leave = json!({
-                "type": "user_leave",
-                "user_id": user_id,
-                "name": user_name,
-            }).to_string();
-            let channel_map = channels.lock().await;
-            if let Some(sender) = channel_map.get(&project_id) {
-                let _ = sender.send(leave);
-            }
-        });
+            });
+        }
     }
 }
+
 
 type ApiError = (StatusCode, Json<Value>);
 
@@ -281,59 +185,38 @@ pub async fn project_events(
     }
 
     let conv_id = params.get("conv").cloned();
+    let receiver = state.live.subscribe(&project_id);
 
-    let catchup: Vec<Result<Event, Infallible>> = if let Some(cid) = &conv_id {
-        let map = state.in_flight.read().await;
-        if let Some(s) = map.get(&project_id).and_then(|m| m.get(cid)) {
-            let mut events = vec![];
-            events.push(Ok(Event::default().data(json!({
-                "type": "user_message",
-                "conv_id": cid,
-                "query": s.query,
-                "username": s.username,
-                "attachments": s.attachments,
-            }).to_string())));
-            for v in build_catchup_events(cid, s) {
-                events.push(Ok(Event::default().data(v.to_string())));
+    let (catchup, cutoff): (Vec<Result<Event, Infallible>>, u64) = match &conv_id {
+        Some(cid) => match state.live.snapshot(cid).await {
+            Some(snapshot) => {
+                let s = &snapshot.state;
+                let mut events = vec![Ok(Event::default().data(json!({
+                    "type": "user_message",
+                    "conv_id": cid,
+                    "query": s.query,
+                    "username": s.username,
+                    "attachments": s.attachments,
+                }).to_string()))];
+                for v in build_catchup_events(cid, s) {
+                    events.push(Ok(Event::default().data(v.to_string())));
+                }
+                (events, snapshot.seq)
             }
-            events
-        } else {
-            vec![]
-        }
-    } else {
-        vec![]
+            None => (vec![], 0),
+        },
+        None => (vec![], 0),
     };
 
-    let sender = state.get_or_create_channel(&project_id).await;
-    let receiver = sender.subscribe();
-
-    {
-        let mut presence = state.presence.write().await;
-        presence
-            .entry(project_id.clone())
-            .or_default()
-            .insert(user.sub.clone(), UserPresence {
-                name: user.name.clone(),
-                conv_id: conv_id.clone(),
-            });
+    let connection_id = Uuid::new_v4().to_string();
+    if let Err(e) = state.live.join(&project_id, &connection_id, &user.sub, &user.name, conv_id.as_deref()).await {
+        tracing::warn!(error = %e, "failed to record presence");
     }
 
-    let presence_users: Vec<Value> = {
-        let presence = state.presence.read().await;
-        presence.get(&project_id)
-            .map(|map| map.iter().map(|(id, up)| json!({
-                "user_id": id,
-                "name": up.name,
-                "conv_id": up.conv_id,
-            })).collect())
-            .unwrap_or_default()
-    };
-    let project_locks: Vec<(String, String)> = state.locks.read().await
-        .get(&project_id)
-        .map(|m| m.iter().map(|(cid, by)| (cid.clone(), by.clone())).collect())
-        .unwrap_or_default();
+    let presence_users = state.live.presence(&project_id).await.unwrap_or_default();
+    let project_locks = state.live.locks(&project_id).await.unwrap_or_default();
 
-    let _ = sender.send(json!({
+    state.live.broadcast(&project_id, json!({
         "type": "user_join",
         "user_id": user.sub,
         "name": user.name,
@@ -353,21 +236,23 @@ pub async fn project_events(
     init.extend(catchup);
 
     let guard = PresenceGuard {
-        project_id: project_id.clone(),
-        user_id:    user.sub.clone(),
-        user_name:  user.name.clone(),
-        channels:   Arc::clone(&state.channels),
-        presence:   Arc::clone(&state.presence),
+        connection_id,
+        live: Arc::clone(&state.live),
     };
 
-    let broadcast_stream = BroadcastStream::new(receiver).filter_map(|msg| {
+    let keep = seq_filter(conv_id.clone().unwrap_or_default(), cutoff);
+    let broadcast_stream = BroadcastStream::new(receiver).filter_map(move |msg| {
         std::future::ready(
-            msg.ok().map(|data| Ok::<Event, Infallible>(Event::default().data(data)))
+            msg.ok()
+                .filter(|data| keep(data))
+                .map(|data| Ok::<Event, Infallible>(Event::default().data(data)))
         )
     });
 
+    let shutdown = state.live.shutdown_signal();
     let stream = tokio_stream::iter(init)
-        .chain(GuardedStream { inner: broadcast_stream, _guard: guard });
+        .chain(GuardedStream { inner: broadcast_stream, _guard: guard })
+        .take_until(shutdown);
 
     let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
     response.headers_mut().insert(
@@ -429,6 +314,7 @@ async fn save_project_turn(
     turn_id: &str,
     user_id: &str,
     pricing: &crate::cost::PricingTable,
+    release_lock: bool,
 ) {
     let mut messages = prior_messages;
     messages.push(json!({
@@ -471,13 +357,17 @@ async fn save_project_turn(
     let count = messages.len() as i64;
 
     let _ = db.query(
-        "UPDATE conversations
+        "WITH released AS (
+             DELETE FROM active_turns WHERE conv_id = $cid AND turn_id = $tid AND $release::bool
+         )
+         UPDATE conversations
          SET messages = $messages, message_count = $count, updated_at = $now
          WHERE id = $cid AND project_id = $pid
          RETURNING id",
         json!({
             "pid": project_id, "cid": conv_id,
             "messages": messages_json, "count": count, "now": now,
+            "tid": turn_id, "release": release_lock,
         }),
     ).await;
 
@@ -507,6 +397,7 @@ async fn update_last_assistant_turn(
     turn_id: &str,
     user_id: &str,
     pricing: &crate::cost::PricingTable,
+    release_lock: bool,
 ) {
     let mut messages = load_project_messages_raw(db, project_id, conv_id).await;
     let Some(last) = messages.last_mut() else { return; };
@@ -541,13 +432,17 @@ async fn update_last_assistant_turn(
     let count = messages.len() as i64;
 
     let _ = db.query(
-        "UPDATE conversations
+        "WITH released AS (
+             DELETE FROM active_turns WHERE conv_id = $cid AND turn_id = $tid AND $release::bool
+         )
+         UPDATE conversations
          SET messages = $messages, message_count = $count, updated_at = $now
          WHERE id = $cid AND project_id = $pid
          RETURNING id",
         json!({
             "pid": project_id, "cid": conv_id,
             "messages": messages_json, "count": count, "now": now,
+            "tid": turn_id, "release": release_lock,
         }),
     ).await;
 
@@ -620,14 +515,12 @@ enum TurnPersist {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn drive_turn(
-    locks:     Arc<RwLock<HashMap<String, HashMap<String, String>>>>,
-    channels:  Arc<Mutex<HashMap<String, broadcast::Sender<String>>>>,
-    db:     Arc<Db>,
+    live:      Arc<ProjectLive>,
+    db:        Arc<Db>,
     llm:       Arc<dyn crate::llm::LlmProvider>,
     registry:  Arc<crate::machines::MachineRegistry>,
-    in_flight: Arc<RwLock<HashMap<String, HashMap<String, InFlightState>>>>,
-    paused_confirmations: Arc<RwLock<HashMap<String, PausedConfirm>>>,
     project_id: String,
     conv_id:    String,
     query:      String,
@@ -643,12 +536,19 @@ async fn drive_turn(
 ) {
     let mut chain_builder = crate::agent::chain::ChainBuilder::new();
     let mut pending_question: Option<Value> = None;
+    let mut confirmation_requested = false;
+    let mut released = false;
 
     while let Some(event) = agent_rx.recv().await {
+        if matches!(event, AgentEvent::ConfirmAction { .. }) {
+            confirmation_requested = true;
+        }
         let (description, hostname) = if let AgentEvent::ToolCall { name, input } = &event {
             if name == "run_command" {
-                let host = input["agent_id"].as_str()
-                    .and_then(|id| registry.agents.get(id).map(|a| a.hostname.clone()));
+                let host = match input["agent_id"].as_str() {
+                    Some(id) => registry.hostname_of(id).await,
+                    None => None,
+                };
                 (None, host)
             } else {
                 (None, None)
@@ -684,91 +584,12 @@ async fn drive_turn(
             _ => {}
         }
 
-        {
-            let mut map = in_flight.write().await;
-            if let Some(entry) = map.get_mut(&project_id).and_then(|m| m.get_mut(&conv_id)) {
-                record_in_flight(entry, &event, description.clone(), hostname.clone());
-            }
-        }
+        let seq = live.record(&conv_id, &event, description.clone(), hostname.clone()).await;
 
-        {
-            let channels_guard = channels.lock().await;
-            if let Some(sender) = channels_guard.get(&project_id) {
-                let broadcast_data = match &event {
-                    AgentEvent::TextDelta { text } => Some(json!({
-                        "type": "text_delta", "conv_id": &conv_id, "text": text,
-                    })),
-                    AgentEvent::ThinkingDelta { text } => Some(json!({
-                        "type": "thinking_delta", "conv_id": &conv_id, "text": text,
-                    })),
-                    AgentEvent::Thinking { text } => Some(json!({
-                        "type": "thinking", "conv_id": &conv_id, "text": text,
-                    })),
-                    AgentEvent::ToolCall { name, input } => {
-                        let mut v = json!({
-                            "type": "tool_call", "conv_id": &conv_id,
-                            "name": name, "input": input,
-                        });
-                        if let Some(d) = &description { v["description"] = json!(d); }
-                        if let Some(h) = &hostname { v["hostname"] = json!(h); }
-                        Some(v)
-                    }
-                    AgentEvent::ToolResult { name, preview } => Some(json!({
-                        "type": "tool_result", "conv_id": &conv_id,
-                        "name": name, "preview": preview,
-                    })),
-                    AgentEvent::Phase { label } => Some(json!({
-                        "type": "phase", "conv_id": &conv_id, "label": label,
-                    })),
-                    AgentEvent::Intent { mode } => Some(json!({
-                        "type": "intent", "conv_id": &conv_id,
-                        "mode": format!("{:?}", mode).to_lowercase(),
-                    })),
-                    AgentEvent::ParallelResearchStarted { leads } => Some(json!({
-                        "type": "parallel_research_started", "conv_id": &conv_id, "leads": leads,
-                    })),
-                    AgentEvent::ParallelResearchLeadDone { index, iterations, preview, duration_ms } => Some(json!({
-                        "type": "parallel_research_lead_done", "conv_id": &conv_id,
-                        "index": index, "iterations": iterations, "preview": preview, "duration_ms": duration_ms,
-                    })),
-                    AgentEvent::ParallelResearchMergeStarted { duration_ms } => Some(json!({
-                        "type": "parallel_research_merge_started", "conv_id": &conv_id, "duration_ms": duration_ms,
-                    })),
-                    AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, .. } => {
-                        let cost_microusd = pricing.price_call(usage, provider_used.as_ref().map(|p| p.kind.as_str()).unwrap_or(""), provider_used.as_ref().map(|p| p.model.as_str()).unwrap_or(""));
-                        Some(json!({
-                            "type": "done", "conv_id": &conv_id,
-                            "answer": answer, "sources": sources,
-                            "tool_calls_made": tool_calls_made,
-                            "provider_used": provider_used,
-                            "duration_ms": duration_ms,
-                            "usage": usage,
-                            "llm_call_count": llm_call_count,
-                            "cost_microusd": cost_microusd,
-                        }))
-                    }
-                    AgentEvent::Question { question, choices } => Some(json!({
-                        "type": "question", "conv_id": &conv_id,
-                        "question": question, "choices": choices,
-                    })),
-                    AgentEvent::ConfirmAction { id, name, input, description } => Some(json!({
-                        "type": "confirm_action", "conv_id": &conv_id,
-                        "id": id, "name": name, "input": input, "description": description,
-                    })),
-                    AgentEvent::Error { message } => Some(json!({
-                        "type": "error", "conv_id": &conv_id, "message": message,
-                    })),
-                    AgentEvent::TitleUpdated { title } => Some(json!({
-                        "type": "title_updated", "conv_id": &conv_id, "title": title,
-                    })),
-                    AgentEvent::Enumeration { .. } => None,
-                };
-                if let Some(data) = broadcast_data {
-                    let _ = sender.send(data.to_string());
-                }
-            }
+        if let Some(mut data) = turn_event_json(&event, &conv_id, description.as_deref(), hostname.as_deref(), &pricing) {
+            data["seq"] = json!(seq);
+            live.broadcast(&project_id, data.to_string());
         }
-
         if let AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, .. } = &event {
             let save_now = harvest_db::now_rfc3339();
             let chain = std::mem::take(&mut chain_builder).finish();
@@ -781,6 +602,7 @@ async fn drive_turn(
                         answer, sources, *tool_calls_made,
                         chain, pending_question.clone(), provider_used.as_ref(), *duration_ms,
                         usage, *llm_call_count, &turn_id, &user_id, &pricing,
+                        !confirmation_requested,
                     ).await;
                 }
                 TurnPersist::Continuation => {
@@ -789,23 +611,27 @@ async fn drive_turn(
                         answer, sources, *tool_calls_made,
                         chain, pending_question.clone(), provider_used.as_ref(), *duration_ms,
                         usage, *llm_call_count, &turn_id, &user_id, &pricing,
+                        !confirmation_requested,
                     ).await;
                 }
             }
-            {
-                let ch = channels.lock().await;
-                if let Some(sender) = ch.get(&project_id) {
-                    let _ = sender.send(json!({
-                        "type": "conversation_updated",
-                        "conv_id": conv_id,
-                        "updated_at": save_now,
-                    }).to_string());
+            live.broadcast(&project_id, json!({
+                "type": "conversation_updated",
+                "conv_id": conv_id,
+                "updated_at": save_now,
+            }).to_string());
+
+            if !confirmation_requested && !released {
+                if let Err(e) = live.finish(&conv_id, &turn_id).await {
+                    tracing::warn!(error = %e, conv_id, "failed to release conversation lock");
                 }
+                live.broadcast(&project_id, json!({"type": "unlock", "conv_id": conv_id}).to_string());
+                released = true;
             }
 
             let llm_t      = Arc::clone(&llm);
             let db_t    = Arc::clone(&db);
-            let channels_t = Arc::clone(&channels);
+            let live_t     = Arc::clone(&live);
             let pid_t      = project_id.clone();
             let cid_t      = conv_id.clone();
             let query_t    = query.clone();
@@ -824,38 +650,114 @@ async fn drive_turn(
                         "conv_id": cid_t,
                         "title": new_title,
                     }).to_string();
-                    let ch = channels_t.lock().await;
-                    if let Some(sender) = ch.get(&pid_t) {
-                        let _ = sender.send(data);
-                    }
+                    live_t.broadcast(&pid_t, data);
                 }
             });
         }
     }
 
     if let Ok(Some(paused_turn)) = paused_rx.await {
-        paused_confirmations.write().await.insert(
-            format!("{project_id}:{conv_id}"),
-            PausedConfirm {
-                messages:   paused_turn.messages,
-                iterations: paused_turn.iterations,
-                pending:    paused_turn.pending,
-                resolved:   HashMap::new(),
-                selection,
-                elapsed_ms: paused_turn.elapsed_ms,
-            },
-        );
+        let paused = PausedConfirm {
+            messages:   paused_turn.messages,
+            iterations: paused_turn.iterations,
+            pending:    paused_turn.pending,
+            resolved:   HashMap::new(),
+            selection,
+            elapsed_ms: paused_turn.elapsed_ms,
+        };
+        match serde_json::to_value(&paused) {
+            Ok(payload) => {
+                if let Err(e) = live.save_paused(&project_id, &conv_id, &payload).await {
+                    tracing::error!(error = %e, conv_id, "failed to persist paused confirmation");
+                }
+            }
+            Err(e) => tracing::error!(error = %e, conv_id, "failed to serialize paused confirmation"),
+        }
     }
 
-    if let Some(m) = in_flight.write().await.get_mut(&project_id) {
-        m.remove(&conv_id);
+    if !released {
+        if let Err(e) = live.finish(&conv_id, &turn_id).await {
+            tracing::warn!(error = %e, conv_id, "failed to release conversation lock");
+        }
+        live.broadcast(&project_id, json!({"type": "unlock", "conv_id": conv_id}).to_string());
     }
-    if let Some(m) = locks.write().await.get_mut(&project_id) {
-        m.remove(&conv_id);
-    }
-    let channel_map = channels.lock().await;
-    if let Some(sender) = channel_map.get(&project_id) {
-        let _ = sender.send(json!({"type": "unlock", "conv_id": conv_id}).to_string());
+}
+
+fn turn_event_json(
+    event: &AgentEvent,
+    conv_id: &str,
+    description: Option<&str>,
+    hostname: Option<&str>,
+    pricing: &crate::cost::PricingTable,
+) -> Option<Value> {
+    match event {
+        AgentEvent::TextDelta { text } => Some(json!({
+            "type": "text_delta", "conv_id": conv_id, "text": text,
+        })),
+        AgentEvent::ThinkingDelta { text } => Some(json!({
+            "type": "thinking_delta", "conv_id": conv_id, "text": text,
+        })),
+        AgentEvent::Thinking { text } => Some(json!({
+            "type": "thinking", "conv_id": conv_id, "text": text,
+        })),
+        AgentEvent::ToolCall { name, input } => {
+            let mut v = json!({
+                "type": "tool_call", "conv_id": conv_id,
+                "name": name, "input": input,
+            });
+            if let Some(d) = description { v["description"] = json!(d); }
+            if let Some(h) = hostname { v["hostname"] = json!(h); }
+            Some(v)
+        }
+        AgentEvent::ToolResult { name, preview } => Some(json!({
+            "type": "tool_result", "conv_id": conv_id,
+            "name": name, "preview": preview,
+        })),
+        AgentEvent::Phase { label } => Some(json!({
+            "type": "phase", "conv_id": conv_id, "label": label,
+        })),
+        AgentEvent::Intent { mode } => Some(json!({
+            "type": "intent", "conv_id": conv_id,
+            "mode": format!("{:?}", mode).to_lowercase(),
+        })),
+        AgentEvent::ParallelResearchStarted { leads } => Some(json!({
+            "type": "parallel_research_started", "conv_id": conv_id, "leads": leads,
+        })),
+        AgentEvent::ParallelResearchLeadDone { index, iterations, preview, duration_ms } => Some(json!({
+            "type": "parallel_research_lead_done", "conv_id": conv_id,
+            "index": index, "iterations": iterations, "preview": preview, "duration_ms": duration_ms,
+        })),
+        AgentEvent::ParallelResearchMergeStarted { duration_ms } => Some(json!({
+            "type": "parallel_research_merge_started", "conv_id": conv_id, "duration_ms": duration_ms,
+        })),
+        AgentEvent::Done { answer, sources, tool_calls_made, provider_used, duration_ms, usage, llm_call_count, .. } => {
+            let cost_microusd = pricing.price_call(usage, provider_used.as_ref().map(|p| p.kind.as_str()).unwrap_or(""), provider_used.as_ref().map(|p| p.model.as_str()).unwrap_or(""));
+            Some(json!({
+                "type": "done", "conv_id": conv_id,
+                "answer": answer, "sources": sources,
+                "tool_calls_made": tool_calls_made,
+                "provider_used": provider_used,
+                "duration_ms": duration_ms,
+                "usage": usage,
+                "llm_call_count": llm_call_count,
+                "cost_microusd": cost_microusd,
+            }))
+        }
+        AgentEvent::Question { question, choices } => Some(json!({
+            "type": "question", "conv_id": conv_id,
+            "question": question, "choices": choices,
+        })),
+        AgentEvent::ConfirmAction { id, name, input, description } => Some(json!({
+            "type": "confirm_action", "conv_id": conv_id,
+            "id": id, "name": name, "input": input, "description": description,
+        })),
+        AgentEvent::Error { message } => Some(json!({
+            "type": "error", "conv_id": conv_id, "message": message,
+        })),
+        AgentEvent::TitleUpdated { title } => Some(json!({
+            "type": "title_updated", "conv_id": conv_id, "title": title,
+        })),
+        AgentEvent::Enumeration { .. } => None,
     }
 }
 
@@ -869,12 +771,31 @@ pub async fn project_query_stream(
         return e.into_response();
     }
 
-    {
-        let mut locks = state.locks.write().await;
-        if locks.get(&project_id).map_or(false, |m| m.contains_key(&body.conversation_id)) {
-            return (StatusCode::CONFLICT, Json(json!({"error": "chat is locked"}))).into_response();
+    if state.live.node().is_draining() {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "server is shutting down, retry"}))).into_response();
+    }
+
+    let attachments_for_broadcast: Vec<serde_json::Value> = body.attachments.as_ref()
+        .map(|attachments| attachments.iter().map(|a| json!({
+            "name": a.name,
+            "mime_type": a.mime_type,
+            "data": a.data,
+            "preview_url": if a.mime_type.starts_with("image/") {
+                format!("data:{};base64,{}", a.mime_type, a.data)
+            } else {
+                String::new()
+            }
+        })).collect())
+        .unwrap_or_default();
+    let turn_id = uuid::Uuid::new_v4().to_string();
+
+    match state.live.try_lock(&project_id, &body.conversation_id, &turn_id, &user.name, &user.name, &body.query, &attachments_for_broadcast).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::CONFLICT, Json(json!({"error": "chat is locked"}))).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to acquire conversation lock");
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "could not lock the conversation"}))).into_response();
         }
-        locks.entry(project_id.clone()).or_default().insert(body.conversation_id.clone(), user.name.clone());
     }
 
     let user_llm = crate::api::resolve_user_llm(
@@ -902,18 +823,6 @@ pub async fn project_query_stream(
         "by": user.name,
         "conv_id": body.conversation_id,
     }).to_string()).await;
-    let attachments_for_broadcast: Vec<serde_json::Value> = body.attachments.as_ref()
-        .map(|attachments| attachments.iter().map(|a| json!({
-            "name": a.name,
-            "mime_type": a.mime_type,
-            "data": a.data,
-            "preview_url": if a.mime_type.starts_with("image/") {
-                format!("data:{};base64,{}", a.mime_type, a.data)
-            } else {
-                String::new()
-            }
-        })).collect())
-        .unwrap_or_default();
     state.broadcast(&project_id, json!({
         "type": "user_message",
         "conv_id": body.conversation_id,
@@ -922,13 +831,10 @@ pub async fn project_query_stream(
         "attachments": attachments_for_broadcast,
     }).to_string()).await;
 
-    let locks     = Arc::clone(&state.locks);
-    let channels  = Arc::clone(&state.channels);
-    let db     = Arc::clone(&state.db);
+    let live      = Arc::clone(&state.live);
+    let db        = Arc::clone(&state.db);
     let llm       = Arc::clone(agent.llm());
     let registry  = Arc::clone(&state.agent_builder.registry);
-    let in_flight = Arc::clone(&state.in_flight);
-    let paused_confirmations = Arc::clone(&state.paused_confirmations);
     let collocate_registry = Arc::clone(&state.collocate_registry);
     let project_id_owned = project_id.clone();
     let query            = body.query.clone();
@@ -942,19 +848,8 @@ pub async fn project_query_stream(
     let prior_messages_for_save = raw_messages;
     let pricing = Arc::clone(&state.pricing);
     let user_id = user.sub.clone();
-    let turn_id = uuid::Uuid::new_v4().to_string();
 
-    in_flight.write().await
-        .entry(project_id.clone())
-        .or_default()
-        .insert(conv_id.clone(), InFlightState {
-            query:       body.query.clone(),
-            username:    user.name.clone(),
-            attachments: attachments_for_broadcast,
-            ..Default::default()
-        });
-
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let _collocate_guard = crate::collocate::sessions::SessionGuard::new(
             Arc::clone(&collocate_registry),
             project_id_owned.clone(),
@@ -966,15 +861,15 @@ pub async fn project_query_stream(
         let history_for_agent = history.clone();
         let query_for_agent   = query.clone();
         let selection_for_agent = selection.clone();
-        tokio::spawn(async move {
+        let _agent_task = AbortOnDrop(tokio::spawn(async move {
             let paused = agent_clone.query_streaming(&query_for_agent, &history_for_agent, &attachments, selection_for_agent.as_ref(), agent_event_sender).await;
             let _ = paused_tx.send(paused);
-        });
+        }).abort_handle());
 
         let db_for_summary = Arc::clone(&db);
         let conv_for_summary = conv_id.clone();
         drive_turn(
-            locks, channels, db, llm, registry, in_flight, paused_confirmations,
+            live, db, llm, registry,
             project_id_owned, conv_id, query, username, history,
             TurnPersist::New { prior_messages: prior_messages_for_save, attachment_meta },
             selection,
@@ -983,8 +878,17 @@ pub async fn project_query_stream(
         ).await;
         refresh_summary(&db_for_summary, &agent, &conv_for_summary).await;
     });
+    state.live.set_abort_handle(&body.conversation_id, task.abort_handle()).await;
 
     Json(json!({"ok": true})).into_response()
+}
+
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 pub async fn list_my_groups(
@@ -1284,28 +1188,51 @@ pub async fn resume_confirm_action(
         return Err(err(StatusCode::BAD_REQUEST, "results must not be empty"));
     }
 
-    let key = format!("{project_id}:{conv_id}");
-    let ready = {
-        let mut map = state.paused_confirmations.write().await;
-        let Some(paused) = map.get_mut(&key) else {
-            return Err(err(StatusCode::NOT_FOUND, "no pending confirmation for this conversation"));
-        };
-        for item in &body.results {
-            if !paused.pending.iter().any(|p| p.id == item.tool_call_id) { continue; }
-            paused.resolved.entry(item.tool_call_id.clone()).or_insert_with(|| ResolvedConfirmItem {
-                content: if !item.result_text.is_empty() {
-                    item.result_text.clone()
-                } else if item.status == "denied" {
-                    "The user declined to run this action.".to_string()
-                } else if item.status == "error" {
-                    "The action failed.".to_string()
-                } else {
-                    "Done.".to_string()
-                },
-                is_error: item.status != "done",
-            });
+    let mut submitted: Vec<(String, ResolvedConfirmItem)> = Vec::new();
+    for item in &body.results {
+        submitted.push((item.tool_call_id.clone(), ResolvedConfirmItem {
+            content: if !item.result_text.is_empty() {
+                item.result_text.clone()
+            } else if item.status == "denied" {
+                "The user declined to run this action.".to_string()
+            } else if item.status == "error" {
+                "The action failed.".to_string()
+            } else {
+                "Done.".to_string()
+            },
+            is_error: item.status != "done",
+        }));
+    }
+
+    let deadline = tokio::time::Instant::now() + PAUSED_TURN_WAIT;
+    loop {
+        if state.live.has_paused(&project_id, &conv_id).await
+            || !state.live.is_locked(&project_id, &conv_id).await.unwrap_or(false)
+            || tokio::time::Instant::now() >= deadline
+        {
+            break;
         }
-        paused.resolved.len() >= paused.pending.len()
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let updated = state.live.update_paused(&project_id, &conv_id, |payload| {
+        let Ok(mut paused) = serde_json::from_value::<PausedConfirm>(payload.clone()) else { return false };
+        for (id, resolved) in &submitted {
+            if !paused.pending.iter().any(|p| &p.id == id) { continue; }
+            paused.resolved.entry(id.clone()).or_insert_with(|| resolved.clone());
+        }
+        let ready = paused.resolved.len() >= paused.pending.len();
+        if let Ok(value) = serde_json::to_value(&paused) {
+            *payload = value;
+        }
+        ready
+    }).await.map_err(|e| {
+        tracing::error!(error = %e, "failed to update paused confirmation");
+        err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
+    })?;
+
+    let Some((payload, ready)) = updated else {
+        return Err(err(StatusCode::NOT_FOUND, "no pending confirmation for this conversation"));
     };
 
     mark_confirm_action_statuses(&state.db, &project_id, &conv_id, &body.results).await;
@@ -1314,16 +1241,28 @@ pub async fn resume_confirm_action(
         return Ok(Json(json!({ "ok": true, "resumed": false })));
     }
 
-    let Some(paused) = state.paused_confirmations.write().await.remove(&key) else {
-        return Ok(Json(json!({ "ok": true, "resumed": false })));
+    let Ok(paused) = serde_json::from_value::<PausedConfirm>(payload.clone()) else {
+        return Err(err(StatusCode::INTERNAL_SERVER_ERROR, "corrupt paused confirmation"));
     };
 
-    {
-        let mut locks = state.locks.write().await;
-        if locks.get(&project_id).map_or(false, |m| m.contains_key(&conv_id)) {
-            return Err(err(StatusCode::CONFLICT, "chat is locked"));
-        }
-        locks.entry(project_id.clone()).or_default().insert(conv_id.clone(), user.name.clone());
+    let (raw_messages, stored_summary) = load_project_conversation(&state.db, &project_id, &conv_id).await;
+    let split = raw_messages.len().saturating_sub(2);
+    let (prior_raw, tail_raw) = raw_messages.split_at(split);
+    let prior_history = effective_history(&history_messages_from_raw(prior_raw), stored_summary.as_ref());
+    let (query, username) = tail_raw.iter()
+        .find(|m| m["role"] == "user")
+        .map(|m| (
+            m["text"].as_str().unwrap_or("").to_string(),
+            m["username"].as_str().unwrap_or("").to_string(),
+        ))
+        .unwrap_or_default();
+
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    let locked = state.live.try_lock(&project_id, &conv_id, &turn_id, &user.name, &username, &query, &[]).await
+        .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "could not lock the conversation"))?;
+    if !locked {
+        let _ = state.live.save_paused(&project_id, &conv_id, &payload).await;
+        return Err(err(StatusCode::CONFLICT, "chat is locked"));
     }
     state.broadcast(&project_id, json!({
         "type": "lock", "by": user.name, "conv_id": conv_id,
@@ -1353,44 +1292,19 @@ pub async fn resume_confirm_action(
             user_system_one.or_else(|| state.agent_builder.system_one.clone()),
         )
     };
-    let (raw_messages, stored_summary) = load_project_conversation(&state.db, &project_id, &conv_id).await;
-    let split = raw_messages.len().saturating_sub(2);
-    let (prior_raw, tail_raw) = raw_messages.split_at(split);
-    let prior_history = effective_history(&history_messages_from_raw(prior_raw), stored_summary.as_ref());
-    let (query, username) = tail_raw.iter()
-        .find(|m| m["role"] == "user")
-        .map(|m| (
-            m["text"].as_str().unwrap_or("").to_string(),
-            m["username"].as_str().unwrap_or("").to_string(),
-        ))
-        .unwrap_or_default();
 
-    state.in_flight.write().await
-        .entry(project_id.clone())
-        .or_default()
-        .insert(conv_id.clone(), InFlightState {
-            query:    query.clone(),
-            username: username.clone(),
-            ..Default::default()
-        });
-
-    let locks     = Arc::clone(&state.locks);
-    let channels  = Arc::clone(&state.channels);
-    let db     = Arc::clone(&state.db);
+    let live      = Arc::clone(&state.live);
+    let db        = Arc::clone(&state.db);
     let llm       = Arc::clone(agent.llm());
     let registry  = Arc::clone(&state.agent_builder.registry);
-    let in_flight = Arc::clone(&state.in_flight);
-    let paused_confirmations = Arc::clone(&state.paused_confirmations);
     let collocate_registry = Arc::clone(&state.collocate_registry);
     let project_id_owned = project_id.clone();
     let conv_id_owned    = conv_id.clone();
     let pricing = Arc::clone(&state.pricing);
     let user_id = user.sub.clone();
-    let turn_id = uuid::Uuid::new_v4().to_string();
-
     let selection = paused.selection.clone();
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         let _collocate_guard = crate::collocate::sessions::SessionGuard::new(
             Arc::clone(&collocate_registry),
             project_id_owned.clone(),
@@ -1400,18 +1314,18 @@ pub async fn resume_confirm_action(
         let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
         let agent_clone = Arc::clone(&agent);
         let selection_for_agent = selection.clone();
-        tokio::spawn(async move {
+        let _agent_task = AbortOnDrop(tokio::spawn(async move {
             let out = agent_clone.resume_after_confirm(
                 paused.messages, paused.iterations, results, selection_for_agent.as_ref(), agent_event_sender,
                 paused.elapsed_ms,
             ).await;
             let _ = paused_tx.send(out);
-        });
+        }).abort_handle());
 
         let db_for_summary = Arc::clone(&db);
         let conv_for_summary = conv_id_owned.clone();
         drive_turn(
-            locks, channels, db, llm, registry, in_flight, paused_confirmations,
+            live, db, llm, registry,
             project_id_owned, conv_id_owned, query, username, prior_history,
             TurnPersist::Continuation,
             selection,
@@ -1420,6 +1334,7 @@ pub async fn resume_confirm_action(
         ).await;
         refresh_summary(&db_for_summary, &agent, &conv_for_summary).await;
     });
+    state.live.set_abort_handle(&conv_id, task.abort_handle()).await;
 
     Ok(Json(json!({ "ok": true, "resumed": true })))
 }
@@ -1453,6 +1368,7 @@ mod provider_selection_tests {
 #[cfg(test)]
 mod in_flight_tests {
     use super::*;
+    use crate::projects::live::{record_in_flight, InFlightState};
 
     fn empty_state() -> InFlightState {
         InFlightState::default()
@@ -1564,6 +1480,7 @@ mod drive_turn_broadcast_tests {
     use super::*;
     use async_trait::async_trait;
     use crate::llm::types::{LlmResponse, Message, ModelInfo, ToolDefinition};
+    use harvest_db::test_support::TestDb;
 
     struct NoopProvider;
     #[async_trait]
@@ -1577,36 +1494,23 @@ mod drive_turn_broadcast_tests {
         ) -> anyhow::Result<LlmResponse> { unimplemented!("not used") }
     }
 
-    fn count(messages: &[String], ty: &str) -> usize {
-        messages.iter().filter(|m| {
-            serde_json::from_str::<Value>(m).ok()
-                .and_then(|v| v["type"].as_str().map(|s| s == ty))
-                .unwrap_or(false)
-        }).count()
+    fn count(messages: &[Value], ty: &str) -> usize {
+        messages.iter().filter(|m| m["type"].as_str() == Some(ty)).count()
     }
 
     #[tokio::test]
-    async fn broadcasts_each_chain_event_exactly_once() {
-        let project_id = "proj-1".to_string();
-        let conv_id = "conv-1".to_string();
-        let (tx, mut rx) = broadcast::channel::<String>(128);
-        let channels = Arc::new(Mutex::new(HashMap::<String, broadcast::Sender<String>>::new()));
-        channels.lock().await.insert(project_id.clone(), tx);
+    #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+    async fn broadcasts_each_chain_event_exactly_once_and_releases_the_lock() {
+        let t = TestDb::new().await;
+        let db = Arc::new(t.db.clone());
+        let live = ProjectLive::standalone(Arc::clone(&db));
+        live.node().heartbeat().await.unwrap();
+        assert!(live.try_lock("proj-1", "conv-1", "turn-1", "tester", "tester", "query", &[]).await.unwrap());
+        let mut rx = live.subscribe("proj-1");
 
-        let in_flight = Arc::new(RwLock::new(HashMap::<String, HashMap<String, InFlightState>>::new()));
-        in_flight.write().await
-            .entry(project_id.clone()).or_default()
-            .insert(conv_id.clone(), InFlightState::default());
-
-        let locks = Arc::new(RwLock::new(HashMap::<String, HashMap<String, String>>::new()));
-        locks.write().await.entry(project_id.clone()).or_default().insert(conv_id.clone(), "tester".into());
-
-        let db = Arc::new(Db::connect_without_migrating("postgresql://").unwrap());
         let llm: Arc<dyn crate::llm::LlmProvider> = Arc::new(NoopProvider);
         let registry = MachineRegistry::new();
         let pricing = Arc::new(PricingTable::default());
-        let paused_confirmations = Arc::new(RwLock::new(HashMap::<String, PausedConfirm>::new()));
-
         let (agent_tx, agent_rx) = mpsc::channel::<AgentEvent>(64);
         let (paused_tx, paused_rx) = tokio::sync::oneshot::channel::<Option<PausedTurn>>();
 
@@ -1617,24 +1521,26 @@ mod drive_turn_broadcast_tests {
         drop(agent_tx);
         drop(paused_tx);
 
-        let channels_for_test = channels.clone();
         drive_turn(
-            locks, channels.clone(), db, llm, registry, in_flight, paused_confirmations,
-            project_id.clone(), conv_id.clone(), "query".into(), "tester".into(),
+            Arc::clone(&live), Arc::clone(&db), llm, registry,
+            "proj-1".into(), "conv-1".into(), "query".into(), "tester".into(),
             vec![], TurnPersist::Continuation, None,
             agent_rx, paused_rx,
             "user-1".into(), pricing, "turn-1".into(),
         ).await;
 
-        channels_for_test.lock().await.remove(&project_id);
         let mut received = Vec::new();
-        while let Ok(m) = rx.recv().await { received.push(m); }
+        while let Ok(m) = rx.try_recv() { received.push(serde_json::from_str::<Value>(&m).unwrap()); }
 
         assert_eq!(count(&received, "thinking"), 2, "{:?}", received);
         assert_eq!(count(&received, "tool_call"), 1, "{:?}", received);
         assert_eq!(count(&received, "tool_result"), 1, "{:?}", received);
         assert_eq!(count(&received, "unlock"), 1, "{:?}", received);
         assert_eq!(count(&received, "done"), 0);
+        let seqs: Vec<u64> = received.iter().filter_map(|m| m["seq"].as_u64()).collect();
+        assert_eq!(seqs, vec![1, 2, 3, 4]);
+        assert!(!live.is_locked("proj-1", "conv-1").await.unwrap());
+        assert!(live.local_snapshot("conv-1").await.is_none());
     }
 }
 

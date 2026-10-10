@@ -1,3 +1,4 @@
+pub mod ephemeral;
 pub mod handlers;
 pub mod jwt;
 pub mod oidc;
@@ -6,25 +7,15 @@ pub mod tui;
 pub mod user_keys;
 
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::IntoResponse, Json};
-use dashmap::DashMap;
 use serde_json::json;
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::config::{AuthConfig, UiConfig};
 use harvest_db::Db;
 
 pub use oidc::OidcEndpoints;
-pub use tui::TuiAuthMap;
 
 pub const TOKEN_COOKIE: &str = "token";
-
-pub struct OAuthSession {
-    pub pkce_verifier: Option<String>,
-    pub created_at:    Instant,
-}
-
-pub type OAuthSessions = Arc<DashMap<String, OAuthSession>>;
 
 #[derive(Clone)]
 pub struct AuthState {
@@ -33,9 +24,7 @@ pub struct AuthState {
     pub ui:             Arc<UiConfig>,
     pub http:           reqwest::Client,
     pub oidc_endpoints: Option<Arc<OidcEndpoints>>,
-    pub oauth_sessions: OAuthSessions,
     pub lxd_enabled:    bool,
-    pub tui_auth:       TuiAuthMap,
 }
 
 fn token_from_request(req: &Request) -> Option<String> {

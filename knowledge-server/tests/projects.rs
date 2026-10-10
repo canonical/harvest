@@ -62,7 +62,10 @@ impl LlmProvider for ScriptedLlm {
     fn kind(&self) -> &str { "mock" }
     fn default_model(&self) -> &str { "mock-model" }
     async fn list_models(&self) -> Result<Vec<ModelInfo>> { Ok(vec![]) }
-    async fn chat_with(&self, _model: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
+    async fn chat_with(&self, _model: Option<&str>, messages: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
+        if serde_json::to_string(messages).unwrap_or_default().contains("Generate a short, expressive title") {
+            return Ok(LlmResponse::Message { text: "Scripted title".into(), usage: Usage::default() });
+        }
         self.0.lock().unwrap().pop_front()
             .ok_or_else(|| anyhow::anyhow!("ScriptedLlm: no more responses"))
     }

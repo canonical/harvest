@@ -9,10 +9,18 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
-use tokio_stream::StreamExt;
 
 use crate::api::GraphState;
+use crate::api::GraphCache;
 use crate::ingestion::IngestionStatus;
+
+pub const GRAPH_TOPIC: &str = "graph:invalidate";
+const PROGRESS_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
+
+pub async fn drop_cached_graphs(cache: &GraphCache, prefix: &str) {
+    let mut cache = cache.write().await;
+    cache.retain(|key, _| !key.starts_with(prefix));
+}
 
 #[derive(Serialize)]
 pub struct RepositoryInfo {
@@ -105,18 +113,13 @@ pub async fn handle_list_repositories(
         )
         .await;
 
-    let ingestion_jobs = state.ingestion.read().await;
-
     let mut ingestion_statuses: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
-    for (name, job) in ingestion_jobs.iter() {
-        let status = job.status.read().await;
-        let (s, e) = match &*status {
-            IngestionStatus::Running => (Some("running".to_string()), None),
-            IngestionStatus::Failed { error } => (Some("failed".to_string()), Some(error.clone())),
-            IngestionStatus::Completed { .. } => (Some("completed".to_string()), None),
-            IngestionStatus::Pending => (Some("pending".to_string()), None),
+    for (name, status) in state.ingestion.latest_statuses().await.unwrap_or_default() {
+        let error = match &status {
+            IngestionStatus::Failed { error } => Some(error.clone()),
+            _ => None,
         };
-        ingestion_statuses.insert(name.clone(), (s, e));
+        ingestion_statuses.insert(name, (Some(status.label().to_string()), error));
     }
 
     match result {
@@ -189,28 +192,39 @@ pub async fn handle_add_repository(
             .into_response();
     }
 
-    {
-        let jobs = state.ingestion.read().await;
-        if let Some(job) = jobs.get(&name) {
-            let status = job.status.read().await;
-            if matches!(*status, IngestionStatus::Running | IngestionStatus::Pending) {
-                return (
-                    StatusCode::CONFLICT,
-                    format!("repository '{}' is already being ingested", name),
-                )
-                    .into_response();
-            }
+    match state.ingestion.is_active(&name).await {
+        Ok(true) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("repository '{}' is already being ingested", name),
+            )
+                .into_response();
         }
+        Ok(false) => {}
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 
-    let registry = Arc::clone(&state.ingestion);
+    let job_id = match state.ingestion.try_start(&name, "ingest").await {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("repository '{}' is already being ingested", name),
+            )
+                .into_response();
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let jobs = state.ingestion.clone();
+    let bus = Arc::clone(&state.bus);
     let db = (*state.db).clone();
     let cache = Arc::clone(&state.cache);
     let name_for_response = name.clone();
 
     tokio::spawn(async move {
         crate::ingestion::run_ingestion(
-            registry.clone(),
+            jobs,
+            job_id,
             db,
             name.clone(),
             url,
@@ -228,6 +242,8 @@ pub async fn handle_add_repository(
         for key in keys_to_remove {
             cache_write.remove(&key);
         }
+        drop(cache_write);
+        bus.publish(GRAPH_TOPIC, format!("{}:", name));
     });
 
     (
@@ -292,18 +308,16 @@ pub async fn handle_delete_repository(
     State(state): State<Arc<GraphState>>,
     Path(repo): Path<String>,
 ) -> impl IntoResponse {
-    {
-        let jobs = state.ingestion.read().await;
-        if let Some(job) = jobs.get(&repo) {
-            let status = job.status.read().await;
-            if matches!(*status, IngestionStatus::Running | IngestionStatus::Pending) {
-                return (
-                    StatusCode::CONFLICT,
-                    format!("cannot delete repository '{}' while it is being ingested", repo),
-                )
-                    .into_response();
-            }
+    match state.ingestion.is_active(&repo).await {
+        Ok(true) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("cannot delete repository '{}' while it is being ingested", repo),
+            )
+                .into_response();
         }
+        Ok(false) => {}
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 
     let result = state.db
@@ -325,8 +339,8 @@ pub async fn handle_delete_repository(
                 cache_write.remove(&key);
             }
 
-            let mut jobs = state.ingestion.write().await;
-            jobs.remove(&repo);
+            state.bus.publish(GRAPH_TOPIC, format!("{}:", repo));
+            let _ = state.ingestion.forget(&repo).await;
 
             Json(json!({ "deleted": repo })).into_response()
         }
@@ -388,28 +402,39 @@ pub async fn handle_ingest_versions(
         }
     };
 
-    {
-        let jobs = state.ingestion.read().await;
-        if let Some(job) = jobs.get(&repo) {
-            let status = job.status.read().await;
-            if matches!(*status, IngestionStatus::Running | IngestionStatus::Pending) {
-                return (
-                    StatusCode::CONFLICT,
-                    format!("repository '{}' is already being ingested", repo),
-                )
-                    .into_response();
-            }
+    match state.ingestion.is_active(&repo).await {
+        Ok(true) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("repository '{}' is already being ingested", repo),
+            )
+                .into_response();
         }
+        Ok(false) => {}
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 
-    let registry = Arc::clone(&state.ingestion);
+    let job_id = match state.ingestion.try_start(&repo, "ingest").await {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("repository '{}' is already being ingested", repo),
+            )
+                .into_response();
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let jobs = state.ingestion.clone();
+    let bus = Arc::clone(&state.bus);
     let db = (*state.db).clone();
     let cache = Arc::clone(&state.cache);
     let repo_name = repo.clone();
 
     tokio::spawn(async move {
         crate::ingestion::run_ingestion(
-            registry.clone(),
+            jobs,
+            job_id,
             db,
             repo_name.clone(),
             url,
@@ -427,6 +452,8 @@ pub async fn handle_ingest_versions(
         for key in keys_to_remove {
             cache_write.remove(&key);
         }
+        drop(cache_write);
+        bus.publish(GRAPH_TOPIC, format!("{}:", repo_name));
     });
 
     (
@@ -440,18 +467,16 @@ pub async fn handle_resync_version(
     State(state): State<Arc<GraphState>>,
     Path((repo, version)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    {
-        let jobs = state.ingestion.read().await;
-        if let Some(job) = jobs.get(&repo) {
-            let status = job.status.read().await;
-            if matches!(*status, IngestionStatus::Running | IngestionStatus::Pending) {
-                return (
-                    StatusCode::CONFLICT,
-                    format!("repository '{}' is already being ingested", repo),
-                )
-                    .into_response();
-            }
+    match state.ingestion.is_active(&repo).await {
+        Ok(true) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("repository '{}' is already being ingested", repo),
+            )
+                .into_response();
         }
+        Ok(false) => {}
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 
     let url_result = state
@@ -487,7 +512,19 @@ pub async fn handle_resync_version(
         }
     };
 
-    let registry = Arc::clone(&state.ingestion);
+    let job_id = match state.ingestion.try_start(&repo, "resync").await {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("repository '{}' is already being ingested", repo),
+            )
+                .into_response();
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let jobs = state.ingestion.clone();
+    let bus = Arc::clone(&state.bus);
     let db = (*state.db).clone();
     let cache = Arc::clone(&state.cache);
     let repo_name = repo.clone();
@@ -495,7 +532,8 @@ pub async fn handle_resync_version(
 
     tokio::spawn(async move {
         crate::ingestion::run_resync(
-            registry.clone(),
+            jobs,
+            job_id,
             db,
             repo_name.clone(),
             url,
@@ -506,6 +544,8 @@ pub async fn handle_resync_version(
         let mut cache_write = cache.write().await;
         let key = format!("{}:{}", repo_name, version_name);
         cache_write.remove(&key);
+        drop(cache_write);
+        bus.publish(GRAPH_TOPIC, key);
     });
 
     (
@@ -519,18 +559,16 @@ pub async fn handle_delete_version(
     State(state): State<Arc<GraphState>>,
     Path((repo, version)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    {
-        let jobs = state.ingestion.read().await;
-        if let Some(job) = jobs.get(&repo) {
-            let status = job.status.read().await;
-            if matches!(*status, IngestionStatus::Running | IngestionStatus::Pending) {
-                return (
-                    StatusCode::CONFLICT,
-                    format!("cannot delete version while repository '{}' is being ingested", repo),
-                )
-                    .into_response();
-            }
+    match state.ingestion.is_active(&repo).await {
+        Ok(true) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("cannot delete version while repository '{}' is being ingested", repo),
+            )
+                .into_response();
         }
+        Ok(false) => {}
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 
     let result = state.db
@@ -546,6 +584,8 @@ pub async fn handle_delete_version(
             let mut cache_write = state.cache.write().await;
             let key = format!("{}:{}", repo, version);
             cache_write.remove(&key);
+            drop(cache_write);
+            state.bus.publish(GRAPH_TOPIC, key);
 
             Json(json!({ "deleted": version, "repo": repo })).into_response()
         }
@@ -560,66 +600,49 @@ pub async fn handle_repository_progress(
     State(state): State<Arc<GraphState>>,
     Path(repo): Path<String>,
 ) -> impl IntoResponse {
-    let jobs = state.ingestion.read().await;
-    let job = match jobs.get(&repo) {
-        Some(j) => Arc::clone(j),
-        None => {
-            drop(jobs);
+    let job = match state.ingestion.latest(&repo).await {
+        Ok(Some(job)) => job,
+        Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
                 "no ingestion job found for this repository".to_string(),
             )
                 .into_response();
         }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    drop(jobs);
 
-    let mut rx = job.progress.subscribe();
-    let progress = job.progress.clone();
-    let job_clone = Arc::clone(&job);
-
+    let jobs = state.ingestion.clone();
     let (tx, rx_sse) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
 
     tokio::spawn(async move {
-        let mut sent_count = 0;
-
+        let mut last_seq = 0;
         loop {
-            let lines = progress.lines().await;
-            while sent_count < lines.len() {
-                let line = &lines[sent_count];
-                if tx
-                    .send(Ok(Event::default().data(
-                        json!({ "type": "progress", "message": line }).to_string(),
-                    )))
-                    .await
-                    .is_err()
-                {
+            let status = jobs.status(&job.id).await.ok().flatten();
+            let lines = jobs.progress_since(&job.id, last_seq).await.unwrap_or_default();
+            for (seq, line) in lines {
+                last_seq = seq;
+                let event = Event::default().data(json!({ "type": "progress", "message": line }).to_string());
+                if tx.send(Ok(event)).await.is_err() {
                     return;
                 }
-                sent_count += 1;
             }
-
-            if {
-                let status = job_clone.status.read().await;
-                matches!(*status, IngestionStatus::Completed { .. } | IngestionStatus::Failed { .. })
-            } {
-                let status = job_clone.status.read().await;
-                let final_event = match &*status {
-                    IngestionStatus::Completed { versions } => Event::default().data(
-                        json!({ "type": "completed", "versions": versions }).to_string(),
-                    ),
-                    IngestionStatus::Failed { error } => Event::default().data(
-                        json!({ "type": "failed", "error": error }).to_string(),
-                    ),
-                    _ => Event::default().data(json!({ "type": "done" }).to_string()),
-                };
-                let _ = tx.send(Ok(final_event)).await;
+            let final_event = match status {
+                Some(IngestionStatus::Completed { versions }) => Some(json!({ "type": "completed", "versions": versions })),
+                Some(IngestionStatus::Failed { error }) => Some(json!({ "type": "failed", "error": error })),
+                None => Some(json!({ "type": "done" })),
+                _ => None,
+            };
+            if let Some(final_event) = final_event {
+                let remaining = jobs.progress_since(&job.id, last_seq).await.unwrap_or_default();
+                for (_, line) in remaining {
+                    let event = Event::default().data(json!({ "type": "progress", "message": line }).to_string());
+                    let _ = tx.send(Ok(event)).await;
+                }
+                let _ = tx.send(Ok(Event::default().data(final_event.to_string()))).await;
                 return;
             }
-
-            if rx.changed().await.is_err() {
-                return;
-            }
+            tokio::time::sleep(PROGRESS_POLL_INTERVAL).await;
         }
     });
 

@@ -1,4 +1,6 @@
+pub mod directory;
 pub mod handlers;
+pub mod internal;
 pub mod lxd_provision;
 pub mod port_forwards;
 pub mod proxy;
@@ -12,7 +14,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResultBody {
     pub request_id: String,
     pub stdout:     String,
@@ -20,7 +22,7 @@ pub struct ResultBody {
     pub exit_code:  i32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerraformFlavor {
     Terraform,
@@ -44,7 +46,7 @@ impl TerraformFlavor {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerraformAction {
     Plan,
@@ -130,8 +132,34 @@ pub struct MachineRegistry {
     pub token_index:     DashMap<String, String>,
     pub console_pending: DashMap<String, PendingConsoleSession>,
     pub tunnel_pending:  DashMap<String, PendingTunnelSession>,
-    /// Live stdout/stderr line subscribers for in-flight `execute_terraform` calls, keyed by request_id.
     pub output:          DashMap<String, mpsc::Sender<Value>>,
+    directory:           std::sync::OnceLock<Arc<directory::AgentDirectory>>,
+    shutdown:            std::sync::OnceLock<crate::cluster::Shutdown>,
+}
+
+const LOCAL_NODE_ID: &str = "local";
+const REMOTE_GRACE_SECS: u64 = 20;
+
+pub fn session_owner(session_id: &str) -> Option<&str> {
+    session_id.rsplit_once('.').map(|(node, _)| node).filter(|n| !n.is_empty())
+}
+
+fn command_result_from(value: &Value) -> Result<CommandResult, String> {
+    if let Some(error) = value["error"].as_str() {
+        return Err(error.to_string());
+    }
+    Ok(CommandResult {
+        stdout:    value["stdout"].as_str().unwrap_or_default().to_string(),
+        stderr:    value["stderr"].as_str().unwrap_or_default().to_string(),
+        exit_code: value["exit_code"].as_i64().unwrap_or(-1) as i32,
+    })
+}
+
+pub fn command_result_json(result: &Result<CommandResult, String>) -> Value {
+    match result {
+        Ok(r)  => serde_json::json!({ "stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code }),
+        Err(e) => serde_json::json!({ "error": e }),
+    }
 }
 
 impl MachineRegistry {
@@ -152,7 +180,98 @@ impl MachineRegistry {
         true
     }
 
-    pub fn agents_for_project(&self, project_id: &str) -> Vec<serde_json::Value> {
+    pub fn attach_directory(&self, directory: Arc<directory::AgentDirectory>) {
+        let _ = self.directory.set(directory);
+    }
+
+    pub fn directory(&self) -> Option<&Arc<directory::AgentDirectory>> {
+        self.directory.get()
+    }
+
+    pub fn attach_shutdown(&self, shutdown: crate::cluster::Shutdown) {
+        let _ = self.shutdown.set(shutdown);
+    }
+
+    pub fn shutdown_signal(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        match self.shutdown.get() {
+            Some(shutdown) => Box::pin(shutdown.wait()),
+            None => Box::pin(std::future::pending()),
+        }
+    }
+
+    pub async fn agent_for_token(&self, token: &str) -> Option<String> {
+        let token_hash = hash_token(token);
+        if let Some(agent_id) = self.token_index.get(&token_hash) {
+            return Some(agent_id.value().clone());
+        }
+        self.directory()?.agent_for_token_hash(&token_hash).await
+    }
+
+    pub fn resolve_pending(&self, body: ResultBody) -> bool {
+        match self.pending.remove(&body.request_id) {
+            Some((_, pending)) => {
+                let _ = pending.tx.send(Ok(CommandResult {
+                    stdout:    body.stdout,
+                    stderr:    body.stderr,
+                    exit_code: body.exit_code,
+                }));
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn relay_output(&self, request_id: &str, stream: &str, line: &str) -> bool {
+        match self.output.get(request_id) {
+            Some(tx) => {
+                let _ = tx.try_send(serde_json::json!({ "stream": stream, "line": line }));
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn node_id(&self) -> String {
+        self.directory().map(|d| d.node_id().to_string()).unwrap_or_else(|| LOCAL_NODE_ID.to_string())
+    }
+
+    pub fn new_session_id(&self) -> String {
+        format!("{}.{}", self.node_id(), Uuid::new_v4())
+    }
+
+    pub fn is_local(&self, agent_id: &str) -> bool {
+        self.agents.contains_key(agent_id)
+    }
+
+    pub async fn is_online(&self, agent_id: &str) -> bool {
+        if self.is_local(agent_id) {
+            return true;
+        }
+        match self.directory() {
+            Some(directory) => directory.locate(agent_id).await.is_some(),
+            None => false,
+        }
+    }
+
+    pub async fn project_of(&self, agent_id: &str) -> Option<String> {
+        if let Some(agent) = self.agents.get(agent_id) {
+            return Some(agent.project_id.clone());
+        }
+        self.directory()?.locate(agent_id).await.map(|l| l.project_id)
+    }
+
+    pub async fn hostname_of(&self, agent_id: &str) -> Option<String> {
+        if let Some(agent) = self.agents.get(agent_id) {
+            return Some(agent.hostname.clone());
+        }
+        let directory = self.directory()?;
+        match directory.locate(agent_id).await {
+            Some(location) => Some(location.hostname),
+            None => directory.hostname_from_inventory(agent_id).await,
+        }
+    }
+
+    pub fn local_agents_for_project(&self, project_id: &str) -> Vec<serde_json::Value> {
         self.agents
             .iter()
             .filter(|e| e.value().project_id == project_id)
@@ -166,6 +285,60 @@ impl MachineRegistry {
                 })
             })
             .collect()
+    }
+
+    pub async fn agents_for_project(&self, project_id: &str) -> Vec<serde_json::Value> {
+        let mut agents = self.local_agents_for_project(project_id);
+        if let Some(directory) = self.directory() {
+            for location in directory.online_in_project(project_id).await {
+                if agents.iter().any(|a| a["id"].as_str() == Some(location.agent_id.as_str())) {
+                    continue;
+                }
+                agents.push(serde_json::json!({
+                    "id":           location.agent_id,
+                    "hostname":     location.hostname,
+                    "online":       true,
+                    "connected_at": location.connected_at,
+                }));
+            }
+        }
+        agents
+    }
+
+    async fn remote_target(&self, agent_id: &str) -> Result<(Arc<crate::cluster::peer::PeerClient>, String), String> {
+        let not_connected = || format!("agent {agent_id} not connected");
+        let directory = self.directory().ok_or_else(not_connected)?;
+        let peers = directory.peers().cloned().ok_or_else(not_connected)?;
+        let url = directory.owner_url(agent_id).await.ok_or_else(not_connected)?;
+        Ok((peers, url))
+    }
+
+    async fn remote_post(&self, agent_id: &str, action: &str, body: Value, timeout_secs: u64) -> Result<Value, String> {
+        let (peers, url) = self.remote_target(agent_id).await?;
+        let (status, value) = peers
+            .post_json(&url, &format!("/internal/agents/{agent_id}/{action}"), &body, std::time::Duration::from_secs(timeout_secs))
+            .await
+            .map_err(|e| format!("agent {agent_id} unreachable: {e}"))?;
+        if status.is_success() {
+            Ok(value)
+        } else {
+            Err(value["error"].as_str().map(str::to_string).unwrap_or_else(|| format!("agent {agent_id} not connected")))
+        }
+    }
+
+    pub async fn uninstall(&self, agent_id: &str) {
+        let sender = self.agents.get(agent_id).map(|a| a.sender.clone());
+        self.agents.remove(agent_id);
+        match sender {
+            Some(sender) => { let _ = sender.send(ServerToAgent::Uninstall).await; }
+            None => { let _ = self.remote_post(agent_id, "uninstall", serde_json::json!({}), 10).await; }
+        }
+    }
+
+    pub async fn disconnect(&self, agent_id: &str) {
+        if self.agents.remove(agent_id).is_none() {
+            let _ = self.remote_post(agent_id, "disconnect", serde_json::json!({}), 10).await;
+        }
     }
 
     async fn send_and_await(
@@ -207,6 +380,24 @@ impl MachineRegistry {
         command:  String,
         timeout_secs: u64,
     ) -> Result<CommandResult, String> {
+        if !self.is_local(agent_id) && self.directory().is_some() {
+            let value = self.remote_post(
+                agent_id,
+                "execute",
+                serde_json::json!({ "command": command, "timeout_secs": timeout_secs }),
+                timeout_secs + REMOTE_GRACE_SECS,
+            ).await?;
+            return command_result_from(&value);
+        }
+        self.execute_local(agent_id, command, timeout_secs).await
+    }
+
+    pub async fn execute_local(
+        &self,
+        agent_id: &str,
+        command:  String,
+        timeout_secs: u64,
+    ) -> Result<CommandResult, String> {
         let request_id = Uuid::new_v4().to_string();
         self.send_and_await(
             agent_id,
@@ -216,10 +407,74 @@ impl MachineRegistry {
         ).await
     }
 
-    /// `output_tx`, if given, receives a `{"stream": "stdout"|"stderr", "line": "..."}` value
-    /// for each line the agent produces while the command runs.
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_terraform(
+        &self,
+        agent_id:     &str,
+        artifact_id:  String,
+        flavor:       TerraformFlavor,
+        action:       TerraformAction,
+        files:        BTreeMap<String, String>,
+        timeout_secs: u64,
+        output_tx:    Option<mpsc::Sender<Value>>,
+    ) -> Result<CommandResult, String> {
+        if !self.is_local(agent_id) && self.directory().is_some() {
+            return self.remote_terraform(agent_id, artifact_id, flavor, action, files, timeout_secs, output_tx).await;
+        }
+        self.execute_terraform_local(agent_id, artifact_id, flavor, action, files, timeout_secs, output_tx).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn remote_terraform(
+        &self,
+        agent_id:     &str,
+        artifact_id:  String,
+        flavor:       TerraformFlavor,
+        action:       TerraformAction,
+        files:        BTreeMap<String, String>,
+        timeout_secs: u64,
+        output_tx:    Option<mpsc::Sender<Value>>,
+    ) -> Result<CommandResult, String> {
+        use futures::StreamExt as _;
+        let (peers, url) = self.remote_target(agent_id).await?;
+        let body = serde_json::json!({
+            "artifact_id": artifact_id, "flavor": flavor, "action": action,
+            "files": files, "timeout_secs": timeout_secs,
+        });
+        let response = peers
+            .post_streaming(&url, &format!("/internal/agents/{agent_id}/terraform"), &body)
+            .await
+            .map_err(|e| format!("agent {agent_id} unreachable: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!("agent {agent_id} not connected"));
+        }
+        let mut stream = response.bytes_stream();
+        let mut buffer: Vec<u8> = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs + REMOTE_GRACE_SECS);
+        loop {
+            let chunk = match tokio::time::timeout_at(deadline, stream.next()).await {
+                Ok(Some(Ok(chunk))) => chunk,
+                Ok(Some(Err(e))) => return Err(format!("lost connection to the node running agent {agent_id}: {e}")),
+                Ok(None) => return Err(format!("lost connection to the node running agent {agent_id}")),
+                Err(_) => return Err("timed out waiting for command result".to_string()),
+            };
+            buffer.extend_from_slice(&chunk);
+            while let Some(position) = buffer.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = buffer.drain(..=position).collect();
+                let Ok(value) = serde_json::from_slice::<Value>(&line) else { continue };
+                if let Some(output) = value.get("output") {
+                    if let Some(tx) = &output_tx {
+                        let _ = tx.send(output.clone()).await;
+                    }
+                } else if let Some(result) = value.get("result") {
+                    return command_result_from(result);
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_terraform_local(
         &self,
         agent_id:     &str,
         artifact_id:  String,
@@ -256,7 +511,7 @@ impl MachineRegistry {
             .sender
             .clone();
 
-        let session_id = Uuid::new_v4().to_string();
+        let session_id = self.new_session_id();
         let (to_agent_tx, to_agent_rx) = mpsc::channel::<Message>(64);
         let (to_browser_tx, to_browser_rx) = mpsc::channel::<Message>(64);
 
@@ -306,7 +561,7 @@ impl MachineRegistry {
             .sender
             .clone();
 
-        let session_id = Uuid::new_v4().to_string();
+        let session_id = self.new_session_id();
         let (to_agent_tx, to_agent_rx) = mpsc::channel::<Message>(64);
         let (to_caller_tx, to_caller_rx) = mpsc::channel::<Message>(64);
 

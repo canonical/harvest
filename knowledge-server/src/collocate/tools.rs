@@ -270,7 +270,7 @@ impl Tool for CollocateCreateSessionTool {
             })
             .unwrap_or_default();
 
-        let count = self.registry.count_for_project(&self.project_id);
+        let count = self.registry.count_for_project_shared(&self.project_id).await;
         if count >= self.handle.config().max_containers {
             anyhow::bail!(
                 "maximum {} collocate containers reached for this project",
@@ -414,7 +414,7 @@ impl Tool for CollocateExecTool {
 
         let _ = self
             .registry
-            .verify_ownership(&container_id, &self.project_id, &self.conversation_id)
+            .verify_ownership_shared(&container_id, &self.project_id, &self.conversation_id).await
             .ok_or_else(|| anyhow!("container {container_id} not found in this conversation"))?;
 
         let env: Vec<(String, String)> = params["env"]
@@ -489,7 +489,7 @@ impl Tool for CollocateDeleteSessionTool {
         let container_id = required_str(&params, "container_id")?;
         let _ = self
             .registry
-            .verify_ownership(&container_id, &self.project_id, &self.conversation_id)
+            .verify_ownership_shared(&container_id, &self.project_id, &self.conversation_id).await
             .ok_or_else(|| anyhow!("container {container_id} not found in this conversation"))?;
         self.handle.rm_force(&container_id).await?;
         self.registry.remove_entry(&container_id);
@@ -525,7 +525,7 @@ impl Tool for CollocateListContainersTool {
     }
 
     async fn execute(&self, _params: Value) -> Result<String> {
-        let containers = self.registry.list_for_session(&self.project_id, &self.conversation_id);
+        let containers = self.registry.list_for_session_shared(&self.project_id, &self.conversation_id).await;
         let result: Vec<Value> = containers
             .iter()
             .map(|c| {
@@ -598,7 +598,7 @@ impl Tool for CollocateTransferFileTool {
 
         let _ = self
             .registry
-            .verify_ownership(&container_id, &self.project_id, &self.conversation_id)
+            .verify_ownership_shared(&container_id, &self.project_id, &self.conversation_id).await
             .ok_or_else(|| anyhow!("container {container_id} not found in this conversation"))?;
 
         match direction.as_str() {

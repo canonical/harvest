@@ -91,9 +91,10 @@ fn test_claims() -> Claims {
 
 fn repos_app(db: Arc<Db>) -> Router {
     let state = Arc::new(GraphState {
+        ingestion: knowledge_server::ingestion::IngestionJobs::standalone(Arc::clone(&db)),
         db,
         cache: Arc::new(RwLock::new(HashMap::new())),
-        ingestion: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+        bus: knowledge_server::cluster::bus::ClusterBus::local("test-node"),
     });
     Router::new()
         .route("/repositories", get(handle_list_repositories))

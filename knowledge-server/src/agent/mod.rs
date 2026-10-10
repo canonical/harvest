@@ -201,7 +201,7 @@ enum LoopOutcome {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PendingConfirmCall {
     pub id:          String,
     pub tool_use_id: String,

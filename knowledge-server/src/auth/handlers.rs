@@ -11,11 +11,11 @@ use std::sync::Arc;
 use time::Duration;
 use uuid::Uuid;
 
-use super::{jwt, oidc, password, AuthState, OAuthSession, TOKEN_COOKIE};
+use super::{ephemeral, jwt, oidc, password, AuthState, TOKEN_COOKIE};
 use crate::config::{GoogleConfig, OidcConfig};
 use harvest_db::Db;
 
-const SESSION_TTL_SECS: u64 = 600; // 10 minutes
+const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 type ApiError = (StatusCode, Json<Value>);
 
@@ -23,9 +23,10 @@ fn err(status: StatusCode, msg: &str) -> ApiError {
     (status, Json(json!({ "error": msg })))
 }
 
-fn make_token_cookie(token: String) -> Cookie<'static> {
+pub fn token_cookie(token: String, secure: bool) -> Cookie<'static> {
     Cookie::build((TOKEN_COOKIE, token))
         .http_only(true)
+        .secure(secure)
         .same_site(SameSite::Lax)
         .path("/")
         .max_age(Duration::days(30))
@@ -98,10 +99,9 @@ pub async fn register(
     assign_default_groups(&state, &id).await?;
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
-    Ok((jar.add(make_token_cookie(token)), Json(json!({ "ok": true }))))
+    Ok((jar.add(token_cookie(token, state.config.secure_cookies())), Json(json!({ "ok": true }))))
 }
 
-/// Serialises user creation so exactly one account can become the first admin.
 async fn insert_user(db: &Db, sql: &str, params: Value) -> anyhow::Result<Vec<Value>> {
     let tx = db.begin().await?;
     tx.execute("SELECT pg_advisory_xact_lock(hashtext('harvest:first-user'))", json!({})).await?;
@@ -169,7 +169,7 @@ pub async fn login(
     }
 
     let token = issue_token(&state.config.jwt_secret, &user)?;
-    Ok((jar.add(make_token_cookie(token)), Json(json!({ "ok": true }))))
+    Ok((jar.add(token_cookie(token, state.config.secure_cookies())), Json(json!({ "ok": true }))))
 }
 
 pub async fn logout(jar: CookieJar) -> impl IntoResponse {
@@ -254,10 +254,9 @@ pub async fn google_redirect(
     let url = build_google_auth_url(google, &oauth_state);
     tracing::info!(redirect_uri = %google.redirect_uri, auth_url = %url, "Initiating Google OAuth");
 
-    state.oauth_sessions.insert(oauth_state.clone(), OAuthSession {
-        pkce_verifier: None,
-        created_at: std::time::Instant::now(),
-    });
+    ephemeral::put(&state.db, ephemeral::OAUTH_KIND, &oauth_state, &json!({ "pkce_verifier": null }), SESSION_TTL)
+        .await
+        .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "could not start the login"))?;
 
     Ok((jar, Redirect::to(&url)))
 }
@@ -286,9 +285,9 @@ pub async fn google_callback(
     let code = params.code.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth code"))?;
     let oauth_state = params.state.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth state"))?;
 
-    let session = state.oauth_sessions.remove(&oauth_state)
-        .map(|(_, s)| s)
-        .filter(|s| s.created_at.elapsed().as_secs() < SESSION_TTL_SECS)
+    let session = ephemeral::take(&state.db, ephemeral::OAUTH_KIND, &oauth_state).await
+        .ok()
+        .flatten()
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid OAuth state"))?;
 
     let access_token = exchange_google_code(&state.http, google, &code)
@@ -323,8 +322,8 @@ pub async fn google_callback(
     }
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
-    let _ = session; // session consumed above to validate state
-    Ok((jar.add(make_token_cookie(token)), Redirect::to("/")))
+    let _ = session;
+    Ok((jar.add(token_cookie(token, state.config.secure_cookies())), Redirect::to("/")))
 }
 
 fn extract_claims(secret: &str, jar: &CookieJar) -> Result<jwt::Claims, ApiError> {
@@ -359,10 +358,9 @@ pub async fn oidc_redirect(
     let (pkce_verifier, pkce_challenge) = oidc::generate_pkce_pair();
     let url = build_oidc_auth_url(&endpoints.authorization_endpoint, oidc_cfg, &oauth_state, &pkce_challenge);
 
-    state.oauth_sessions.insert(oauth_state.clone(), OAuthSession {
-        pkce_verifier: Some(pkce_verifier),
-        created_at: std::time::Instant::now(),
-    });
+    ephemeral::put(&state.db, ephemeral::OAUTH_KIND, &oauth_state, &json!({ "pkce_verifier": pkce_verifier }), SESSION_TTL)
+        .await
+        .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "could not start the login"))?;
 
     Ok((jar, Redirect::to(&url)))
 }
@@ -394,12 +392,12 @@ pub async fn oidc_callback(
     let code = params.code.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth code"))?;
     let oauth_state = params.state.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth state"))?;
 
-    let session = state.oauth_sessions.remove(&oauth_state)
-        .map(|(_, s)| s)
-        .filter(|s| s.created_at.elapsed().as_secs() < SESSION_TTL_SECS)
+    let session = ephemeral::take(&state.db, ephemeral::OAUTH_KIND, &oauth_state).await
+        .ok()
+        .flatten()
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid OAuth state"))?;
 
-    let pkce_verifier = session.pkce_verifier;
+    let pkce_verifier = session["pkce_verifier"].as_str().map(str::to_string);
 
     let access_token = oidc::exchange_code(
         &state.http,
@@ -460,7 +458,7 @@ pub async fn oidc_callback(
     }
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
-    Ok((jar.add(make_token_cookie(token)), Redirect::to("/")))
+    Ok((jar.add(token_cookie(token, state.config.secure_cookies())), Redirect::to("/")))
 }
 
 fn build_oidc_auth_url(
