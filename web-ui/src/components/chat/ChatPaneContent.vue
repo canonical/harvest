@@ -305,6 +305,19 @@ function handleProjectEvent(event) {
         lockedBy.value     = '';
       }
       break;
+    case 'turn_aborted':
+      if (event.conv_id === activeConvId.value) {
+        remoteLocked.value = false;
+        lockedBy.value     = '';
+        if (chat.loading) {
+          chat.setError('The response was interrupted because the server handling it went away. Please send your message again.');
+        }
+      }
+      break;
+    case 'resync':
+      loadConversationList();
+      if (activeConvId.value && !chat.loading) refreshActiveConversation();
+      break;
     case 'conversation_created': {
       const existing = conversations.value.findIndex(c => c.id === event.conversation.id);
       if (existing !== -1) {
@@ -381,6 +394,18 @@ async function loadConversation(id) {
     openEventStream();
     await nextTick();
     jumpToLatest(messagesEl.value);
+  } catch {}
+}
+
+async function refreshActiveConversation() {
+  const id = activeConvId.value;
+  if (!id) return;
+  try {
+    const conv = props.projectId
+      ? await getProjectConversation(props.projectId, id)
+      : await getConversation(id);
+    if (id !== activeConvId.value || chat.loading) return;
+    chat.loadFromHistory(Array.isArray(conv.messages) ? conv.messages : []);
   } catch {}
 }
 
