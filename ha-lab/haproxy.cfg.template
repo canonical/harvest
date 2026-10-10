@@ -1,0 +1,40 @@
+global
+    maxconn 4096
+    log /dev/log local0
+
+defaults
+    mode http
+    log global
+    option httplog
+    option dontlognull
+    timeout queue 20000
+    timeout http-request 60000
+    timeout http-keep-alive 30000
+    timeout client 50000
+    timeout connect 5000
+    timeout server 50000
+
+frontend haproxy
+    bind [::]:80 v4v6
+    acl acl_path_harvest_server path_beg -i @API_PATHS@
+    use_backend harvest_server if acl_path_harvest_server
+    default_backend harvest_web_ui
+
+backend harvest_server
+    option forwardfor
+    balance leastconn
+    timeout server 3600s
+    timeout connect 10s
+    timeout queue 60s
+    retries 2
+    option redispatch
+    option httpchk GET /health/ready
+@SERVERS@
+
+backend harvest_web_ui
+    option forwardfor
+    balance roundrobin
+    retries 2
+    option redispatch
+    option httpchk GET /ui-health
+    server ui0 127.0.0.1:8090 check inter 5s rise 2 fall 3
