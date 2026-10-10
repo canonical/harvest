@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt as _;
 
 use knowledge_server::{
-    auth::{handlers as auth_handlers, tui as auth_tui, AuthState, OidcEndpoints},
+    auth::{ephemeral, handlers as auth_handlers, tui as auth_tui, AuthState, OidcEndpoints},
     config::{AuthConfig, OidcConfig, UiConfig},
 };
 
@@ -82,9 +82,7 @@ async fn config_reports_oidc_enabled_with_display_name() {
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
-        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
-        tui_auth:         auth_tui::new_auth_map(),
     });
     let app  = oidc_router(auth);
 
@@ -107,9 +105,7 @@ async fn config_reports_oidc_disabled_when_not_configured() {
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
         oidc_endpoints:  None,
-        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
-        tui_auth:         auth_tui::new_auth_map(),
     });
     let app = oidc_router(auth);
 
@@ -145,9 +141,7 @@ async fn config_oidc_display_name_null_when_not_set() {
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
-        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
-        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
@@ -168,9 +162,7 @@ async fn oidc_redirect_returns_501_when_not_configured() {
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
         oidc_endpoints:  None,
-        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
-        tui_auth:         auth_tui::new_auth_map(),
     });
     let resp = oidc_router(auth)
         .oneshot(Request::builder().uri("/auth/oidc").body(Body::empty()).unwrap())
@@ -181,19 +173,19 @@ async fn oidc_redirect_returns_501_when_not_configured() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn oidc_redirect_returns_302_to_authorization_endpoint() {
+    let live = harvest_db::test_support::TestDb::new().await;
     let server = MockServer::start();
     let cfg = auth_config_with_oidc(&server.base_url());
     let ep  = Arc::new(endpoints(&server.base_url()));
     let auth = Arc::new(AuthState {
-        db:          make_stub_db().await,
+        db:          Arc::new(live.db.clone()),
         config:         cfg,
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
-        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
-        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
@@ -207,19 +199,19 @@ async fn oidc_redirect_returns_302_to_authorization_endpoint() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn oidc_redirect_url_contains_required_params() {
+    let live = harvest_db::test_support::TestDb::new().await;
     let server = MockServer::start();
     let cfg = auth_config_with_oidc(&server.base_url());
     let ep  = Arc::new(endpoints(&server.base_url()));
     let auth = Arc::new(AuthState {
-        db:          make_stub_db().await,
+        db:          Arc::new(live.db.clone()),
         config:         cfg,
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
-        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
-        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
@@ -241,19 +233,19 @@ async fn oidc_redirect_url_contains_required_params() {
 }
 
 #[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn oidc_redirect_stores_session_server_side() {
+    let live = harvest_db::test_support::TestDb::new().await;
     let server = MockServer::start();
     let cfg = auth_config_with_oidc(&server.base_url());
     let ep  = Arc::new(endpoints(&server.base_url()));
     let auth = Arc::new(AuthState {
-        db:          make_stub_db().await,
+        db:          Arc::new(live.db.clone()),
         config:         cfg,
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
-        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
-        tui_auth:         auth_tui::new_auth_map(),
     });
     let auth_ref = Arc::clone(&auth);
 
@@ -272,10 +264,9 @@ async fn oidc_redirect_stores_session_server_side() {
     let url = reqwest::Url::parse(&location).unwrap();
     let params: std::collections::HashMap<_, _> = url.query_pairs().collect();
     let state_val = params.get("state").expect("state param in redirect URL");
-    assert!(
-        auth_ref.oauth_sessions.contains_key(state_val.as_ref()),
-        "session for state={state_val} must be in server-side oauth_sessions map",
-    );
+    let stored = ephemeral::get(&auth_ref.db, ephemeral::OAUTH_KIND, state_val.as_ref()).await.unwrap();
+    assert!(stored.is_some(), "session for state={state_val} must be stored server side");
+    assert!(stored.unwrap()["pkce_verifier"].as_str().is_some_and(|v| !v.is_empty()));
 }
 
 #[tokio::test]
@@ -289,9 +280,7 @@ async fn oidc_callback_returns_400_when_no_code() {
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
-        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
-        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
@@ -318,9 +307,7 @@ async fn oidc_callback_returns_400_on_idp_error_param() {
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
-        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
-        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
@@ -349,9 +336,7 @@ async fn oidc_callback_returns_400_on_state_mismatch() {
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
         oidc_endpoints:  Some(ep),
-        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
-        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
@@ -377,9 +362,7 @@ async fn oidc_callback_returns_501_when_not_configured() {
         ui:             Arc::new(UiConfig::default()),
         http:           reqwest::Client::new(),
         oidc_endpoints:  None,
-        oauth_sessions:  Arc::new(dashmap::DashMap::new()),
         lxd_enabled:     false,
-        tui_auth:         auth_tui::new_auth_map(),
     });
 
     let resp = oidc_router(auth)
@@ -400,4 +383,110 @@ async fn make_stub_db() -> Arc<harvest_db::Db> {
         harvest_db::Db::connect_without_migrating("postgres://harvest:x@127.0.0.1:19999/harvest")
             .expect("pool construction should succeed even with an unreachable host"),
     )
+}
+
+fn auth_state(db: Arc<harvest_db::Db>, config: Arc<AuthConfig>, endpoints: Option<Arc<OidcEndpoints>>) -> Arc<AuthState> {
+    Arc::new(AuthState {
+        db,
+        config,
+        ui:             Arc::new(UiConfig::default()),
+        http:           reqwest::Client::new(),
+        oidc_endpoints: endpoints,
+        lxd_enabled:    false,
+    })
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn oidc_state_created_on_one_node_is_accepted_by_another() {
+    let live = harvest_db::test_support::TestDb::new().await;
+    let server = MockServer::start();
+    let node_a = auth_state(Arc::new(live.db.clone()), auth_config_with_oidc(&server.base_url()), Some(Arc::new(endpoints(&server.base_url()))));
+    let node_b = auth_state(Arc::new(live.db.clone()), auth_config_with_oidc(&server.base_url()), Some(Arc::new(endpoints(&server.base_url()))));
+
+    let resp = oidc_router(node_a)
+        .oneshot(Request::builder().uri("/auth/oidc").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let location = resp_header(&resp, "location").unwrap();
+    let url = reqwest::Url::parse(&location).unwrap();
+    let state_val = url.query_pairs().find(|(k, _)| k == "state").unwrap().1.to_string();
+
+    let resp = oidc_router(Arc::clone(&node_b))
+        .oneshot(Request::builder().uri(format!("/auth/oidc/callback?code=abc&state={state_val}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::BAD_REQUEST, "state must be recognised by another node");
+
+    let replay = oidc_router(node_b)
+        .oneshot(Request::builder().uri(format!("/auth/oidc/callback?code=abc&state={state_val}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST, "a state value can only be used once");
+}
+
+fn tui_router(auth: Arc<AuthState>) -> Router {
+    Router::new()
+        .route("/auth/tui/login", axum::routing::post(auth_tui::create_auth_request))
+        .route("/auth/tui/poll/:uuid", get(auth_tui::poll_auth_request))
+        .route("/auth/tui/authorize/:uuid", axum::routing::post(auth_tui::authorize_request))
+        .with_state(auth)
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn tui_login_can_be_created_authorized_and_polled_on_different_nodes() {
+    let live = harvest_db::test_support::TestDb::new().await;
+    let nodes: Vec<Arc<AuthState>> = (0..3)
+        .map(|_| auth_state(Arc::new(live.db.clone()), auth_config_no_oidc(), None))
+        .collect();
+
+    let resp = tui_router(Arc::clone(&nodes[0]))
+        .oneshot(Request::builder().method("POST").uri("/auth/tui/login").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let uuid = body_json(resp).await["uuid"].as_str().unwrap().to_string();
+
+    let pending = tui_router(Arc::clone(&nodes[2]))
+        .oneshot(Request::builder().uri(format!("/auth/tui/poll/{uuid}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(body_json(pending).await["status"], "pending");
+
+    let token = knowledge_server::auth::jwt::issue("test-secret-for-jwt-signing-long-enough", "u1", "a@b.c", "Ann", "regular").unwrap();
+    let resp = tui_router(Arc::clone(&nodes[1]))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/auth/tui/authorize/{uuid}"))
+                .header("cookie", format!("token={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = tui_router(Arc::clone(&nodes[2]))
+        .oneshot(Request::builder().uri(format!("/auth/tui/poll/{uuid}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = body_json(resp).await;
+    assert_eq!(body["status"], "authorized");
+    assert_eq!(body["email"], "a@b.c");
+    assert!(body["token"].as_str().is_some());
+
+    let resp = tui_router(Arc::clone(&nodes[0]))
+        .oneshot(Request::builder().uri(format!("/auth/tui/poll/{uuid}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(body_json(resp).await["status"], "expired", "the token is handed out only once");
+}
+
+#[test]
+fn login_cookies_are_secure_behind_https() {
+    let cookie = auth_handlers::token_cookie("t".into(), true);
+    assert_eq!(cookie.secure(), Some(true));
+    let cookie = auth_handlers::token_cookie("t".into(), false);
+    assert_ne!(cookie.secure(), Some(true));
 }

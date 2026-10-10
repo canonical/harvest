@@ -21,6 +21,8 @@ pub async fn resolve_client(cfg: &LxdConfig, db: &Db) -> Result<Option<LxdClient
         return Ok(Some(LxdClient::new(cfg)?));
     }
 
+    let lock = db.dedicated_client().await?;
+    lock.execute("SELECT pg_advisory_lock(hashtext('harvest:lxd-identity'))", &[]).await?;
     let mut ident = identity::load_or_generate(db).await?;
 
     if !ident.trusted {

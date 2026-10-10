@@ -584,10 +584,9 @@ pub(crate) fn flavor_for_kind(kind: &str) -> Result<TerraformFlavor, ApiError> {
     }
 }
 
-fn require_agent_in_project(state: &ProjectState, agent_id: &str, project_id: &str) -> Result<(), ApiError> {
-    let belongs = state.agent_builder.registry.agents.get(agent_id)
-        .map(|a| a.project_id == project_id)
-        .unwrap_or(false);
+async fn require_agent_in_project(state: &ProjectState, agent_id: &str, project_id: &str) -> Result<(), ApiError> {
+    let belongs = state.agent_builder.registry.project_of(agent_id).await
+        .is_some_and(|p| p == project_id);
     if belongs { Ok(()) } else { Err(err(StatusCode::NOT_FOUND, "agent not found in this project")) }
 }
 
@@ -597,7 +596,7 @@ fn spawn_output_relay(
     deployment_id: &str,
 ) -> tokio::sync::mpsc::Sender<Value> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(256);
-    let channels       = Arc::clone(&state.channels);
+    let live           = Arc::clone(&state.live);
     let project_id     = project_id.to_string();
     let deployment_id  = deployment_id.to_string();
 
@@ -605,11 +604,7 @@ fn spawn_output_relay(
         while let Some(mut line) = rx.recv().await {
             line["type"]          = json!("deployment_run_log");
             line["deployment_id"] = json!(deployment_id);
-            let msg = line.to_string();
-            let map = channels.lock().await;
-            if let Some(sender) = map.get(&project_id) {
-                let _ = sender.send(msg);
-            }
+            live.broadcast(&project_id, line.to_string());
         }
     });
 
@@ -622,7 +617,7 @@ fn spawn_progress_relay(
     deployment_id: &str,
 ) -> tokio::sync::mpsc::Sender<AgentEvent> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
-    let channels       = Arc::clone(&state.channels);
+    let live           = Arc::clone(&state.live);
     let project_id     = project_id.to_string();
     let deployment_id  = deployment_id.to_string();
 
@@ -630,11 +625,7 @@ fn spawn_progress_relay(
         while let Some(event) = rx.recv().await {
             let mut value = serde_json::to_value(&event).unwrap_or_else(|_| json!({}));
             value["deployment_id"] = json!(deployment_id);
-            let msg = value.to_string();
-            let map = channels.lock().await;
-            if let Some(sender) = map.get(&project_id) {
-                let _ = sender.send(msg);
-            }
+            live.broadcast(&project_id, value.to_string());
         }
     });
 
@@ -699,7 +690,7 @@ pub(crate) async fn deploy_deployment_core(
     agent_id:      &str,
     timeout_secs:  u64,
 ) -> Result<Value, ApiError> {
-    require_agent_in_project(state, agent_id, project_id)?;
+    require_agent_in_project(state, agent_id, project_id).await?;
     let run = load_runnable_bundle(&state.db, project_id, deployment_id).await?;
     let flavor = flavor_for_kind(&run.artifact_kind)?;
     let timeout = timeout_secs.min(MAX_RUN_TIMEOUT_SECS);
@@ -767,7 +758,7 @@ pub(crate) async fn destroy_deployment_core(
     agent_id:      &str,
     timeout_secs:  u64,
 ) -> Result<Value, ApiError> {
-    require_agent_in_project(state, agent_id, project_id)?;
+    require_agent_in_project(state, agent_id, project_id).await?;
     let run = load_runnable_bundle(&state.db, project_id, deployment_id).await?;
     if matches!(run.infra_state, InfraState::None | InfraState::Destroyed) {
         return Err(err(StatusCode::BAD_REQUEST, "nothing to destroy"));
@@ -808,7 +799,7 @@ pub async fn redeploy_deployment(
     Json(body): Json<RunDeploymentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    require_agent_in_project(&state, &body.agent_id, &project_id)?;
+    require_agent_in_project(&state, &body.agent_id, &project_id).await?;
     let value = redeploy_deployment_core(&state, &project_id, &deployment_id, &body.agent_id, body.timeout_secs).await?;
     Ok(Json(value))
 }
@@ -2715,7 +2706,7 @@ pub(crate) async fn run_dag_core(
     agent_id:      &str,
     timeout_secs:  u64,
 ) -> Result<Value, ApiError> {
-    require_agent_in_project(state, agent_id, project_id)?;
+    require_agent_in_project(state, agent_id, project_id).await?;
     let rows = fetch_execution_plan_rows(&state.db, project_id, deployment_id, "deploy").await?;
     if rows.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "no deploy steps configured — set an execution plan first"));
@@ -2783,7 +2774,7 @@ pub(crate) async fn run_destroy_dag_core(
     agent_id:      &str,
     timeout_secs:  u64,
 ) -> Result<Value, ApiError> {
-    require_agent_in_project(state, agent_id, project_id)?;
+    require_agent_in_project(state, agent_id, project_id).await?;
     let rows = fetch_execution_plan_rows(&state.db, project_id, deployment_id, "destroy").await?;
     if rows.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "no destroy steps configured — set an execution plan first"));

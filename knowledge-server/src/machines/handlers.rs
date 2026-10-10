@@ -40,6 +40,13 @@ const CONSOLE_CLAIM_TIMEOUT_SECS: u64 = 15;
 const CONSOLE_MAX_MESSAGE_SIZE: usize = 64 * 1024;
 const DEFAULT_CONSOLE_COLS: u16 = 80;
 const DEFAULT_CONSOLE_ROWS: u16 = 24;
+pub const WEBSOCKET_PING_INTERVAL: Duration = Duration::from_secs(20);
+
+fn ping_ticker() -> tokio::time::Interval {
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + WEBSOCKET_PING_INTERVAL, WEBSOCKET_PING_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker
+}
 
 pub struct MachineState {
     pub registry:    Arc<MachineRegistry>,
@@ -242,14 +249,27 @@ async fn binary_handler(State(state): State<Arc<MachineState>>) -> impl IntoResp
 }
 
 struct AgentGuard {
-    agent_id:   String,
-    index_hash: String,
-    sender:     mpsc::Sender<ServerToAgent>,
-    registry:   Arc<MachineRegistry>,
+    agent_id:      String,
+    index_hash:    String,
+    connection_id: String,
+    sender:        mpsc::Sender<ServerToAgent>,
+    registry:      Arc<MachineRegistry>,
 }
 
 impl Drop for AgentGuard {
     fn drop(&mut self) {
+        if let Some(directory) = self.registry.directory().cloned() {
+            let agent_id = self.agent_id.clone();
+            let connection_id = self.connection_id.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    if let Err(e) = directory.unregister(&agent_id, &connection_id).await {
+                        tracing::warn!(error = %e, agent_id, "failed to unregister agent connection");
+                    }
+                });
+            }
+        }
+
         if !self.registry.disconnect_if_current(&self.agent_id, &self.sender) {
             tracing::info!(agent_id = %self.agent_id, "stale connection dropped, agent already reconnected");
             return;
@@ -258,6 +278,25 @@ impl Drop for AgentGuard {
         self.registry.token_index.remove(&self.index_hash);
         tracing::info!(agent_id = %self.agent_id, "agent disconnected");
     }
+}
+
+async fn authenticate_agent(registry: &MachineRegistry, headers: &HeaderMap) -> Option<String> {
+    let token = extract_bearer_token(headers)?;
+    registry.agent_for_token(&token).await
+}
+
+async fn peer_for_node(registry: &MachineRegistry, node_id: &str) -> Option<(Arc<crate::cluster::peer::PeerClient>, String)> {
+    let directory = registry.directory()?;
+    let peers = directory.peers()?.clone();
+    let url = directory.node_url(node_id).await?;
+    Some((peers, url))
+}
+
+async fn peer_for_agent(registry: &MachineRegistry, agent_id: &str) -> Option<(Arc<crate::cluster::peer::PeerClient>, String)> {
+    let directory = registry.directory()?;
+    let peers = directory.peers()?.clone();
+    let url = directory.owner_url(agent_id).await?;
+    Some((peers, url))
 }
 
 struct GuardedStream<S: Unpin> {
@@ -360,6 +399,14 @@ async fn agent_events_handler(
     });
     state.registry.token_index.insert(index_hash.clone(), agent_id.clone());
 
+    let connection_id = Uuid::new_v4().to_string();
+    if let Some(directory) = state.registry.directory() {
+        let project_id = state.registry.agents.get(&agent_id).map(|a| a.project_id.clone()).unwrap_or_default();
+        if let Err(e) = directory.register(&agent_id, &connection_id, &project_id, &hostname).await {
+            tracing::warn!(error = %e, agent_id, "failed to register agent connection in the cluster directory");
+        }
+    }
+
     tracing::info!(agent_id, hostname, "agent connected via SSE");
 
     let first_data  = serde_json::to_string(&first_event).unwrap_or_default();
@@ -367,7 +414,7 @@ async fn agent_events_handler(
         Ok::<Event, Infallible>(Event::default().data(first_data)),
     ]);
 
-    let guard = AgentGuard { agent_id, index_hash, sender: command_sender, registry: Arc::clone(&state.registry) };
+    let guard = AgentGuard { agent_id, index_hash, connection_id, sender: command_sender, registry: Arc::clone(&state.registry) };
     let command_stream = GuardedStream {
         inner: ReceiverStream::new(command_receiver).map(|msg| {
             let data = serde_json::to_string(&msg).unwrap_or_default();
@@ -376,7 +423,8 @@ async fn agent_events_handler(
         _guard: guard,
     };
 
-    let mut response = Sse::new(init_stream.chain(command_stream))
+    let shutdown = state.registry.shutdown_signal();
+    let mut response = Sse::new(init_stream.chain(command_stream).take_until(shutdown))
         .keep_alive(
             KeepAlive::new()
                 .interval(Duration::from_secs(SSE_KEEPALIVE_INTERVAL_SECS))
@@ -395,21 +443,21 @@ async fn agent_results_handler(
     headers:      HeaderMap,
     Json(body):   Json<ResultBody>,
 ) -> impl IntoResponse {
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None    => return StatusCode::UNAUTHORIZED.into_response(),
+    let Some(agent_id) = authenticate_agent(&state.registry, &headers).await else {
+        return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    if state.registry.token_index.get(&hash_token(&token)).is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if state.registry.resolve_pending(body.clone()) {
+        return StatusCode::OK.into_response();
     }
 
-    if let Some((_, pending)) = state.registry.pending.remove(&body.request_id) {
-        let _ = pending.tx.send(Ok(super::CommandResult {
-            stdout:    body.stdout,
-            stderr:    body.stderr,
-            exit_code: body.exit_code,
-        }));
+    if !crate::cluster::peer::is_forwarded(&headers) {
+        if let Some((peers, url)) = peer_for_agent(&state.registry, &agent_id).await {
+            let payload = serde_json::to_value(&body).unwrap_or(Value::Null);
+            if let Err(e) = peers.post_json(&url, "/internal/agents/results", &payload, Duration::from_secs(10)).await {
+                tracing::warn!(error = %e, agent_id, "failed to forward agent result to its owning node");
+            }
+        }
     }
 
     StatusCode::OK.into_response()
@@ -427,17 +475,19 @@ async fn agent_output_handler(
     headers:      HeaderMap,
     Json(body):   Json<AgentOutputBody>,
 ) -> impl IntoResponse {
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None    => return StatusCode::UNAUTHORIZED.into_response(),
+    let Some(agent_id) = authenticate_agent(&state.registry, &headers).await else {
+        return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    if state.registry.token_index.get(&hash_token(&token)).is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if state.registry.relay_output(&body.request_id, &body.stream, &body.line) {
+        return StatusCode::OK.into_response();
     }
 
-    if let Some(tx) = state.registry.output.get(&body.request_id) {
-        let _ = tx.try_send(json!({ "stream": body.stream, "line": body.line }));
+    if !crate::cluster::peer::is_forwarded(&headers) {
+        if let Some((peers, url)) = peer_for_agent(&state.registry, &agent_id).await {
+            let payload = json!({ "request_id": body.request_id, "stream": body.stream, "line": body.line });
+            let _ = peers.post_json(&url, "/internal/agents/output", &payload, Duration::from_secs(10)).await;
+        }
     }
 
     StatusCode::OK.into_response()
@@ -447,15 +497,8 @@ async fn agent_ping_handler(
     State(state): State<Arc<MachineState>>,
     headers:      HeaderMap,
 ) -> impl IntoResponse {
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None    => return StatusCode::UNAUTHORIZED.into_response(),
-    };
-
-    let token_hash = hash_token(&token);
-    let agent_id = match state.registry.token_index.get(&token_hash) {
-        Some(r) => r.value().clone(),
-        None    => return StatusCode::UNAUTHORIZED.into_response(),
+    let Some(agent_id) = authenticate_agent(&state.registry, &headers).await else {
+        return StatusCode::UNAUTHORIZED.into_response();
     };
 
     if let Some(db) = &state.db {
@@ -487,9 +530,18 @@ pub async fn list_agents(
         json!({ "pid": project_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
+    let mut online_ids = std::collections::HashSet::new();
+    for m in &db_machines {
+        if let Some(id) = m["id"].as_str() {
+            if state.registry.is_online(id).await {
+                online_ids.insert(id.to_string());
+            }
+        }
+    }
+
     let result: Vec<Value> = db_machines.into_iter().map(|m| {
         let id       = m["id"].as_str().unwrap_or("").to_string();
-        let online   = state.registry.agents.contains_key(&id);
+        let online   = online_ids.contains(&id);
         let provider = m["provider"].as_str().unwrap_or("manual").to_string();
         json!({
             "id":          id,
@@ -631,9 +683,20 @@ async fn bridge_socket(
         }
     });
 
-    while let Some(msg) = in_rx.recv().await {
-        if ws_tx.send(msg).await.is_err() {
-            break;
+    let mut ticker = ping_ticker();
+    loop {
+        tokio::select! {
+            msg = in_rx.recv() => {
+                let Some(msg) = msg else { break };
+                if ws_tx.send(msg).await.is_err() {
+                    break;
+                }
+            }
+            _ = ticker.tick() => {
+                if ws_tx.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
+            }
         }
     }
 
@@ -675,26 +738,46 @@ async fn pump_browser_console_socket(
         }
     });
 
-    while let Some(msg) = to_browser_rx.recv().await {
-        if ws_tx.send(msg).await.is_err() {
-            break;
+    let mut ticker = ping_ticker();
+    loop {
+        tokio::select! {
+            msg = to_browser_rx.recv() => {
+                let Some(msg) = msg else { break };
+                if ws_tx.send(msg).await.is_err() {
+                    break;
+                }
+            }
+            _ = ticker.tick() => {
+                if ws_tx.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
+                }
+            }
         }
     }
 
     reader.abort();
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn agent_console_open_handler(
     Extension(user):  Extension<Claims>,
     State(state):     State<Arc<MachineState>>,
     Path((project_id, agent_id)): Path<(String, String)>,
     Query(q):         Query<ConsoleQuery>,
+    headers:          HeaderMap,
+    uri:              axum::http::Uri,
     ws:               WebSocketUpgrade,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let db = db_or_err(&state)?;
     require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
-    if !state.registry.agents.contains_key(&agent_id) {
+    if !state.registry.is_local(&agent_id) {
+        if !crate::cluster::peer::is_forwarded(&headers) {
+            if let Some((peers, url)) = peer_for_agent(&state.registry, &agent_id).await {
+                let path = uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| uri.path().to_string());
+                return Ok(peers.forward_websocket(&url, &path, &headers, ws, CONSOLE_MAX_MESSAGE_SIZE));
+            }
+        }
         return Err(err(StatusCode::BAD_GATEWAY, "agent not connected"));
     }
 
@@ -713,20 +796,36 @@ pub async fn agent_console_open_handler(
         }))
 }
 
+async fn forward_claim_to_owner(
+    state: &MachineState,
+    session_id: &str,
+    headers: &HeaderMap,
+    path: &str,
+    ws: WebSocketUpgrade,
+) -> Result<axum::response::Response, WebSocketUpgrade> {
+    let Some(owner) = super::session_owner(session_id) else { return Err(ws) };
+    if owner == state.registry.node_id() || crate::cluster::peer::is_forwarded(headers) {
+        return Err(ws);
+    }
+    match peer_for_node(&state.registry, owner).await {
+        Some((peers, url)) => Ok(peers.forward_websocket(&url, path, headers, ws, CONSOLE_MAX_MESSAGE_SIZE)),
+        None => Ok(StatusCode::NOT_FOUND.into_response()),
+    }
+}
+
 pub async fn agent_console_claim_handler(
     State(state):  State<Arc<MachineState>>,
     headers:       HeaderMap,
     Path(session_id): Path<String>,
     ws:            WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None    => return StatusCode::UNAUTHORIZED.into_response(),
+    let Some(agent_id) = authenticate_agent(&state.registry, &headers).await else {
+        return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    let agent_id = match state.registry.token_index.get(&hash_token(&token)) {
-        Some(r) => r.value().clone(),
-        None    => return StatusCode::UNAUTHORIZED.into_response(),
+    let ws = match forward_claim_to_owner(&state, &session_id, &headers, &format!("/agent/console/{session_id}"), ws).await {
+        Ok(forwarded) => return forwarded,
+        Err(ws) => ws,
     };
 
     let Some((to_browser_tx, to_agent_rx)) = state.registry.claim_console_session(&session_id, &agent_id) else {
@@ -748,14 +847,13 @@ pub async fn agent_tunnel_claim_handler(
     Path(session_id): Path<String>,
     ws:            WebSocketUpgrade,
 ) -> impl IntoResponse {
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None    => return StatusCode::UNAUTHORIZED.into_response(),
+    let Some(agent_id) = authenticate_agent(&state.registry, &headers).await else {
+        return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    let agent_id = match state.registry.token_index.get(&hash_token(&token)) {
-        Some(r) => r.value().clone(),
-        None    => return StatusCode::UNAUTHORIZED.into_response(),
+    let ws = match forward_claim_to_owner(&state, &session_id, &headers, &format!("/agent/tunnel/{session_id}"), ws).await {
+        Ok(forwarded) => return forwarded,
+        Err(ws) => ws,
     };
 
     let Some((to_caller_tx, to_agent_rx)) = state.registry.claim_tunnel_session(&session_id, &agent_id) else {
@@ -847,11 +945,7 @@ pub async fn delete_agent_core(
             .map_err(|e| DeleteAgentError::LxdFailed(e.to_string()))?;
     }
 
-    let sender = registry.agents.get(agent_id).map(|a| a.sender.clone());
-    registry.agents.remove(agent_id);
-    if let Some(sender) = sender {
-        let _ = sender.send(super::ServerToAgent::Uninstall).await;
-    }
+    registry.uninstall(agent_id).await;
 
     db.query(
         "DELETE FROM machines WHERE id = $aid AND project_id = $pid",
@@ -903,7 +997,7 @@ async fn set_lxd_agent_state(
     result.map_err(|e| err(StatusCode::BAD_GATEWAY, &e.to_string()))?;
 
     if action == "stop" || action == "restart" {
-        state.registry.agents.remove(agent_id);
+        state.registry.disconnect(agent_id).await;
     }
 
     tracing::info!(user = %user.email, project_id, agent_id, action, "agent lxd state change");
