@@ -8,6 +8,7 @@ const MIGRATIONS: &[(i32, &str)] = &[
     (4, include_str!("../migrations/0004_parser_version.sql")),
     (5, include_str!("../migrations/0005_decorators.sql")),
     (6, include_str!("../migrations/0006_conversation_summary.sql")),
+    (7, include_str!("../migrations/0007_cluster.sql")),
 ];
 
 pub fn fingerprint() -> u64 {
@@ -18,6 +19,24 @@ pub fn fingerprint() -> u64 {
         }
     }
     hash
+}
+
+pub const fn latest_version() -> i32 {
+    MIGRATIONS[MIGRATIONS.len() - 1].0
+}
+
+pub async fn applied_version(client: &Client) -> Result<i32> {
+    let exists = client
+        .query_one("SELECT to_regclass('schema_migrations') IS NOT NULL", &[])
+        .await?
+        .get::<_, bool>(0);
+    if !exists {
+        return Ok(0);
+    }
+    Ok(client
+        .query_one("SELECT COALESCE(MAX(version), 0) FROM schema_migrations", &[])
+        .await?
+        .get::<_, i32>(0))
 }
 
 const MIGRATION_LOCK_KEY: i64 = 0x4841_5256_4553_54;
@@ -88,6 +107,28 @@ mod tests {
     fn fingerprint_changes_when_a_migration_is_added() {
         let before = fingerprint();
         assert_ne!(before, 0);
+    }
+
+    #[test]
+    fn latest_version_is_the_highest_migration() {
+        let highest = MIGRATIONS.iter().map(|(v, _)| *v).max().unwrap();
+        assert_eq!(latest_version(), highest);
+    }
+
+    #[test]
+    fn migration_7_creates_the_cluster_coordination_tables() {
+        let sql = sql_for(7);
+        for table in [
+            "cluster_nodes", "bus_payloads", "active_turns", "paused_turns", "project_presence",
+            "auth_ephemeral", "agent_connections", "ingestion_jobs", "ingestion_progress", "collocate_sessions",
+        ] {
+            assert!(
+                sql.contains(&format!("CREATE TABLE {table} ")) || sql.contains(&format!("CREATE UNLOGGED TABLE {table} ")),
+                "missing {table}"
+            );
+        }
+        assert!(sql.contains("ingestion_jobs_one_active"), "only one active ingestion per repository");
+        assert!(sql.contains("generating_until"), "design pdf generation needs a lease column");
     }
 
     #[test]
