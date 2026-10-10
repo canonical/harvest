@@ -1,14 +1,9 @@
 #!/bin/bash
-# Runs once when the snap is first installed.
-# Sets snap config defaults; the configure hook fires automatically
-# afterwards to generate server.toml.
 set -eu
 
 snapctl set \
-  neo4j.host=localhost \
-  neo4j.port=7687 \
-  neo4j.user=neo4j \
-  neo4j.password="" \
+  database.url="" \
+  database.pool-size=16 \
   server.host=127.0.0.1 \
   server.port=8080 \
   agent.max-iterations=20 \
@@ -29,4 +24,5 @@ snapctl set \
   ui.enable-docs=false \
   ui.host=127.0.0.1 \
   ui.port=3000 \
+  ui.mode=proxy \
   log.level=warn
