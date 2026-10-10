@@ -4,18 +4,20 @@ version: '0.10.0'
 summary: AI-powered code knowledge graph server and web interface
 description: |
   Harvest exposes an AI-powered HTTP API and web interface for querying code
-  knowledge graphs stored in Neo4j.  Agents can connect to it to run commands
-  on remote machines.
+  knowledge graphs stored in PostgreSQL.  Agents can connect to it to run
+  commands on remote machines.  Several server units can run active/active
+  against the same database.
 
   Prerequisites
   ─────────────
-  A running Neo4j instance (not bundled in this snap).
+  A reachable PostgreSQL 16 database with the pg_trgm and vector extensions
+  available (not bundled in this snap).
 
   Quick start
   ───────────
   1. Set required credentials:
        snap set harvest \
-         neo4j.password=<neo4j-password> \
+         database.url=postgres://harvest:<pw>@<host>:5432/harvest \
          llm.primary.provider=anthropic \
          llm.primary.api-key=<llm-api-key> \
          auth.jwt-secret=$(openssl rand -base64 32)
@@ -29,10 +31,16 @@ description: |
 
   Snap configuration keys
   ───────────────────────
-  neo4j.host                  Neo4j hostname               (default: localhost)
-  neo4j.port                  Neo4j bolt port              (default: 7687)
-  neo4j.user                  Neo4j username               (default: neo4j)
-  neo4j.password              Neo4j password               (required)
+  database.url                PostgreSQL URL; several hosts with
+                              target_session_attrs=read-write follow a
+                              primary failover   (required)
+  database.pool-size          Connection pool size         (default: 16)
+  database.ca-file            CA certificate for TLS to PostgreSQL (optional)
+  cluster.internal-listen     Node-to-node listen address  (optional)
+  cluster.internal-url        Address other nodes use to reach this one
+  cluster.shared-secret       Secret shared by every node of the cluster
+  cluster.node-name           Name prefix for this node    (optional)
+  config.managed              true when a charm writes server.toml itself
   server.host                 API bind address             (default: 127.0.0.1)
   server.port                 API port                     (default: 8080)
 
@@ -103,11 +111,13 @@ description: |
   ui.enable-docs              Show docs page in web UI     (default: false)
   ui.host                     Web UI bind address          (default: 127.0.0.1)
   ui.port                     Web UI port                  (default: 3000)
+  ui.mode                     proxy (serve UI and proxy the API) or static
+                              (UI only, API routed by a load balancer)
   log.level                   Log verbosity: error|warn|info|debug|trace  (default: warn)
 
   Harvester (ingest-code command)
   ────────────────────────────────
-  Reuses neo4j.* and llm.* keys — no separate credentials needed.
+  Reuses database.url and llm.* keys — no separate credentials needed.
   Repos are cloned to a temporary directory and deleted after ingestion.
 
   Ingest repositories into the knowledge graph:
@@ -121,6 +131,8 @@ apps:
   server:
     command: bin/wrapper-server
     daemon: simple
+    stop-timeout: 150s
+    stop-mode: sigterm
     install-mode: disable
     restart-condition: on-failure
     plugs:
@@ -135,6 +147,11 @@ apps:
     plugs:
       - network
       - network-bind
+
+  admin:
+    command: bin/wrapper-server
+    plugs:
+      - network
 
   ingest-code:
     command: bin/wrapper-ingest-code
