@@ -157,3 +157,61 @@ describe('ChatPaneContent — jump to latest', () => {
     expect(w.find('[data-testid="chat-jump-latest"]').exists()).toBe(false);
   });
 });
+
+describe('ChatPaneContent — cluster failover events', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    capturedOnEvent = null;
+  });
+
+  afterEach(() => {
+    disposeChatInstance('tab-1');
+  });
+
+  it('marks the in-flight response as interrupted when its server node is lost', async () => {
+    const api = await import('../../src/lib/api.js');
+    const chat = useChatInstance('tab-1');
+    chat.addUserMessage('hello', 'Alice', []);
+    chat.startAssistantMessage();
+    chat.addTextDelta('partial');
+
+    mountPane({ tabId: 'tab-1', conversationId: 'conv-1', projectId: 'proj-1' });
+    await flushPromises();
+    api.getProjectConversation.mockClear();
+
+    capturedOnEvent({ type: 'turn_aborted', conv_id: 'conv-1' });
+    await flushPromises();
+
+    expect(chat.loading).toBe(false);
+    expect(chat.messages.at(-1).status).toBe('error');
+    expect(chat.messages.at(-1).error).toMatch(/interrupted/i);
+  });
+
+  it('ignores aborted turns of other conversations', async () => {
+    const chat = useChatInstance('tab-1');
+    chat.addUserMessage('hello', 'Alice', []);
+    chat.startAssistantMessage();
+
+    mountPane({ tabId: 'tab-1', conversationId: 'conv-1', projectId: 'proj-1' });
+    await flushPromises();
+
+    capturedOnEvent({ type: 'turn_aborted', conv_id: 'conv-other' });
+    await flushPromises();
+
+    expect(chat.loading).toBe(true);
+  });
+
+  it('reloads the conversation list and the open conversation on resync', async () => {
+    const api = await import('../../src/lib/api.js');
+    mountPane({ tabId: 'tab-1', conversationId: 'conv-1', projectId: 'proj-1' });
+    await flushPromises();
+    api.listProjectConversations.mockClear();
+    api.getProjectConversation.mockClear();
+
+    capturedOnEvent({ type: 'resync' });
+    await flushPromises();
+
+    expect(api.listProjectConversations).toHaveBeenCalledWith('proj-1');
+    expect(api.getProjectConversation).toHaveBeenCalledWith('proj-1', 'conv-1');
+  });
+});
