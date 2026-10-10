@@ -93,7 +93,7 @@ async fn registry_execute_unknown_agent_returns_error() {
 
 #[tokio::test]
 async fn registry_agents_for_project_empty_initially() {
-    assert!(MachineRegistry::new().agents_for_project("proj-1").is_empty());
+    assert!(MachineRegistry::new().agents_for_project("proj-1").await.is_empty());
 }
 
 #[tokio::test]
@@ -115,12 +115,12 @@ async fn registry_agents_for_project_scoped_correctly() {
         connected_at: Utc::now(), sender: tx2,
     });
 
-    let p1 = registry.agents_for_project("proj-1");
+    let p1 = registry.agents_for_project("proj-1").await;
     assert_eq!(p1.len(), 1);
     assert_eq!(p1[0]["hostname"], "h1");
 
-    assert_eq!(registry.agents_for_project("proj-2").len(), 1);
-    assert!(registry.agents_for_project("proj-3").is_empty());
+    assert_eq!(registry.agents_for_project("proj-2").await.len(), 1);
+    assert!(registry.agents_for_project("proj-3").await.is_empty());
 }
 
 #[tokio::test]

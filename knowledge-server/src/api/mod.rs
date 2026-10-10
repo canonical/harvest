@@ -1,6 +1,7 @@
 pub mod cost;
 pub mod docs;
 pub mod graph;
+pub mod health;
 pub mod llm;
 pub mod query;
 pub mod repositories;
@@ -85,6 +86,7 @@ pub struct GraphState {
     pub db: Arc<Db>,
     pub cache: Arc<GraphCache>,
     pub ingestion: IngestionRegistry,
+    pub bus: Arc<crate::cluster::bus::ClusterBus>,
 }
 
 #[derive(Clone)]
@@ -120,6 +122,7 @@ pub struct AppState {
     pub collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
     pub pricing:          Arc<crate::cost::PricingTable>,
     pub semantic:         Option<Arc<graph_tools::SemanticHandle>>,
+    pub live:             Arc<crate::projects::live::ProjectLive>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -137,7 +140,36 @@ pub struct Thresholds {
 }
 
 impl Thresholds {
-    fn apply(self, agent: Agent) -> Agent {
+    pub fn from_system_one(config: Option<&crate::config::SystemOneConfig>) -> Self {
+        match config {
+            Some(so) if so.is_enabled() => Self {
+                fast_path: so.fast_path,
+                early_synthesis: so.early_synthesis,
+                relevance: so.relevance,
+                early_synthesis_research: so.early_synthesis_research,
+                relevance_preserve_recent: so.relevance_preserve_recent,
+                early_synthesis_coverage: so.early_synthesis_coverage,
+                early_synthesis_min_iterations_first_turn: so.early_synthesis_min_iterations_first_turn,
+                early_synthesis_uniform: so.early_synthesis_uniform,
+                early_synthesis_capability_gate: so.early_synthesis_capability_gate,
+                next_action_confidence: so.next_action_confidence,
+            },
+            _ => Self {
+                fast_path: 0.7,
+                early_synthesis: 0.85,
+                relevance: 0.4,
+                early_synthesis_research: 0.95,
+                relevance_preserve_recent: 2,
+                early_synthesis_coverage: 0.8,
+                early_synthesis_min_iterations_first_turn: 5,
+                early_synthesis_uniform: 0.7,
+                early_synthesis_capability_gate: 0.8,
+                next_action_confidence: 0.5,
+            },
+        }
+    }
+
+    pub fn apply(self, agent: Agent) -> Agent {
         agent
             .with_thresholds(
                 self.fast_path,
@@ -363,10 +395,6 @@ impl ProjectAgentBuilder {
         }
     }
 
-    /// Same grounding as `build_for_deployment` but with no tools at all, so the model can only
-    /// answer in text — used where a caller needs a draft to review before anything is written
-    /// (e.g. proposing a design change), and must not be able to write to the deployment directly
-    /// even if it ignores a "do not call tools" instruction in the prompt.
     pub fn build_for_deployment_text_only(&self, ctx: &deployments::DeploymentContext) -> Arc<Agent> {
         self.build_for_deployment_text_only_with_llm(ctx, Arc::clone(&self.llm))
     }
@@ -423,7 +451,8 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let graph_state = Arc::new(GraphState {
         db: Arc::clone(&state.db),
         cache,
-        ingestion: Arc::clone(&state.ingestion),
+        ingestion: state.ingestion.clone(),
+        bus: Arc::clone(state.live.bus()),
     });
 
     let http = reqwest::Client::new();
@@ -447,12 +476,16 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         ui:             Arc::clone(&state.ui),
         http,
         oidc_endpoints,
-        oauth_sessions: Arc::new(dashmap::DashMap::new()),
         lxd_enabled:    state.lxd.is_some(),
-        tui_auth:       auth_tui::new_auth_map(),
     });
 
     let jwt_secret = Arc::new(state.auth.jwt_secret.clone());
+
+    let health_state = Arc::new(health::HealthState {
+        db:       Arc::clone(&state.db),
+        live:     Arc::clone(&state.live),
+        registry: Arc::clone(&state.machine_registry),
+    });
 
     let conv_state = Arc::new(ConvState {
         db: Arc::clone(&state.db),
@@ -464,6 +497,9 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
 
     let public_router = Router::new()
         .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
+        .route("/health/ready", get(health::ready).with_state(Arc::clone(&health_state)))
+        .route("/version", get(health::version).with_state(Arc::clone(&health_state)))
+        .route("/metrics", get(health::metrics).with_state(Arc::clone(&health_state)))
         .route("/auth/config",            get(auth_handlers::config))
         .route("/auth/register",          post(auth_handlers::register))
         .route("/auth/login",             post(auth_handlers::login))
@@ -540,7 +576,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                                        .delete(chat_layout_handlers::delete_named))
         .with_state(Arc::clone(&chat_layout_state));
 
-    let project_state = Arc::new(ProjectState::new(
+    let project_state = Arc::new(ProjectState::with_live(
         Arc::clone(&state.db),
         Arc::clone(&state.agent),
         Arc::clone(&state.agent_builder),
@@ -550,6 +586,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         state.user_key_store.clone(),
         Arc::clone(&state.pricing),
         Arc::clone(&state.collocate_registry),
+        Arc::clone(&state.live),
     ));
 
     let skill_store = Arc::new(SkillStore::new(Arc::clone(&state.db)));

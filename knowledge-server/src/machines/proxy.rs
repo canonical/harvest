@@ -201,7 +201,14 @@ async fn proxy_request_inner(
         return api_error(StatusCode::NOT_IMPLEMENTED, "websocket/upgrade forwarding is not supported");
     }
 
-    if !state.registry.agents.contains_key(&agent_id) {
+    if !state.registry.is_local(&agent_id) {
+        if !crate::cluster::peer::is_forwarded(req.headers()) {
+            if let Some(directory) = state.registry.directory() {
+                if let (Some(peers), Some(url)) = (directory.peers().cloned(), directory.owner_url(&agent_id).await) {
+                    return peers.forward(&url, req).await;
+                }
+            }
+        }
         return api_error(StatusCode::BAD_GATEWAY, "agent not connected");
     }
 

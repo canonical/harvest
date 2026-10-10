@@ -154,6 +154,74 @@ pub struct Config {
     pub security: SecurityConfig,
     #[serde(default)]
     pub semantic: SemanticConfig,
+    #[serde(default)]
+    pub cluster: ClusterConfig,
+}
+
+fn default_heartbeat_interval_ms() -> u64 { 5_000 }
+fn default_node_timeout_ms() -> u64 { 20_000 }
+fn default_bus_batch_window_ms() -> u64 { 50 }
+fn default_drain_grace_secs() -> u64 { 10 }
+fn default_drain_timeout_secs() -> u64 { 120 }
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct ClusterConfig {
+    #[serde(default)]
+    pub node_name: Option<String>,
+    #[serde(default)]
+    pub internal_listen: Option<String>,
+    #[serde(default)]
+    pub internal_url: Option<String>,
+    #[serde(default)]
+    pub shared_secret: Option<String>,
+    #[serde(default = "default_heartbeat_interval_ms")]
+    pub heartbeat_interval_ms: u64,
+    #[serde(default = "default_node_timeout_ms")]
+    pub node_timeout_ms: u64,
+    #[serde(default = "default_bus_batch_window_ms")]
+    pub bus_batch_window_ms: u64,
+    #[serde(default = "default_drain_grace_secs")]
+    pub drain_grace_secs: u64,
+    #[serde(default = "default_drain_timeout_secs")]
+    pub drain_timeout_secs: u64,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self {
+            node_name: None,
+            internal_listen: None,
+            internal_url: None,
+            shared_secret: None,
+            heartbeat_interval_ms: default_heartbeat_interval_ms(),
+            node_timeout_ms: default_node_timeout_ms(),
+            bus_batch_window_ms: default_bus_batch_window_ms(),
+            drain_grace_secs: default_drain_grace_secs(),
+            drain_timeout_secs: default_drain_timeout_secs(),
+        }
+    }
+}
+
+impl ClusterConfig {
+    pub fn advertised_url(&self, bound: std::net::SocketAddr) -> Result<String> {
+        if let Some(url) = self.internal_url.as_deref().filter(|u| !u.is_empty()) {
+            return Ok(url.trim_end_matches('/').to_string());
+        }
+        if bound.ip().is_unspecified() {
+            anyhow::bail!("cluster.internal_url is required when cluster.internal_listen binds every interface");
+        }
+        Ok(format!("http://{bound}"))
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.internal_listen.is_some() && self.shared_secret.as_deref().map_or(true, str::is_empty) {
+            anyhow::bail!("cluster.shared_secret is required when cluster.internal_listen is set");
+        }
+        if self.node_timeout_ms < self.heartbeat_interval_ms.saturating_mul(2) {
+            anyhow::bail!("cluster.node_timeout_ms must be at least twice cluster.heartbeat_interval_ms");
+        }
+        Ok(())
+    }
 }
 
 fn default_semantic_model() -> String { "text-embedding-004".to_string() }
@@ -230,6 +298,12 @@ pub struct AuthConfig {
     pub public_url: Option<String>,
 }
 
+impl AuthConfig {
+    pub fn secure_cookies(&self) -> bool {
+        self.public_url.as_deref().is_some_and(|url| url.starts_with("https://"))
+    }
+}
+
 fn default_true() -> bool { true }
 
 #[derive(Deserialize, Clone)]
@@ -262,16 +336,10 @@ pub struct AgentsConfig {
 #[derive(Deserialize, Clone)]
 pub struct LxdConfig {
     pub endpoint: String,
-    /// Manual override: set both this and `client_key` to manage the client
-    /// identity yourself. Omit both to let Harvest generate and self-register
-    /// its own identity via `trust_token`.
     #[serde(default)]
     pub client_cert: Option<String>,
     #[serde(default)]
     pub client_key: Option<String>,
-    /// One-time token from `lxc config trust add --name <name>` (no cert
-    /// argument), used to self-register a Harvest-generated identity. Only
-    /// consulted while no trusted identity has been persisted yet.
     #[serde(default)]
     pub trust_token: Option<String>,
     #[serde(default)]
@@ -339,9 +407,25 @@ pub struct ServerConfig {
 fn default_host() -> String { "0.0.0.0".into() }
 fn default_port() -> u16 { 8080 }
 
+fn default_pool_size() -> usize { harvest_db::DEFAULT_POOL_SIZE }
+
 #[derive(Deserialize)]
 pub struct DatabaseConfig {
     pub url: String,
+    #[serde(default = "default_pool_size")]
+    pub pool_size: usize,
+    #[serde(default)]
+    pub ca_file: Option<std::path::PathBuf>,
+    #[serde(default = "default_true")]
+    pub migrate_on_start: bool,
+}
+
+impl DatabaseConfig {
+    pub fn options(&self) -> harvest_db::DbOptions {
+        harvest_db::DbOptions::new(self.url.clone())
+            .with_pool_size(self.pool_size)
+            .with_ca_file(self.ca_file.clone())
+    }
 }
 
 #[derive(Deserialize)]
@@ -597,7 +681,12 @@ impl Config {
             .with_context(|| format!("reading config file: {}", path.display()))?;
         let mut config: Config = toml::from_str(&text).context("parsing config TOML")?;
         config.normalize_llm_ids()?;
+        config.validate()?;
         Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.cluster.validate()
     }
 
     fn normalize_llm_ids(&mut self) -> Result<()> {
@@ -1425,5 +1514,148 @@ mod tests {
         let sem = cfg.semantic;
         assert!(!sem.enabled);
         assert_eq!(sem.dimensions, 768);
+    }
+}
+
+#[cfg(test)]
+mod cluster_config_tests {
+    use super::*;
+
+    fn with_sections(extra: &str) -> Config {
+        let text = format!(r#"
+            [server]
+            [database]
+            url = "postgres://harvest:pw@localhost:5432/harvest"
+            {extra}
+            [auth]
+            jwt_secret = "secret"
+            [[llm]]
+            provider = "gemini"
+            model    = "gemini-2.5-flash"
+            api_key  = "key1"
+        "#);
+        toml::from_str::<Config>(&text).expect("parse failed")
+    }
+
+    #[test]
+    fn database_defaults_keep_a_single_node_deployment_working() {
+        let cfg = with_sections("");
+        assert_eq!(cfg.database.pool_size, 16);
+        assert!(cfg.database.ca_file.is_none());
+        assert!(cfg.database.migrate_on_start);
+    }
+
+    #[test]
+    fn database_pool_size_ca_file_and_migration_mode_are_configurable() {
+        let cfg = toml::from_str::<Config>(r#"
+            [server]
+            [database]
+            url = "postgres://h1:5432,h2:5432/harvest?target_session_attrs=read-write"
+            pool_size = 24
+            ca_file = "/var/snap/harvest/common/db-ca.pem"
+            migrate_on_start = false
+            [auth]
+            jwt_secret = "secret"
+            [[llm]]
+            provider = "gemini"
+            model    = "gemini-2.5-flash"
+            api_key  = "key1"
+        "#).unwrap();
+        assert_eq!(cfg.database.pool_size, 24);
+        assert_eq!(cfg.database.ca_file.as_deref(), Some(std::path::Path::new("/var/snap/harvest/common/db-ca.pem")));
+        assert!(!cfg.database.migrate_on_start);
+        let options = cfg.database.options();
+        assert_eq!(options.pool_size, 24);
+        assert!(options.requires_tls().unwrap());
+    }
+
+    #[test]
+    fn cluster_defaults_without_a_cluster_section() {
+        let cfg = with_sections("");
+        assert!(cfg.cluster.internal_listen.is_none());
+        assert!(cfg.cluster.internal_url.is_none());
+        assert!(cfg.cluster.shared_secret.is_none());
+        assert_eq!(cfg.cluster.heartbeat_interval_ms, 5_000);
+        assert_eq!(cfg.cluster.node_timeout_ms, 20_000);
+        assert_eq!(cfg.cluster.bus_batch_window_ms, 50);
+        assert_eq!(cfg.cluster.drain_grace_secs, 10);
+        assert_eq!(cfg.cluster.drain_timeout_secs, 120);
+        assert!(cfg.cluster.node_name.is_none());
+    }
+
+    #[test]
+    fn cluster_section_parses() {
+        let cfg = toml::from_str::<Config>(r#"
+            [server]
+            [database]
+            url = "postgres://harvest:pw@localhost:5432/harvest"
+            [cluster]
+            node_name = "harvest-server-0"
+            internal_listen = "0.0.0.0:8081"
+            internal_url = "http://10.0.0.11:8081"
+            shared_secret = "cluster-secret"
+            heartbeat_interval_ms = 1000
+            node_timeout_ms = 4000
+            bus_batch_window_ms = 20
+            drain_grace_secs = 2
+            drain_timeout_secs = 30
+            [auth]
+            jwt_secret = "secret"
+            [[llm]]
+            provider = "gemini"
+            model    = "gemini-2.5-flash"
+            api_key  = "key1"
+        "#).unwrap();
+        assert_eq!(cfg.cluster.node_name.as_deref(), Some("harvest-server-0"));
+        assert_eq!(cfg.cluster.internal_listen.as_deref(), Some("0.0.0.0:8081"));
+        assert_eq!(cfg.cluster.internal_url.as_deref(), Some("http://10.0.0.11:8081"));
+        assert_eq!(cfg.cluster.shared_secret.as_deref(), Some("cluster-secret"));
+        assert_eq!(cfg.cluster.heartbeat_interval_ms, 1000);
+        assert_eq!(cfg.cluster.node_timeout_ms, 4000);
+        assert_eq!(cfg.cluster.bus_batch_window_ms, 20);
+        assert_eq!(cfg.cluster.drain_grace_secs, 2);
+        assert_eq!(cfg.cluster.drain_timeout_secs, 30);
+    }
+
+    #[test]
+    fn cluster_validation_requires_a_secret_when_the_internal_listener_is_enabled() {
+        let mut cfg = with_sections("");
+        cfg.cluster.internal_listen = Some("0.0.0.0:8081".into());
+        cfg.cluster.internal_url = Some("http://10.0.0.11:8081".into());
+        assert!(cfg.validate().is_err());
+        cfg.cluster.shared_secret = Some("s".into());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn advertised_url_prefers_the_configured_value() {
+        let mut cfg = with_sections("");
+        cfg.cluster.internal_url = Some("http://10.0.0.5:8081/".into());
+        assert_eq!(cfg.cluster.advertised_url("0.0.0.0:8081".parse().unwrap()).unwrap(), "http://10.0.0.5:8081");
+    }
+
+    #[test]
+    fn advertised_url_is_derived_from_a_specific_bind_address() {
+        let cfg = with_sections("");
+        assert_eq!(cfg.cluster.advertised_url("127.0.0.1:9000".parse().unwrap()).unwrap(), "http://127.0.0.1:9000");
+        assert!(cfg.cluster.advertised_url("0.0.0.0:9000".parse().unwrap()).is_err());
+    }
+
+    #[test]
+    fn node_timeout_must_exceed_twice_the_heartbeat_interval() {
+        let mut cfg = with_sections("");
+        cfg.cluster.heartbeat_interval_ms = 5_000;
+        cfg.cluster.node_timeout_ms = 6_000;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn secure_cookies_follow_an_https_public_url() {
+        let mut cfg = with_sections("");
+        assert!(!cfg.auth.secure_cookies());
+        cfg.auth.public_url = Some("https://harvest.example.com".into());
+        assert!(cfg.auth.secure_cookies());
+        cfg.auth.public_url = Some("http://localhost:8080".into());
+        assert!(!cfg.auth.secure_cookies());
     }
 }

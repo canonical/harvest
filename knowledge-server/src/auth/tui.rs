@@ -6,10 +6,10 @@ use axum::{
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
 use uuid::Uuid;
 
-use super::{jwt, AuthState, TOKEN_COOKIE};
+use super::{ephemeral, jwt, AuthState, TOKEN_COOKIE};
 use axum_extra::extract::cookie::CookieJar;
 
 type ApiError = (StatusCode, Json<Value>);
@@ -18,21 +18,7 @@ fn err(status: StatusCode, msg: &str) -> ApiError {
     (status, Json(json!({ "error": msg })))
 }
 
-#[derive(Clone)]
-pub struct TuiAuthEntry {
-    pub status: String,
-    pub token: Option<String>,
-    pub user_email: Option<String>,
-    pub created_at: Instant,
-}
-
-pub type TuiAuthMap = Arc<dashmap::DashMap<String, TuiAuthEntry>>;
-
-pub fn new_auth_map() -> TuiAuthMap {
-    Arc::new(dashmap::DashMap::new())
-}
-
-const TUI_AUTH_TTL_SECS: u64 = 300;
+const TUI_AUTH_TTL: Duration = Duration::from_secs(300);
 
 pub async fn create_auth_request(
     State(state): State<Arc<AuthState>>,
@@ -45,16 +31,9 @@ pub async fn create_auth_request(
         .unwrap_or_else(|| format!("http://{}:{}", "localhost", "8080"));
     let auth_url = format!("{}/#/authenticate/{}", public_url, uuid);
 
-    let map = get_tui_map(&state);
-    map.insert(
-        uuid.clone(),
-        TuiAuthEntry {
-            status: "pending".to_string(),
-            token: None,
-            user_email: None,
-            created_at: Instant::now(),
-        },
-    );
+    ephemeral::put(&state.db, ephemeral::TUI_KIND, &uuid, &json!({ "status": "pending" }), TUI_AUTH_TTL)
+        .await
+        .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "could not create the auth request"))?;
 
     Ok(Json(json!({
         "uuid": uuid,
@@ -62,42 +41,32 @@ pub async fn create_auth_request(
     })))
 }
 
-fn get_tui_map(state: &AuthState) -> TuiAuthMap {
-    state.tui_auth.clone()
-}
-
 pub async fn poll_auth_request(
     State(state): State<Arc<AuthState>>,
     Path(uuid): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let map = get_tui_map(&state);
+    let entry = ephemeral::get(&state.db, ephemeral::TUI_KIND, &uuid)
+        .await
+        .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "server error"))?;
 
-    let entry = map.get(&uuid).filter(|e| e.created_at.elapsed().as_secs() < TUI_AUTH_TTL_SECS);
+    let Some(entry) = entry else {
+        return Ok(Json(json!({ "status": "expired" })));
+    };
 
-    match entry {
-        Some(e) => {
-            let status = e.status.clone();
-            match status.as_str() {
-                "authorized" => {
-                    let token = e.token.clone();
-                    let email = e.user_email.clone();
-                    drop(e);
-                    map.remove(&uuid);
-                    Ok(Json(json!({
-                        "status": "authorized",
-                        "token": token,
-                        "email": email,
-                    })))
-                }
-                "denied" => {
-                    drop(e);
-                    map.remove(&uuid);
-                    Ok(Json(json!({ "status": "denied" })))
-                }
-                _ => Ok(Json(json!({ "status": "pending" }))),
-            }
+    match entry["status"].as_str() {
+        Some("authorized") => {
+            let _ = ephemeral::take(&state.db, ephemeral::TUI_KIND, &uuid).await;
+            Ok(Json(json!({
+                "status": "authorized",
+                "token": entry["token"],
+                "email": entry["user_email"],
+            })))
         }
-        None => Ok(Json(json!({ "status": "expired" }))),
+        Some("denied") => {
+            let _ = ephemeral::take(&state.db, ephemeral::TUI_KIND, &uuid).await;
+            Ok(Json(json!({ "status": "denied" })))
+        }
+        _ => Ok(Json(json!({ "status": "pending" }))),
     }
 }
 
@@ -127,34 +96,28 @@ pub async fn authorize_request(
 
     let approved = body.map(|b| b.approved).unwrap_or(true);
 
-    let map = get_tui_map(&state);
+    let next = if approved {
+        let tui_token = jwt::issue(
+            &state.config.jwt_secret,
+            &claims.sub,
+            &claims.email,
+            &claims.name,
+            &claims.role,
+        )
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        json!({ "status": "authorized", "token": tui_token, "user_email": claims.email })
+    } else {
+        json!({ "status": "denied" })
+    };
 
-    let entry = map.get_mut(&uuid).filter(|e| {
-        e.status == "pending" && e.created_at.elapsed().as_secs() < TUI_AUTH_TTL_SECS
-    });
+    let updated = ephemeral::replace_if(&state.db, ephemeral::TUI_KIND, &uuid, |current| {
+        (current["status"].as_str() == Some("pending")).then(|| next.clone())
+    })
+    .await
+    .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "server error"))?;
 
-    match entry {
-        Some(mut e) => {
-            if approved {
-                let tui_token = jwt::issue(
-                    &state.config.jwt_secret,
-                    &claims.sub,
-                    &claims.email,
-                    &claims.name,
-                    &claims.role,
-                )
-                .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-
-                e.status = "authorized".to_string();
-                e.token = Some(tui_token);
-                e.user_email = Some(claims.email.clone());
-
-                Ok(Json(json!({ "status": "authorized" })))
-            } else {
-                e.status = "denied".to_string();
-                Ok(Json(json!({ "status": "denied" })))
-            }
-        }
+    match updated {
+        Some(value) => Ok(Json(json!({ "status": value["status"] }))),
         None => Err(err(StatusCode::NOT_FOUND, "auth request not found or expired")),
     }
 }

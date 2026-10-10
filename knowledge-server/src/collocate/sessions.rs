@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use std::sync::Arc;
+use harvest_db::Db;
+use serde_json::{json, Value};
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 
 use super::client::CollocateHandle;
@@ -17,11 +19,36 @@ pub struct SessionContainer {
     pub published: Vec<String>,
 }
 
+struct SharedStore {
+    db:      Arc<Db>,
+    node_id: String,
+    handle:  Option<Arc<CollocateHandle>>,
+}
+
 #[derive(Default)]
 pub struct SessionContainerRegistry {
     containers: DashMap<String, SessionContainer>,
     handles: DashMap<String, Arc<CollocateHandle>>,
     cleanup_lock: Mutex<()>,
+    store: OnceLock<SharedStore>,
+}
+
+fn container_from_row(row: &Value) -> SessionContainer {
+    SessionContainer {
+        id: row["container_id"].as_str().unwrap_or_default().to_string(),
+        name: row["name"].as_str().unwrap_or_default().to_string(),
+        project_id: row["project_id"].as_str().unwrap_or_default().to_string(),
+        conversation_id: row["conversation_id"].as_str().unwrap_or_default().to_string(),
+        created_at: row["created_at"].as_str()
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now),
+        persistent: row["persistent"].as_bool().unwrap_or(false),
+        address: row["address"].as_str().map(str::to_string),
+        published: row["published"].as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .unwrap_or_default(),
+    }
 }
 
 impl SessionContainerRegistry {
@@ -29,7 +56,48 @@ impl SessionContainerRegistry {
         Arc::new(Self::default())
     }
 
+    pub fn attach_store(&self, db: Arc<Db>, node_id: String, handle: Option<Arc<CollocateHandle>>) {
+        let _ = self.store.set(SharedStore { db, node_id, handle });
+    }
+
+    fn persist(&self, container: &SessionContainer) {
+        let Some(store) = self.store.get() else { return };
+        let db = Arc::clone(&store.db);
+        let params = json!({
+            "id": container.id, "name": container.name, "pid": container.project_id,
+            "cid": container.conversation_id, "node": store.node_id, "persistent": container.persistent,
+            "address": container.address, "published": container.published,
+            "created": container.created_at.to_rfc3339(),
+        });
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let result = db.execute(
+                    "INSERT INTO collocate_sessions (container_id, name, project_id, conversation_id, node_id, persistent, address, published, created_at)
+                     VALUES ($id, $name, $pid, $cid, $node, $persistent, $address, $published, $created::timestamptz)
+                     ON CONFLICT (container_id) DO UPDATE SET address = EXCLUDED.address, published = EXCLUDED.published,
+                         persistent = EXCLUDED.persistent, node_id = EXCLUDED.node_id",
+                    params,
+                ).await;
+                if let Err(e) = result {
+                    tracing::warn!(error = %e, "failed to record collocate session");
+                }
+            });
+        }
+    }
+
+    fn forget(&self, container_id: &str) {
+        let Some(store) = self.store.get() else { return };
+        let db = Arc::clone(&store.db);
+        let id = container_id.to_string();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = db.execute("DELETE FROM collocate_sessions WHERE container_id = $id", json!({ "id": id })).await;
+            });
+        }
+    }
+
     pub fn register(&self, container: SessionContainer) {
+        self.persist(&container);
         self.containers.insert(container.id.clone(), container);
     }
 
@@ -38,8 +106,79 @@ impl SessionContainerRegistry {
         container: SessionContainer,
         handle: Arc<CollocateHandle>,
     ) {
+        self.persist(&container);
         self.handles.insert(container.id.clone(), handle);
         self.containers.insert(container.id.clone(), container);
+    }
+
+    async fn shared_rows(&self, sql: &str, params: Value) -> Option<Vec<SessionContainer>> {
+        let store = self.store.get()?;
+        let rows = store.db.query(sql, params).await.ok()?;
+        Some(rows.iter().map(container_from_row).collect())
+    }
+
+    pub async fn verify_ownership_shared(
+        &self,
+        container_id: &str,
+        project_id: &str,
+        conversation_id: &str,
+    ) -> Option<SessionContainer> {
+        if let Some(local) = self.verify_ownership(container_id, project_id, conversation_id) {
+            return Some(local);
+        }
+        let found = self.shared_rows(
+            "SELECT container_id, name, project_id, conversation_id, persistent, address, published, created_at
+             FROM collocate_sessions WHERE container_id = $id AND project_id = $pid AND conversation_id = $cid",
+            json!({ "id": container_id, "pid": project_id, "cid": conversation_id }),
+        ).await?;
+        found.into_iter().next()
+    }
+
+    pub async fn list_for_session_shared(&self, project_id: &str, conversation_id: &str) -> Vec<SessionContainer> {
+        let mut containers = self.list_for_session(project_id, conversation_id);
+        let shared = self.shared_rows(
+            "SELECT container_id, name, project_id, conversation_id, persistent, address, published, created_at
+             FROM collocate_sessions WHERE project_id = $pid AND conversation_id = $cid ORDER BY created_at",
+            json!({ "pid": project_id, "cid": conversation_id }),
+        ).await.unwrap_or_default();
+        for container in shared {
+            if !containers.iter().any(|c| c.id == container.id) {
+                containers.push(container);
+            }
+        }
+        containers
+    }
+
+    pub async fn count_for_project_shared(&self, project_id: &str) -> usize {
+        let Some(store) = self.store.get() else { return self.count_for_project(project_id) };
+        let rows = store.db.query(
+            "SELECT count(*) AS n FROM collocate_sessions WHERE project_id = $pid",
+            json!({ "pid": project_id }),
+        ).await;
+        match rows {
+            Ok(rows) => rows.first().and_then(|r| r["n"].as_i64()).unwrap_or(0) as usize,
+            Err(_) => self.count_for_project(project_id),
+        }
+    }
+
+    pub async fn reap_dead_nodes(&self, timeout_secs: f64) -> usize {
+        let Some(store) = self.store.get() else { return 0 };
+        let rows = store.db.query(
+            "DELETE FROM collocate_sessions s
+             WHERE s.persistent = false AND s.node_id <> $node AND NOT EXISTS (
+                 SELECT 1 FROM cluster_nodes n
+                 WHERE n.node_id = s.node_id AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8))
+             RETURNING container_id",
+            json!({ "node": store.node_id, "timeout": timeout_secs }),
+        ).await.unwrap_or_default();
+        if let Some(handle) = &store.handle {
+            for row in &rows {
+                if let Some(id) = row["container_id"].as_str() {
+                    let _ = handle.rm_force(id).await;
+                }
+            }
+        }
+        rows.len()
     }
 
     pub fn get(&self, container_id: &str) -> Option<SessionContainer> {
@@ -85,6 +224,7 @@ impl SessionContainerRegistry {
     }
 
     pub fn remove_entry(&self, container_id: &str) -> Option<SessionContainer> {
+        self.forget(container_id);
         self.handles.remove(container_id);
         self.containers.remove(container_id).map(|(_, c)| c)
     }
@@ -110,6 +250,7 @@ impl SessionContainerRegistry {
             }
             self.handles.remove(&c.id);
             self.containers.remove(&c.id);
+            self.forget(&c.id);
             removed.push(c.id.clone());
         }
         removed
@@ -120,6 +261,7 @@ impl SessionContainerRegistry {
             let _ = handle.rm_force(container_id).await;
         }
         self.handles.remove(container_id);
+        self.forget(container_id);
         self.containers.remove(container_id).map(|(_, c)| c)
     }
 }
