@@ -1,48 +1,105 @@
+mod connection;
 pub(crate) mod migrations;
 mod params;
 mod rows;
 pub mod test_support;
 
 use std::ops::DerefMut;
-use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod};
+use deadpool_postgres::{Manager, ManagerConfig, Object, Pool, RecyclingMethod, Runtime};
 use serde_json::Value;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::NoTls;
+
+pub use tokio_postgres;
+pub use connection::{DbOptions, Listener, Notification, DEFAULT_POOL_SIZE};
+use connection::Tls;
 
 use params::{bind_named, JsonParam};
 use rows::row_to_json;
 
 pub const GRAPH_READER_ROLE: &str = "harvest_graph_reader";
 
-/// The current time as RFC 3339, at the microsecond precision Postgres stores, so a value
-/// returned to a client right after a write matches the one read back later.
+pub const LATEST_SCHEMA_VERSION: i32 = migrations::latest_version();
+
 pub fn now_rfc3339() -> String {
     use chrono::SubsecRound;
     chrono::Utc::now().trunc_subsecs(6).to_rfc3339()
 }
 
+const POOL_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+const POOL_CREATE_TIMEOUT: Duration = Duration::from_secs(10);
+const POOL_RECYCLE_TIMEOUT: Duration = Duration::from_secs(5);
+const PING_TIMEOUT: Duration = Duration::from_secs(3);
+
 #[derive(Clone)]
 pub struct Db {
     pool: Pool,
+    config: Arc<tokio_postgres::Config>,
+    tls: Tls,
 }
 
 impl Db {
     pub async fn connect(url: &str) -> Result<Self> {
-        let db = Self::connect_without_migrating(url)?;
+        Self::connect_with(&DbOptions::new(url)).await
+    }
+
+    pub async fn connect_with(options: &DbOptions) -> Result<Self> {
+        let db = Self::connect_with_without_migrating(options)?;
         db.migrate().await?;
         Ok(db)
     }
 
     pub fn connect_without_migrating(url: &str) -> Result<Self> {
-        let config = tokio_postgres::Config::from_str(url).context("invalid database url")?;
-        let manager = Manager::from_config(config, NoTls, ManagerConfig {
-            recycling_method: RecyclingMethod::Fast,
-        });
-        let pool = Pool::builder(manager).max_size(16).build()?;
-        Ok(Self { pool })
+        Self::connect_with_without_migrating(&DbOptions::new(url))
+    }
+
+    pub fn connect_with_without_migrating(options: &DbOptions) -> Result<Self> {
+        let config = options.parsed()?;
+        let tls = Tls::from_options(options)?;
+        let manager_config = ManagerConfig { recycling_method: RecyclingMethod::Verified };
+        let manager = match &tls {
+            Tls::Plain => Manager::from_config(config.clone(), NoTls, manager_config),
+            Tls::Rustls(connector) => Manager::from_config(config.clone(), connector.clone(), manager_config),
+        };
+        let pool = Pool::builder(manager)
+            .max_size(options.pool_size)
+            .runtime(Runtime::Tokio1)
+            .wait_timeout(Some(POOL_WAIT_TIMEOUT))
+            .create_timeout(Some(POOL_CREATE_TIMEOUT))
+            .recycle_timeout(Some(POOL_RECYCLE_TIMEOUT))
+            .build()?;
+        Ok(Self { pool, config: Arc::new(config), tls })
+    }
+
+    pub fn max_pool_size(&self) -> usize {
+        self.pool.status().max_size
+    }
+
+    pub async fn ping(&self) -> Result<()> {
+        tokio::time::timeout(PING_TIMEOUT, async {
+            let client = self.client().await?;
+            client.simple_query("SELECT 1").await.context("database ping failed")?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .context("database ping timed out")?
+    }
+
+    pub async fn dedicated_client(&self) -> Result<tokio_postgres::Client> {
+        connection::connect_dedicated(&self.config, &self.tls, None).await
+    }
+
+    pub async fn listen(&self, channels: &[&str]) -> Result<Listener> {
+        connection::listen(&self.config, &self.tls, channels).await
+    }
+
+    pub async fn schema_version(&self) -> Result<i32> {
+        let client = self.client().await?;
+        migrations::applied_version(&client).await
     }
 
     pub async fn migrate(&self) -> Result<()> {
@@ -93,7 +150,6 @@ impl Tx {
         execute_on(self.client(), sql, &params).await
     }
 
-    /// Like `query`, but without caching the prepared statement; for one-off SQL.
     pub async fn query_uncached(&self, sql: &str, params: Value) -> Result<Vec<Value>> {
         let (sql, values) = bind_named(sql, &params)?;
         let wrapped: Vec<JsonParam> = values.iter().map(JsonParam).collect();
