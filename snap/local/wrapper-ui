@@ -3,11 +3,13 @@ set -eu
 
 UI_HOST=$(snapctl get ui.host)
 UI_PORT=$(snapctl get ui.port)
+UI_MODE=$(snapctl get ui.mode)
 SERVER_HOST=$(snapctl get server.host)
 SERVER_PORT=$(snapctl get server.port)
 
 : "${UI_HOST:=127.0.0.1}"
 : "${UI_PORT:=3000}"
+: "${UI_MODE:=proxy}"
 : "${SERVER_HOST:=127.0.0.1}"
 : "${SERVER_PORT:=8080}"
 
@@ -15,15 +17,17 @@ export XDG_DATA_HOME="$SNAP_COMMON"
 export XDG_CONFIG_HOME="$SNAP_COMMON"
 export XDG_CACHE_HOME="$SNAP_COMMON"
 
-cat > "$SNAP_COMMON/Caddyfile" << EOF
-{
-	auto_https     off
-	admin          off
-	persist_config off
-}
+ASSET_ROOT="$SNAP_COMMON/ui-assets"
+mkdir -p "$ASSET_ROOT/assets"
+if [ -d "$SNAP/share/harvest-ui/assets" ]; then
+  cp -r --update=none "$SNAP/share/harvest-ui/assets/." "$ASSET_ROOT/assets/"
+  (cd "$SNAP/share/harvest-ui/assets" && find . -type f -exec touch "$ASSET_ROOT/assets/{}" \;)
+  find "$ASSET_ROOT/assets" -type f -mtime +30 -delete 2>/dev/null || true
+fi
 
-${UI_HOST}:${UI_PORT} {
-	@api path_regexp ^/(auth|admin|conversations|groups|projects|query|repositories|graph|health|tool-description|docs|skills|agents|agent|llm|artifacts|templates|chat-layouts|machines)(/|$)
+API_BLOCK=""
+if [ "$UI_MODE" != "static" ]; then
+  API_BLOCK="	@api path_regexp ^/(auth|admin|conversations|groups|projects|query|repositories|graph|health|version|metrics|tool-description|docs|skills|agents|agent|llm|artifacts|templates|chat-layouts|machines)(/|\$)
 
 	handle @api {
 		reverse_proxy ${SERVER_HOST}:${SERVER_PORT} {
@@ -35,16 +39,37 @@ ${UI_HOST}:${UI_PORT} {
 				write_timeout 3600s
 			}
 		}
+	}"
+fi
+
+cat > "$SNAP_COMMON/Caddyfile" << CADDY
+{
+	auto_https     off
+	admin          off
+	persist_config off
+}
+
+${UI_HOST}:${UI_PORT} {
+${API_BLOCK}
+
+	handle /ui-health {
+		respond "ok" 200
+	}
+
+	handle /assets/* {
+		root * ${ASSET_ROOT}
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
 	}
 
 	handle {
 		root * ${SNAP}/share/harvest-ui
+		header Cache-Control "no-cache"
 		try_files {path} {path}/ /index.html
 		file_server
 	}
 }
-EOF
+CADDY
 
-echo "Harvest UI  →  http://${UI_HOST}:${UI_PORT}"
-echo "API server  →  http://${SERVER_HOST}:${SERVER_PORT}"
-exec "$SNAP/bin/caddy" run --config "$SNAP_COMMON/Caddyfile"
+echo "Harvest UI on http://${UI_HOST}:${UI_PORT} (${UI_MODE} mode)"
+exec "${CADDY_BIN:-$SNAP/bin/caddy}" run --config "$SNAP_COMMON/Caddyfile"

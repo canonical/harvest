@@ -1,41 +1,41 @@
 #!/bin/bash
-# Runs after every `snap set harvest ...` invocation.
-# Regenerates server.toml from the current snap config values.
 set -eu
 
-# ── Read required keys early so validation and the main block share them ───
-_NEO4J_PASSWORD=$(snapctl get neo4j.password)
+if [ "$(snapctl get config.managed)" = "true" ]; then
+  exit 0
+fi
+
+_DATABASE_URL=$(snapctl get database.url)
 _JWT_SECRET=$(snapctl get auth.jwt-secret)
 
-# ── Validate required keys before touching any config files ────────────────
-# Skip on a fresh install (server.toml not yet written) so the install hook
-# can set empty defaults without triggering an error.
 if [ -f "$SNAP_COMMON/server.toml" ]; then
   _errors=""
-  [ -z "$_NEO4J_PASSWORD" ] && _errors="${_errors}  neo4j.password is required\n"
-  [ -z "$_JWT_SECRET" ]      && _errors="${_errors}  auth.jwt-secret is required\n"
+  [ -z "$_DATABASE_URL" ] && _errors="${_errors}  database.url is required\n"
+  [ -z "$_JWT_SECRET" ]   && _errors="${_errors}  auth.jwt-secret is required\n"
   if [ -n "$_errors" ]; then
-    printf "harvest: missing required configuration:\n%b\nRun: snap set harvest neo4j.password=<pw> auth.jwt-secret=\$(openssl rand -base64 32)\n" "$_errors" >&2
+    printf "harvest: missing required configuration:\n%b\nRun: snap set harvest database.url=postgres://user:pw@host:5432/harvest auth.jwt-secret=\$(openssl rand -base64 32)\n" "$_errors" >&2
     exit 1
   fi
 fi
 
-# ── Read snap config ───────────────────────────────────────────────────────
-NEO4J_HOST=$(snapctl get neo4j.host)
-NEO4J_PORT=$(snapctl get neo4j.port)
-NEO4J_USER=$(snapctl get neo4j.user)
-NEO4J_PASSWORD="$_NEO4J_PASSWORD"
+DATABASE_URL="$_DATABASE_URL"
+DATABASE_POOL_SIZE=$(snapctl get database.pool-size)
+DATABASE_CA_FILE=$(snapctl get database.ca-file)
 SERVER_HOST=$(snapctl get server.host)
 SERVER_PORT=$(snapctl get server.port)
 
-# Agent behaviour
+CLUSTER_INTERNAL_LISTEN=$(snapctl get cluster.internal-listen)
+CLUSTER_INTERNAL_URL=$(snapctl get cluster.internal-url)
+CLUSTER_SHARED_SECRET=$(snapctl get cluster.shared-secret)
+CLUSTER_NODE_NAME=$(snapctl get cluster.node-name)
+
 AGENT_MAX_ITER=$(snapctl get agent.max-iterations)
 AGENT_COMPACT_CHARS=$(snapctl get agent.compaction-threshold-chars)
 AGENT_COMPACT_KEEP=$(snapctl get agent.compaction-keep-last)
 
-# Auth
 JWT_SECRET="$_JWT_SECRET"
 AUTH_LOCAL_LOGIN=$(snapctl get auth.allow-local-login)
+AUTH_PUBLIC_URL=$(snapctl get auth.public-url)
 GOOGLE_CLIENT_ID=$(snapctl get auth.google.client-id)
 GOOGLE_CLIENT_SECRET=$(snapctl get auth.google.client-secret)
 GOOGLE_REDIRECT_URI=$(snapctl get auth.google.redirect-uri)
@@ -44,14 +44,13 @@ OIDC_CLIENT_ID=$(snapctl get auth.oidc.client-id)
 OIDC_CLIENT_SECRET=$(snapctl get auth.oidc.client-secret)
 OIDC_REDIRECT_URI=$(snapctl get auth.oidc.redirect-uri)
 OIDC_DISPLAY_NAME=$(snapctl get auth.oidc.display-name)
+USER_KEY_ENCRYPTION_KEY=$(snapctl get security.user-key-encryption-key)
 
-# Misc
 AGENTS_PUBLIC_URL=$(snapctl get agents.public-url)
 DOCS_DIR=$(snapctl get docs.dir)
 UI_ENABLE_DOCS=$(snapctl get ui.enable-docs)
 LOG_LEVEL=$(snapctl get log.level)
 
-# LXD (optional — enables "Let Harvest create and manage agent" in the UI)
 LXD_ENDPOINT=$(snapctl get lxd.endpoint)
 LXD_CLIENT_CERT=$(snapctl get lxd.client-cert)
 LXD_CLIENT_KEY=$(snapctl get lxd.client-key)
@@ -63,12 +62,9 @@ LXD_IMAGE_ALIAS=$(snapctl get lxd.image-alias)
 LXD_IMAGE_SERVER=$(snapctl get lxd.image-server)
 LXD_PROFILE=$(snapctl get lxd.profile)
 
-# ── Apply defaults ─────────────────────────────────────────────────────────
-: "${NEO4J_HOST:=localhost}"
-: "${NEO4J_PORT:=7687}"
-: "${NEO4J_USER:=neo4j}"
 : "${SERVER_HOST:=127.0.0.1}"
 : "${SERVER_PORT:=8080}"
+: "${DATABASE_POOL_SIZE:=16}"
 : "${AGENT_MAX_ITER:=20}"
 : "${AGENT_COMPACT_CHARS:=40000}"
 : "${AGENT_COMPACT_KEEP:=6}"
@@ -79,13 +75,8 @@ LXD_PROFILE=$(snapctl get lxd.profile)
 
 mkdir -p "$SNAP_COMMON" "$DOCS_DIR"
 
-# Write an env file sourced by service/command wrappers at startup.
 printf 'RUST_LOG=%s\n' "$LOG_LEVEL" > "$SNAP_COMMON/env"
 
-# ── LLM provider blocks ────────────────────────────────────────────────────
-# Read all named providers under llm.* as a JSON document and emit one
-# [[llm]] TOML block per provider whose api-key is set.
-# The JSON is passed via an environment variable to avoid shell-quoting issues.
 generate_llm_blocks() {
   local llm_json
   llm_json=$(snapctl get -d llm 2>/dev/null || echo '{}')
@@ -106,7 +97,6 @@ except Exception:
 if not isinstance(data, dict):
     data = {}
 
-# snapctl get -d llm wraps the result as {"llm": {...}} — unwrap it
 providers = data.get("llm", data)
 if not isinstance(providers, dict):
     providers = {}
@@ -148,8 +138,6 @@ for name, cfg in sorted(providers.items(), key=sort_key):
     print("priority     = %s" % priority)
     if provider == "openai-compatible" and base_url:
         print("base_url     = \"%s\"" % base_url)
-    # <name> is the key the provider was declared under (e.g. llm.primary.*),
-    # so it doubles as the stable id the chat page picker targets.
     print("id           = \"%s\"" % name)
     print("expose_to_ui = %s" % ("true" if expose_to_ui else "false"))
     if display_name:
@@ -160,21 +148,29 @@ for name, cfg in sorted(providers.items(), key=sort_key):
 '
 }
 
-# ── Write server.toml ──────────────────────────────────────────────────────
 {
   cat << TOML
 [server]
 host = "${SERVER_HOST}"
 port = ${SERVER_PORT}
 
-[neo4j]
-uri      = "bolt://${NEO4J_HOST}:${NEO4J_PORT}"
-user     = "${NEO4J_USER}"
-password = "${NEO4J_PASSWORD}"
+[database]
+url = "${DATABASE_URL}"
+pool_size = ${DATABASE_POOL_SIZE}
 TOML
+  [ -n "${DATABASE_CA_FILE:-}" ] && echo "ca_file = \"${DATABASE_CA_FILE}\""
 
-  # If no providers are configured yet, write an empty array so the TOML is
-  # valid.  The server will refuse to start and print a clear error message.
+  if [ -n "${CLUSTER_INTERNAL_LISTEN:-}" ]; then
+    cat << TOML
+
+[cluster]
+internal_listen = "${CLUSTER_INTERNAL_LISTEN}"
+TOML
+    [ -n "${CLUSTER_INTERNAL_URL:-}" ]  && echo "internal_url = \"${CLUSTER_INTERNAL_URL}\""
+    [ -n "${CLUSTER_SHARED_SECRET:-}" ] && echo "shared_secret = \"${CLUSTER_SHARED_SECRET}\""
+    [ -n "${CLUSTER_NODE_NAME:-}" ]     && echo "node_name = \"${CLUSTER_NODE_NAME}\""
+  fi
+
   llm_blocks=$(generate_llm_blocks)
   if [ -n "$llm_blocks" ]; then
     echo "$llm_blocks"
@@ -194,6 +190,7 @@ compaction_keep_last       = ${AGENT_COMPACT_KEEP}
 jwt_secret        = "${JWT_SECRET}"
 allow_local_login = ${AUTH_LOCAL_LOGIN}
 TOML
+  [ -n "${AUTH_PUBLIC_URL:-}" ] && echo "public_url        = \"${AUTH_PUBLIC_URL}\""
 
   if [ -n "${GOOGLE_CLIENT_ID:-}" ] && \
      [ -n "${GOOGLE_CLIENT_SECRET:-}" ] && \
@@ -224,6 +221,14 @@ TOML
     fi
   fi
 
+  if [ -n "${USER_KEY_ENCRYPTION_KEY:-}" ]; then
+    cat << TOML
+
+[security]
+user_key_encryption_key = "${USER_KEY_ENCRYPTION_KEY}"
+TOML
+  fi
+
   cat << TOML
 
 [agents]
@@ -249,8 +254,6 @@ TOML
 [lxd]
 endpoint    = "${LXD_ENDPOINT}"
 TOML
-    # Manual override: only emitted when both cert and key are set. Otherwise
-    # Harvest generates and self-registers its own identity via trust_token.
     if [ -n "${LXD_CLIENT_CERT:-}" ] && [ -n "${LXD_CLIENT_KEY:-}" ]; then
       cat << TOML
 client_cert = """
@@ -276,18 +279,12 @@ TOML
     [ -n "${LXD_IMAGE_SERVER:-}" ] && echo "image_server = \"${LXD_IMAGE_SERVER}\""
     [ -n "${LXD_PROFILE:-}" ]      && echo "profile      = \"${LXD_PROFILE}\""
   fi
-
+  true
 } > "$SNAP_COMMON/server.toml"
 
-# Restart running services so they pick up the new config.
 snapctl restart harvest.server 2>/dev/null || true
 snapctl restart harvest.ui   2>/dev/null || true
 
-# ── Write harvester.toml ───────────────────────────────────────────────────
-# Repositories are NOT generated here — they live in $SNAP_COMMON/repositories.toml
-# (user-managed).  The wrapper-ingest-code script merges both files at runtime.
-
-# Pick the single lowest-priority LLM provider configured for the harvester.
 generate_harvester_llm_block() {
   local llm_json
   llm_json=$(snapctl get -d llm 2>/dev/null || echo '{}')
@@ -346,10 +343,8 @@ for name, cfg in sorted(providers.items(), key=sort_key):
 
 {
   cat << TOML
-[neo4j]
-uri      = "bolt://${NEO4J_HOST}:${NEO4J_PORT}"
-user     = "${NEO4J_USER}"
-password = "${NEO4J_PASSWORD}"
+[database]
+url = "${DATABASE_URL}"
 TOML
 
   generate_harvester_llm_block
