@@ -4,6 +4,8 @@ from pathlib import Path
 import jubilant
 import pytest
 
+CHARMS = Path(__file__).resolve().parents[2]
+
 
 def pytest_addoption(parser):
     parser.addoption("--server-charm", default=os.environ.get("HARVEST_SERVER_CHARM"))
@@ -32,4 +34,8 @@ def juju(request):
     keep = request.config.getoption("--keep-models")
     with jubilant.temp_model(keep=keep) as juju:
         juju.wait_timeout = 3600
+        juju.model_config({
+            "enable-os-upgrade": False,
+            "cloudinit-userdata": (CHARMS / "cloudinit-userdata.yaml").read_text(),
+        })
         yield juju

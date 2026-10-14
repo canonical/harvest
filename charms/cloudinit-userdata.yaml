@@ -1,0 +1,2 @@
+postruncmd:
+  - "for attempt in 1 2 3 4 5; do snap install core24 && break; sleep 10; done"
