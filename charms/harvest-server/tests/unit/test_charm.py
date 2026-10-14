@@ -13,7 +13,6 @@ from charm import HarvestServerCharm
 from harvest_workload import WorkloadError
 
 CHARM_ROOT = Path(__file__).resolve().parents[2]
-LLM = '[[llm]]\nprovider = "openai-compatible"\nbase_url = "https://llm.example.com/v1"\nmodel = "m"\napi_key = "${secret:key}"\n'
 
 
 class FakeWorkload:
@@ -117,18 +116,42 @@ def database(endpoints="10.0.0.1:5432", read_only="10.0.0.2:5432", tls=None):
 
 
 def llm_secret():
-    return testing.Secret(tracked_content={"key": "sk-123"}, owner=None)
+    return testing.Secret(tracked_content={"api-key": "sk-123"}, owner=None)
+
+
+def llm_relation(secret_id=None, **overrides):
+    data = {
+        "provider": "openai-compatible",
+        "model": "m",
+        "base_url": "https://llm.example.com/v1",
+        "priority": "100",
+    }
+    if secret_id:
+        data["secret_id"] = secret_id
+    data.update(overrides)
+    return testing.Relation(endpoint="llm-provider", interface="harvest_llm_provider", remote_app_name="harvest-llm-provider-openai-compatible", remote_app_data=data)
+
+
+def auth_relation(provider, secret_id=None, **overrides):
+    data = {"provider": provider}
+    if provider == "oidc":
+        data.update({"issuer_url": "https://login.example.com", "client_id": "harvest"})
+    if provider == "google":
+        data.update({"client_id": "google-client"})
+    if secret_id:
+        data["secret_id"] = secret_id
+    data.update(overrides)
+    return testing.Relation(endpoint="auth-provider", interface="harvest_auth_provider", remote_app_name=f"harvest-auth-provider-{provider}", remote_app_data=data)
 
 
 def base_state(*, leader=True, relations=(), config=None, secrets=(), planned_units=1):
-    secret = llm_secret()
-    cfg = {"llm-providers": LLM, "llm-secret": secret.id}
+    cfg = {}
     cfg.update(config or {})
     return testing.State(
         leader=leader,
         config=cfg,
         relations=[testing.PeerRelation(endpoint="harvest-peers"), testing.PeerRelation(endpoint="restart"), *relations],
-        secrets=[secret, *secrets],
+        secrets=[*secrets],
         planned_units=planned_units,
     )
 
@@ -142,14 +165,15 @@ def test_blocks_without_a_database_relation(ctx, workload):
     assert out.unit_status == testing.BlockedStatus("requires a database relation (postgresql)")
 
 
-def test_blocks_without_llm_providers(ctx, workload):
-    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database()], config={"llm-providers": ""}))
+def test_blocks_without_llm_provider_relation(ctx, workload):
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database()]))
     assert isinstance(out.unit_status, testing.BlockedStatus)
-    assert "llm-providers" in out.unit_status.message
+    assert "llm-provider" in out.unit_status.message
 
 
 def test_leader_generates_cluster_secrets_once(ctx, workload):
-    out = ctx.run(ctx.on.leader_elected(), base_state(relations=[database()]))
+    llm = llm_secret()
+    out = ctx.run(ctx.on.leader_elected(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm]))
     peer = out.get_relations("harvest-peers")[0]
     secret_id = peer.local_app_data["cluster-secret-id"]
     secret = out.get_secret(id=secret_id)
@@ -159,13 +183,15 @@ def test_leader_generates_cluster_secrets_once(ctx, workload):
 
 
 def test_follower_waits_for_cluster_secrets(ctx, workload):
-    out = ctx.run(ctx.on.config_changed(), base_state(leader=False, relations=[database()]))
+    llm = llm_secret()
+    out = ctx.run(ctx.on.config_changed(), base_state(leader=False, relations=[database(), llm_relation(llm.id)], secrets=[llm]))
     assert out.unit_status == testing.WaitingStatus("waiting for the leader to create cluster secrets")
 
 
 def test_imported_secrets_preserve_an_existing_deployment(ctx, workload):
     imported = testing.Secret(tracked_content={"jwt-secret": "old-jwt", "user-key-encryption-key": "ab" * 32}, owner=None)
-    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database()], config={"import-secrets": imported.id}, secrets=[imported]))
+    llm = llm_secret()
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], config={"import-secrets": imported.id}, secrets=[imported, llm]))
     peer = out.get_relations("harvest-peers")[0]
     content = out.get_secret(id=peer.local_app_data["cluster-secret-id"]).latest_content
     assert content["jwt-secret"] == "old-jwt"
@@ -174,7 +200,8 @@ def test_imported_secrets_preserve_an_existing_deployment(ctx, workload):
 
 
 def test_renders_a_multi_host_read_write_url_and_starts_the_server(ctx, workload):
-    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database()]))
+    llm = llm_secret()
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm]))
     toml = server_toml(workload)
     assert toml["database"]["url"].startswith("postgres://relation-5:pw@10.0.0.1:5432,10.0.0.2:5432/harvest?")
     assert "target_session_attrs=read-write" in toml["database"]["url"]
@@ -188,7 +215,8 @@ def test_renders_a_multi_host_read_write_url_and_starts_the_server(ctx, workload
 
 
 def test_tls_database_writes_the_ca_and_requires_ssl(ctx, workload):
-    ctx.run(ctx.on.config_changed(), base_state(relations=[database(tls="-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----")]))
+    llm = llm_secret()
+    ctx.run(ctx.on.config_changed(), base_state(relations=[database(tls="-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----"), llm_relation(llm.id)], secrets=[llm]))
     toml = server_toml(workload)
     assert "sslmode=require" in toml["database"]["url"]
     assert toml["database"]["ca_file"] == "/var/snap/harvest/common/db-ca.pem"
@@ -196,11 +224,12 @@ def test_tls_database_writes_the_ca_and_requires_ssl(ctx, workload):
 
 
 def test_only_the_leader_runs_migrations(ctx, workload):
-    ctx.run(ctx.on.config_changed(), base_state(relations=[database()]))
+    llm = llm_secret()
+    ctx.run(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm]))
     assert ("migrate",) in workload["w"].calls
 
     peer = testing.PeerRelation(endpoint="harvest-peers")
-    state = base_state(relations=[database()])
+    state = base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm])
     first = ctx.run(ctx.on.leader_elected(), state)
     secret_id = first.get_relations("harvest-peers")[0].local_app_data["cluster-secret-id"]
     follower_state = testing.State(
@@ -210,6 +239,7 @@ def test_only_the_leader_runs_migrations(ctx, workload):
             testing.PeerRelation(endpoint="harvest-peers", local_app_data={"cluster-secret-id": secret_id}),
             testing.PeerRelation(endpoint="restart"),
             database(),
+            llm_relation(llm.id),
         ],
         secrets=list(first.secrets),
     )
@@ -226,24 +256,28 @@ def test_invalid_configuration_blocks_and_does_not_start(ctx, workload, monkeypa
         self.check_error = "parsing config TOML: bad"
 
     monkeypatch.setattr(FakeWorkload, "__init__", failing)
-    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database()]))
+    llm = llm_secret()
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm]))
     assert out.unit_status == testing.BlockedStatus("invalid configuration: parsing config TOML: bad")
     assert ("start",) not in workload["w"].calls
 
 
 def test_single_unit_mode_blocks_when_scaled_out(ctx, workload):
-    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database()], config={"active-active": False}, planned_units=3))
+    llm = llm_secret()
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm], config={"active-active": False}, planned_units=3))
     assert out.unit_status == testing.BlockedStatus("active-active is false: scale to one unit")
 
 
 def test_active_active_allows_several_units(ctx, workload):
-    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database()], planned_units=3))
+    llm = llm_secret()
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm], planned_units=3))
     assert isinstance(out.unit_status, testing.ActiveStatus)
 
 
 def test_haproxy_route_requests_api_paths_health_checks_and_long_timeouts(ctx, workload):
+    llm = llm_secret()
     route = testing.Relation(endpoint="haproxy-route", interface="haproxy-route", remote_app_name="haproxy")
-    out = ctx.run(ctx.on.relation_changed(route), base_state(relations=[database(), route]))
+    out = ctx.run(ctx.on.relation_changed(route), base_state(relations=[database(), llm_relation(llm.id), route], secrets=[llm]))
     data = out.get_relation(route.id).local_app_data
     assert json.loads(data["service"]) == "harvest-server"
     assert json.loads(data["ports"]) == [8080]
@@ -259,15 +293,15 @@ def test_haproxy_route_requests_api_paths_health_checks_and_long_timeouts(ctx, w
 
 
 def test_public_url_from_haproxy_drives_oauth_redirects(ctx, workload):
+    llm = llm_secret()
     route = testing.Relation(
         endpoint="haproxy-route", interface="haproxy-route", remote_app_name="haproxy",
         remote_app_data={"endpoints": json.dumps(["https://harvest.example.com/"])},
     )
     oidc = testing.Secret(tracked_content={"client-secret": "oidc-s"}, owner=None)
     ctx.run(ctx.on.config_changed(), base_state(
-        relations=[database(), route],
-        config={"oidc-issuer-url": "https://login.example.com", "oidc-client-id": "harvest", "oidc-secret": oidc.id},
-        secrets=[oidc],
+        relations=[database(), llm_relation(llm.id), route, auth_relation("oidc", oidc.id)],
+        secrets=[llm, oidc],
     ))
     toml = server_toml(workload)
     assert toml["auth"]["public_url"] == "https://harvest.example.com"
@@ -277,8 +311,9 @@ def test_public_url_from_haproxy_drives_oauth_redirects(ctx, workload):
 
 
 def test_harvest_api_publishes_version_schema_and_paths(ctx, workload):
+    llm = llm_secret()
     api = testing.Relation(endpoint="harvest-api", interface="harvest_api", remote_app_name="harvest-web-ui")
-    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database(), api]))
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id), api], secrets=[llm]))
     data = out.get_relation(api.id).local_app_data
     assert data["version"] == "0.11.0"
     assert data["schema-version"] == "7"
@@ -293,14 +328,16 @@ def test_a_configuration_change_on_a_running_unit_requests_a_rolling_restart(ctx
         self.is_running = True
 
     monkeypatch.setattr(FakeWorkload, "__init__", running)
-    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database()]))
+    llm = llm_secret()
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm]))
     assert ("start",) not in workload["w"].calls
     assert ("restart",) in workload["w"].calls, "the leader grants the rolling-restart lock and the callback restarts the unit"
 
 
 def test_the_rolling_restart_callback_restarts_and_waits_for_readiness(ctx, workload):
     charm = None
-    with ctx(ctx.on.config_changed(), base_state(relations=[database()])) as manager:
+    llm = llm_secret()
+    with ctx(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm])) as manager:
         charm = manager.charm
         manager.run()
         charm._restart(None)
@@ -318,7 +355,8 @@ def test_install_stops_the_ui_service_and_marks_config_managed(ctx, workload, mo
     monkeypatch.setattr(FakeWorkload, "__init__", fresh)
     empty = tmp_path / "harvest.snap"
     empty.write_bytes(b"")
-    state = base_state(relations=[database()])
+    llm = llm_secret()
+    state = base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm])
     state = testing.State(
         leader=state.leader, config=state.config, relations=list(state.relations), secrets=list(state.secrets),
         resources=[testing.Resource(name="harvest-snap", path=empty)],
@@ -330,9 +368,11 @@ def test_install_stops_the_ui_service_and_marks_config_managed(ctx, workload, mo
     assert ("stop", ("ui",)) in calls
 
 
-def test_missing_llm_secret_key_blocks(ctx, workload):
-    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database()], config={"llm-providers": 'x = "${secret:nope}"'}))
-    assert out.unit_status == testing.BlockedStatus("llm-providers references nope which llm-secret does not contain")
+def test_missing_llm_secret_grant_blocks(ctx, workload):
+    relation = llm_relation("secret:missing")
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database(), relation]))
+    assert isinstance(out.unit_status, testing.BlockedStatus)
+    assert "cannot read llm-provider secret from relation" in out.unit_status.message
 
 
 def three_members(endpoints="10.0.0.1:5432", read_only=""):
@@ -341,19 +381,22 @@ def three_members(endpoints="10.0.0.1:5432", read_only=""):
 
 
 def test_the_first_start_waits_until_every_postgresql_member_is_listed(ctx, workload):
-    out = ctx.run(ctx.on.config_changed(), base_state(relations=[three_members()]))
+    llm = llm_secret()
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[three_members(), llm_relation(llm.id)], secrets=[llm]))
     assert out.unit_status == testing.WaitingStatus("waiting for every PostgreSQL member (1/3)")
     assert ("start",) not in workload["w"].calls
 
 
 def test_the_first_start_proceeds_once_every_member_is_listed(ctx, workload):
-    out = ctx.run(ctx.on.config_changed(), base_state(relations=[three_members(read_only="10.0.0.2:5432,10.0.0.3:5432")]))
+    llm = llm_secret()
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[three_members(read_only="10.0.0.2:5432,10.0.0.3:5432"), llm_relation(llm.id)], secrets=[llm]))
     assert ("start",) in workload["w"].calls
     assert out.unit_status == testing.ActiveStatus("ready (harvest-server-0-abc)")
 
 
 def test_the_member_wait_gives_up_after_a_while(ctx, workload):
-    state = base_state(relations=[three_members()])
+    llm = llm_secret()
+    state = base_state(relations=[three_members(), llm_relation(llm.id)], secrets=[llm])
     stored = testing.StoredState(owner_path="HarvestServerCharm", content={"member_wait_since": time.time() - charm_module.MEMBER_WAIT - 1})
     ctx.run(ctx.on.config_changed(), dataclasses.replace(state, stored_states=[stored]))
     assert ("start",) in workload["w"].calls
@@ -367,5 +410,59 @@ def test_a_running_server_never_waits_for_members(ctx, workload, monkeypatch):
         self.is_running = True
 
     monkeypatch.setattr(FakeWorkload, "__init__", running)
-    out = ctx.run(ctx.on.config_changed(), base_state(relations=[three_members()]))
+    llm = llm_secret()
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[three_members(), llm_relation(llm.id)], secrets=[llm]))
     assert out.unit_status == testing.ActiveStatus("ready (harvest-server-0-abc)")
+
+
+def test_multiple_llm_relations_are_ordered_by_priority(ctx, workload):
+    first_secret = testing.Secret(tracked_content={"api-key": "k1"}, owner=None)
+    second_secret = testing.Secret(tracked_content={"api-key": "k2"}, owner=None)
+    ctx.run(
+        ctx.on.config_changed(),
+        base_state(
+            relations=[
+                database(),
+                llm_relation(first_secret.id, model="first", priority="200"),
+                llm_relation(second_secret.id, model="second", priority="10"),
+            ],
+            secrets=[first_secret, second_secret],
+        ),
+    )
+    toml = server_toml(workload)
+    assert toml["llm"][0]["model"] == "second"
+    assert toml["llm"][1]["model"] == "first"
+
+
+def test_google_auth_provider_renders_google_auth_section(ctx, workload):
+    llm = llm_secret()
+    route = testing.Relation(
+        endpoint="haproxy-route",
+        interface="haproxy-route",
+        remote_app_name="haproxy",
+        remote_app_data={"endpoints": json.dumps(["https://harvest.example.com/"])},
+    )
+    google = testing.Secret(tracked_content={"client-secret": "google-s"}, owner=None)
+    ctx.run(
+        ctx.on.config_changed(),
+        base_state(
+            relations=[database(), llm_relation(llm.id), route, auth_relation("google", google.id)],
+            secrets=[llm, google],
+        ),
+    )
+    toml = server_toml(workload)
+    assert toml["auth"]["google"]["redirect_uri"] == "https://harvest.example.com/auth/google/callback"
+    assert toml["auth"]["google"]["client_secret"] == "google-s"
+
+
+def test_disabling_local_login_requires_auth_provider_relation(ctx, workload):
+    llm = llm_secret()
+    out = ctx.run(
+        ctx.on.config_changed(),
+        base_state(
+            relations=[database(), llm_relation(llm.id)],
+            secrets=[llm],
+            config={"allow-local-login": False},
+        ),
+    )
+    assert out.unit_status == testing.BlockedStatus("allow-local-login is false but no auth-provider relation is configured")
