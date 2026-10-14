@@ -1,12 +1,18 @@
 # Harvest charms
 
-Two machine charms deploy Harvest highly available next to the existing Charmed PostgreSQL
-and HAProxy charms.
+Machine charms deploy Harvest highly available next to the existing Charmed PostgreSQL
+and HAProxy charms. Integrator charms provide LLM and authentication providers over
+Juju relations.
 
 | Charm | Runs | Relations |
 |---|---|---|
-| `harvest-server` | `harvest.server` from the harvest snap (API, chat turns, agents) | `database` (postgresql_client), `haproxy-route`, `harvest-api` (provides), `cos-agent`, peers |
+| `harvest-server` | `harvest.server` from the harvest snap (API, chat turns, agents) | `database` (postgresql_client), `haproxy-route`, `llm-provider`, `auth-provider`, `harvest-api` (provides), `cos-agent`, peers |
 | `harvest-web-ui` | `harvest.ui` from the harvest snap in static mode (single page app only) | `haproxy-route`, `harvest-api` (requires) |
+| `harvest-llm-provider-openai-compatible` | Integrator | `llm-provider` (provides) |
+| `harvest-llm-provider-anthropic` | Integrator | `llm-provider` (provides) |
+| `harvest-llm-provider-opencode` | Integrator | `llm-provider` (provides) |
+| `harvest-auth-provider-oidc` | Integrator | `auth-provider` (provides) |
+| `harvest-auth-provider-google` | Integrator | `auth-provider` (provides) |
 
 ```
               VIP (hacluster) or DNS
@@ -37,22 +43,22 @@ juju deploy hacluster --channel 2.4/edge --base ubuntu@24.04
 juju integrate hacluster haproxy
 juju integrate haproxy:certificates self-signed-certificates
 
-juju add-secret harvest-llm key=<api key>
 juju deploy ./harvest-server_amd64.charm -n 3 \
   --resource harvest-snap=./harvest.snap \
-  --config llm-providers="$(cat llm.toml)" --config llm-secret=secret:<id>
-juju grant-secret harvest-llm harvest-server
+  --config hostname=harvest.example.com
+juju deploy ./harvest-llm-provider-openai-compatible_amd64.charm \
+  --config model=gpt-4.1-mini --config base-url=https://api.openai.com/v1
 juju deploy ./harvest-web-ui_amd64.charm -n 2 --resource harvest-snap=./harvest.snap
 
 juju integrate harvest-server:database postgresql:database
 juju integrate harvest-server:haproxy-route haproxy:haproxy-route
+juju integrate harvest-llm-provider-openai-compatible:llm-provider harvest-server:llm-provider
 juju integrate harvest-web-ui:haproxy-route haproxy:haproxy-route
 juju integrate harvest-web-ui:harvest-api harvest-server:harvest-api
 ```
 
-`llm.toml` holds `[[llm]]` blocks. Values can refer to keys of the `llm-secret` secret as
-`${secret:<key>}`. With per-user API keys use `user_provided_key = true` and leave `api_key`
-empty.
+LLM provider charms publish one provider each. Integrate more than one provider charm to build
+a fallback list, and set provider priority with each charm's `priority` config.
 
 ### Lab bundle
 
@@ -62,7 +68,7 @@ server units and two web UI units, routed for `harvest.test`. Charmhub revisions
 
 ```bash
 cd charms
-(cd harvest-server && charmcraft pack) && (cd harvest-web-ui && charmcraft pack)
+(cd harvest-server && charmcraft pack) && (cd harvest-web-ui && charmcraft pack) && (cd harvest-llm-provider-openai-compatible && charmcraft pack)
 cp ../harvest_*.snap harvest.snap
 juju add-model harvest
 ./deploy-bundle.sh harvest
@@ -107,7 +113,7 @@ compiler.
 ```bash
 cd charms/harvest-server && uv run --with pytest --with ops[testing] env PYTHONPATH=src:lib pytest tests/unit
 cd charms/harvest-web-ui && uv run --with pytest --with ops[testing] env PYTHONPATH=src:lib pytest tests/unit
-HARVEST_SERVER_CHARM=... HARVEST_UI_CHARM=... HARVEST_SNAP=... pytest charms/tests/integration
+HARVEST_SERVER_CHARM=... HARVEST_UI_CHARM=... HARVEST_LLM_OPENAI_COMPATIBLE_CHARM=... HARVEST_SNAP=... pytest charms/tests/integration
 ```
 
 The integration tests deploy the full topology with jubilant and check routing, the loss of
