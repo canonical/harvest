@@ -1,0 +1,43 @@
+name: harvest-llm-provider-anthropic
+type: charm
+title: Harvest Anthropic LLM provider
+summary: Publishes an Anthropic LLM provider configuration to harvest-server.
+description: |
+  Integrator charm that provides one Anthropic LLM provider definition to
+  harvest-server over the harvest_llm_provider interface.
+assumes:
+  - juju >= 3.3
+base: ubuntu@24.04
+platforms:
+  amd64:
+parts:
+  charm:
+    plugin: charm
+    source: .
+
+provides:
+  llm-provider:
+    interface: harvest_llm_provider
+
+config:
+  options:
+    enabled:
+      type: boolean
+      default: true
+    priority:
+      type: int
+      default: 100
+    model:
+      type: string
+      default: claude-3-7-sonnet-latest
+    api-key-secret:
+      type: secret
+    user-provided-key:
+      type: boolean
+      default: false
+    timeout-secs:
+      type: int
+      default: 120
+    max-retries:
+      type: int
+      default: 3
