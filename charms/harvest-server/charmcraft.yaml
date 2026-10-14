@@ -29,6 +29,11 @@ requires:
     interface: haproxy-route
     limit: 1
     optional: true
+  llm-provider:
+    interface: harvest_llm_provider
+  auth-provider:
+    interface: harvest_auth_provider
+    optional: true
 
 provides:
   harvest-api:
@@ -60,41 +65,10 @@ config:
       type: string
       default: ""
       description: Public hostname routed to Harvest by haproxy. Defaults to the haproxy external-hostname.
-    llm-providers:
-      type: string
-      default: ""
-      description: |
-        TOML [[llm]] blocks copied into server.toml. Values may reference keys of
-        llm-secret as ${secret:<key>}.
-    llm-secret:
-      type: secret
-      description: Juju secret whose keys can be referenced from llm-providers.
     allow-local-login:
       type: boolean
       default: true
       description: Allow email and password accounts.
-    oidc-issuer-url:
-      type: string
-      default: ""
-      description: OIDC issuer URL; enables OIDC login together with oidc-client-id and oidc-secret.
-    oidc-client-id:
-      type: string
-      default: ""
-      description: OIDC client id.
-    oidc-display-name:
-      type: string
-      default: ""
-      description: Name shown on the OIDC login button.
-    oidc-secret:
-      type: secret
-      description: Juju secret holding client-secret for OIDC.
-    google-client-id:
-      type: string
-      default: ""
-      description: Google OAuth client id; enables Google login together with google-secret.
-    google-secret:
-      type: secret
-      description: Juju secret holding client-secret for Google OAuth.
     import-secrets:
       type: secret
       description: |
