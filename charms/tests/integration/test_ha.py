@@ -6,7 +6,6 @@ import urllib.request
 import jubilant
 
 HOSTNAME = "harvest.test"
-LLM = '[[llm]]\nprovider = "openai-compatible"\nbase_url = "http://127.0.0.1:9/v1"\nmodel = "m"\napi_key = ""\nuser_provided_key = true\n'
 
 
 def haproxy_address(juju: jubilant.Juju) -> str:
@@ -27,18 +26,24 @@ def get(juju: jubilant.Juju, path: str, timeout: float = 10.0) -> tuple:
         return e.code, e.read()
 
 
-def test_deploy_the_ha_topology(juju: jubilant.Juju, server_charm, ui_charm, harvest_snap):
+def test_deploy_the_ha_topology(juju: jubilant.Juju, server_charm, ui_charm, llm_openai_compatible_charm, harvest_snap):
     juju.deploy("postgresql", channel="16/stable", num_units=3,
                 config={"plugin_pg_trgm_enable": True, "plugin_vector_enable": True})
     juju.deploy("self-signed-certificates")
     juju.deploy("haproxy", channel="2.8/stable", config={"external-hostname": HOSTNAME})
     juju.integrate("haproxy:certificates", "self-signed-certificates:certificates")
     juju.deploy(server_charm, "harvest-server", num_units=3, resources={"harvest-snap": str(harvest_snap)},
-                config={"llm-providers": LLM, "hostname": HOSTNAME})
+                config={"hostname": HOSTNAME})
+    juju.deploy(llm_openai_compatible_charm, "harvest-llm-provider-openai-compatible", config={
+        "model": "m",
+        "base-url": "http://127.0.0.1:9/v1",
+        "user-provided-key": True,
+    })
     juju.deploy(ui_charm, "harvest-web-ui", num_units=2, resources={"harvest-snap": str(harvest_snap)},
                 config={"hostname": HOSTNAME})
     juju.integrate("harvest-server:database", "postgresql:database")
     juju.integrate("harvest-server:haproxy-route", "haproxy:haproxy-route")
+    juju.integrate("harvest-llm-provider-openai-compatible:llm-provider", "harvest-server:llm-provider")
     juju.integrate("harvest-web-ui:haproxy-route", "haproxy:haproxy-route")
     juju.integrate("harvest-web-ui:harvest-api", "harvest-server:harvest-api")
     juju.wait(jubilant.all_active, timeout=3600)

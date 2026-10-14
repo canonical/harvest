@@ -47,13 +47,15 @@ applications:
       harvest-snap: ./harvest.snap
     options:
       hostname: harvest.test
-      llm-providers: |
-        [[llm]]
-        provider = "openai-compatible"
-        base_url = "http://127.0.0.1:9/v1"
-        model = "m"
-        api_key = ""
-        user_provided_key = true
+
+  harvest-llm-provider-openai-compatible:
+    charm: ./harvest-llm-provider-openai-compatible/harvest-llm-provider-openai-compatible_amd64.charm
+    num_units: 1
+    to: ["4"]
+    options:
+      model: m
+      base-url: http://127.0.0.1:9/v1
+      user-provided-key: true
 
   harvest-web-ui:
     charm: ./harvest-web-ui/harvest-web-ui_amd64.charm
@@ -68,5 +70,6 @@ relations:
   - [haproxy:certificates, self-signed-certificates:certificates]
   - [harvest-server:database, postgresql:database]
   - [harvest-server:haproxy-route, haproxy:haproxy-route]
+  - [harvest-llm-provider-openai-compatible:llm-provider, harvest-server:llm-provider]
   - [harvest-web-ui:haproxy-route, haproxy:haproxy-route]
   - [harvest-web-ui:harvest-api, harvest-server:harvest-api]

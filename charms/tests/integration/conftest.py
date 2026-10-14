@@ -10,6 +10,7 @@ CHARMS = Path(__file__).resolve().parents[2]
 def pytest_addoption(parser):
     parser.addoption("--server-charm", default=os.environ.get("HARVEST_SERVER_CHARM"))
     parser.addoption("--ui-charm", default=os.environ.get("HARVEST_UI_CHARM"))
+    parser.addoption("--llm-openai-compatible-charm", default=os.environ.get("HARVEST_LLM_OPENAI_COMPATIBLE_CHARM"))
     parser.addoption("--harvest-snap", default=os.environ.get("HARVEST_SNAP"))
     parser.addoption("--keep-models", action="store_true", default=False)
 
@@ -22,6 +23,11 @@ def server_charm(request):
 @pytest.fixture(scope="session")
 def ui_charm(request):
     return Path(request.config.getoption("--ui-charm")).resolve()
+
+
+@pytest.fixture(scope="session")
+def llm_openai_compatible_charm(request):
+    return Path(request.config.getoption("--llm-openai-compatible-charm")).resolve()
 
 
 @pytest.fixture(scope="session")

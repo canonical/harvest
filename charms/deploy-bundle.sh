@@ -6,7 +6,7 @@ MODEL="${1:-$(juju models --format json | python3 -c 'import json,sys; print(jso
 TIMEOUT="${TIMEOUT:-90m}"
 FIRST="${FIRST:-postgresql}"
 
-for file in harvest-server/harvest-server_amd64.charm harvest-web-ui/harvest-web-ui_amd64.charm harvest.snap; do
+for file in harvest-server/harvest-server_amd64.charm harvest-web-ui/harvest-web-ui_amd64.charm harvest-llm-provider-openai-compatible/harvest-llm-provider-openai-compatible_amd64.charm harvest.snap; do
   [ -s "$file" ] || { echo "missing $file" >&2; exit 1; }
 done
 
