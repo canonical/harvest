@@ -16,12 +16,10 @@ platforms:
   amd64:
 parts:
   charm:
-    plugin: charm
+    plugin: uv
     source: .
-    charm-requirements:
-      - requirements.txt
-    build-packages:
-      - git
+    build-snaps:
+      - astral-uv
 
 requires:
   haproxy-route:
