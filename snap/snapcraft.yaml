@@ -35,94 +35,41 @@ description: |
                               target_session_attrs=read-write follow a
                               primary failover   (required)
   database.pool-size          Connection pool size         (default: 16)
-  database.ca-file            CA certificate for TLS to PostgreSQL (optional)
-  cluster.internal-listen     Node-to-node listen address  (optional)
+  database.ca-file            CA certificate for TLS to PostgreSQL
+  cluster.internal-listen     Node-to-node listen address
   cluster.internal-url        Address other nodes use to reach this one
   cluster.shared-secret       Secret shared by every node of the cluster
-  cluster.node-name           Name prefix for this node    (optional)
+  cluster.node-name           Name prefix for this node
   config.managed              true when a charm writes server.toml itself
-  server.host                 API bind address             (default: 127.0.0.1)
-  server.port                 API port                     (default: 8080)
+  server.host / server.port   API address        (default: 127.0.0.1:8080)
+  ui.host / ui.port           Web UI address     (default: 127.0.0.1:3000)
+  ui.mode                     proxy (UI and API) or static (UI only)
+  ui.enable-docs / docs.dir   Documentation page and its directory
+  log.level                   error|warn|info|debug|trace  (default: warn)
 
-  LLM providers — define any number with user-chosen names. <name> itself
-  becomes the provider's stable id, which the chat page's model picker uses
-  to target a specific provider:
-  llm.<name>.provider         anthropic | gemini | openai-compatible
-  llm.<name>.api-key          API key (setting this enables the provider)
-  llm.<name>.model            Model name
-  llm.<name>.base-url         Base URL (openai-compatible only)
-  llm.<name>.timeout-secs     Per-request timeout          (default: 120)
-  llm.<name>.max-retries      Retry limit per request      (default: 3)
-  llm.<name>.priority         Lower = tried first on rate limits  (default: 0)
-  llm.<name>.expose-to-ui     Show in the chat page's model picker;
-                               set to false to keep a provider failover-only
-                               (default: true)
-  llm.<name>.display-name     Name shown in the model picker
-                               (default: the provider kind)
-  llm.<name>.models           Comma-separated allowlist of model names to
-                               offer in the picker (default: all discovered
-                               models)
-
-  Example — Anthropic primary, Gemini fallback:
-    snap set harvest \
-      llm.primary.provider=anthropic llm.primary.api-key=sk-ant-... \
-      llm.fallback.provider=gemini   llm.fallback.api-key=AIza... \
-      llm.fallback.priority=1
-
-  Example — hide a failover-only provider from the picker, restrict another
-  to a curated model list:
-    snap set harvest \
-      llm.backup.expose-to-ui=false \
-      llm.primary.display-name="Claude (production)" \
-      llm.primary.models="claude-sonnet-5,claude-opus-5"
+  llm.<name>.*                One block per provider; <name> is its stable id:
+    provider                  anthropic | gemini | openai-compatible
+    api-key, model, base-url  Credentials, model, endpoint
+    timeout-secs, max-retries Request limits         (default: 120, 3)
+    priority                  Lower = tried first on rate limits
+    expose-to-ui              false keeps a provider failover-only
+    display-name, models      Model picker label and model allowlist
 
   agent.max-iterations        Agent iteration limit        (default: 20)
-  agent.compaction-threshold-chars  Context compaction trigger  (default: 40000)
-  agent.compaction-keep-last  Messages kept after compaction  (default: 6)
+  agent.compaction-threshold-chars, agent.compaction-keep-last
+  agents.public-url           Public URL for agent callbacks
   auth.jwt-secret             JWT signing secret           (required)
   auth.allow-local-login      Enable username/password login  (default: true)
-  auth.google.client-id       Google OAuth client ID       (optional)
-  auth.google.client-secret   Google OAuth client secret   (optional)
-  auth.google.redirect-uri    Google OAuth redirect URI    (optional)
-  auth.oidc.issuer-url        OIDC provider URL            (optional)
-  auth.oidc.client-id         OIDC client ID               (optional)
-  auth.oidc.client-secret     OIDC client secret           (optional)
-  auth.oidc.redirect-uri      OIDC redirect URI            (optional)
-  auth.oidc.display-name      OIDC provider display name   (optional)
-  agents.public-url           Public URL for agent callbacks  (optional)
+  auth.google.{client-id,client-secret,redirect-uri}
+  auth.oidc.{issuer-url,client-id,client-secret,redirect-uri,display-name}
+  lxd.endpoint, lxd.trust-token, lxd.client-cert, lxd.client-key,
+  lxd.ca-cert, lxd.insecure, lxd.project, lxd.image-alias,
+  lxd.image-server, lxd.profile
+                              LXD-managed agents (optional)
 
-  LXD (optional) — set lxd.endpoint to enable "Let Harvest create and
-  manage agent" in the web UI. Harvest generates its own client identity and
-  self-registers it with lxd.trust-token (from `lxc config trust add --name
-  harvest`, run once against the cluster); set lxd.client-cert/client-key
-  instead if you'd rather manage the identity yourself.
-  lxd.endpoint                 LXD REST API URL, e.g. https://lxd:8443
-  lxd.trust-token               One-time token from `lxc config trust add --name harvest`
-  lxd.client-cert              Manual override: client certificate PEM (skips trust-token)
-  lxd.client-key               Manual override: client private key PEM (skips trust-token)
-  lxd.ca-cert                  LXD server CA certificate PEM  (optional)
-  lxd.insecure                 Skip TLS verification        (default: false, dev only)
-  lxd.project                  LXD project for containers   (default: default)
-  lxd.image-alias              Base image alias             (default: 24.04)
-  lxd.image-server             Image simplestreams server    (default: https://cloud-images.ubuntu.com/releases)
-  lxd.profile                  LXD profile applied to containers (default: default)
-
-  docs.dir                    Documentation directory      (default: $SNAP_COMMON/docs)
-  ui.enable-docs              Show docs page in web UI     (default: false)
-  ui.host                     Web UI bind address          (default: 127.0.0.1)
-  ui.port                     Web UI port                  (default: 3000)
-  ui.mode                     proxy (serve UI and proxy the API) or static
-                              (UI only, API routed by a load balancer)
-  log.level                   Log verbosity: error|warn|info|debug|trace  (default: warn)
-
-  Harvester (ingest-code command)
-  ────────────────────────────────
-  Reuses database.url and llm.* keys — no separate credentials needed.
-  Repos are cloned to a temporary directory and deleted after ingestion.
-
-  Ingest repositories into the knowledge graph:
-    1. Write [[repositories]] blocks to $SNAP_COMMON/repositories.toml
-    2. harvest.ingest-code [-f /path/to/repositories.toml] [--force]
+  Harvester: write [[repositories]] blocks to
+  $SNAP_COMMON/repositories.toml, then run
+  harvest.ingest-code [-f <file>] [--force]
 
 grade: devel
 confinement: strict

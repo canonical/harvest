@@ -49,7 +49,8 @@ cat > "$SNAP_COMMON/Caddyfile" << CADDY
 	persist_config off
 }
 
-${UI_HOST}:${UI_PORT} {
+http://:${UI_PORT} {
+	bind ${UI_HOST}
 ${API_BLOCK}
 
 	handle /ui-health {
