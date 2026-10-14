@@ -1,8 +1,11 @@
+import dataclasses
 import json
+import time
 import tomllib
 from pathlib import Path
 
 import pytest
+import ops
 from ops import testing
 
 import charm as charm_module
@@ -25,6 +28,9 @@ class FakeWorkload:
 
     def installed(self):
         return self.is_installed
+
+    def needs_install(self, resource):
+        return not self.is_installed
 
     def install(self, channel, resource):
         self.calls.append(("install", channel))
@@ -88,6 +94,7 @@ def workload(monkeypatch):
         return holder["w"]
 
     monkeypatch.setattr(charm_module, "Workload", factory)
+    monkeypatch.setattr(HarvestServerCharm, "_resource", lambda self: None)
     return holder
 
 
@@ -297,6 +304,7 @@ def test_the_rolling_restart_callback_restarts_and_waits_for_readiness(ctx, work
         charm = manager.charm
         manager.run()
         charm._restart(None)
+        assert charm.unit.status == ops.ActiveStatus("ready (harvest-server-0-abc)")
     assert ("restart",) in workload["w"].calls
 
 
@@ -325,3 +333,39 @@ def test_install_stops_the_ui_service_and_marks_config_managed(ctx, workload, mo
 def test_missing_llm_secret_key_blocks(ctx, workload):
     out = ctx.run(ctx.on.config_changed(), base_state(relations=[database()], config={"llm-providers": 'x = "${secret:nope}"'}))
     assert out.unit_status == testing.BlockedStatus("llm-providers references nope which llm-secret does not contain")
+
+
+def three_members(endpoints="10.0.0.1:5432", read_only=""):
+    relation = database(endpoints=endpoints, read_only=read_only)
+    return dataclasses.replace(relation, remote_units_data={0: {}, 1: {}, 2: {}})
+
+
+def test_the_first_start_waits_until_every_postgresql_member_is_listed(ctx, workload):
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[three_members()]))
+    assert out.unit_status == testing.WaitingStatus("waiting for every PostgreSQL member (1/3)")
+    assert ("start",) not in workload["w"].calls
+
+
+def test_the_first_start_proceeds_once_every_member_is_listed(ctx, workload):
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[three_members(read_only="10.0.0.2:5432,10.0.0.3:5432")]))
+    assert ("start",) in workload["w"].calls
+    assert out.unit_status == testing.ActiveStatus("ready (harvest-server-0-abc)")
+
+
+def test_the_member_wait_gives_up_after_a_while(ctx, workload):
+    state = base_state(relations=[three_members()])
+    stored = testing.StoredState(owner_path="HarvestServerCharm", content={"member_wait_since": time.time() - charm_module.MEMBER_WAIT - 1})
+    ctx.run(ctx.on.config_changed(), dataclasses.replace(state, stored_states=[stored]))
+    assert ("start",) in workload["w"].calls
+
+
+def test_a_running_server_never_waits_for_members(ctx, workload, monkeypatch):
+    original = FakeWorkload.__init__
+
+    def running(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self.is_running = True
+
+    monkeypatch.setattr(FakeWorkload, "__init__", running)
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[three_members()]))
+    assert out.unit_status == testing.ActiveStatus("ready (harvest-server-0-abc)")

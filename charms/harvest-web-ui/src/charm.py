@@ -55,9 +55,10 @@ class HarvestWebUiCharm(ops.CharmBase):
             return None
 
     def _reconcile(self, _event: ops.EventBase) -> None:
-        if not self.workload.installed():
+        resource = self._resource()
+        if self.workload.needs_install(resource):
             self.unit.status = ops.MaintenanceStatus("installing the harvest snap")
-            self.workload.install(self.config.get("snap-channel", "latest/edge"), self._resource())
+            self.workload.install(self.config.get("snap-channel", "latest/edge"), resource)
         desired = {
             "config.managed": "true",
             "ui.mode": "static",
@@ -70,10 +71,10 @@ class HarvestWebUiCharm(ops.CharmBase):
             self.workload.stop(["server"])
         self.unit.open_port("tcp", self.port)
 
-        if not self.workload.running():
-            self.workload.start()
-        elif changed:
+        if changed and self.workload.running():
             self.workload.restart()
+        if not self.workload.running() or not self.workload.enabled():
+            self.workload.start()
         self._stored.applied = desired
 
         if self.model.get_relation("haproxy-route"):
@@ -85,7 +86,10 @@ class HarvestWebUiCharm(ops.CharmBase):
         server = self.api.get()
         version = self.workload.version()
         if server is None:
-            self.unit.status = ops.BlockedStatus("requires a harvest-api relation to harvest-server")
+            if self.model.get_relation("harvest-api") is None:
+                self.unit.status = ops.BlockedStatus("requires a harvest-api relation to harvest-server")
+            else:
+                self.unit.status = ops.WaitingStatus("waiting for harvest-server to publish its API")
             return
         if server.version and version and server.version != version:
             self.unit.status = ops.WaitingStatus(f"harvest-server runs {server.version}, this unit serves {version}; refresh to match")
