@@ -1,0 +1,31 @@
+name: harvest-auth-provider-google
+type: charm
+title: Harvest Google auth provider
+summary: Publishes Google authentication configuration to harvest-server.
+description: |
+  Integrator charm that provides one Google authentication provider definition
+  to harvest-server over the harvest_auth_provider interface.
+assumes:
+  - juju >= 3.3
+base: ubuntu@24.04
+platforms:
+  amd64:
+parts:
+  charm:
+    plugin: charm
+    source: .
+
+provides:
+  auth-provider:
+    interface: harvest_auth_provider
+
+config:
+  options:
+    enabled:
+      type: boolean
+      default: true
+    client-id:
+      type: string
+      default: ""
+    client-secret:
+      type: secret
