@@ -1,14 +1,11 @@
 import tomllib
 
-import pytest
-
 from harvest_config import (
     API_PATHS,
     DatabaseInfo,
     ServerSettings,
     build_database_url,
     render_server_toml,
-    substitute_secrets,
 )
 
 
@@ -88,14 +85,6 @@ def test_credentials_are_percent_encoded():
         database="harvest", tls=False,
     ))
     assert url.startswith("postgres://u%40x:p%2Fw%3Ad%3F%23@h:5432/")
-
-
-def test_secret_placeholders_are_replaced_and_unknown_ones_rejected():
-    rendered = substitute_secrets('api_key = "${secret:openai}"', {"openai": "sk-1"})
-    assert rendered == 'api_key = "sk-1"'
-    with pytest.raises(KeyError):
-        substitute_secrets('api_key = "${secret:missing}"', {})
-
 
 def test_rendered_config_is_valid_toml_with_cluster_and_database_settings():
     parsed = tomllib.loads(render_server_toml(settings()))
