@@ -54,15 +54,43 @@ juju integrate harvest-web-ui:harvest-api harvest-server:harvest-api
 `${secret:<key>}`. With per-user API keys use `user_provided_key = true` and leave `api_key`
 empty.
 
+### Lab bundle
+
+`bundle.yaml` deploys the same topology on a single LXD host without hacluster: three
+PostgreSQL units, one haproxy unit sharing its machine with self-signed-certificates, three
+server units and two web UI units, routed for `harvest.test`. Charmhub revisions are pinned.
+
+```bash
+cd charms
+(cd harvest-server && charmcraft pack) && (cd harvest-web-ui && charmcraft pack)
+cp ../harvest_*.snap harvest.snap
+juju add-model harvest
+./deploy-bundle.sh harvest
+```
+
+`deploy-bundle.sh` turns off the OS upgrade of new machines, preinstalls `core24` while they
+boot (`cloudinit-userdata.yaml`), adds every machine before the bundle's charm uploads,
+deploys PostgreSQL first because it is the critical path, then deploys the rest and waits
+until every unit is active and idle.
+
+Deploy time is dominated by fsync: Juju fsyncs each extracted charm file, and snapd, MongoDB
+and dqlite sync constantly. Keep Juju machines on a storage pool backed directly by the host
+filesystem (the LXD `dir` driver) rather than a loop file, which made fsync more than ten
+times slower here. The charms use the `uv` plugin with a lockfile, so they hold only runtime
+dependencies (about 700 files instead of 2200 with the `charm` plugin) and build without a
+compiler.
+
 ## What the server charm does
 
 * Generates `jwt-secret`, `user-key-encryption-key` and the node-to-node `cluster-secret`
   once, on the leader, in an application secret shared through the peer relation. Set
   `import-secrets` to a secret holding `jwt-secret` and `user-key-encryption-key` to keep
   the keys of an existing deployment (encrypted per-user API keys stay readable).
-* Builds the database URL from every PostgreSQL endpoint (primary first, then replicas) with
+* Builds the database URL from every PostgreSQL endpoint in a stable order with
   `target_session_attrs=read-write`, so a switchover is followed without a restart. When the
   relation reports TLS the CA is written to `$SNAP_COMMON/db-ca.pem` and `sslmode=require` is set.
+  The first start waits up to ten minutes until every related PostgreSQL unit is listed, so
+  replicas joining during a fresh deployment do not trigger rolling restarts.
 * Renders `$SNAP_COMMON/server.toml` (`config.managed=true` stops the snap hook from
   overwriting it), validates it with `harvest.admin check-config`, lets only the leader run
   `harvest.admin migrate` (every unit starts with `migrate_on_start = false` and waits for the
@@ -77,8 +105,8 @@ empty.
 ## Tests
 
 ```bash
-cd charms/harvest-server && PYTHONPATH=src:lib pytest tests/unit
-cd charms/harvest-web-ui && PYTHONPATH=src:lib pytest tests/unit
+cd charms/harvest-server && uv run --with pytest --with ops[testing] env PYTHONPATH=src:lib pytest tests/unit
+cd charms/harvest-web-ui && uv run --with pytest --with ops[testing] env PYTHONPATH=src:lib pytest tests/unit
 HARVEST_SERVER_CHARM=... HARVEST_UI_CHARM=... HARVEST_SNAP=... pytest charms/tests/integration
 ```
 
