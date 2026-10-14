@@ -17,11 +17,15 @@ class FakeWorkload:
         self.calls = []
         self.is_installed = True
         self.is_running = False
+        self.is_enabled = False
         self.is_ready = True
         self.snap_version = "0.11.0"
 
     def installed(self):
         return self.is_installed
+
+    def needs_install(self, resource):
+        return not self.is_installed
 
     def install(self, channel, resource):
         self.calls.append(("install", channel))
@@ -35,6 +39,7 @@ class FakeWorkload:
     def start(self):
         self.calls.append(("start",))
         self.is_running = True
+        self.is_enabled = True
 
     def stop(self, services):
         self.calls.append(("stop", tuple(services)))
@@ -44,6 +49,9 @@ class FakeWorkload:
 
     def running(self):
         return self.is_running
+
+    def enabled(self):
+        return self.is_enabled
 
     def ready(self):
         return self.is_ready
@@ -58,6 +66,7 @@ def workload(monkeypatch):
         return holder["w"]
 
     monkeypatch.setattr(charm_module, "Workload", factory)
+    monkeypatch.setattr(HarvestWebUiCharm, "_resource", lambda self: None)
     return holder
 
 
@@ -77,6 +86,12 @@ def api(version="0.11.0"):
 def test_blocks_until_related_to_harvest_server(ctx, workload):
     out = ctx.run(ctx.on.config_changed(), testing.State(leader=True))
     assert out.unit_status == testing.BlockedStatus("requires a harvest-api relation to harvest-server")
+
+
+def test_waits_until_harvest_server_publishes_its_api(ctx, workload):
+    relation = testing.Relation(endpoint="harvest-api", interface="harvest_api", remote_app_name="harvest-server")
+    out = ctx.run(ctx.on.config_changed(), testing.State(leader=True, relations=[relation]))
+    assert out.unit_status == testing.WaitingStatus("waiting for harvest-server to publish its API")
 
 
 def test_serves_static_files_only_on_the_configured_port(ctx, workload):
@@ -121,3 +136,18 @@ def test_a_port_change_restarts_the_running_ui(ctx, workload, monkeypatch):
     ctx.run(ctx.on.config_changed(), testing.State(leader=True, relations=[api()], config={"port": 9090}, stored_states=[stored]))
     assert ("restart",) in workload["w"].calls
     assert ("snap-config", {"config.managed": "true", "ui.mode": "static", "ui.host": "0.0.0.0", "ui.port": "9090"}) in workload["w"].calls
+
+
+def test_a_ui_started_outside_the_charm_is_enabled(ctx, workload, monkeypatch):
+    original = FakeWorkload.__init__
+
+    def running_but_disabled(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self.is_running = True
+
+    monkeypatch.setattr(FakeWorkload, "__init__", running_but_disabled)
+    applied = {"config.managed": "true", "ui.mode": "static", "ui.host": "0.0.0.0", "ui.port": "8080"}
+    stored = testing.StoredState(owner_path="HarvestWebUiCharm", content={"applied": applied})
+    ctx.run(ctx.on.update_status(), testing.State(leader=True, relations=[api()], stored_states=[stored]))
+    assert ("start",) in workload["w"].calls
+    assert ("restart",) not in workload["w"].calls

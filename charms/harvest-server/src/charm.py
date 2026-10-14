@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import logging
 import secrets
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +19,7 @@ from harvest_config import (
     DatabaseInfo,
     ServerSettings,
     build_database_url,
+    database_hosts,
     render_server_toml,
     substitute_secrets,
 )
@@ -30,6 +32,7 @@ SECRET_LABEL = "harvest-cluster"
 SECRET_ID_KEY = "cluster-secret-id"
 SCHEMA_KEY = "schema-version"
 READY_TIMEOUT = 240
+MEMBER_WAIT = 600
 
 
 class Blocked(Exception):
@@ -41,8 +44,11 @@ class Waiting(Exception):
 
 
 class HarvestServerCharm(ops.CharmBase):
+    _stored = ops.StoredState()
+
     def __init__(self, framework: ops.Framework):
         super().__init__(framework)
+        self._stored.set_default(member_wait_since=0.0)
         self.workload = Workload(service="server", port=SERVER_PORT, ready_path="/health/ready")
         self.database = DatabaseRequires(self, relation_name="database", database_name="harvest")
         self.route = HaproxyRouteRequirer(
@@ -157,6 +163,19 @@ class HarvestServerCharm(ops.CharmBase):
             tls=str(data.get("tls", "")).lower() == "true",
         ), data.get("tls-ca")
 
+    def _wait_for_members(self, info: DatabaseInfo) -> None:
+        if self.workload.running():
+            return
+        relation = self.model.get_relation("database")
+        expected = len(relation.units) if relation else 0
+        listed = len(database_hosts(info))
+        if listed >= expected:
+            return
+        if not self._stored.member_wait_since:
+            self._stored.member_wait_since = time.time()
+        if time.time() - self._stored.member_wait_since < MEMBER_WAIT:
+            raise Waiting(f"waiting for every PostgreSQL member ({listed}/{expected})")
+
     def _public_url(self) -> Optional[str]:
         endpoints = self.route.get_proxied_endpoints()
         if endpoints:
@@ -225,10 +244,11 @@ class HarvestServerCharm(ops.CharmBase):
         )
 
     def _ensure_installed(self) -> None:
-        if self.workload.installed():
+        resource = self._resource()
+        if not self.workload.needs_install(resource):
             return
         self.unit.status = ops.MaintenanceStatus("installing the harvest snap")
-        self.workload.install(self.config.get("snap-channel", "latest/edge"), self._resource())
+        self.workload.install(self.config.get("snap-channel", "latest/edge"), resource)
         self.workload.set_snap_config({"config.managed": "true", "ui.mode": "static"})
         self.workload.stop(["ui"])
 
@@ -266,6 +286,7 @@ class HarvestServerCharm(ops.CharmBase):
                 raise Blocked("active-active is false: scale to one unit")
             cluster = self._cluster_secrets()
             info, ca = self._database_info()
+            self._wait_for_members(info)
             settings = self._settings(cluster, info, ca)
             if ca:
                 self.workload.write_file(CA_PATH, ca, 0o644)
@@ -284,8 +305,7 @@ class HarvestServerCharm(ops.CharmBase):
                 self.on[self.restart_manager.name].acquire_lock.emit()
             self._publish(settings.public_url)
             if self.workload.ready():
-                node = self.workload.node_id()
-                self.unit.status = ops.ActiveStatus(f"ready ({node})" if node else "ready")
+                self.unit.status = self._ready_status()
             else:
                 self.unit.status = ops.WaitingStatus("waiting for harvest to become ready")
         except Blocked as e:
@@ -302,7 +322,11 @@ class HarvestServerCharm(ops.CharmBase):
         if not self.workload.wait_ready(READY_TIMEOUT):
             self.unit.status = ops.WaitingStatus("harvest did not become ready after restart")
             return
-        self.unit.status = ops.ActiveStatus("ready")
+        self.unit.status = self._ready_status()
+
+    def _ready_status(self) -> ops.ActiveStatus:
+        node = self.workload.node_id()
+        return ops.ActiveStatus(f"ready ({node})" if node else "ready")
 
     def _on_stop(self, _event: ops.StopEvent) -> None:
         try:

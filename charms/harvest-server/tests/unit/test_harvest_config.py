@@ -44,13 +44,25 @@ def test_single_primary_endpoint_builds_a_read_write_url():
     assert url == "postgres://relation-7:s3cret@10.0.0.1:5432/harvest?target_session_attrs=read-write&connect_timeout=5"
 
 
-def test_replicas_are_listed_after_the_primary_so_failover_needs_no_restart():
+def test_every_member_is_listed_so_failover_needs_no_restart():
     url = build_database_url(DatabaseInfo(
         endpoints="10.0.0.1:5432", read_only_endpoints="10.0.0.2:5432,10.0.0.3:5432",
         username="u", password="p", database="harvest", tls=False,
     ))
     assert url.startswith("postgres://u:p@10.0.0.1:5432,10.0.0.2:5432,10.0.0.3:5432/harvest?")
     assert "target_session_attrs=read-write" in url
+
+
+def test_a_switchover_leaves_the_url_unchanged():
+    before = build_database_url(DatabaseInfo(
+        endpoints="10.0.0.1:5432", read_only_endpoints="10.0.0.2:5432,10.0.0.3:5432",
+        username="u", password="p", database="harvest", tls=False,
+    ))
+    after = build_database_url(DatabaseInfo(
+        endpoints="10.0.0.3:5432", read_only_endpoints="10.0.0.1:5432,10.0.0.2:5432",
+        username="u", password="p", database="harvest", tls=False,
+    ))
+    assert before == after
 
 
 def test_duplicate_hosts_are_not_repeated():

@@ -65,17 +65,15 @@ class ServerSettings:
 
 
 def _hosts(*lists: str) -> list:
-    seen = []
-    for value in lists:
-        for host in (value or "").split(","):
-            host = host.strip()
-            if host and host not in seen:
-                seen.append(host)
-    return seen
+    return sorted({host.strip() for value in lists for host in (value or "").split(",") if host.strip()})
+
+
+def database_hosts(info: DatabaseInfo) -> list:
+    return _hosts(info.endpoints, info.read_only_endpoints)
 
 
 def build_database_url(info: DatabaseInfo) -> str:
-    hosts = ",".join(_hosts(info.endpoints, info.read_only_endpoints))
+    hosts = ",".join(database_hosts(info))
     params = ["target_session_attrs=read-write", "connect_timeout=5"]
     if info.tls:
         params.append("sslmode=require")

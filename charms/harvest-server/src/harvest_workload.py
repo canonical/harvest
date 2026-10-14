@@ -6,7 +6,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from charms.operator_libs_linux.v2 import snap
 
@@ -16,11 +16,34 @@ SNAP_NAME = "harvest"
 COMMON = Path("/var/snap/harvest/common")
 CONFIG_PATH = COMMON / "server.toml"
 CA_PATH = COMMON / "db-ca.pem"
+DIGEST_PATH = COMMON / ".charm-resource-digest"
 AGENT_BINARY = "/snap/harvest/current/bin/harvest-agent"
+SNAP_ATTEMPTS = 5
+SNAP_BACKOFF = 10
 
 
 class WorkloadError(Exception):
     pass
+
+
+def _usable(resource: Optional[Path]) -> bool:
+    return resource is not None and resource.exists() and resource.stat().st_size > 0
+
+
+def _digest(resource: Path) -> str:
+    return hashlib.sha256(resource.read_bytes()).hexdigest()
+
+
+def _with_retries(action: Callable[[], None]) -> None:
+    for attempt in range(1, SNAP_ATTEMPTS + 1):
+        try:
+            action()
+            return
+        except snap.SnapError as e:
+            if attempt == SNAP_ATTEMPTS:
+                raise WorkloadError(f"snap operation failed: {e}") from e
+            logger.warning("snap operation failed (attempt %d of %d): %s", attempt, SNAP_ATTEMPTS, e)
+            time.sleep(SNAP_BACKOFF * attempt)
 
 
 class Workload:
@@ -33,11 +56,20 @@ class Workload:
         return snap.SnapCache()[SNAP_NAME]
 
     def install(self, channel: str, resource: Optional[Path]) -> None:
-        if resource is not None and resource.exists() and resource.stat().st_size > 0:
-            snap.install_local(str(resource), dangerous=True)
+        if _usable(resource):
+            _with_retries(lambda: snap.install_local(str(resource), dangerous=True))
+            DIGEST_PATH.write_text(_digest(resource))
         else:
-            self._snap().ensure(snap.SnapState.Latest, channel=channel)
-        self._snap().hold()
+            _with_retries(lambda: self._snap().ensure(snap.SnapState.Latest, channel=channel))
+        _with_retries(lambda: self._snap().hold())
+
+    def needs_install(self, resource: Optional[Path]) -> bool:
+        if not self.installed():
+            return True
+        if not _usable(resource):
+            return False
+        current = DIGEST_PATH.read_text().strip() if DIGEST_PATH.exists() else ""
+        return current != _digest(resource)
 
     def installed(self) -> bool:
         try:
@@ -52,7 +84,7 @@ class Workload:
             return ""
 
     def set_snap_config(self, values: dict) -> None:
-        self._snap().set({k: str(v) for k, v in values.items()})
+        _with_retries(lambda: self._snap().set({k: str(v) for k, v in values.items()}))
 
     def write_file(self, path: Path, content: str, mode: int = 0o600) -> bool:
         current = path.read_text() if path.exists() else None
@@ -98,13 +130,13 @@ class Workload:
         return int(database), int(binary)
 
     def start(self) -> None:
-        self._snap().start([self.service], enable=True)
+        _with_retries(lambda: self._snap().start([self.service], enable=True))
 
     def stop(self, services: list) -> None:
-        self._snap().stop(services, disable=True)
+        _with_retries(lambda: self._snap().stop(services, disable=True))
 
     def restart(self) -> None:
-        self._snap().restart([self.service])
+        _with_retries(lambda: self._snap().restart([self.service]))
 
     def running(self) -> bool:
         try:
@@ -112,6 +144,13 @@ class Workload:
         except snap.SnapError:
             return False
         return bool(services.get(self.service, {}).get("active"))
+
+    def enabled(self) -> bool:
+        try:
+            services = self._snap().services
+        except snap.SnapError:
+            return False
+        return bool(services.get(self.service, {}).get("enabled"))
 
     def ready(self) -> bool:
         try:
