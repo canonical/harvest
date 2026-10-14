@@ -21,7 +21,6 @@ from harvest_config import (
     build_database_url,
     database_hosts,
     render_server_toml,
-    substitute_secrets,
 )
 from harvest_workload import AGENT_BINARY, CA_PATH, CONFIG_PATH, Workload, WorkloadError
 
@@ -86,6 +85,10 @@ class HarvestServerCharm(ops.CharmBase):
             self.on.secret_changed,
             self.on[PEER].relation_changed,
             self.on[PEER].relation_departed,
+            self.on["llm-provider"].relation_changed,
+            self.on["llm-provider"].relation_broken,
+            self.on["auth-provider"].relation_changed,
+            self.on["auth-provider"].relation_broken,
             self.on["database"].relation_broken,
             self.on["harvest-api"].relation_joined,
             self.database.on.database_created,
@@ -190,39 +193,127 @@ class HarvestServerCharm(ops.CharmBase):
         return f"http://{address}:{INTERNAL_PORT}"
 
     def _auth_providers(self, public_url: Optional[str]) -> tuple:
-        oidc = google = None
-        if self.config.get("oidc-issuer-url") and self.config.get("oidc-client-id"):
-            content = self._read_secret("oidc-secret") or {}
-            if not public_url:
-                raise Waiting("waiting for the public URL from haproxy before enabling OIDC")
-            oidc = {
-                "issuer_url": self.config["oidc-issuer-url"],
-                "client_id": self.config["oidc-client-id"],
-                "client_secret": content.get("client-secret", ""),
-                "redirect_uri": f"{public_url}/auth/oidc/callback",
-                "display_name": self.config.get("oidc-display-name") or "",
-            }
-        if self.config.get("google-client-id"):
-            content = self._read_secret("google-secret") or {}
-            if not public_url:
-                raise Waiting("waiting for the public URL from haproxy before enabling Google login")
-            google = {
-                "client_id": self.config["google-client-id"],
-                "client_secret": content.get("client-secret", ""),
-                "redirect_uri": f"{public_url}/auth/google/callback",
-            }
+        oidc = None
+        google = None
+        for relation in self.model.relations.get("auth-provider", []):
+            app = relation.app
+            if app is None:
+                continue
+            data = relation.data[app]
+            if str(data.get("enabled", "true")).lower() == "false":
+                continue
+            provider = (data.get("provider") or "").strip().lower()
+            secret_id = (data.get("secret_id") or "").strip()
+            secret_content = {}
+            if secret_id:
+                try:
+                    secret_content = self.model.get_secret(id=secret_id).get_content(refresh=True)
+                except (ops.SecretNotFoundError, ops.ModelError) as e:
+                    raise Blocked(f"cannot read auth-provider secret from relation {relation.id}: grant it to the application") from e
+            if provider == "oidc":
+                issuer_url = (data.get("issuer_url") or "").strip()
+                client_id = (data.get("client_id") or "").strip()
+                if not issuer_url or not client_id:
+                    raise Blocked(f"auth-provider relation {relation.id} for oidc is missing issuer_url or client_id")
+                if not public_url:
+                    raise Waiting("waiting for the public URL from haproxy before enabling OIDC")
+                oidc = {
+                    "issuer_url": issuer_url,
+                    "client_id": client_id,
+                    "client_secret": secret_content.get("client-secret", ""),
+                    "redirect_uri": f"{public_url}/auth/oidc/callback",
+                    "display_name": (data.get("display_name") or "").strip(),
+                }
+            elif provider == "google":
+                client_id = (data.get("client_id") or "").strip()
+                if not client_id:
+                    raise Blocked(f"auth-provider relation {relation.id} for google is missing client_id")
+                if not public_url:
+                    raise Waiting("waiting for the public URL from haproxy before enabling Google login")
+                google = {
+                    "client_id": client_id,
+                    "client_secret": secret_content.get("client-secret", ""),
+                    "redirect_uri": f"{public_url}/auth/google/callback",
+                }
+            else:
+                raise Blocked(f"auth-provider relation {relation.id} has unsupported provider {provider or '<empty>'}")
         return oidc, google
 
+    def _llm_providers(self) -> str:
+        providers = []
+        for relation in self.model.relations.get("llm-provider", []):
+            app = relation.app
+            if app is None:
+                continue
+            data = relation.data[app]
+            if str(data.get("enabled", "true")).lower() == "false":
+                continue
+            provider = (data.get("provider") or "").strip()
+            model = (data.get("model") or "").strip()
+            if not provider or not model:
+                raise Blocked(f"llm-provider relation {relation.id} is missing provider or model")
+            try:
+                priority = int((data.get("priority") or "100").strip())
+            except ValueError as e:
+                raise Blocked(f"llm-provider relation {relation.id} has invalid priority") from e
+            entry = {
+                "relation_id": relation.id,
+                "provider": provider,
+                "model": model,
+                "base_url": (data.get("base_url") or "").strip(),
+                "user_provided_key": str(data.get("user_provided_key", "false")).lower() == "true",
+                "timeout_secs": (data.get("timeout_secs") or "").strip(),
+                "max_retries": (data.get("max_retries") or "").strip(),
+                "priority": priority,
+                "api_key": "",
+            }
+            if entry["timeout_secs"]:
+                try:
+                    int(entry["timeout_secs"])
+                except ValueError as e:
+                    raise Blocked(f"llm-provider relation {relation.id} has invalid timeout_secs") from e
+            if entry["max_retries"]:
+                try:
+                    int(entry["max_retries"])
+                except ValueError as e:
+                    raise Blocked(f"llm-provider relation {relation.id} has invalid max_retries") from e
+            secret_id = (data.get("secret_id") or "").strip()
+            if secret_id:
+                try:
+                    secret_content = self.model.get_secret(id=secret_id).get_content(refresh=True)
+                except (ops.SecretNotFoundError, ops.ModelError) as e:
+                    raise Blocked(f"cannot read llm-provider secret from relation {relation.id}: grant it to the application") from e
+                entry["api_key"] = secret_content.get("api-key", "")
+            providers.append(entry)
+        if not providers:
+            raise Blocked("relate at least one llm-provider application")
+        providers.sort(key=lambda item: (item["priority"], item["relation_id"]))
+        lines = []
+        for item in providers:
+            lines.extend([
+                "[[llm]]",
+                f'provider = "{item["provider"]}"',
+                f'model = "{item["model"]}"',
+            ])
+            if item["base_url"]:
+                lines.append(f'base_url = "{item["base_url"]}"')
+            lines.append(f'api_key = "{item["api_key"]}"')
+            if item["user_provided_key"]:
+                lines.append("user_provided_key = true")
+            if item["timeout_secs"]:
+                lines.append(f"timeout_secs = {item['timeout_secs']}")
+            if item["max_retries"]:
+                lines.append(f"max_retries = {item['max_retries']}")
+            lines.append("")
+        return "\n".join(lines).strip()
+
     def _settings(self, cluster: dict, info: DatabaseInfo, ca: Optional[str]) -> ServerSettings:
-        llm = (self.config.get("llm-providers") or "").strip()
-        if not llm:
-            raise Blocked("set llm-providers to at least one [[llm]] block")
-        try:
-            llm = substitute_secrets(llm, self._read_secret("llm-secret") or {})
-        except KeyError as e:
-            raise Blocked(f"llm-providers references {e.args[0]} which llm-secret does not contain") from e
+        llm = self._llm_providers()
         public_url = self._public_url()
         oidc, google = self._auth_providers(public_url)
+        allow_local_login = bool(self.config.get("allow-local-login", True))
+        if not allow_local_login and not oidc and not google:
+            raise Blocked("allow-local-login is false but no auth-provider relation is configured")
         return ServerSettings(
             database_url=build_database_url(info),
             database_ca_file=str(CA_PATH) if ca else None,
@@ -234,7 +325,7 @@ class HarvestServerCharm(ops.CharmBase):
             user_key_encryption_key=cluster["user-key-encryption-key"],
             public_url=public_url,
             llm_providers=llm,
-            allow_local_login=bool(self.config.get("allow-local-login", True)),
+            allow_local_login=allow_local_login,
             max_iterations=int(self.config.get("max-iterations", 25)),
             drain_timeout_secs=int(self.config.get("drain-timeout", 120)),
             binary_path=AGENT_BINARY,

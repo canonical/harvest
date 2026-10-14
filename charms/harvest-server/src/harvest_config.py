@@ -1,4 +1,3 @@
-import re
 from dataclasses import dataclass
 from typing import Mapping, Optional
 from urllib.parse import quote
@@ -29,9 +28,6 @@ API_PATHS = [
     "/tool-description",
     "/version",
 ]
-
-_SECRET_PLACEHOLDER = re.compile(r"\$\{secret:([A-Za-z0-9_.-]+)\}")
-
 
 @dataclass(frozen=True)
 class DatabaseInfo:
@@ -80,13 +76,6 @@ def build_database_url(info: DatabaseInfo) -> str:
     user = quote(info.username, safe="")
     password = quote(info.password, safe="")
     return f"postgres://{user}:{password}@{hosts}/{quote(info.database, safe='')}?{'&'.join(params)}"
-
-
-def substitute_secrets(text: str, secrets: Mapping[str, str]) -> str:
-    def replace(match):
-        return secrets[match.group(1)]
-
-    return _SECRET_PLACEHOLDER.sub(replace, text)
 
 
 def _quote(value: str) -> str:
