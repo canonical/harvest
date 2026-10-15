@@ -44,8 +44,12 @@ class HarvestLlmProviderOpenaiCompatibleCharm(ops.CharmBase):
         for relation in relations:
             if api_key_secret is not None:
                 api_key_secret.grant(relation)
+            provider_id = self.app.name
+            display_name = self.app.name.replace("-", " ").title()
             payload = {
                 "provider": "openai-compatible",
+                "id": provider_id,
+                "name": display_name,
                 "enabled": str(enabled).lower(),
                 "priority": str(int(self.config.get("priority", 100))),
                 "model": model,
