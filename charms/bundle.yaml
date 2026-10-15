@@ -30,7 +30,7 @@ applications:
     num_units: 1
     to: ["3"]
     options:
-      external-hostname: harvest.test
+      external-hostname: harvest-development.thinking-dragon.net
 
   self-signed-certificates:
     charm: self-signed-certificates
@@ -46,7 +46,7 @@ applications:
     resources:
       harvest-snap: ./harvest.snap
     options:
-      hostname: harvest.test
+      hostname: harvest-development.thinking-dragon.net
 
   harvest-llm-provider-openai-compatible:
     charm: ./harvest-llm-provider-openai-compatible/harvest-llm-provider-openai-compatible_amd64.charm
@@ -64,7 +64,7 @@ applications:
     resources:
       harvest-snap: ./harvest.snap
     options:
-      hostname: harvest.test
+      hostname: harvest-development.thinking-dragon.net
 
 relations:
   - [haproxy:certificates, self-signed-certificates:certificates]
