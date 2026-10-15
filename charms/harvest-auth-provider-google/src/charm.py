@@ -36,8 +36,6 @@ class HarvestAuthProviderGoogleCharm(ops.CharmBase):
             return
         relations = self.model.relations.get("auth-provider", [])
         for relation in relations:
-            if client_secret is not None:
-                client_secret.grant(relation)
             payload = {
                 "provider": "google",
                 "enabled": str(enabled).lower(),
