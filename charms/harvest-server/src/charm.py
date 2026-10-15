@@ -249,6 +249,8 @@ class HarvestServerCharm(ops.CharmBase):
             if str(data.get("enabled", "true")).lower() == "false":
                 continue
             provider = (data.get("provider") or "").strip()
+            provider_id = (data.get("id") or app.name or "").strip()
+            provider_name = (data.get("name") or app.name or "").strip()
             model = (data.get("model") or "").strip()
             if not provider or not model:
                 raise Blocked(f"llm-provider relation {relation.id} is missing provider or model")
@@ -259,6 +261,8 @@ class HarvestServerCharm(ops.CharmBase):
             entry = {
                 "relation_id": relation.id,
                 "provider": provider,
+                "id": provider_id,
+                "name": provider_name,
                 "model": model,
                 "base_url": (data.get("base_url") or "").strip(),
                 "user_provided_key": str(data.get("user_provided_key", "false")).lower() == "true",
@@ -293,6 +297,8 @@ class HarvestServerCharm(ops.CharmBase):
             lines.extend([
                 "[[llm]]",
                 f'provider = "{item["provider"]}"',
+                f'id = "{item["id"]}"',
+                f'name = "{item["name"]}"',
                 f'model = "{item["model"]}"',
             ])
             if item["base_url"]:
