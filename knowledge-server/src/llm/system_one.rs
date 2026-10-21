@@ -101,11 +101,17 @@ impl NextAction {
 
     pub fn criterion(self) -> &'static str {
         match self {
-            NextAction::GetEvidencePack => "The evidence pack has not been read yet and would answer the question directly",
-            NextAction::SearchSymbols => "Symbol names, signatures, or paths are still unknown and must be located first",
+            NextAction::GetEvidencePack => {
+                "The evidence pack has not been read yet and would answer the question directly"
+            }
+            NextAction::SearchSymbols => {
+                "Symbol names, signatures, or paths are still unknown and must be located first"
+            }
             NextAction::ReadSources => "Symbols are known but their bodies have not been read yet",
             NextAction::Synthesize => "Enough evidence has been gathered to answer",
-            NextAction::AskQuestion => "The question is ambiguous and the user must choose a direction",
+            NextAction::AskQuestion => {
+                "The question is ambiguous and the user must choose a direction"
+            }
             NextAction::Continue => "Useful work remains but no single action dominates",
         }
     }
@@ -138,7 +144,10 @@ pub fn resolve_next_action(
         confidence: 0.0,
         fallback: true,
     };
-    let Some(SystemOneAnswer::Choice { choice, confidence, .. }) = answers.get(NEXT_ACTION_KEY) else {
+    let Some(SystemOneAnswer::Choice {
+        choice, confidence, ..
+    }) = answers.get(NEXT_ACTION_KEY)
+    else {
         return fallback();
     };
     let Some(action) = NextAction::from_key(choice) else {
@@ -148,9 +157,17 @@ pub fn resolve_next_action(
         return fallback();
     }
     if !confidence.is_finite() || *confidence < min_confidence {
-        return NextActionDecision { action, confidence: *confidence, fallback: true };
+        return NextActionDecision {
+            action,
+            confidence: *confidence,
+            fallback: true,
+        };
     }
-    NextActionDecision { action, confidence: *confidence, fallback: false }
+    NextActionDecision {
+        action,
+        confidence: *confidence,
+        fallback: false,
+    }
 }
 
 impl SystemOneClient {
@@ -246,17 +263,30 @@ impl SystemOneClient {
             SystemOneQuestion::Choice {
                 instructions: "The primary intent of this user message".into(),
                 criteria: HashMap::from([
-                    ("conversational".to_string(), "General question or chat, no code or infrastructure action needed".into()),
-                    ("research".to_string(), "Needs to search or analyze code or repositories".into()),
-                    ("action".to_string(), "Wants to run, deploy, provision, or modify infrastructure".into()),
-                    ("hybrid".to_string(), "Both research and action in one request".into()),
+                    (
+                        "conversational".to_string(),
+                        "General question or chat, no code or infrastructure action needed".into(),
+                    ),
+                    (
+                        "research".to_string(),
+                        "Needs to search or analyze code or repositories".into(),
+                    ),
+                    (
+                        "action".to_string(),
+                        "Wants to run, deploy, provision, or modify infrastructure".into(),
+                    ),
+                    (
+                        "hybrid".to_string(),
+                        "Both research and action in one request".into(),
+                    ),
                 ]),
             },
         );
         questions.insert(
             "needs_tools".to_string(),
             SystemOneQuestion::Noul {
-                instructions: "Answering this message requires calling tools beyond ask_user".into(),
+                instructions: "Answering this message requires calling tools beyond ask_user"
+                    .into(),
             },
         );
 
@@ -301,9 +331,21 @@ impl SystemOneClient {
             SystemOneQuestion::Choice {
                 instructions: "Which model tier is appropriate for this turn?".into(),
                 criteria: HashMap::from([
-                    ("small".to_string(), "Simple factual, conversational, or lookup — no multi-step reasoning".into()),
-                    ("medium".to_string(), "Moderate reasoning, single tool call, or straightforward code analysis".into()),
-                    ("large".to_string(), "Multi-step reasoning, deployment design, complex code relationships".into()),
+                    (
+                        "small".to_string(),
+                        "Simple factual, conversational, or lookup — no multi-step reasoning"
+                            .into(),
+                    ),
+                    (
+                        "medium".to_string(),
+                        "Moderate reasoning, single tool call, or straightforward code analysis"
+                            .into(),
+                    ),
+                    (
+                        "large".to_string(),
+                        "Multi-step reasoning, deployment design, complex code relationships"
+                            .into(),
+                    ),
                 ]),
             },
         );
@@ -341,7 +383,8 @@ impl SystemOneClient {
         tool_calls: &[(String, String)],
         history: &str,
     ) -> Result<Vec<bool>> {
-        self.filter_tool_calls_with_threshold(tool_calls, history, 0.5).await
+        self.filter_tool_calls_with_threshold(tool_calls, history, 0.5)
+            .await
     }
 
     pub async fn filter_tool_calls_with_threshold(
@@ -389,11 +432,7 @@ impl SystemOneClient {
             .collect())
     }
 
-    pub async fn should_compact(
-        &self,
-        history: &str,
-        current_query: &str,
-    ) -> Result<(bool, f64)> {
+    pub async fn should_compact(&self, history: &str, current_query: &str) -> Result<(bool, f64)> {
         let mut questions = HashMap::new();
         questions.insert(
             "needs_compaction".to_string(),
@@ -404,14 +443,12 @@ impl SystemOneClient {
             },
         );
 
-        let state = format!(
-            "Conversation history:\n{history}\n\nCurrent question:\n{current_query}"
-        );
+        let state =
+            format!("Conversation history:\n{history}\n\nCurrent question:\n{current_query}");
 
         let response = self.evaluate(&state, questions).await?;
 
-        if let Some(SystemOneAnswer::Noul { noul }) = response.answers.get("needs_compaction")
-        {
+        if let Some(SystemOneAnswer::Noul { noul }) = response.answers.get("needs_compaction") {
             Ok((*noul >= 0.5, *noul))
         } else {
             Ok((true, 1.0))
@@ -435,7 +472,8 @@ impl SystemOneClient {
         questions.insert(
             "breadth".to_string(),
             SystemOneQuestion::Score {
-                instructions: "How many independent research angles does this question have?".into(),
+                instructions: "How many independent research angles does this question have?"
+                    .into(),
                 criteria: vec![
                     "One focused question — one angle suffices".into(),
                     "2-3 related but distinct angles".into(),
@@ -483,8 +521,8 @@ impl SystemOneClient {
         questions.insert(
             "needs_mermaid".to_string(),
             SystemOneQuestion::Noul {
-                instructions:
-                    "This turn likely involves generating diagrams or visual graphs".into(),
+                instructions: "This turn likely involves generating diagrams or visual graphs"
+                    .into(),
             },
         );
         questions.insert(
@@ -552,16 +590,29 @@ impl SystemOneClient {
             SystemOneQuestion::Choice {
                 instructions: "Which model tier is appropriate for this turn?".into(),
                 criteria: HashMap::from([
-                    ("small".to_string(), "Simple factual, conversational, or lookup — no multi-step reasoning".into()),
-                    ("medium".to_string(), "Moderate reasoning, single tool call, or straightforward code analysis".into()),
-                    ("large".to_string(), "Multi-step reasoning, deployment design, complex code relationships".into()),
+                    (
+                        "small".to_string(),
+                        "Simple factual, conversational, or lookup — no multi-step reasoning"
+                            .into(),
+                    ),
+                    (
+                        "medium".to_string(),
+                        "Moderate reasoning, single tool call, or straightforward code analysis"
+                            .into(),
+                    ),
+                    (
+                        "large".to_string(),
+                        "Multi-step reasoning, deployment design, complex code relationships"
+                            .into(),
+                    ),
                 ]),
             },
         );
         questions.insert(
             "needs_deep_reasoning".to_string(),
             SystemOneQuestion::Noul {
-                instructions: "This turn requires deep multi-step reasoning to decide what to do next".into(),
+                instructions:
+                    "This turn requires deep multi-step reasoning to decide what to do next".into(),
             },
         );
 
@@ -576,7 +627,12 @@ impl SystemOneClient {
         let mut tier = ModelTier::Large;
         let mut confidence = 0.0;
 
-        if let Some(SystemOneAnswer::Choice { choice, confidence: c, .. }) = response.answers.get("model_tier") {
+        if let Some(SystemOneAnswer::Choice {
+            choice,
+            confidence: c,
+            ..
+        }) = response.answers.get("model_tier")
+        {
             tier = match choice.as_str() {
                 "small" => ModelTier::Small,
                 "medium" => ModelTier::Medium,
@@ -623,11 +679,7 @@ impl SystemOneClient {
         }
     }
 
-    pub async fn select_tools(
-        &self,
-        query: &str,
-        tool_names: &[String],
-    ) -> Result<Vec<String>> {
+    pub async fn select_tools(&self, query: &str, tool_names: &[String]) -> Result<Vec<String>> {
         if tool_names.len() <= 8 {
             return Ok(tool_names.to_vec());
         }
@@ -637,18 +689,27 @@ impl SystemOneClient {
             questions.insert(
                 format!("use_{name}"),
                 SystemOneQuestion::Noul {
-                    instructions: format!("The tool '{name}' is likely to be needed to answer: {query}"),
+                    instructions: format!(
+                        "The tool '{name}' is likely to be needed to answer: {query}"
+                    ),
                 },
             );
         }
 
         let response = self.evaluate(query, questions).await?;
 
-        let selected: Vec<String> = tool_names.iter()
+        let selected: Vec<String> = tool_names
+            .iter()
             .filter(|name| {
-                response.answers.get(&format!("use_{}", name))
+                response
+                    .answers
+                    .get(&format!("use_{}", name))
                     .map(|a| {
-                        if let SystemOneAnswer::Noul { noul } = a { *noul >= 0.4 } else { true }
+                        if let SystemOneAnswer::Noul { noul } = a {
+                            *noul >= 0.4
+                        } else {
+                            true
+                        }
                     })
                     .unwrap_or(true)
             })
@@ -688,7 +749,11 @@ impl SystemOneClient {
         );
 
         let response = self.evaluate(goal, questions).await?;
-        Ok(resolve_next_action(&response.answers, candidates, min_confidence))
+        Ok(resolve_next_action(
+            &response.answers,
+            candidates,
+            min_confidence,
+        ))
     }
 
     pub async fn should_synthesize(
@@ -732,7 +797,8 @@ impl SystemOneClient {
 
         let response = self.evaluate(goal, questions).await?;
 
-        if let Some(SystemOneAnswer::Noul { noul }) = response.answers.get("all_variants_examined") {
+        if let Some(SystemOneAnswer::Noul { noul }) = response.answers.get("all_variants_examined")
+        {
             Ok((*noul >= 0.5, *noul))
         } else {
             Ok((false, 0.0))
@@ -770,7 +836,9 @@ impl SystemOneClient {
 
         let response = self.evaluate(goal, questions).await?;
 
-        if let Some(SystemOneAnswer::Noul { noul }) = response.answers.get("capability_gate_located") {
+        if let Some(SystemOneAnswer::Noul { noul }) =
+            response.answers.get("capability_gate_located")
+        {
             Ok((*noul >= threshold, *noul))
         } else {
             Ok((false, 0.0))
@@ -866,7 +934,10 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let score = client.score_tool_result_relevance("search_symbols", "found auth middleware", "find auth").await.unwrap();
+        let score = client
+            .score_tool_result_relevance("search_symbols", "found auth middleware", "find auth")
+            .await
+            .unwrap();
         assert!((score - 0.85).abs() < f64::EPSILON);
     }
 
@@ -875,11 +946,15 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("POST").path("/");
-            then.status(200).json_body(so_response(serde_json::json!({})));
+            then.status(200)
+                .json_body(so_response(serde_json::json!({})));
         });
 
         let client = mock_client(&server);
-        let score = client.score_tool_result_relevance("tool", "result", "goal").await.unwrap();
+        let score = client
+            .score_tool_result_relevance("tool", "result", "goal")
+            .await
+            .unwrap();
         assert!((score - 1.0).abs() < f64::EPSILON);
     }
 
@@ -959,7 +1034,10 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let (should, conf) = client.should_synthesize("find auth", "found auth in auth.rs").await.unwrap();
+        let (should, conf) = client
+            .should_synthesize("find auth", "found auth in auth.rs")
+            .await
+            .unwrap();
         assert!(should);
         assert!((conf - 0.9).abs() < f64::EPSILON);
     }
@@ -975,7 +1053,10 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let (should, _) = client.should_synthesize("find auth", "no results yet").await.unwrap();
+        let (should, _) = client
+            .should_synthesize("find auth", "no results yet")
+            .await
+            .unwrap();
         assert!(!should);
     }
 
@@ -991,7 +1072,10 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let (tier, _, needs_deep) = client.route_model_enhanced("complex query", "").await.unwrap();
+        let (tier, _, needs_deep) = client
+            .route_model_enhanced("complex query", "")
+            .await
+            .unwrap();
         assert!(needs_deep);
         assert_eq!(tier, ModelTier::Medium);
     }
@@ -1008,7 +1092,10 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let (tier, _, needs_deep) = client.route_model_enhanced("simple query", "").await.unwrap();
+        let (tier, _, needs_deep) = client
+            .route_model_enhanced("simple query", "")
+            .await
+            .unwrap();
         assert!(!needs_deep);
         assert_eq!(tier, ModelTier::Small);
     }
@@ -1025,8 +1112,14 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let calls = vec![("search".to_string(), "{}".to_string()), ("get_source".to_string(), "{}".to_string())];
-        let keep = client.filter_tool_calls_with_threshold(&calls, "history", 0.5).await.unwrap();
+        let calls = vec![
+            ("search".to_string(), "{}".to_string()),
+            ("get_source".to_string(), "{}".to_string()),
+        ];
+        let keep = client
+            .filter_tool_calls_with_threshold(&calls, "history", 0.5)
+            .await
+            .unwrap();
         assert_eq!(keep, vec![false, true]);
     }
 
@@ -1042,8 +1135,14 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let calls = vec![("search".to_string(), "{}".to_string()), ("get_source".to_string(), "{}".to_string())];
-        let keep = client.filter_tool_calls_with_threshold(&calls, "history", 0.2).await.unwrap();
+        let calls = vec![
+            ("search".to_string(), "{}".to_string()),
+            ("get_source".to_string(), "{}".to_string()),
+        ];
+        let keep = client
+            .filter_tool_calls_with_threshold(&calls, "history", 0.2)
+            .await
+            .unwrap();
         assert_eq!(keep, vec![true, true]);
     }
 
@@ -1058,7 +1157,10 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let (located, conf) = client.should_synthesize_capability_gate("does it support HA", "found the flag").await.unwrap();
+        let (located, conf) = client
+            .should_synthesize_capability_gate("does it support HA", "found the flag")
+            .await
+            .unwrap();
         assert!(located);
         assert!((conf - 0.9).abs() < f64::EPSILON);
     }
@@ -1074,7 +1176,10 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let (located, _) = client.should_synthesize_capability_gate("goal", "findings").await.unwrap();
+        let (located, _) = client
+            .should_synthesize_capability_gate("goal", "findings")
+            .await
+            .unwrap();
         assert!(!located);
     }
 
@@ -1083,11 +1188,15 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("POST").path("/");
-            then.status(200).json_body(so_response(serde_json::json!({})));
+            then.status(200)
+                .json_body(so_response(serde_json::json!({})));
         });
 
         let client = mock_client(&server);
-        let (located, conf) = client.should_synthesize_capability_gate("goal", "findings").await.unwrap();
+        let (located, conf) = client
+            .should_synthesize_capability_gate("goal", "findings")
+            .await
+            .unwrap();
         assert!(!located);
         assert!((conf - 0.0).abs() < f64::EPSILON);
     }
@@ -1101,14 +1210,19 @@ mod tests {
                 body.contains("capability_gate_located")
                     && body.contains("declaration")
                     && body.contains("enforces")
-            }).method("POST").path("/");
+            })
+            .method("POST")
+            .path("/");
             then.status(200).json_body(so_response(serde_json::json!({
                 "capability_gate_located": { "type": "noul", "noul": 0.9 }
             })));
         });
 
         let client = mock_client(&server);
-        let (located, _) = client.should_synthesize_capability_gate("goal", "findings").await.unwrap();
+        let (located, _) = client
+            .should_synthesize_capability_gate("goal", "findings")
+            .await
+            .unwrap();
         assert!(located);
     }
 
@@ -1123,8 +1237,20 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        assert!(client.should_synthesize_capability_gate_with_threshold("goal", "f", 0.6).await.unwrap().0);
-        assert!(!client.should_synthesize_capability_gate_with_threshold("goal", "f", 0.8).await.unwrap().0);
+        assert!(
+            client
+                .should_synthesize_capability_gate_with_threshold("goal", "f", 0.6)
+                .await
+                .unwrap()
+                .0
+        );
+        assert!(
+            !client
+                .should_synthesize_capability_gate_with_threshold("goal", "f", 0.8)
+                .await
+                .unwrap()
+                .0
+        );
     }
 
     #[tokio::test]
@@ -1138,7 +1264,10 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let (covered, conf) = client.should_synthesize_coverage("does NetApp support HA", "NFS yes, iSCSI no").await.unwrap();
+        let (covered, conf) = client
+            .should_synthesize_coverage("does NetApp support HA", "NFS yes, iSCSI no")
+            .await
+            .unwrap();
         assert!(covered);
         assert!((conf - 0.9).abs() < f64::EPSILON);
     }
@@ -1154,7 +1283,10 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let (covered, _) = client.should_synthesize_coverage("does NetApp support HA", "NFS yes").await.unwrap();
+        let (covered, _) = client
+            .should_synthesize_coverage("does NetApp support HA", "NFS yes")
+            .await
+            .unwrap();
         assert!(!covered);
     }
 
@@ -1163,11 +1295,15 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("POST").path("/");
-            then.status(200).json_body(so_response(serde_json::json!({})));
+            then.status(200)
+                .json_body(so_response(serde_json::json!({})));
         });
 
         let client = mock_client(&server);
-        let (covered, conf) = client.should_synthesize_coverage("goal", "findings").await.unwrap();
+        let (covered, conf) = client
+            .should_synthesize_coverage("goal", "findings")
+            .await
+            .unwrap();
         assert!(!covered);
         assert!((conf - 0.0).abs() < f64::EPSILON);
     }
@@ -1183,7 +1319,10 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let (uniform, conf) = client.should_synthesize_uniform("does anything differ", "all identical").await.unwrap();
+        let (uniform, conf) = client
+            .should_synthesize_uniform("does anything differ", "all identical")
+            .await
+            .unwrap();
         assert!(uniform);
         assert!((conf - 0.9).abs() < f64::EPSILON);
     }
@@ -1199,7 +1338,10 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let (uniform, _) = client.should_synthesize_uniform("does anything differ", "NFS yes, iSCSI no").await.unwrap();
+        let (uniform, _) = client
+            .should_synthesize_uniform("does anything differ", "NFS yes, iSCSI no")
+            .await
+            .unwrap();
         assert!(!uniform);
     }
 
@@ -1208,11 +1350,15 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("POST").path("/");
-            then.status(200).json_body(so_response(serde_json::json!({})));
+            then.status(200)
+                .json_body(so_response(serde_json::json!({})));
         });
 
         let client = mock_client(&server);
-        let (uniform, conf) = client.should_synthesize_uniform("goal", "findings").await.unwrap();
+        let (uniform, conf) = client
+            .should_synthesize_uniform("goal", "findings")
+            .await
+            .unwrap();
         assert!(!uniform);
         assert!((conf - 0.0).abs() < f64::EPSILON);
     }
@@ -1228,7 +1374,10 @@ mod tests {
         });
 
         let client = mock_client(&server);
-        let (_, conf) = client.should_synthesize_uniform("goal", "findings").await.unwrap();
+        let (_, conf) = client
+            .should_synthesize_uniform("goal", "findings")
+            .await
+            .unwrap();
         assert!((conf - 1.0).abs() < f64::EPSILON);
         assert_eq!(mock.calls(), 1);
     }
@@ -1245,7 +1394,11 @@ mod tests {
         m
     }
 
-    const CANDIDATES: [NextAction; 3] = [NextAction::GetEvidencePack, NextAction::SearchSymbols, NextAction::Synthesize];
+    const CANDIDATES: [NextAction; 3] = [
+        NextAction::GetEvidencePack,
+        NextAction::SearchSymbols,
+        NextAction::Synthesize,
+    ];
 
     #[test]
     fn next_action_keys_round_trip() {
@@ -1257,7 +1410,11 @@ mod tests {
             NextAction::AskQuestion,
             NextAction::Continue,
         ] {
-            assert_eq!(NextAction::from_key(a.key()), Some(a), "key round trip failed for {a:?}");
+            assert_eq!(
+                NextAction::from_key(a.key()),
+                Some(a),
+                "key round trip failed for {a:?}"
+            );
         }
     }
 
@@ -1269,7 +1426,11 @@ mod tests {
     #[test]
     fn a_valid_action_outside_the_candidate_set_is_rejected() {
         let d = resolve_next_action(&choice("read_sources", 0.9), &CANDIDATES, 0.5);
-        assert_eq!(d.action, NextAction::GetEvidencePack, "read_sources was not offered, so it must not be chosen");
+        assert_eq!(
+            d.action,
+            NextAction::GetEvidencePack,
+            "read_sources was not offered, so it must not be chosen"
+        );
         assert!(d.fallback);
         assert_eq!(d.confidence, 0.0);
     }
@@ -1313,7 +1474,10 @@ mod tests {
     #[test]
     fn a_wrongly_typed_answer_falls_back() {
         let mut m = HashMap::new();
-        m.insert(NEXT_ACTION_KEY.to_string(), SystemOneAnswer::Noul { noul: 0.9 });
+        m.insert(
+            NEXT_ACTION_KEY.to_string(),
+            SystemOneAnswer::Noul { noul: 0.9 },
+        );
         let d = resolve_next_action(&m, &CANDIDATES, 0.5);
         assert!(d.fallback);
     }
@@ -1332,14 +1496,21 @@ mod tests {
         let mut values: Vec<&String> = criteria.values().collect();
         values.sort();
         values.dedup();
-        assert_eq!(values.len(), CANDIDATES.len(), "criteria must be distinguishable");
+        assert_eq!(
+            values.len(),
+            CANDIDATES.len(),
+            "criteria must be distinguishable"
+        );
     }
 
     #[test]
     fn criteria_use_the_router_keys() {
         let criteria = candidate_criteria(&CANDIDATES);
         for a in CANDIDATES {
-            assert!(criteria.contains_key(a.key()), "missing criterion for {a:?}");
+            assert!(
+                criteria.contains_key(a.key()),
+                "missing criterion for {a:?}"
+            );
         }
     }
 
@@ -1347,10 +1518,18 @@ mod tests {
     async fn routing_without_candidates_never_calls_the_provider() {
         let server = httpmock::MockServer::start();
         let client = SystemOneClient::new(
-            &SystemOneConfig { endpoint: server.url("/"), api_key: "k".into(), model: "m".into(), ..Default::default() },
+            &SystemOneConfig {
+                endpoint: server.url("/"),
+                api_key: "k".into(),
+                model: "m".into(),
+                ..Default::default()
+            },
             "k".into(),
         );
-        let d = client.route_next_action("goal", "progress", &[], 0.5).await.unwrap();
+        let d = client
+            .route_next_action("goal", "progress", &[], 0.5)
+            .await
+            .unwrap();
         assert_eq!(d.action, NextAction::Continue);
         assert!(d.fallback);
     }

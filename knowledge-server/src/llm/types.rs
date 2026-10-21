@@ -56,13 +56,22 @@ pub struct Message {
 
 impl Message {
     pub fn system(text: impl Into<String>) -> Self {
-        Self { role: Role::System, content: MessageContent::Text(text.into()) }
+        Self {
+            role: Role::System,
+            content: MessageContent::Text(text.into()),
+        }
     }
     pub fn user(text: impl Into<String>) -> Self {
-        Self { role: Role::User, content: MessageContent::Text(text.into()) }
+        Self {
+            role: Role::User,
+            content: MessageContent::Text(text.into()),
+        }
     }
     pub fn assistant_text(text: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: MessageContent::Text(text.into()) }
+        Self {
+            role: Role::Assistant,
+            content: MessageContent::Text(text.into()),
+        }
     }
 }
 
@@ -121,8 +130,15 @@ pub struct ToolCall {
 
 #[derive(Debug, Clone)]
 pub enum LlmResponse {
-    Message { text: String, usage: Usage },
-    ToolCalls { calls: Vec<ToolCall>, preamble: String, usage: Usage },
+    Message {
+        text: String,
+        usage: Usage,
+    },
+    ToolCalls {
+        calls: Vec<ToolCall>,
+        preamble: String,
+        usage: Usage,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -167,7 +183,13 @@ pub struct ProviderMeta {
 
 impl ProviderMeta {
     pub fn new(id: impl Into<String>) -> Self {
-        Self { id: id.into(), expose_to_ui: true, name: None, models: None, user_provided_key: false }
+        Self {
+            id: id.into(),
+            expose_to_ui: true,
+            name: None,
+            models: None,
+            user_provided_key: false,
+        }
     }
 }
 
@@ -195,16 +217,49 @@ mod tests {
 
     #[test]
     fn usage_add_sums_each_field() {
-        let a = Usage { input_tokens: 10, output_tokens: 5, cache_read_tokens: 2, cache_creation_tokens: 1, reasoning_tokens: 0 };
-        let b = Usage { input_tokens: 20, output_tokens: 15, cache_read_tokens: 8, cache_creation_tokens: 4, reasoning_tokens: 3 };
+        let a = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 2,
+            cache_creation_tokens: 1,
+            reasoning_tokens: 0,
+        };
+        let b = Usage {
+            input_tokens: 20,
+            output_tokens: 15,
+            cache_read_tokens: 8,
+            cache_creation_tokens: 4,
+            reasoning_tokens: 3,
+        };
         let c = a + b;
-        assert_eq!(c, Usage { input_tokens: 30, output_tokens: 20, cache_read_tokens: 10, cache_creation_tokens: 5, reasoning_tokens: 3 });
+        assert_eq!(
+            c,
+            Usage {
+                input_tokens: 30,
+                output_tokens: 20,
+                cache_read_tokens: 10,
+                cache_creation_tokens: 5,
+                reasoning_tokens: 3
+            }
+        );
     }
 
     #[test]
     fn usage_add_assign_accumulates() {
-        let mut u = Usage { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0, reasoning_tokens: 0 };
-        u += Usage { input_tokens: 5, output_tokens: 5, cache_read_tokens: 0, cache_creation_tokens: 0, reasoning_tokens: 0 };
+        let mut u = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        u += Usage {
+            input_tokens: 5,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+        };
         assert_eq!(u.input_tokens, 15);
         assert_eq!(u.output_tokens, 10);
     }

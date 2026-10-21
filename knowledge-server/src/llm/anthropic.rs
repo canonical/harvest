@@ -8,7 +8,10 @@ use tokio::sync::mpsc;
 
 use super::{
     retry,
-    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, ProviderSelection, Role, StreamEvent, ToolCall, ToolDefinition, Usage, UsedProvider},
+    types::{
+        ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta,
+        ProviderSelection, Role, StreamEvent, ToolCall, ToolDefinition, Usage, UsedProvider,
+    },
     LlmProvider,
 };
 
@@ -29,13 +32,21 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    pub fn new(model: String, api_key: String, timeout_secs: u64, max_retries: u32, meta: ProviderMeta) -> Self {
+    pub fn new(
+        model: String,
+        api_key: String,
+        timeout_secs: u64,
+        max_retries: u32,
+        meta: ProviderMeta,
+    ) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .expect("failed to build HTTP client");
         Self {
-            model, api_key, client,
+            model,
+            api_key,
+            client,
             base_url: API_URL.to_string(),
             models_url: MODELS_URL.to_string(),
             max_retries,
@@ -58,54 +69,93 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
-    fn id(&self) -> &str { &self.meta.id }
-    fn kind(&self) -> &str { "anthropic" }
-    fn default_model(&self) -> &str { &self.model }
-    fn expose_to_ui(&self) -> bool { self.meta.expose_to_ui }
-    fn user_provided_key(&self) -> bool { self.meta.user_provided_key }
-    fn name(&self) -> Option<&str> { self.meta.name.as_deref() }
-    fn configured_models(&self) -> Option<&[String]> { self.meta.models.as_deref() }
+    fn id(&self) -> &str {
+        &self.meta.id
+    }
+    fn kind(&self) -> &str {
+        "anthropic"
+    }
+    fn default_model(&self) -> &str {
+        &self.model
+    }
+    fn expose_to_ui(&self) -> bool {
+        self.meta.expose_to_ui
+    }
+    fn user_provided_key(&self) -> bool {
+        self.meta.user_provided_key
+    }
+    fn name(&self) -> Option<&str> {
+        self.meta.name.as_deref()
+    }
+    fn configured_models(&self) -> Option<&[String]> {
+        self.meta.models.as_deref()
+    }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        let fallback = vec![ModelInfo { id: self.model.clone(), display_name: None }];
-        let req = self.client.get(&self.models_url)
+        let fallback = vec![ModelInfo {
+            id: self.model.clone(),
+            display_name: None,
+        }];
+        let req = self
+            .client
+            .get(&self.models_url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION);
-        let Ok(response) = req.send().await else { return Ok(fallback) };
+        let Ok(response) = req.send().await else {
+            return Ok(fallback);
+        };
         if !response.status().is_success() {
             return Ok(fallback);
         }
-        let Ok(json) = response.json::<Value>().await else { return Ok(fallback) };
-        let Some(data) = json["data"].as_array() else { return Ok(fallback) };
-        let models: Vec<ModelInfo> = data.iter()
-            .filter_map(|m| m["id"].as_str().map(|id| ModelInfo {
-                id: id.to_string(),
-                display_name: m["display_name"].as_str().map(str::to_string),
-            }))
+        let Ok(json) = response.json::<Value>().await else {
+            return Ok(fallback);
+        };
+        let Some(data) = json["data"].as_array() else {
+            return Ok(fallback);
+        };
+        let models: Vec<ModelInfo> = data
+            .iter()
+            .filter_map(|m| {
+                m["id"].as_str().map(|id| ModelInfo {
+                    id: id.to_string(),
+                    display_name: m["display_name"].as_str().map(str::to_string),
+                })
+            })
             .collect();
-        if models.is_empty() { Ok(fallback) } else { Ok(models) }
+        if models.is_empty() {
+            Ok(fallback)
+        } else {
+            Ok(models)
+        }
     }
 
-    async fn chat_with(&self, model: Option<&str>, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
+    async fn chat_with(
+        &self,
+        model: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<LlmResponse> {
         let body = build_body(model.unwrap_or(&self.model), messages, tools, false);
 
-        let response = retry::send_with_retry(
-            self.max_retries,
-            OVERLOAD_STATUS_CODES,
-            "Anthropic",
-            || self.client
-                .post(&self.base_url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", ANTHROPIC_VERSION)
-                .header("content-type", "application/json")
-                .json(&body)
-                .send(),
-        ).await?;
+        let response =
+            retry::send_with_retry(self.max_retries, OVERLOAD_STATUS_CODES, "Anthropic", || {
+                self.client
+                    .post(&self.base_url)
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", ANTHROPIC_VERSION)
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .send()
+            })
+            .await?;
 
         let status = response.status();
         let body_text = response.text().await?;
-        let json: Value = serde_json::from_str(&body_text)
-            .map_err(|e| anyhow::anyhow!("Anthropic API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+        let json: Value = serde_json::from_str(&body_text).map_err(|e| {
+            anyhow::anyhow!(
+                "Anthropic API returned non-JSON (status {status}): {e}\nbody: {body_text}"
+            )
+        })?;
 
         if !status.is_success() {
             bail!("Anthropic API error {status}: {json}");
@@ -124,25 +174,28 @@ impl LlmProvider for AnthropicProvider {
             .filter(|s| s.provider_id == self.id())
             .and_then(|s| s.model.as_deref());
         let bp = selection.and_then(|s| s.cache_breakpoint_index);
-        let body = build_body_with_breakpoint(model.unwrap_or(&self.model), messages, tools, false, bp);
+        let body =
+            build_body_with_breakpoint(model.unwrap_or(&self.model), messages, tools, false, bp);
 
-        let response = retry::send_with_retry(
-            self.max_retries,
-            OVERLOAD_STATUS_CODES,
-            "Anthropic",
-            || self.client
-                .post(&self.base_url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", ANTHROPIC_VERSION)
-                .header("content-type", "application/json")
-                .json(&body)
-                .send(),
-        ).await?;
+        let response =
+            retry::send_with_retry(self.max_retries, OVERLOAD_STATUS_CODES, "Anthropic", || {
+                self.client
+                    .post(&self.base_url)
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", ANTHROPIC_VERSION)
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .send()
+            })
+            .await?;
 
         let status = response.status();
         let body_text = response.text().await?;
-        let json: Value = serde_json::from_str(&body_text)
-            .map_err(|e| anyhow::anyhow!("Anthropic API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+        let json: Value = serde_json::from_str(&body_text).map_err(|e| {
+            anyhow::anyhow!(
+                "Anthropic API returned non-JSON (status {status}): {e}\nbody: {body_text}"
+            )
+        })?;
 
         if !status.is_success() {
             bail!("Anthropic API error {status}: {json}");
@@ -177,7 +230,8 @@ impl LlmProvider for AnthropicProvider {
             .filter(|s| s.provider_id == self.id())
             .and_then(|s| s.model.as_deref());
         let bp = selection.and_then(|s| s.cache_breakpoint_index);
-        self.stream_with_breakpoint(model, messages, tools, tx, bp).await?;
+        self.stream_with_breakpoint(model, messages, tools, tx, bp)
+            .await?;
         Ok(self.used(model))
     }
 }
@@ -186,7 +240,13 @@ fn build_body(model: &str, messages: &[Message], tools: &[ToolDefinition], strea
     build_body_with_breakpoint(model, messages, tools, stream, None)
 }
 
-fn build_body_with_breakpoint(model: &str, messages: &[Message], tools: &[ToolDefinition], stream: bool, cache_breakpoint_index: Option<usize>) -> Value {
+fn build_body_with_breakpoint(
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    stream: bool,
+    cache_breakpoint_index: Option<usize>,
+) -> Value {
     let system_text = messages
         .iter()
         .find(|m| matches!(m.role, Role::System))
@@ -221,7 +281,9 @@ fn build_body_with_breakpoint(model: &str, messages: &[Message], tools: &[ToolDe
 fn add_cache_breakpoint(api_messages: &mut [Value], breakpoint_index: Option<usize>) {
     let Some(bp) = breakpoint_index else { return };
     let idx = bp.min(api_messages.len().saturating_sub(1));
-    let Some(msg) = api_messages.get_mut(idx) else { return };
+    let Some(msg) = api_messages.get_mut(idx) else {
+        return;
+    };
     let mut blocks = match msg["content"].take() {
         Value::String(s) => vec![json!({ "type": "text", "text": s })],
         Value::Array(blocks) => blocks,
@@ -235,32 +297,38 @@ fn add_cache_breakpoint(api_messages: &mut [Value], breakpoint_index: Option<usi
 
 fn to_anthropic_message(msg: &Message) -> Value {
     let role = match msg.role {
-        Role::User      => "user",
+        Role::User => "user",
         Role::Assistant => "assistant",
-        Role::Tool      => "user",
-        Role::System    => unreachable!("system filtered above"),
+        Role::Tool => "user",
+        Role::System => unreachable!("system filtered above"),
     };
 
     let content: Value = match &msg.content {
         MessageContent::Text(t) => Value::String(t.clone()),
         MessageContent::Parts(parts) => {
-            let items: Vec<Value> = parts.iter().map(|p| match p {
-                ContentPart::Text { text, .. } =>
-                    json!({ "type": "text", "text": text }),
-                ContentPart::ToolUse { id, name, input, .. } =>
-                    json!({ "type": "tool_use", "id": id, "name": name, "input": input }),
-                ContentPart::ToolResult { tool_use_id, content, is_error } =>
-                    json!({ "type": "tool_result", "tool_use_id": tool_use_id,
+            let items: Vec<Value> = parts
+                .iter()
+                .map(|p| match p {
+                    ContentPart::Text { text, .. } => json!({ "type": "text", "text": text }),
+                    ContentPart::ToolUse {
+                        id, name, input, ..
+                    } => json!({ "type": "tool_use", "id": id, "name": name, "input": input }),
+                    ContentPart::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => json!({ "type": "tool_result", "tool_use_id": tool_use_id,
                             "content": content, "is_error": is_error }),
-                ContentPart::Image { media_type, data } =>
-                    json!({ "type": "image", "source": {
+                    ContentPart::Image { media_type, data } => json!({ "type": "image", "source": {
                         "type": "base64", "media_type": media_type, "data": data
                     }}),
-                ContentPart::Document { media_type, data } =>
-                    json!({ "type": "document", "source": {
-                        "type": "base64", "media_type": media_type, "data": data
-                    }}),
-            }).collect();
+                    ContentPart::Document { media_type, data } => {
+                        json!({ "type": "document", "source": {
+                            "type": "base64", "media_type": media_type, "data": data
+                        }})
+                    }
+                })
+                .collect();
             Value::Array(items)
         }
     };
@@ -279,11 +347,11 @@ fn to_anthropic_tool(tool: &ToolDefinition) -> Value {
 fn usage_from_anthropic(json: &Value) -> Usage {
     let u = &json["usage"];
     Usage {
-        input_tokens:         u["input_tokens"].as_u64().unwrap_or(0),
-        output_tokens:        u["output_tokens"].as_u64().unwrap_or(0),
-        cache_read_tokens:    u["cache_read_input_tokens"].as_u64().unwrap_or(0),
+        input_tokens: u["input_tokens"].as_u64().unwrap_or(0),
+        output_tokens: u["output_tokens"].as_u64().unwrap_or(0),
+        cache_read_tokens: u["cache_read_input_tokens"].as_u64().unwrap_or(0),
         cache_creation_tokens: u["cache_creation_input_tokens"].as_u64().unwrap_or(0),
-        reasoning_tokens:     0,
+        reasoning_tokens: 0,
     }
 }
 
@@ -297,9 +365,9 @@ fn parse_anthropic_response(json: Value) -> Result<LlmResponse> {
             .iter()
             .filter(|b| b["type"] == "tool_use")
             .map(|b| ToolCall {
-                id:                b["id"].as_str().unwrap_or("").to_string(),
-                name:              b["name"].as_str().unwrap_or("").to_string(),
-                input:             b["input"].clone(),
+                id: b["id"].as_str().unwrap_or("").to_string(),
+                name: b["name"].as_str().unwrap_or("").to_string(),
+                input: b["input"].clone(),
                 thought_signature: None,
             })
             .collect();
@@ -309,7 +377,11 @@ fn parse_anthropic_response(json: Value) -> Result<LlmResponse> {
             .filter_map(|b| b["text"].as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        return Ok(LlmResponse::ToolCalls { calls, preamble, usage });
+        return Ok(LlmResponse::ToolCalls {
+            calls,
+            preamble,
+            usage,
+        });
     }
 
     let text = content
@@ -325,7 +397,11 @@ fn parse_anthropic_response(json: Value) -> Result<LlmResponse> {
 enum BlockAccum {
     Text,
     Thinking,
-    ToolUse { id: String, name: String, json_buf: String },
+    ToolUse {
+        id: String,
+        name: String,
+        json_buf: String,
+    },
 }
 
 async fn process_stream_event(
@@ -340,27 +416,35 @@ async fn process_stream_event(
             if let Some(u) = msg.get("usage") {
                 usage.input_tokens = u["input_tokens"].as_u64().unwrap_or(0);
                 usage.cache_read_tokens = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
-                usage.cache_creation_tokens = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                usage.cache_creation_tokens =
+                    u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
             }
         }
         "content_block_start" => {
             let idx = event["index"].as_u64().unwrap_or(0) as usize;
-            let cb  = &event["content_block"];
+            let cb = &event["content_block"];
             match cb["type"].as_str().unwrap_or("") {
-                "text"     => { blocks.insert(idx, BlockAccum::Text); }
-                "thinking" => { blocks.insert(idx, BlockAccum::Thinking); }
+                "text" => {
+                    blocks.insert(idx, BlockAccum::Text);
+                }
+                "thinking" => {
+                    blocks.insert(idx, BlockAccum::Thinking);
+                }
                 "tool_use" => {
-                    blocks.insert(idx, BlockAccum::ToolUse {
-                        id:       cb["id"].as_str().unwrap_or("").to_string(),
-                        name:     cb["name"].as_str().unwrap_or("").to_string(),
-                        json_buf: String::new(),
-                    });
+                    blocks.insert(
+                        idx,
+                        BlockAccum::ToolUse {
+                            id: cb["id"].as_str().unwrap_or("").to_string(),
+                            name: cb["name"].as_str().unwrap_or("").to_string(),
+                            json_buf: String::new(),
+                        },
+                    );
                 }
                 _ => {}
             }
         }
         "content_block_delta" => {
-            let idx   = event["index"].as_u64().unwrap_or(0) as usize;
+            let idx = event["index"].as_u64().unwrap_or(0) as usize;
             let delta = &event["delta"];
             match delta["type"].as_str().unwrap_or("") {
                 "text_delta" => {
@@ -389,12 +473,14 @@ async fn process_stream_event(
             if let Some(BlockAccum::ToolUse { id, name, json_buf }) = blocks.remove(&idx) {
                 let input: Value = serde_json::from_str(&json_buf)
                     .unwrap_or(Value::Object(serde_json::Map::new()));
-                let _ = tx.send(StreamEvent::ToolCallReady(ToolCall {
-                    id,
-                    name,
-                    input,
-                    thought_signature: None,
-                })).await;
+                let _ = tx
+                    .send(StreamEvent::ToolCallReady(ToolCall {
+                        id,
+                        name,
+                        input,
+                        thought_signature: None,
+                    }))
+                    .await;
             }
         }
         "message_delta" => {
@@ -407,7 +493,12 @@ async fn process_stream_event(
             if let Some(u) = event.get("usage") {
                 usage.output_tokens = u["output_tokens"].as_u64().unwrap_or(0);
             }
-            let _ = tx.send(StreamEvent::Done { stop_reason, usage: usage.clone() }).await;
+            let _ = tx
+                .send(StreamEvent::Done {
+                    stop_reason,
+                    usage: usage.clone(),
+                })
+                .await;
         }
         _ => {}
     }
@@ -422,7 +513,8 @@ impl AnthropicProvider {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
-        self.stream_with_breakpoint(model, messages, tools, tx, None).await
+        self.stream_with_breakpoint(model, messages, tools, tx, None)
+            .await
     }
 
     async fn stream_with_breakpoint(
@@ -433,20 +525,25 @@ impl AnthropicProvider {
         tx: mpsc::Sender<StreamEvent>,
         cache_breakpoint_index: Option<usize>,
     ) -> Result<()> {
-        let body = build_body_with_breakpoint(model.unwrap_or(&self.model), messages, tools, true, cache_breakpoint_index);
+        let body = build_body_with_breakpoint(
+            model.unwrap_or(&self.model),
+            messages,
+            tools,
+            true,
+            cache_breakpoint_index,
+        );
 
-        let response = retry::send_with_retry(
-            self.max_retries,
-            OVERLOAD_STATUS_CODES,
-            "Anthropic",
-            || self.client
-                .post(&self.base_url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", ANTHROPIC_VERSION)
-                .header("content-type", "application/json")
-                .json(&body)
-                .send(),
-        ).await?;
+        let response =
+            retry::send_with_retry(self.max_retries, OVERLOAD_STATUS_CODES, "Anthropic", || {
+                self.client
+                    .post(&self.base_url)
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", ANTHROPIC_VERSION)
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .send()
+            })
+            .await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -657,8 +754,14 @@ mod tests {
         let msg = Message {
             role: Role::User,
             content: MessageContent::Parts(vec![
-                ContentPart::Text { text: "look at this".into(), thought_signature: None },
-                ContentPart::Image { media_type: "image/png".into(), data: "abc123".into() },
+                ContentPart::Text {
+                    text: "look at this".into(),
+                    thought_signature: None,
+                },
+                ContentPart::Image {
+                    media_type: "image/png".into(),
+                    data: "abc123".into(),
+                },
             ]),
         };
         let v = to_anthropic_message(&msg);
@@ -674,9 +777,10 @@ mod tests {
     fn document_content_part_serializes_for_anthropic() {
         let msg = Message {
             role: Role::User,
-            content: MessageContent::Parts(vec![
-                ContentPart::Document { media_type: "application/pdf".into(), data: "pdfdata".into() },
-            ]),
+            content: MessageContent::Parts(vec![ContentPart::Document {
+                media_type: "application/pdf".into(),
+                data: "pdfdata".into(),
+            }]),
         };
         let v = to_anthropic_message(&msg);
         let parts = v["content"].as_array().unwrap();
@@ -696,8 +800,14 @@ mod tests {
         let v = to_anthropic_tool(&def);
         assert_eq!(v["name"], "my_tool");
         assert_eq!(v["description"], "does stuff");
-        assert!(v.get("input_schema").is_some(), "must use 'input_schema' key");
-        assert!(v.get("parameters").is_none(), "must NOT use 'parameters' key");
+        assert!(
+            v.get("input_schema").is_some(),
+            "must use 'input_schema' key"
+        );
+        assert!(
+            v.get("parameters").is_none(),
+            "must NOT use 'parameters' key"
+        );
     }
 
     fn text_response_body() -> serde_json::Value {
@@ -727,8 +837,14 @@ mod tests {
             then.status(200).json_body(text_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_base_url(server.url("/v1/messages"));
+        let provider = AnthropicProvider::new(
+            "claude-test".into(),
+            "key".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_base_url(server.url("/v1/messages"));
         match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
             LlmResponse::Message { text, .. } => assert_eq!(text, "all good"),
             other => panic!("unexpected: {other:?}"),
@@ -745,9 +861,18 @@ mod tests {
             then.status(200).json_body(text_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_base_url(server.url("/v1/messages"));
-        provider.chat_with(Some("override-model"), &[Message::user("hi")], &[]).await.unwrap();
+        let provider = AnthropicProvider::new(
+            "claude-test".into(),
+            "key".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_base_url(server.url("/v1/messages"));
+        provider
+            .chat_with(Some("override-model"), &[Message::user("hi")], &[])
+            .await
+            .unwrap();
         mock.assert();
     }
 
@@ -761,9 +886,18 @@ mod tests {
             then.status(200).json_body(text_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_base_url(server.url("/v1/messages"));
-        provider.chat_with(None, &[Message::user("hi")], &[]).await.unwrap();
+        let provider = AnthropicProvider::new(
+            "claude-test".into(),
+            "key".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_base_url(server.url("/v1/messages"));
+        provider
+            .chat_with(None, &[Message::user("hi")], &[])
+            .await
+            .unwrap();
         mock.assert();
     }
 
@@ -780,8 +914,14 @@ mod tests {
             }));
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_models_url(server.url("/v1/models"));
+        let provider = AnthropicProvider::new(
+            "claude-test".into(),
+            "key".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_models_url(server.url("/v1/models"));
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "claude-opus-4-8");
@@ -796,23 +936,56 @@ mod tests {
             then.status(500);
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_models_url(server.url("/v1/models"));
+        let provider = AnthropicProvider::new(
+            "claude-test".into(),
+            "key".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_models_url(server.url("/v1/models"));
         let models = provider.list_models().await.unwrap();
-        assert_eq!(models, vec![ModelInfo { id: "claude-test".into(), display_name: None }]);
+        assert_eq!(
+            models,
+            vec![ModelInfo {
+                id: "claude-test".into(),
+                display_name: None
+            }]
+        );
     }
 
     #[test]
     fn expose_to_ui_reflects_constructor_value() {
         let visible = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("a"));
-        let hidden  = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "b".into(), expose_to_ui: false, ..Default::default() });
+        let hidden = AnthropicProvider::new(
+            "m".into(),
+            "k".into(),
+            30,
+            0,
+            ProviderMeta {
+                id: "b".into(),
+                expose_to_ui: false,
+                ..Default::default()
+            },
+        );
         assert!(visible.expose_to_ui());
         assert!(!hidden.expose_to_ui());
     }
 
     #[test]
     fn name_reflects_constructor_value() {
-        let named   = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "a".into(), expose_to_ui: true, name: Some("Claude Direct".into()), ..Default::default() });
+        let named = AnthropicProvider::new(
+            "m".into(),
+            "k".into(),
+            30,
+            0,
+            ProviderMeta {
+                id: "a".into(),
+                expose_to_ui: true,
+                name: Some("Claude Direct".into()),
+                ..Default::default()
+            },
+        );
         let unnamed = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("b"));
         assert_eq!(named.name(), Some("Claude Direct"));
         assert_eq!(unnamed.name(), None);
@@ -826,8 +999,14 @@ mod tests {
             then.status(200).json_body(tool_use_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_base_url(server.url("/v1/messages"));
+        let provider = AnthropicProvider::new(
+            "claude-test".into(),
+            "key".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_base_url(server.url("/v1/messages"));
         match provider.chat(&[Message::user("hi")], &[]).await.unwrap() {
             LlmResponse::ToolCalls { calls, .. } => {
                 assert_eq!(calls.len(), 1);
@@ -842,11 +1021,18 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("POST").path("/v1/messages");
-            then.status(401).json_body(json!({ "error": "unauthorized" }));
+            then.status(401)
+                .json_body(json!({ "error": "unauthorized" }));
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "bad-key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_base_url(server.url("/v1/messages"));
+        let provider = AnthropicProvider::new(
+            "claude-test".into(),
+            "bad-key".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_base_url(server.url("/v1/messages"));
         assert!(provider.chat(&[Message::user("hi")], &[]).await.is_err());
     }
 
@@ -861,8 +1047,14 @@ mod tests {
             then.status(200).json_body(text_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "test-key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_base_url(server.url("/v1/messages"));
+        let provider = AnthropicProvider::new(
+            "claude-test".into(),
+            "test-key".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_base_url(server.url("/v1/messages"));
         provider.chat(&[Message::user("hi")], &[]).await.unwrap();
         mock.assert();
     }
@@ -877,8 +1069,14 @@ mod tests {
             then.status(200).json_body(text_response_body());
         });
 
-        let provider = AnthropicProvider::new("claude-test".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_base_url(server.url("/v1/messages"));
+        let provider = AnthropicProvider::new(
+            "claude-test".into(),
+            "k".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_base_url(server.url("/v1/messages"));
         let result = provider
             .chat(&[Message::system("be helpful"), Message::user("hi")], &[])
             .await
@@ -892,14 +1090,28 @@ mod tests {
 
     #[test]
     fn build_body_puts_a_cache_breakpoint_on_the_system_block() {
-        let body = build_body("m", &[Message::system("be helpful"), Message::user("hi")], &[], false);
+        let body = build_body(
+            "m",
+            &[Message::system("be helpful"), Message::user("hi")],
+            &[],
+            false,
+        );
         assert_eq!(body["system"][0]["text"], "be helpful");
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]
     fn build_body_without_breakpoint_does_not_tag_last_message() {
-        let body = build_body("m", &[Message::user("first"), Message::assistant_text("ok"), Message::user("second")], &[], false);
+        let body = build_body(
+            "m",
+            &[
+                Message::user("first"),
+                Message::assistant_text("ok"),
+                Message::user("second"),
+            ],
+            &[],
+            false,
+        );
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
         let last = messages.last().unwrap();
@@ -910,25 +1122,53 @@ mod tests {
 
     #[test]
     fn build_body_with_breakpoint_tags_specified_index() {
-        let body = build_body_with_breakpoint("m", &[Message::user("first"), Message::assistant_text("ok"), Message::user("second")], &[], false, Some(1));
+        let body = build_body_with_breakpoint(
+            "m",
+            &[
+                Message::user("first"),
+                Message::assistant_text("ok"),
+                Message::user("second"),
+            ],
+            &[],
+            false,
+            Some(1),
+        );
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 3);
         let bp_content = messages[1]["content"].as_array().unwrap();
-        assert_eq!(bp_content.last().unwrap()["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            bp_content.last().unwrap()["cache_control"]["type"],
+            "ephemeral"
+        );
         assert!(messages[2]["content"].get("cache_control").is_none());
     }
 
     #[test]
     fn build_body_with_breakpoint_clamps_to_last_when_out_of_range() {
-        let body = build_body_with_breakpoint("m", &[Message::user("a"), Message::user("b")], &[], false, Some(100));
+        let body = build_body_with_breakpoint(
+            "m",
+            &[Message::user("a"), Message::user("b")],
+            &[],
+            false,
+            Some(100),
+        );
         let messages = body["messages"].as_array().unwrap();
         let last_content = messages.last().unwrap()["content"].as_array().unwrap();
-        assert_eq!(last_content.last().unwrap()["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            last_content.last().unwrap()["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     #[test]
     fn build_body_with_none_breakpoint_does_not_tag_any_message() {
-        let body = build_body_with_breakpoint("m", &[Message::user("a"), Message::user("b")], &[], false, None);
+        let body = build_body_with_breakpoint(
+            "m",
+            &[Message::user("a"), Message::user("b")],
+            &[],
+            false,
+            None,
+        );
         let messages = body["messages"].as_array().unwrap();
         for msg in messages {
             assert!(msg["content"].get("cache_control").is_none());
@@ -937,12 +1177,19 @@ mod tests {
 
     #[test]
     fn build_body_cache_breakpoint_survives_multi_part_message_content() {
-        let att = crate::agent::Attachment { name: "a.png".into(), mime_type: "image/png".into(), data: "abc".into() };
+        let att = crate::agent::Attachment {
+            name: "a.png".into(),
+            mime_type: "image/png".into(),
+            data: "abc".into(),
+        };
         let msg = crate::agent::build_user_message("look at this", &[att]);
         let body = build_body_with_breakpoint("m", &[msg], &[], false, Some(0));
         let parts = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
-        assert!(parts[0].get("cache_control").is_none(), "breakpoint belongs on the last block, not the first");
+        assert!(
+            parts[0].get("cache_control").is_none(),
+            "breakpoint belongs on the last block, not the first"
+        );
         assert_eq!(parts[1]["cache_control"]["type"], "ephemeral");
     }
 
@@ -955,13 +1202,22 @@ mod tests {
     fn sse_body(events: &[Value]) -> String {
         events
             .iter()
-            .map(|e| format!("event: {}\ndata: {}\n\n", e["type"].as_str().unwrap_or(""), e))
+            .map(|e| {
+                format!(
+                    "event: {}\ndata: {}\n\n",
+                    e["type"].as_str().unwrap_or(""),
+                    e
+                )
+            })
             .collect::<String>()
     }
 
     async fn collect_stream_events(provider: &AnthropicProvider) -> Vec<StreamEvent> {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        provider.stream(None, &[Message::user("hi")], &[], tx).await.unwrap();
+        provider
+            .stream(None, &[Message::user("hi")], &[], tx)
+            .await
+            .unwrap();
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() {
             events.push(e);
@@ -986,17 +1242,28 @@ mod tests {
                 ]));
         });
 
-        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_base_url(server.url("/v1/messages"));
+        let provider = AnthropicProvider::new(
+            "m".into(),
+            "k".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_base_url(server.url("/v1/messages"));
         let events = collect_stream_events(&provider).await;
 
-        let text_deltas: Vec<_> = events.iter().filter_map(|e| match e {
-            StreamEvent::TextDelta { text } => Some(text.as_str()),
-            _ => None,
-        }).collect();
+        let text_deltas: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(text_deltas, vec!["Hello", " world"]);
 
-        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "end_turn"));
+        let done = events.iter().any(
+            |e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "end_turn"),
+        );
         assert!(done, "expected Done(end_turn) event");
     }
 
@@ -1018,14 +1285,23 @@ mod tests {
                 ]));
         });
 
-        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_base_url(server.url("/v1/messages"));
+        let provider = AnthropicProvider::new(
+            "m".into(),
+            "k".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_base_url(server.url("/v1/messages"));
         let events = collect_stream_events(&provider).await;
 
-        let thinking: Vec<_> = events.iter().filter_map(|e| match e {
-            StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
-            _ => None,
-        }).collect();
+        let thinking: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(thinking, vec!["I should search"]);
     }
 
@@ -1045,16 +1321,25 @@ mod tests {
                 ]));
         });
 
-        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_base_url(server.url("/v1/messages"));
+        let provider = AnthropicProvider::new(
+            "m".into(),
+            "k".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_base_url(server.url("/v1/messages"));
         let events = collect_stream_events(&provider).await;
 
-        let calls: Vec<_> = events.iter().filter_map(|e| match e {
-            StreamEvent::ToolCallReady(c) => Some(c),
-            _ => None,
-        }).collect();
+        let calls: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ToolCallReady(c) => Some(c),
+                _ => None,
+            })
+            .collect();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].id,   "tu_42");
+        assert_eq!(calls[0].id, "tu_42");
         assert_eq!(calls[0].name, "search_symbols");
         assert_eq!(calls[0].input["query"], "hello");
     }
@@ -1077,14 +1362,23 @@ mod tests {
                 ]));
         });
 
-        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_base_url(server.url("/v1/messages"));
+        let provider = AnthropicProvider::new(
+            "m".into(),
+            "k".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_base_url(server.url("/v1/messages"));
         let events = collect_stream_events(&provider).await;
 
-        let call_names: Vec<_> = events.iter().filter_map(|e| match e {
-            StreamEvent::ToolCallReady(c) => Some(c.name.as_str()),
-            _ => None,
-        }).collect();
+        let call_names: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ToolCallReady(c) => Some(c.name.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(call_names, vec!["tool_a", "tool_b"]);
     }
 
@@ -1096,8 +1390,14 @@ mod tests {
             then.status(401).body("unauthorized");
         });
 
-        let provider = AnthropicProvider::new("m".into(), "bad-key".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_base_url(server.url("/v1/messages"));
+        let provider = AnthropicProvider::new(
+            "m".into(),
+            "bad-key".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_base_url(server.url("/v1/messages"));
         let (tx, _rx) = tokio::sync::mpsc::channel(4);
         let result = provider.stream(None, &[Message::user("hi")], &[], tx).await;
         assert!(result.is_err(), "expected error on 4xx");
@@ -1119,11 +1419,19 @@ mod tests {
                 ]));
         });
 
-        let provider = AnthropicProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("anthropic-test"))
-            .with_base_url(server.url("/v1/messages"));
+        let provider = AnthropicProvider::new(
+            "m".into(),
+            "k".into(),
+            30,
+            0,
+            ProviderMeta::new("anthropic-test"),
+        )
+        .with_base_url(server.url("/v1/messages"));
         let events = collect_stream_events(&provider).await;
 
-        assert!(events.iter().any(|e| matches!(e, StreamEvent::TextDelta { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::TextDelta { .. })));
         assert!(events.iter().any(|e| matches!(e, StreamEvent::Done { .. })));
         assert_eq!(events.len(), 2, "unexpected extra events: {events:?}");
     }

@@ -52,7 +52,13 @@ mod tests {
 
     #[test]
     fn price_zero_when_no_pricing() {
-        let usage = Usage { input_tokens: 100, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0, reasoning_tokens: 0 };
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+        };
         assert_eq!(price(&usage, None), 0);
     }
 
@@ -78,15 +84,33 @@ mod tests {
 
     #[test]
     fn price_input_only() {
-        let usage = Usage { input_tokens: 1000, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0, reasoning_tokens: 0 };
+        let usage = Usage {
+            input_tokens: 1000,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+        };
         let p = sample_pricing();
         assert_eq!(price(&usage, Some(&p)), 3000);
     }
 
     #[test]
     fn price_cache_read_cheaper_than_input() {
-        let input_usage = Usage { input_tokens: 1000, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0, reasoning_tokens: 0 };
-        let cached_usage = Usage { input_tokens: 0, output_tokens: 0, cache_read_tokens: 1000, cache_creation_tokens: 0, reasoning_tokens: 0 };
+        let input_usage = Usage {
+            input_tokens: 1000,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        let cached_usage = Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 1000,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+        };
         let p = sample_pricing();
         assert!(price(&cached_usage, Some(&p)) < price(&input_usage, Some(&p)));
     }

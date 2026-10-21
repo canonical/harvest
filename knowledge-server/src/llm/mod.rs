@@ -2,9 +2,9 @@ pub mod anthropic;
 pub mod gemini;
 pub mod openai_compat;
 pub mod pricing;
+mod retry;
 pub mod system_one;
 pub mod types;
-mod retry;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -12,7 +12,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::config::LlmProviderConfig;
-use types::{LlmResponse, Message, ModelInfo, ProviderMeta, ProviderSelection, StreamEvent, ToolDefinition, Usage, UsedProvider};
+use types::{
+    LlmResponse, Message, ModelInfo, ProviderMeta, ProviderSelection, StreamEvent, ToolDefinition,
+    Usage, UsedProvider,
+};
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -42,7 +45,8 @@ pub trait LlmProvider: Send + Sync {
         let discovered = self.list_models().await?;
         match self.configured_models() {
             None => Ok(discovered),
-            Some(allowed) => Ok(allowed.iter()
+            Some(allowed) => Ok(allowed
+                .iter()
                 .filter_map(|wanted| discovered.iter().find(|m| &m.id == wanted).cloned())
                 .collect()),
         }
@@ -70,16 +74,30 @@ pub trait LlmProvider: Send + Sync {
         match response {
             LlmResponse::Message { text, usage } => {
                 let _ = tx.send(StreamEvent::TextDelta { text }).await;
-                let _ = tx.send(StreamEvent::Done { stop_reason: "end_turn".into(), usage }).await;
+                let _ = tx
+                    .send(StreamEvent::Done {
+                        stop_reason: "end_turn".into(),
+                        usage,
+                    })
+                    .await;
             }
-            LlmResponse::ToolCalls { calls, preamble, usage } => {
+            LlmResponse::ToolCalls {
+                calls,
+                preamble,
+                usage,
+            } => {
                 if !preamble.is_empty() {
                     let _ = tx.send(StreamEvent::TextDelta { text: preamble }).await;
                 }
                 for call in calls {
                     let _ = tx.send(StreamEvent::ToolCallReady(call)).await;
                 }
-                let _ = tx.send(StreamEvent::Done { stop_reason: "tool_use".into(), usage }).await;
+                let _ = tx
+                    .send(StreamEvent::Done {
+                        stop_reason: "tool_use".into(),
+                        usage,
+                    })
+                    .await;
             }
         }
         Ok(())
@@ -144,7 +162,10 @@ pub struct FallbackProvider {
 
 impl FallbackProvider {
     fn new(providers: Vec<Arc<dyn LlmProvider>>) -> Self {
-        assert!(!providers.is_empty(), "FallbackProvider requires at least one provider");
+        assert!(
+            !providers.is_empty(),
+            "FallbackProvider requires at least one provider"
+        );
         Self { providers }
     }
 
@@ -159,9 +180,13 @@ impl FallbackProvider {
     ) -> Vec<(&Arc<dyn LlmProvider>, Option<String>)> {
         match selection {
             Some(sel) if self.providers.iter().any(|p| p.id() == sel.provider_id) => {
-                let (matched, rest): (Vec<_>, Vec<_>) =
-                    self.providers.iter().partition(|p| p.id() == sel.provider_id);
-                matched.into_iter().map(|p| (p, sel.model.clone()))
+                let (matched, rest): (Vec<_>, Vec<_>) = self
+                    .providers
+                    .iter()
+                    .partition(|p| p.id() == sel.provider_id);
+                matched
+                    .into_iter()
+                    .map(|p| (p, sel.model.clone()))
                     .chain(rest.into_iter().map(|p| (p, None)))
                     .collect()
             }
@@ -172,10 +197,18 @@ impl FallbackProvider {
 
 #[async_trait]
 impl LlmProvider for FallbackProvider {
-    fn id(&self) -> &str { "fallback" }
-    fn kind(&self) -> &str { "fallback" }
-    fn default_model(&self) -> &str { self.providers[0].default_model() }
-    fn children(&self) -> &[Arc<dyn LlmProvider>] { &self.providers }
+    fn id(&self) -> &str {
+        "fallback"
+    }
+    fn kind(&self) -> &str {
+        "fallback"
+    }
+    fn default_model(&self) -> &str {
+        self.providers[0].default_model()
+    }
+    fn children(&self) -> &[Arc<dyn LlmProvider>] {
+        &self.providers
+    }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         let mut all = Vec::new();
@@ -187,7 +220,12 @@ impl LlmProvider for FallbackProvider {
         Ok(all)
     }
 
-    async fn chat_with(&self, _model: Option<&str>, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
+    async fn chat_with(
+        &self,
+        _model: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<LlmResponse> {
         let mut last_err = anyhow::anyhow!("no LLM providers configured");
         for provider in &self.providers {
             match provider.chat(messages, tools).await {
@@ -232,7 +270,10 @@ impl LlmProvider for FallbackProvider {
         let order = self.ordered_for(selection);
         let mut last_err = anyhow::anyhow!("no LLM providers configured");
         for (provider, model_override) in order {
-            match provider.chat_with(model_override.as_deref(), messages, tools).await {
+            match provider
+                .chat_with(model_override.as_deref(), messages, tools)
+                .await
+            {
                 Ok(response) => {
                     let usage = match &response {
                         LlmResponse::Message { usage, .. } => usage.clone(),
@@ -260,7 +301,10 @@ impl LlmProvider for FallbackProvider {
         let order = self.ordered_for(selection);
         let mut last_err = anyhow::anyhow!("no LLM providers configured");
         for (provider, model_override) in order {
-            match provider.chat_stream_with(model_override.as_deref(), messages, tools, tx.clone()).await {
+            match provider
+                .chat_stream_with(model_override.as_deref(), messages, tools, tx.clone())
+                .await
+            {
                 Ok(()) => return Ok(provider.used(model_override.as_deref())),
                 Err(e) if Self::is_rate_limited(&e) => {
                     tracing::warn!(error = %e, provider = provider.id(), "LLM provider stream rate limited — trying next provider");
@@ -287,22 +331,54 @@ fn build_provider(config: &LlmProviderConfig) -> Arc<dyn LlmProvider> {
     build_provider_with_key(config, None)
 }
 
-fn build_provider_with_key(config: &LlmProviderConfig, api_key_override: Option<&str>) -> Arc<dyn LlmProvider> {
+fn build_provider_with_key(
+    config: &LlmProviderConfig,
+    api_key_override: Option<&str>,
+) -> Arc<dyn LlmProvider> {
     let meta = build_meta(config);
     let api_key = api_key_override.unwrap_or_else(|| config.api_key());
     match config {
-        LlmProviderConfig::Anthropic { model, timeout_secs, max_retries, .. } =>
-            Arc::new(anthropic::AnthropicProvider::new(
-                model.clone(), api_key.to_string(), *timeout_secs, *max_retries, meta,
-            )),
-        LlmProviderConfig::Gemini { model, timeout_secs, max_retries, .. } =>
-            Arc::new(gemini::GeminiProvider::new(
-                model.clone(), api_key.to_string(), *timeout_secs, *max_retries, meta,
-            )),
-        LlmProviderConfig::OpenAiCompat { base_url, model, timeout_secs, max_retries, .. } =>
-            Arc::new(openai_compat::OpenAiCompatProvider::new(
-                base_url.clone(), api_key.to_string(), model.clone(), *timeout_secs, *max_retries, meta,
-            ).with_prompt_caching(config.enable_prompt_caching())),
+        LlmProviderConfig::Anthropic {
+            model,
+            timeout_secs,
+            max_retries,
+            ..
+        } => Arc::new(anthropic::AnthropicProvider::new(
+            model.clone(),
+            api_key.to_string(),
+            *timeout_secs,
+            *max_retries,
+            meta,
+        )),
+        LlmProviderConfig::Gemini {
+            model,
+            timeout_secs,
+            max_retries,
+            ..
+        } => Arc::new(gemini::GeminiProvider::new(
+            model.clone(),
+            api_key.to_string(),
+            *timeout_secs,
+            *max_retries,
+            meta,
+        )),
+        LlmProviderConfig::OpenAiCompat {
+            base_url,
+            model,
+            timeout_secs,
+            max_retries,
+            ..
+        } => Arc::new(
+            openai_compat::OpenAiCompatProvider::new(
+                base_url.clone(),
+                api_key.to_string(),
+                model.clone(),
+                *timeout_secs,
+                *max_retries,
+                meta,
+            )
+            .with_prompt_caching(config.enable_prompt_caching()),
+        ),
     }
 }
 
@@ -324,14 +400,17 @@ pub fn with_user_keys(
     }
     let config_map: std::collections::HashMap<&str, &LlmProviderConfig> =
         configs.iter().map(|c| (c.id(), c)).collect();
-    let new_children: Vec<Arc<dyn LlmProvider>> = children.iter().map(|child| {
-        if let Some(user_key) = keys.get(child.id()) {
-            if let Some(config) = config_map.get(child.id()) {
-                return build_provider_with_key(config, Some(user_key));
+    let new_children: Vec<Arc<dyn LlmProvider>> = children
+        .iter()
+        .map(|child| {
+            if let Some(user_key) = keys.get(child.id()) {
+                if let Some(config) = config_map.get(child.id()) {
+                    return build_provider_with_key(config, Some(user_key));
+                }
             }
-        }
-        Arc::clone(child)
-    }).collect();
+            Arc::clone(child)
+        })
+        .collect();
     Arc::new(FallbackProvider::new(new_children))
 }
 
@@ -340,8 +419,8 @@ mod tests {
     use super::*;
     use anyhow::anyhow;
     use async_trait::async_trait;
-    use std::sync::Mutex;
     use std::collections::VecDeque;
+    use std::sync::Mutex;
 
     struct MockProvider {
         id: String,
@@ -360,7 +439,10 @@ mod tests {
                 id: id.into(),
                 responses: Mutex::new(responses.into()),
                 last_model: Mutex::new(None),
-                models: vec![ModelInfo { id: "mock-model".into(), display_name: None }],
+                models: vec![ModelInfo {
+                    id: "mock-model".into(),
+                    display_name: None,
+                }],
                 configured_models: None,
             })
         }
@@ -373,7 +455,10 @@ mod tests {
                 configured_models: None,
             })
         }
-        fn with_discovered_and_allowlist(discovered: Vec<ModelInfo>, allowed: Vec<String>) -> Arc<Self> {
+        fn with_discovered_and_allowlist(
+            discovered: Vec<ModelInfo>,
+            allowed: Vec<String>,
+        ) -> Arc<Self> {
             Arc::new(Self {
                 id: "mock".into(),
                 responses: Mutex::new(VecDeque::new()),
@@ -383,7 +468,10 @@ mod tests {
             })
         }
         fn ok(text: &str) -> Result<LlmResponse> {
-            Ok(LlmResponse::Message { text: text.into(), usage: Usage::default() })
+            Ok(LlmResponse::Message {
+                text: text.into(),
+                usage: Usage::default(),
+            })
         }
         fn rate_limited() -> Result<LlmResponse> {
             Err(anyhow!("provider error 429 Too Many Requests"))
@@ -398,10 +486,18 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for MockProvider {
-        fn id(&self) -> &str { &self.id }
-        fn kind(&self) -> &str { "mock" }
-        fn default_model(&self) -> &str { "mock-model" }
-        fn configured_models(&self) -> Option<&[String]> { self.configured_models.as_deref() }
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn kind(&self) -> &str {
+            "mock"
+        }
+        fn default_model(&self) -> &str {
+            "mock-model"
+        }
+        fn configured_models(&self) -> Option<&[String]> {
+            self.configured_models.as_deref()
+        }
 
         async fn list_models(&self) -> Result<Vec<ModelInfo>> {
             if self.models.is_empty() {
@@ -410,9 +506,17 @@ mod tests {
             Ok(self.models.clone())
         }
 
-        async fn chat_with(&self, model: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
+        async fn chat_with(
+            &self,
+            model: Option<&str>,
+            _: &[Message],
+            _: &[ToolDefinition],
+        ) -> Result<LlmResponse> {
             *self.last_model.lock().unwrap() = model.map(String::from);
-            self.responses.lock().unwrap().pop_front()
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
                 .unwrap_or_else(|| Err(anyhow!("MockProvider: exhausted")))
         }
     }
@@ -423,19 +527,29 @@ mod tests {
 
     #[test]
     fn detects_429_in_error_message() {
-        assert!(FallbackProvider::is_rate_limited(&anyhow!("error 429 Too Many Requests")));
+        assert!(FallbackProvider::is_rate_limited(&anyhow!(
+            "error 429 Too Many Requests"
+        )));
     }
 
     #[test]
     fn detects_resource_exhausted_case_insensitive() {
-        assert!(FallbackProvider::is_rate_limited(&anyhow!("Gemini RESOURCE_EXHAUSTED quota")));
+        assert!(FallbackProvider::is_rate_limited(&anyhow!(
+            "Gemini RESOURCE_EXHAUSTED quota"
+        )));
     }
 
     #[test]
     fn non_rate_limit_error_not_detected() {
-        assert!(!FallbackProvider::is_rate_limited(&anyhow!("401 Unauthorized")));
-        assert!(!FallbackProvider::is_rate_limited(&anyhow!("network timeout")));
-        assert!(!FallbackProvider::is_rate_limited(&anyhow!("500 Internal Server Error")));
+        assert!(!FallbackProvider::is_rate_limited(&anyhow!(
+            "401 Unauthorized"
+        )));
+        assert!(!FallbackProvider::is_rate_limited(&anyhow!(
+            "network timeout"
+        )));
+        assert!(!FallbackProvider::is_rate_limited(&anyhow!(
+            "500 Internal Server Error"
+        )));
     }
 
     #[tokio::test]
@@ -492,7 +606,9 @@ mod tests {
 
         let mut texts = Vec::new();
         while let Ok(ev) = rx.try_recv() {
-            if let StreamEvent::TextDelta { text } = ev { texts.push(text); }
+            if let StreamEvent::TextDelta { text } = ev {
+                texts.push(text);
+            }
         }
         assert_eq!(texts, vec!["streamed from second"]);
     }
@@ -511,15 +627,15 @@ mod tests {
     #[test]
     fn from_config_handles_single_provider() {
         let cfg = vec![crate::config::LlmProviderConfig::Gemini {
-            model:        "m".into(),
-            api_key:      "k".into(),
-            id:           "gemini-0".into(),
-            priority:     0,
+            model: "m".into(),
+            api_key: "k".into(),
+            id: "gemini-0".into(),
+            priority: 0,
             timeout_secs: 30,
-            max_retries:  0,
+            max_retries: 0,
             expose_to_ui: true,
-            name:         None,
-            models:       None,
+            name: None,
+            models: None,
             user_provided_key: false,
             pricing: None,
         }];
@@ -544,7 +660,11 @@ mod tests {
         let p2 = MockProvider::with_id("p2", vec![MockProvider::ok("from p2")]);
         let fb = fallback(vec![p1.clone(), p2]);
 
-        let selection = ProviderSelection { provider_id: "p2".into(), model: Some("custom-model".into()), cache_breakpoint_index: None };
+        let selection = ProviderSelection {
+            provider_id: "p2".into(),
+            model: Some("custom-model".into()),
+            cache_breakpoint_index: None,
+        };
         let (response, used, _) = fb.chat_routed(Some(&selection), &[], &[]).await.unwrap();
 
         assert!(matches!(response, LlmResponse::Message { text, .. } if text == "from p2"));
@@ -559,11 +679,18 @@ mod tests {
         let p2 = MockProvider::with_id("p2", vec![MockProvider::rate_limited()]);
         let fb = fallback(vec![p1, p2]);
 
-        let selection = ProviderSelection { provider_id: "p2".into(), model: None, cache_breakpoint_index: None };
+        let selection = ProviderSelection {
+            provider_id: "p2".into(),
+            model: None,
+            cache_breakpoint_index: None,
+        };
         let (response, used, _) = fb.chat_routed(Some(&selection), &[], &[]).await.unwrap();
 
         assert!(matches!(response, LlmResponse::Message { text, .. } if text == "from p1"));
-        assert_eq!(used.provider_id, "p1", "should report the provider that actually answered");
+        assert_eq!(
+            used.provider_id, "p1",
+            "should report the provider that actually answered"
+        );
     }
 
     #[tokio::test]
@@ -572,7 +699,11 @@ mod tests {
         let p2 = MockProvider::with_id("p2", vec![]);
         let fb = fallback(vec![p1, p2]);
 
-        let selection = ProviderSelection { provider_id: "does-not-exist".into(), model: None, cache_breakpoint_index: None };
+        let selection = ProviderSelection {
+            provider_id: "does-not-exist".into(),
+            model: None,
+            cache_breakpoint_index: None,
+        };
         let (response, used, _) = fb.chat_routed(Some(&selection), &[], &[]).await.unwrap();
 
         assert!(matches!(response, LlmResponse::Message { text, .. } if text == "from p1"));
@@ -585,15 +716,24 @@ mod tests {
         let p2 = MockProvider::with_id("p2", vec![MockProvider::ok("streamed")]);
         let fb = fallback(vec![p1, p2]);
 
-        let selection = ProviderSelection { provider_id: "p2".into(), model: Some("m2".into()), cache_breakpoint_index: None };
+        let selection = ProviderSelection {
+            provider_id: "p2".into(),
+            model: Some("m2".into()),
+            cache_breakpoint_index: None,
+        };
         let (tx, mut rx) = mpsc::channel(16);
-        let used = fb.chat_stream_routed(Some(&selection), &[], &[], tx).await.unwrap();
+        let used = fb
+            .chat_stream_routed(Some(&selection), &[], &[], tx)
+            .await
+            .unwrap();
 
         assert_eq!(used.provider_id, "p2");
         assert_eq!(used.model, "m2");
         let mut texts = Vec::new();
         while let Ok(ev) = rx.try_recv() {
-            if let StreamEvent::TextDelta { text } = ev { texts.push(text); }
+            if let StreamEvent::TextDelta { text } = ev {
+                texts.push(text);
+            }
         }
         assert_eq!(texts, vec!["streamed"]);
     }
@@ -606,24 +746,44 @@ mod tests {
         let fb = fallback(vec![p1, p2, p3]);
 
         let models = fb.list_models().await.unwrap();
-        assert_eq!(models.len(), 2, "p2's failed discovery should not break the aggregate");
+        assert_eq!(
+            models.len(),
+            2,
+            "p2's failed discovery should not break the aggregate"
+        );
     }
 
     #[tokio::test]
     async fn available_models_returns_all_discovered_when_no_allowlist_configured() {
         let provider = MockProvider::with_id("p", vec![]);
         let available = provider.available_models().await.unwrap();
-        assert_eq!(available, vec![ModelInfo { id: "mock-model".into(), display_name: None }]);
+        assert_eq!(
+            available,
+            vec![ModelInfo {
+                id: "mock-model".into(),
+                display_name: None
+            }]
+        );
     }
 
     #[tokio::test]
     async fn available_models_filters_to_allowlist_and_preserves_its_order() {
         let discovered = vec![
-            ModelInfo { id: "a".into(), display_name: None },
-            ModelInfo { id: "b".into(), display_name: None },
-            ModelInfo { id: "c".into(), display_name: None },
+            ModelInfo {
+                id: "a".into(),
+                display_name: None,
+            },
+            ModelInfo {
+                id: "b".into(),
+                display_name: None,
+            },
+            ModelInfo {
+                id: "c".into(),
+                display_name: None,
+            },
         ];
-        let provider = MockProvider::with_discovered_and_allowlist(discovered, vec!["c".into(), "a".into()]);
+        let provider =
+            MockProvider::with_discovered_and_allowlist(discovered, vec!["c".into(), "a".into()]);
         let available = provider.available_models().await.unwrap();
         let ids: Vec<&str> = available.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["c", "a"]);
@@ -631,8 +791,14 @@ mod tests {
 
     #[tokio::test]
     async fn available_models_drops_allowlist_entries_that_do_not_exist_on_the_provider() {
-        let discovered = vec![ModelInfo { id: "a".into(), display_name: None }];
-        let provider = MockProvider::with_discovered_and_allowlist(discovered, vec!["a".into(), "does-not-exist".into()]);
+        let discovered = vec![ModelInfo {
+            id: "a".into(),
+            display_name: None,
+        }];
+        let provider = MockProvider::with_discovered_and_allowlist(
+            discovered,
+            vec!["a".into(), "does-not-exist".into()],
+        );
         let available = provider.available_models().await.unwrap();
         let ids: Vec<&str> = available.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, vec!["a"]);
@@ -640,8 +806,12 @@ mod tests {
 
     #[tokio::test]
     async fn available_models_is_empty_when_no_allowlist_entries_validate() {
-        let discovered = vec![ModelInfo { id: "a".into(), display_name: None }];
-        let provider = MockProvider::with_discovered_and_allowlist(discovered, vec!["nonexistent".into()]);
+        let discovered = vec![ModelInfo {
+            id: "a".into(),
+            display_name: None,
+        }];
+        let provider =
+            MockProvider::with_discovered_and_allowlist(discovered, vec!["nonexistent".into()]);
         let available = provider.available_models().await.unwrap();
         assert!(available.is_empty());
     }

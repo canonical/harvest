@@ -8,7 +8,10 @@ use tokio::sync::mpsc;
 
 use super::{
     retry,
-    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, StreamEvent, ToolCall, ToolDefinition, Usage},
+    types::{
+        ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role,
+        StreamEvent, ToolCall, ToolDefinition, Usage,
+    },
     LlmProvider,
 };
 
@@ -25,12 +28,27 @@ pub struct OpenAiCompatProvider {
 }
 
 impl OpenAiCompatProvider {
-    pub fn new(base_url: String, api_key: String, model: String, timeout_secs: u64, max_retries: u32, meta: ProviderMeta) -> Self {
+    pub fn new(
+        base_url: String,
+        api_key: String,
+        model: String,
+        timeout_secs: u64,
+        max_retries: u32,
+        meta: ProviderMeta,
+    ) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .expect("failed to build HTTP client");
-        Self { base_url, api_key, model, client, max_retries, meta, enable_prompt_caching: false }
+        Self {
+            base_url,
+            api_key,
+            model,
+            client,
+            max_retries,
+            meta,
+            enable_prompt_caching: false,
+        }
     }
 
     pub fn with_prompt_caching(mut self, enabled: bool) -> Self {
@@ -45,36 +63,79 @@ impl OpenAiCompatProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAiCompatProvider {
-    fn id(&self) -> &str { &self.meta.id }
-    fn kind(&self) -> &str { "openai-compatible" }
-    fn default_model(&self) -> &str { &self.model }
-    fn name(&self) -> Option<&str> { self.meta.name.as_deref() }
-    fn expose_to_ui(&self) -> bool { self.meta.expose_to_ui }
-    fn user_provided_key(&self) -> bool { self.meta.user_provided_key }
-    fn configured_models(&self) -> Option<&[String]> { self.meta.models.as_deref() }
+    fn id(&self) -> &str {
+        &self.meta.id
+    }
+    fn kind(&self) -> &str {
+        "openai-compatible"
+    }
+    fn default_model(&self) -> &str {
+        &self.model
+    }
+    fn name(&self) -> Option<&str> {
+        self.meta.name.as_deref()
+    }
+    fn expose_to_ui(&self) -> bool {
+        self.meta.expose_to_ui
+    }
+    fn user_provided_key(&self) -> bool {
+        self.meta.user_provided_key
+    }
+    fn configured_models(&self) -> Option<&[String]> {
+        self.meta.models.as_deref()
+    }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        let fallback = vec![ModelInfo { id: self.model.clone(), display_name: None }];
+        let fallback = vec![ModelInfo {
+            id: self.model.clone(),
+            display_name: None,
+        }];
         let url = format!("{}/models", self.base_url.trim_end_matches('/'));
         let mut req = self.client.get(&url);
         if !self.api_key.is_empty() {
             req = req.bearer_auth(&self.api_key);
         }
-        let Ok(response) = req.send().await else { return Ok(fallback) };
+        let Ok(response) = req.send().await else {
+            return Ok(fallback);
+        };
         if !response.status().is_success() {
             return Ok(fallback);
         }
-        let Ok(json) = response.json::<Value>().await else { return Ok(fallback) };
-        let Some(data) = json["data"].as_array() else { return Ok(fallback) };
-        let models: Vec<ModelInfo> = data.iter()
+        let Ok(json) = response.json::<Value>().await else {
+            return Ok(fallback);
+        };
+        let Some(data) = json["data"].as_array() else {
+            return Ok(fallback);
+        };
+        let models: Vec<ModelInfo> = data
+            .iter()
             .filter_map(|m| m["id"].as_str())
-            .map(|id| ModelInfo { id: id.to_string(), display_name: None })
+            .map(|id| ModelInfo {
+                id: id.to_string(),
+                display_name: None,
+            })
             .collect();
-        if models.is_empty() { Ok(fallback) } else { Ok(models) }
+        if models.is_empty() {
+            Ok(fallback)
+        } else {
+            Ok(models)
+        }
     }
 
-    async fn chat_with(&self, model: Option<&str>, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
-        let body = build_body(model.unwrap_or(&self.model), messages, tools, false, self.enable_prompt_caching, None);
+    async fn chat_with(
+        &self,
+        model: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<LlmResponse> {
+        let body = build_body(
+            model.unwrap_or(&self.model),
+            messages,
+            tools,
+            false,
+            self.enable_prompt_caching,
+            None,
+        );
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         let response = retry::send_with_retry(
@@ -88,12 +149,16 @@ impl LlmProvider for OpenAiCompatProvider {
                 }
                 req.send()
             },
-        ).await?;
+        )
+        .await?;
 
         let status = response.status();
         let body_text = response.text().await?;
-        let json: Value = serde_json::from_str(&body_text)
-            .map_err(|e| anyhow::anyhow!("OpenAI-compat API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+        let json: Value = serde_json::from_str(&body_text).map_err(|e| {
+            anyhow::anyhow!(
+                "OpenAI-compat API returned non-JSON (status {status}): {e}\nbody: {body_text}"
+            )
+        })?;
 
         if !status.is_success() {
             bail!("OpenAI-compat API error {status}: {json}");
@@ -113,7 +178,14 @@ impl LlmProvider for OpenAiCompatProvider {
     }
 }
 
-fn build_body(model: &str, messages: &[Message], tools: &[ToolDefinition], stream: bool, enable_caching: bool, cache_breakpoint_index: Option<usize>) -> Value {
+fn build_body(
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    stream: bool,
+    enable_caching: bool,
+    cache_breakpoint_index: Option<usize>,
+) -> Value {
     let mut api_messages: Vec<Value> = messages.iter().map(to_openai_message).collect();
     let api_tools: Vec<Value> = tools.iter().map(to_openai_function).collect();
 
@@ -145,7 +217,9 @@ fn inject_cache_breakpoints(api_messages: &mut Vec<Value>, breakpoint_index: Opt
         }
     }
     let second_bp = match breakpoint_index {
-        Some(idx) => idx.saturating_sub(1).min(api_messages.len().saturating_sub(1)),
+        Some(idx) => idx
+            .saturating_sub(1)
+            .min(api_messages.len().saturating_sub(1)),
         None => api_messages.len().saturating_sub(1),
     };
     if let Some(msg) = api_messages.get_mut(second_bp) {
@@ -174,8 +248,8 @@ fn inject_cache_control_on_message(msg: &mut Value) {
 
 #[derive(Default, Clone)]
 struct ToolCallAccum {
-    id:       String,
-    name:     String,
+    id: String,
+    name: String,
     args_buf: String,
 }
 
@@ -190,8 +264,14 @@ fn apply_usage_delta(usage: &mut Usage, u: &Value) {
     };
     keep_max(&mut usage.input_tokens, u["prompt_tokens"].as_u64());
     keep_max(&mut usage.output_tokens, u["completion_tokens"].as_u64());
-    keep_max(&mut usage.cache_read_tokens, u["prompt_tokens_details"]["cached_tokens"].as_u64());
-    keep_max(&mut usage.reasoning_tokens, u["completion_tokens_details"]["reasoning_tokens"].as_u64());
+    keep_max(
+        &mut usage.cache_read_tokens,
+        u["prompt_tokens_details"]["cached_tokens"].as_u64(),
+    );
+    keep_max(
+        &mut usage.reasoning_tokens,
+        u["completion_tokens_details"]["reasoning_tokens"].as_u64(),
+    );
 }
 
 async fn process_stream_event(
@@ -204,18 +284,28 @@ async fn process_stream_event(
     apply_usage_delta(usage, &event["usage"]);
 
     let choice = &event["choices"][0];
-    let delta  = &choice["delta"];
+    let delta = &choice["delta"];
 
     if let Some(text) = delta["content"].as_str() {
         if !text.is_empty() {
-            let _ = tx.send(StreamEvent::TextDelta { text: text.to_string() }).await;
+            let _ = tx
+                .send(StreamEvent::TextDelta {
+                    text: text.to_string(),
+                })
+                .await;
         }
     }
 
-    let reasoning = delta["reasoning_content"].as_str().or_else(|| delta["reasoning"].as_str());
+    let reasoning = delta["reasoning_content"]
+        .as_str()
+        .or_else(|| delta["reasoning"].as_str());
     if let Some(text) = reasoning {
         if !text.is_empty() {
-            let _ = tx.send(StreamEvent::ThinkingDelta { text: text.to_string() }).await;
+            let _ = tx
+                .send(StreamEvent::ThinkingDelta {
+                    text: text.to_string(),
+                })
+                .await;
         }
     }
 
@@ -238,9 +328,9 @@ async fn process_stream_event(
     if let Some(reason) = choice["finish_reason"].as_str() {
         *stop_reason = Some(match reason {
             "tool_calls" => "tool_use".to_string(),
-            "stop"       => "end_turn".to_string(),
-            "length"     => "max_tokens".to_string(),
-            other        => other.to_string(),
+            "stop" => "end_turn".to_string(),
+            "length" => "max_tokens".to_string(),
+            other => other.to_string(),
         });
     }
 }
@@ -253,7 +343,14 @@ impl OpenAiCompatProvider {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
-        let body = build_body(model.unwrap_or(&self.model), messages, tools, true, self.enable_prompt_caching, None);
+        let body = build_body(
+            model.unwrap_or(&self.model),
+            messages,
+            tools,
+            true,
+            self.enable_prompt_caching,
+            None,
+        );
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
 
         let response = retry::send_with_retry(
@@ -267,7 +364,8 @@ impl OpenAiCompatProvider {
                 }
                 req.send()
             },
-        ).await?;
+        )
+        .await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -298,8 +396,11 @@ impl OpenAiCompatProvider {
                 if data == "[DONE]" {
                     break 'outer;
                 }
-                let Ok(json) = serde_json::from_str::<Value>(&data) else { continue };
-                process_stream_event(&json, &mut tool_calls, &mut stop_reason, &mut usage, &tx).await;
+                let Ok(json) = serde_json::from_str::<Value>(&data) else {
+                    continue;
+                };
+                process_stream_event(&json, &mut tool_calls, &mut stop_reason, &mut usage, &tx)
+                    .await;
             }
         }
 
@@ -310,18 +411,29 @@ impl OpenAiCompatProvider {
         for (_, call) in ordered {
             let input: Value = serde_json::from_str(&call.args_buf)
                 .unwrap_or(Value::Object(serde_json::Map::new()));
-            let _ = tx.send(StreamEvent::ToolCallReady(ToolCall {
-                id:                call.id,
-                name:              call.name,
-                input,
-                thought_signature: None,
-            })).await;
+            let _ = tx
+                .send(StreamEvent::ToolCallReady(ToolCall {
+                    id: call.id,
+                    name: call.name,
+                    input,
+                    thought_signature: None,
+                }))
+                .await;
         }
 
         let resolved_stop_reason = stop_reason.unwrap_or_else(|| {
-            if has_tool_calls { "tool_use".to_string() } else { "end_turn".to_string() }
+            if has_tool_calls {
+                "tool_use".to_string()
+            } else {
+                "end_turn".to_string()
+            }
         });
-        let _ = tx.send(StreamEvent::Done { stop_reason: resolved_stop_reason, usage }).await;
+        let _ = tx
+            .send(StreamEvent::Done {
+                stop_reason: resolved_stop_reason,
+                usage,
+            })
+            .await;
 
         Ok(())
     }
@@ -329,10 +441,10 @@ impl OpenAiCompatProvider {
 
 fn to_openai_message(msg: &Message) -> Value {
     let role = match msg.role {
-        Role::System    => "system",
-        Role::User      => "user",
+        Role::System => "system",
+        Role::User => "user",
         Role::Assistant => "assistant",
-        Role::Tool      => "tool",
+        Role::Tool => "tool",
     };
 
     match &msg.content {
@@ -341,7 +453,9 @@ fn to_openai_message(msg: &Message) -> Value {
             let tool_calls: Vec<Value> = parts
                 .iter()
                 .filter_map(|p| match p {
-                    ContentPart::ToolUse { id, name, input, .. } => Some(json!({
+                    ContentPart::ToolUse {
+                        id, name, input, ..
+                    } => Some(json!({
                         "id": id,
                         "type": "function",
                         "function": { "name": name, "arguments": input.to_string() }
@@ -354,7 +468,12 @@ fn to_openai_message(msg: &Message) -> Value {
                 return json!({ "role": "assistant", "tool_calls": tool_calls });
             }
 
-            if let Some(ContentPart::ToolResult { tool_use_id, content, .. }) = parts.first() {
+            if let Some(ContentPart::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            }) = parts.first()
+            {
                 return json!({
                     "role": "tool",
                     "tool_call_id": tool_use_id,
@@ -362,22 +481,28 @@ fn to_openai_message(msg: &Message) -> Value {
                 });
             }
 
-            let has_media = parts.iter().any(|p| {
-                matches!(p, ContentPart::Image { .. } | ContentPart::Document { .. })
-            });
+            let has_media = parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::Image { .. } | ContentPart::Document { .. }));
 
             if has_media {
-                let content_items: Vec<Value> = parts.iter().filter_map(|p| match p {
-                    ContentPart::Text { text, .. } =>
-                        Some(json!({ "type": "text", "text": text })),
-                    ContentPart::Image { media_type, data } =>
-                        Some(json!({ "type": "image_url", "image_url": {
-                            "url": format!("data:{};base64,{}", media_type, data)
-                        }})),
-                    ContentPart::Document { .. } =>
-                        Some(json!({ "type": "text", "text": "[Attached PDF document]" })),
-                    _ => None,
-                }).collect();
+                let content_items: Vec<Value> = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        ContentPart::Text { text, .. } => {
+                            Some(json!({ "type": "text", "text": text }))
+                        }
+                        ContentPart::Image { media_type, data } => {
+                            Some(json!({ "type": "image_url", "image_url": {
+                                "url": format!("data:{};base64,{}", media_type, data)
+                            }}))
+                        }
+                        ContentPart::Document { .. } => {
+                            Some(json!({ "type": "text", "text": "[Attached PDF document]" }))
+                        }
+                        _ => None,
+                    })
+                    .collect();
                 return json!({ "role": role, "content": content_items });
             }
 
@@ -427,16 +552,19 @@ fn parse_openai_response(json: Value) -> Result<LlmResponse> {
             .unwrap_or_default()
             .into_iter()
             .map(|tc| ToolCall {
-                id:                tc["id"].as_str().unwrap_or("").to_string(),
-                name:              tc["function"]["name"].as_str().unwrap_or("").to_string(),
-                input:             serde_json::from_str(
-                    tc["function"]["arguments"].as_str().unwrap_or("{}"),
-                ).unwrap_or(Value::Null),
+                id: tc["id"].as_str().unwrap_or("").to_string(),
+                name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
+                input: serde_json::from_str(tc["function"]["arguments"].as_str().unwrap_or("{}"))
+                    .unwrap_or(Value::Null),
                 thought_signature: None,
             })
             .collect();
         let preamble = message["content"].as_str().unwrap_or("").to_string();
-        return Ok(LlmResponse::ToolCalls { calls, preamble, usage });
+        return Ok(LlmResponse::ToolCalls {
+            calls,
+            preamble,
+            usage,
+        });
     }
 
     let text = message["content"].as_str().unwrap_or("").to_string();
@@ -450,16 +578,30 @@ mod tests {
     use serde_json::json;
 
     fn make_provider(base_url: &str) -> OpenAiCompatProvider {
-        OpenAiCompatProvider::new(base_url.into(), "test-key".into(), "test-model".into(), 30, 0, ProviderMeta::new("oai-1"))
+        OpenAiCompatProvider::new(
+            base_url.into(),
+            "test-key".into(),
+            "test-model".into(),
+            30,
+            0,
+            ProviderMeta::new("oai-1"),
+        )
     }
 
     fn sse_body(events: &[Value]) -> String {
-        events.iter().map(|e| format!("data: {e}\n\n")).collect::<String>() + "data: [DONE]\n\n"
+        events
+            .iter()
+            .map(|e| format!("data: {e}\n\n"))
+            .collect::<String>()
+            + "data: [DONE]\n\n"
     }
 
     async fn collect_stream_events(provider: &OpenAiCompatProvider) -> Vec<StreamEvent> {
         let (tx, mut rx) = mpsc::channel(64);
-        provider.stream(None, &[Message::user("hi")], &[], tx).await.unwrap();
+        provider
+            .stream(None, &[Message::user("hi")], &[], tx)
+            .await
+            .unwrap();
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() {
             events.push(e);
@@ -484,13 +626,18 @@ mod tests {
         let provider = make_provider(&server.base_url());
         let events = collect_stream_events(&provider).await;
 
-        let text_deltas: Vec<_> = events.iter().filter_map(|e| match e {
-            StreamEvent::TextDelta { text } => Some(text.as_str()),
-            _ => None,
-        }).collect();
+        let text_deltas: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(text_deltas, vec!["Hello", " world"]);
 
-        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "end_turn"));
+        let done = events.iter().any(
+            |e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "end_turn"),
+        );
         assert!(done, "expected Done(end_turn) event");
     }
 
@@ -510,10 +657,13 @@ mod tests {
         let provider = make_provider(&server.base_url());
         let events = collect_stream_events(&provider).await;
 
-        let thinking: Vec<_> = events.iter().filter_map(|e| match e {
-            StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
-            _ => None,
-        }).collect();
+        let thinking: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(thinking, vec!["Let me think"]);
     }
 
@@ -533,10 +683,13 @@ mod tests {
         let provider = make_provider(&server.base_url());
         let events = collect_stream_events(&provider).await;
 
-        let thinking: Vec<_> = events.iter().filter_map(|e| match e {
-            StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
-            _ => None,
-        }).collect();
+        let thinking: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(thinking, vec!["Checking options"]);
     }
 
@@ -564,16 +717,21 @@ mod tests {
         let provider = make_provider(&server.base_url());
         let events = collect_stream_events(&provider).await;
 
-        let calls: Vec<_> = events.iter().filter_map(|e| match e {
-            StreamEvent::ToolCallReady(c) => Some(c),
-            _ => None,
-        }).collect();
+        let calls: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ToolCallReady(c) => Some(c),
+                _ => None,
+            })
+            .collect();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].id,   "call_1");
+        assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].name, "search_symbols");
         assert_eq!(calls[0].input["query"], "hello");
 
-        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "tool_use"));
+        let done = events.iter().any(
+            |e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "tool_use"),
+        );
         assert!(done, "expected Done(tool_use) event");
     }
 
@@ -596,10 +754,13 @@ mod tests {
         let provider = make_provider(&server.base_url());
         let events = collect_stream_events(&provider).await;
 
-        let call_names: Vec<_> = events.iter().filter_map(|e| match e {
-            StreamEvent::ToolCallReady(c) => Some(c.name.as_str()),
-            _ => None,
-        }).collect();
+        let call_names: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ToolCallReady(c) => Some(c.name.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(call_names, vec!["tool_a", "tool_b"]);
     }
 
@@ -627,10 +788,13 @@ mod tests {
         let provider = make_provider(&server.base_url());
         let events = collect_stream_events(&provider).await;
 
-        let usage = events.iter().find_map(|e| match e {
-            StreamEvent::Done { usage, .. } => Some(usage.clone()),
-            _ => None,
-        }).expect("expected Done event with usage");
+        let usage = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::Done { usage, .. } => Some(usage.clone()),
+                _ => None,
+            })
+            .expect("expected Done event with usage");
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 20);
         assert_eq!(usage.cache_read_tokens, 10);
@@ -673,12 +837,18 @@ mod tests {
     #[test]
     fn apply_usage_delta_keeps_max_when_chunks_repeat() {
         let mut usage = Usage::default();
-        apply_usage_delta(&mut usage, &json!({
-            "prompt_tokens": 1200,
-            "completion_tokens": 80,
-            "prompt_tokens_details": { "cached_tokens": 900 }
-        }));
-        apply_usage_delta(&mut usage, &json!({ "prompt_tokens": 0, "completion_tokens": 0 }));
+        apply_usage_delta(
+            &mut usage,
+            &json!({
+                "prompt_tokens": 1200,
+                "completion_tokens": 80,
+                "prompt_tokens_details": { "cached_tokens": 900 }
+            }),
+        );
+        apply_usage_delta(
+            &mut usage,
+            &json!({ "prompt_tokens": 0, "completion_tokens": 0 }),
+        );
         assert_eq!(usage.input_tokens, 1200);
         assert_eq!(usage.output_tokens, 80);
         assert_eq!(usage.cache_read_tokens, 900);
@@ -783,7 +953,9 @@ mod tests {
             }]
         });
         match parse_openai_response(json).unwrap() {
-            LlmResponse::ToolCalls { calls, .. } => assert_eq!(calls[0].input, serde_json::Value::Null),
+            LlmResponse::ToolCalls { calls, .. } => {
+                assert_eq!(calls[0].input, serde_json::Value::Null)
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -844,8 +1016,14 @@ mod tests {
         let msg = Message {
             role: Role::User,
             content: MessageContent::Parts(vec![
-                ContentPart::Text { text: "look at this".into(), thought_signature: None },
-                ContentPart::Image { media_type: "image/jpeg".into(), data: "abc123".into() },
+                ContentPart::Text {
+                    text: "look at this".into(),
+                    thought_signature: None,
+                },
+                ContentPart::Image {
+                    media_type: "image/jpeg".into(),
+                    data: "abc123".into(),
+                },
             ]),
         };
         let v = to_openai_message(&msg);
@@ -853,7 +1031,10 @@ mod tests {
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "look at this");
         assert_eq!(content[1]["type"], "image_url");
-        assert_eq!(content[1]["image_url"]["url"], "data:image/jpeg;base64,abc123");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/jpeg;base64,abc123"
+        );
     }
 
     #[test]
@@ -861,8 +1042,14 @@ mod tests {
         let msg = Message {
             role: Role::User,
             content: MessageContent::Parts(vec![
-                ContentPart::Text { text: "read this".into(), thought_signature: None },
-                ContentPart::Document { media_type: "application/pdf".into(), data: "pdfdata".into() },
+                ContentPart::Text {
+                    text: "read this".into(),
+                    thought_signature: None,
+                },
+                ContentPart::Document {
+                    media_type: "application/pdf".into(),
+                    data: "pdfdata".into(),
+                },
             ]),
         };
         let v = to_openai_message(&msg);
@@ -884,7 +1071,10 @@ mod tests {
         assert_eq!(v["function"]["name"], "my_tool");
         assert_eq!(v["function"]["description"], "does stuff");
         assert!(v["function"].get("parameters").is_some());
-        assert!(v.get("name").is_none(), "name must be nested, not top-level");
+        assert!(
+            v.get("name").is_none(),
+            "name must be nested, not top-level"
+        );
     }
 
     fn text_response() -> serde_json::Value {
@@ -978,7 +1168,10 @@ mod tests {
         });
 
         let provider = make_provider(&server.base_url());
-        provider.chat_with(Some("override-model"), &[Message::user("hi")], &[]).await.unwrap();
+        provider
+            .chat_with(Some("override-model"), &[Message::user("hi")], &[])
+            .await
+            .unwrap();
         mock.assert();
     }
 
@@ -993,7 +1186,10 @@ mod tests {
         });
 
         let provider = make_provider(&server.base_url());
-        provider.chat_with(None, &[Message::user("hi")], &[]).await.unwrap();
+        provider
+            .chat_with(None, &[Message::user("hi")], &[])
+            .await
+            .unwrap();
         mock.assert();
     }
 
@@ -1028,21 +1224,64 @@ mod tests {
 
         let provider = make_provider(&server.base_url());
         let models = provider.list_models().await.unwrap();
-        assert_eq!(models, vec![ModelInfo { id: "test-model".into(), display_name: None }]);
+        assert_eq!(
+            models,
+            vec![ModelInfo {
+                id: "test-model".into(),
+                display_name: None
+            }]
+        );
     }
 
     #[test]
     fn expose_to_ui_reflects_constructor_value() {
-        let visible = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta::new("a"));
-        let hidden  = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta { id: "b".into(), expose_to_ui: false, ..Default::default() });
+        let visible = OpenAiCompatProvider::new(
+            "http://x".into(),
+            "k".into(),
+            "m".into(),
+            30,
+            0,
+            ProviderMeta::new("a"),
+        );
+        let hidden = OpenAiCompatProvider::new(
+            "http://x".into(),
+            "k".into(),
+            "m".into(),
+            30,
+            0,
+            ProviderMeta {
+                id: "b".into(),
+                expose_to_ui: false,
+                ..Default::default()
+            },
+        );
         assert!(visible.expose_to_ui());
         assert!(!hidden.expose_to_ui());
     }
 
     #[test]
     fn name_reflects_constructor_value() {
-        let named   = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta { id: "a".into(), expose_to_ui: true, name: Some("Lemonade (local)".into()), ..Default::default() });
-        let unnamed = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta::new("b"));
+        let named = OpenAiCompatProvider::new(
+            "http://x".into(),
+            "k".into(),
+            "m".into(),
+            30,
+            0,
+            ProviderMeta {
+                id: "a".into(),
+                expose_to_ui: true,
+                name: Some("Lemonade (local)".into()),
+                ..Default::default()
+            },
+        );
+        let unnamed = OpenAiCompatProvider::new(
+            "http://x".into(),
+            "k".into(),
+            "m".into(),
+            30,
+            0,
+            ProviderMeta::new("b"),
+        );
         assert_eq!(named.name(), Some("Lemonade (local)"));
         assert_eq!(unnamed.name(), None);
     }
@@ -1057,7 +1296,13 @@ mod tests {
 
         let provider = make_provider(&server.base_url());
         let models = provider.list_models().await.unwrap();
-        assert_eq!(models, vec![ModelInfo { id: "test-model".into(), display_name: None }]);
+        assert_eq!(
+            models,
+            vec![ModelInfo {
+                id: "test-model".into(),
+                display_name: None
+            }]
+        );
     }
 
     #[tokio::test]
@@ -1132,14 +1377,28 @@ mod tests {
 
     #[test]
     fn prompt_caching_disabled_by_default() {
-        let p = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta::new("a"));
+        let p = OpenAiCompatProvider::new(
+            "http://x".into(),
+            "k".into(),
+            "m".into(),
+            30,
+            0,
+            ProviderMeta::new("a"),
+        );
         assert!(!p.prompt_caching_enabled());
     }
 
     #[test]
     fn with_prompt_caching_enables_it() {
-        let p = OpenAiCompatProvider::new("http://x".into(), "k".into(), "m".into(), 30, 0, ProviderMeta::new("a"))
-            .with_prompt_caching(true);
+        let p = OpenAiCompatProvider::new(
+            "http://x".into(),
+            "k".into(),
+            "m".into(),
+            30,
+            0,
+            ProviderMeta::new("a"),
+        )
+        .with_prompt_caching(true);
         assert!(p.prompt_caching_enabled());
     }
 }
