@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::time::{Duration, interval};
+use tokio::time::{interval, Duration};
 
 use harvest_db::Db;
 
@@ -34,7 +34,10 @@ impl Pipeline {
         let db = Db::connect(&config.database.url).await?;
         let mut pipeline = Self::with_db(db)?;
         if let Some(git_cfg) = &config.git {
-            pipeline.git = pipeline.git.clone().with_ssh_key(git_cfg.ssh_key_path.clone(), git_cfg.ssh_passphrase.clone());
+            pipeline.git = pipeline
+                .git
+                .clone()
+                .with_ssh_key(git_cfg.ssh_key_path.clone(), git_cfg.ssh_passphrase.clone());
         }
         pipeline.repositories = config.repositories;
         Ok(pipeline)
@@ -59,8 +62,7 @@ impl Pipeline {
     pub async fn list_remote_refs(&self, url: &str) -> Result<Vec<crate::git::TagInfo>> {
         let git = self.git.clone();
         let url = url.to_string();
-        tokio::task::spawn_blocking(move || git.list_remote_refs(&url))
-            .await?
+        tokio::task::spawn_blocking(move || git.list_remote_refs(&url)).await?
     }
 
     pub async fn ingested_versions(&self, repo: &str) -> Result<Vec<String>> {
@@ -102,8 +104,13 @@ impl Pipeline {
     }
 
     async fn process_repo(&self, repo: &RepoConfig, force: bool) -> Result<()> {
-        self.emit(format!("Registering repository '{}' in the database…", repo.name));
-        self.writer.upsert_repository(&repo.name, &repo.resolved_browse_url()).await?;
+        self.emit(format!(
+            "Registering repository '{}' in the database…",
+            repo.name
+        ));
+        self.writer
+            .upsert_repository(&repo.name, &repo.resolved_browse_url())
+            .await?;
         self.emit("Cloning repository…");
         let repo_path = self.git.ensure_cloned(repo)?;
         self.emit("Repository cloned. Discovering refs…");
@@ -124,7 +131,11 @@ impl Pipeline {
             match self.writer.ingestion_status(&repo.name, &tag.name).await? {
                 IngestionStatus::Current if !force => {
                     self.emit(format!("Ref '{}' already ingested, skipping.", tag.name));
-                    tracing::debug!(repo = repo.name, tag = tag.name, "already ingested, skipping");
+                    tracing::debug!(
+                        repo = repo.name,
+                        tag = tag.name,
+                        "already ingested, skipping"
+                    );
                     continue;
                 }
                 IngestionStatus::Stale { parser_version } => {
@@ -132,11 +143,18 @@ impl Pipeline {
                         "Ref '{}' was ingested by an older parser (version {parser_version}, current {PARSER_VERSION}); re-ingesting.",
                         tag.name,
                     ));
-                    tracing::info!(repo = repo.name, tag = tag.name, parser_version, current = PARSER_VERSION, "re-ingesting stale version");
+                    tracing::info!(
+                        repo = repo.name,
+                        tag = tag.name,
+                        parser_version,
+                        current = PARSER_VERSION,
+                        "re-ingesting stale version"
+                    );
                 }
                 _ => {}
             }
-            self.process_version(&repo_path, &repo.name, &tag.name, tag.timestamp).await?;
+            self.process_version(&repo_path, &repo.name, &tag.name, tag.timestamp)
+                .await?;
         }
 
         self.emit("Cleaning up temporary clone…");
@@ -157,7 +175,9 @@ impl Pipeline {
         self.emit(format!("Processing ref '{}'…", tag));
         tracing::info!(repo, tag, "ingesting version");
 
-        self.writer.upsert_version(repo, tag, timestamp, false).await?;
+        self.writer
+            .upsert_version(repo, tag, timestamp, false)
+            .await?;
 
         self.emit(format!("Checking out '{}'…", tag));
         self.git.checkout(repo_path, tag)?;
@@ -193,10 +213,18 @@ impl Pipeline {
         .await?;
 
         let parsed_count = parsed.len();
-        self.emit(format!("Parsed {} file(s). Writing to the database…", parsed_count));
+        self.emit(format!(
+            "Parsed {} file(s). Writing to the database…",
+            parsed_count
+        ));
 
-        self.writer.write_version(&repo_owned, &tag_owned, &parsed).await?;
-        self.emit(format!("Ref '{}' ingested successfully ({} files).", tag, parsed_count));
+        self.writer
+            .write_version(&repo_owned, &tag_owned, &parsed)
+            .await?;
+        self.emit(format!(
+            "Ref '{}' ingested successfully ({} files).",
+            tag, parsed_count
+        ));
         Ok(())
     }
 }

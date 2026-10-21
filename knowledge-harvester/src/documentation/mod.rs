@@ -1,8 +1,8 @@
 pub mod llm;
-pub mod workflow;
 mod retry;
+pub mod workflow;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use harvest_db::Db;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -35,7 +35,11 @@ pub struct DocumentationPipeline {
 impl DocumentationPipeline {
     pub fn new(db: Db, llm_config: &LlmConfig, doc_config: &DocumentationConfig) -> Self {
         let llm = llm::from_config(llm_config);
-        Self { db, llm, docs_dir: doc_config.docs_dir.clone() }
+        Self {
+            db,
+            llm,
+            docs_dir: doc_config.docs_dir.clone(),
+        }
     }
 
     pub async fn document(&self, repo: &str, version: &str) -> Result<()> {
@@ -48,7 +52,10 @@ impl DocumentationPipeline {
 
         let sources = self.fetch_sources(repo, version).await?;
 
-        let workflow = Workflow { llm: self.llm.as_ref(), docs_dir: &self.docs_dir };
+        let workflow = Workflow {
+            llm: self.llm.as_ref(),
+            docs_dir: &self.docs_dir,
+        };
         workflow.run(repo, version, &structure, &sources).await
     }
 
@@ -64,8 +71,10 @@ impl DocumentationPipeline {
     }
 
     async fn fetch_structure(&self, repo: &str, version: &str) -> Result<Vec<StructureRow>> {
-        let rows = self.db.query(
-            "SELECT f.path, f.language,
+        let rows = self
+            .db
+            .query(
+                "SELECT f.path, f.language,
                     COALESCE(json_agg(json_build_object('name', s.name, 'kind', s.label,
                                                         'signature', s.signature)
                                       ORDER BY s.start_line) FILTER (WHERE s.id IS NOT NULL),
@@ -75,37 +84,57 @@ impl DocumentationPipeline {
              WHERE f.repo = $repo AND f.version = $version
              GROUP BY f.id, f.path, f.language
              ORDER BY f.path",
-            json!({ "repo": repo, "version": version }),
-        ).await?;
+                json!({ "repo": repo, "version": version }),
+            )
+            .await?;
 
-        Ok(rows.into_iter().map(|row| {
-            let symbols = row["symbols"].as_array().cloned().unwrap_or_default()
-                .into_iter()
-                .filter_map(|s| {
-                    let name = s["name"].as_str()?.to_string();
-                    let kind = s["kind"].as_str().unwrap_or("Unknown").to_string();
-                    let signature = s["signature"].as_str().map(String::from);
-                    Some(SymbolInfo { name, kind, signature })
-                })
-                .collect();
-            StructureRow {
-                path: row["path"].as_str().unwrap_or_default().to_string(),
-                language: row["language"].as_str().unwrap_or_default().to_string(),
-                symbols,
-            }
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let symbols = row["symbols"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|s| {
+                        let name = s["name"].as_str()?.to_string();
+                        let kind = s["kind"].as_str().unwrap_or("Unknown").to_string();
+                        let signature = s["signature"].as_str().map(String::from);
+                        Some(SymbolInfo {
+                            name,
+                            kind,
+                            signature,
+                        })
+                    })
+                    .collect();
+                StructureRow {
+                    path: row["path"].as_str().unwrap_or_default().to_string(),
+                    language: row["language"].as_str().unwrap_or_default().to_string(),
+                    symbols,
+                }
+            })
+            .collect())
     }
 
     async fn fetch_sources(&self, repo: &str, version: &str) -> Result<Vec<(String, String)>> {
-        let rows = self.db.query(
-            "SELECT name, source FROM code_symbols
+        let rows = self
+            .db
+            .query(
+                "SELECT name, source FROM code_symbols
              WHERE repo = $repo AND version = $version AND source <> ''
              ORDER BY file, start_line
              LIMIT 200",
-            json!({ "repo": repo, "version": version }),
-        ).await?;
-        Ok(rows.into_iter()
-            .filter_map(|r| Some((r["name"].as_str()?.to_string(), r["source"].as_str()?.to_string())))
+                json!({ "repo": repo, "version": version }),
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                Some((
+                    r["name"].as_str()?.to_string(),
+                    r["source"].as_str()?.to_string(),
+                ))
+            })
             .filter(|(name, source)| !name.is_empty() && !source.is_empty())
             .collect())
     }
@@ -138,6 +167,9 @@ mod tests {
         let json = serde_json::to_string(&index).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["repo"], "testrepo");
-        assert_eq!(parsed["sections"]["tutorials"][0]["filename"], "getting-started.md");
+        assert_eq!(
+            parsed["sections"]["tutorials"][0]["filename"],
+            "getting-started.md"
+        );
     }
 }

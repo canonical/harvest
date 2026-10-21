@@ -34,7 +34,10 @@ impl RepoConfig {
     pub fn resolved_browse_url(&self) -> String {
         self.browse_url.clone().unwrap_or_else(|| {
             let cleaned = strip_credentials(&self.url);
-            cleaned.strip_suffix(".git").map(str::to_string).unwrap_or(cleaned)
+            cleaned
+                .strip_suffix(".git")
+                .map(str::to_string)
+                .unwrap_or(cleaned)
         })
     }
 }
@@ -87,8 +90,12 @@ pub enum LlmConfig {
     },
 }
 
-fn default_timeout_secs() -> u64 { 300 }
-fn default_max_retries() -> u32 { 3 }
+fn default_timeout_secs() -> u64 {
+    300
+}
+fn default_max_retries() -> u32 {
+    3
+}
 
 impl Config {
     pub fn from_file(path: &Path) -> Result<Self> {
@@ -137,7 +144,8 @@ url  = "https://github.com/owner/repo.git"
 
     #[test]
     fn repo_with_refs_list_parsed() {
-        let config: Config = toml::from_str(&base_toml(r#"refs = ["v1.0", "v2.0", "main"]"#)).unwrap();
+        let config: Config =
+            toml::from_str(&base_toml(r#"refs = ["v1.0", "v2.0", "main"]"#)).unwrap();
         let refs = config.repositories[0].refs.as_ref().unwrap();
         assert_eq!(refs, &["v1.0", "v2.0", "main"]);
     }
@@ -273,7 +281,10 @@ url  = "git@github.com:owner/repo.git"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         let git = config.git.as_ref().unwrap();
-        assert_eq!(git.ssh_key_path, PathBuf::from("/home/user/.ssh/id_ed25519"));
+        assert_eq!(
+            git.ssh_key_path,
+            PathBuf::from("/home/user/.ssh/id_ed25519")
+        );
         assert!(git.ssh_passphrase.is_none());
     }
 
@@ -357,10 +368,8 @@ name = "my-repo"
 
     #[test]
     fn resolved_browse_url_leaves_non_git_suffixed_url_unchanged() {
-        let config: Config = toml::from_str(&repo_toml(
-            r#"url = "https://github.com/owner/repo""#,
-        ))
-        .unwrap();
+        let config: Config =
+            toml::from_str(&repo_toml(r#"url = "https://github.com/owner/repo""#)).unwrap();
         assert_eq!(
             config.repositories[0].resolved_browse_url(),
             "https://github.com/owner/repo"

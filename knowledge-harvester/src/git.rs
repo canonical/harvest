@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use git2::{RemoteCallbacks, build::RepoBuilder, FetchOptions, Repository};
+use git2::{build::RepoBuilder, FetchOptions, RemoteCallbacks, Repository};
 use std::path::{Path, PathBuf};
 
 use crate::config::RepoConfig;
@@ -20,7 +20,11 @@ pub struct GitClient {
 
 impl GitClient {
     pub fn new(clone_root: PathBuf) -> Self {
-        Self { clone_root, ssh_key_path: None, ssh_passphrase: None }
+        Self {
+            clone_root,
+            ssh_key_path: None,
+            ssh_passphrase: None,
+        }
     }
 
     pub fn with_ssh_key(mut self, key_path: PathBuf, passphrase: Option<String>) -> Self {
@@ -35,7 +39,12 @@ impl GitClient {
             let passphrase = self.ssh_passphrase.clone();
             let mut callbacks = RemoteCallbacks::new();
             callbacks.credentials(move |_url, username, _allowed| {
-                git2::Cred::ssh_key(username.unwrap_or("git"), None, &key_path, passphrase.as_deref())
+                git2::Cred::ssh_key(
+                    username.unwrap_or("git"),
+                    None,
+                    &key_path,
+                    passphrase.as_deref(),
+                )
             });
             fo.remote_callbacks(callbacks);
         }
@@ -136,8 +145,8 @@ impl GitClient {
 
     pub fn checkout(&self, repo_path: &Path, refname: &str) -> Result<()> {
         let repo = Repository::open(repo_path)?;
-        let obj = resolve_one(&repo, refname)
-            .with_context(|| format!("resolving ref '{refname}'"))?;
+        let obj =
+            resolve_one(&repo, refname).with_context(|| format!("resolving ref '{refname}'"))?;
         repo.checkout_tree(&obj, None)?;
         repo.set_head_detached(obj.peel_to_commit()?.id())?;
         Ok(())
@@ -170,7 +179,9 @@ fn resolve_one<'r>(repo: &'r Repository, refname: &str) -> Result<git2::Object<'
 fn parse_refs(refs: Vec<(String, String)>) -> Vec<TagInfo> {
     let mut result = Vec::new();
     for (name, sha) in refs {
-        if name == "HEAD" { continue; }
+        if name == "HEAD" {
+            continue;
+        }
         let display_name = name
             .strip_prefix("refs/tags/")
             .unwrap_or(&name)
@@ -227,7 +238,9 @@ mod tests {
     fn resolve_refs_resolves_tag() {
         let (_dir, repo_path) = make_repo();
         let client = GitClient::new(PathBuf::from("/tmp"));
-        let refs = client.resolve_refs(&repo_path, &["v1.0".to_string()]).unwrap();
+        let refs = client
+            .resolve_refs(&repo_path, &["v1.0".to_string()])
+            .unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "v1.0");
         assert!(!refs[0].commit_sha.is_empty());
@@ -237,7 +250,9 @@ mod tests {
     fn resolve_refs_resolves_branch() {
         let (_dir, repo_path) = make_repo();
         let client = GitClient::new(PathBuf::from("/tmp"));
-        let refs = client.resolve_refs(&repo_path, &["develop".to_string()]).unwrap();
+        let refs = client
+            .resolve_refs(&repo_path, &["develop".to_string()])
+            .unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "develop");
         assert!(!refs[0].commit_sha.is_empty());
@@ -292,7 +307,8 @@ mod tests {
             head_oid,
             false,
             "remote tracking ref",
-        ).unwrap();
+        )
+        .unwrap();
         drop(repo);
 
         let client = GitClient::new(PathBuf::from("/tmp"));

@@ -1,18 +1,24 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::graph::model::{CallRef, ClassNode, FunctionNode, ImportNode, ParsedFile};
 use super::LanguageParser;
+use crate::graph::model::{CallRef, ClassNode, FunctionNode, ImportNode, ParsedFile};
 
 pub struct RustParser;
 
 impl LanguageParser for RustParser {
-    fn language_name(&self) -> &str { "rust" }
-    fn extensions(&self) -> &[&'static str] { &["rs"] }
+    fn language_name(&self) -> &str {
+        "rust"
+    }
+    fn extensions(&self) -> &[&'static str] {
+        &["rs"]
+    }
 
     fn parse(&self, source: &str, path: &Path, repo: &str, version: &str) -> ParsedFile {
         let mut ts_parser = tree_sitter::Parser::new();
-        ts_parser.set_language(&tree_sitter_rust::language()).unwrap();
+        ts_parser
+            .set_language(&tree_sitter_rust::language())
+            .unwrap();
 
         let tree = match ts_parser.parse(source, None) {
             Some(t) => t,
@@ -74,32 +80,43 @@ impl LanguageParser for RustParser {
             "[(call_expression function: (identifier) @callee)
               (call_expression function: (field_expression field: (field_identifier) @callee))
               (call_expression function: (scoped_identifier name: (identifier) @callee))]",
-        ).expect("valid Rust call query");
+        )
+        .expect("valid Rust call query");
         let callee_idx = call_q.capture_index_for_name("callee").unwrap();
 
-        let field_q = tree_sitter::Query::new(
-            &lang,
-            "(field_declaration type: (_) @field_type)",
-        ).expect("valid Rust field type query");
+        let field_q = tree_sitter::Query::new(&lang, "(field_declaration type: (_) @field_type)")
+            .expect("valid Rust field type query");
         let ft_idx = field_q.capture_index_for_name("field_type").unwrap();
 
         let fn_q = tree_sitter::Query::new(
             &lang,
             "(function_item name: (identifier) @name parameters: (parameters) @params return_type: (_)? @ret) @fn",
         ).expect("valid Rust function query");
-        let fn_idx   = fn_q.capture_index_for_name("fn").unwrap();
+        let fn_idx = fn_q.capture_index_for_name("fn").unwrap();
         let name_idx = fn_q.capture_index_for_name("name").unwrap();
         let mut cursor = tree_sitter::QueryCursor::new();
         for m in cursor.matches(&fn_q, tree.root_node(), source.as_bytes()) {
-            let fn_node   = m.captures.iter().find(|c| c.index == fn_idx).map(|c| c.node);
-            let name_node = m.captures.iter().find(|c| c.index == name_idx).map(|c| c.node);
+            let fn_node = m
+                .captures
+                .iter()
+                .find(|c| c.index == fn_idx)
+                .map(|c| c.node);
+            let name_node = m
+                .captures
+                .iter()
+                .find(|c| c.index == name_idx)
+                .map(|c| c.node);
             if let (Some(fn_n), Some(nm_n)) = (fn_node, name_node) {
-                let name      = &source[nm_n.byte_range()];
+                let name = &source[nm_n.byte_range()];
                 let start_row = fn_n.start_position().row as u32 + 1;
-                let end_row   = fn_n.end_position().row as u32 + 1;
-                let src_text  = &source[fn_n.byte_range()];
+                let end_row = fn_n.end_position().row as u32 + 1;
+                let src_text = &source[fn_n.byte_range()];
                 let impl_type = impl_type_map.get(&fn_n.start_byte()).cloned();
-                let kind      = if impl_type.is_some() { "method" } else { "function" };
+                let kind = if impl_type.is_some() {
+                    "method"
+                } else {
+                    "function"
+                };
 
                 let mut calls = Vec::new();
                 let mut call_cur = tree_sitter::QueryCursor::new();
@@ -107,7 +124,7 @@ impl LanguageParser for RustParser {
                     if let Some(cap) = cm.captures.iter().find(|c| c.index == callee_idx) {
                         calls.push(CallRef {
                             callee: source[cap.node.byte_range()].to_string(),
-                            line:   cap.node.start_position().row as u32 + 1,
+                            line: cap.node.start_position().row as u32 + 1,
                         });
                     }
                 }
@@ -130,7 +147,10 @@ impl LanguageParser for RustParser {
         }
 
         for (type_q_src, kind) in [
-            ("(struct_item name: (type_identifier) @name) @node", "struct"),
+            (
+                "(struct_item name: (type_identifier) @name) @node",
+                "struct",
+            ),
             ("(enum_item   name: (type_identifier) @name) @node", "enum"),
             ("(trait_item  name: (type_identifier) @name) @node", "trait"),
         ] {
@@ -139,13 +159,21 @@ impl LanguageParser for RustParser {
                 let name_idx = tq.capture_index_for_name("name").unwrap();
                 let mut cursor = tree_sitter::QueryCursor::new();
                 for m in cursor.matches(&tq, tree.root_node(), source.as_bytes()) {
-                    let type_node = m.captures.iter().find(|c| c.index == node_idx).map(|c| c.node);
-                    let name_node = m.captures.iter().find(|c| c.index == name_idx).map(|c| c.node);
+                    let type_node = m
+                        .captures
+                        .iter()
+                        .find(|c| c.index == node_idx)
+                        .map(|c| c.node);
+                    let name_node = m
+                        .captures
+                        .iter()
+                        .find(|c| c.index == name_idx)
+                        .map(|c| c.node);
                     if let (Some(tn), Some(nm)) = (type_node, name_node) {
-                        let name       = &source[nm.byte_range()];
+                        let name = &source[nm.byte_range()];
                         let start_line = tn.start_position().row as u32 + 1;
-                        let end_line   = tn.end_position().row as u32 + 1;
-                        let src_text   = &source[tn.byte_range()];
+                        let end_line = tn.end_position().row as u32 + 1;
+                        let src_text = &source[tn.byte_range()];
 
                         let mut traits = trait_impl_map.get(name).cloned().unwrap_or_default();
                         traits.extend(rust_get_derives(source, tn));
@@ -180,12 +208,18 @@ impl LanguageParser for RustParser {
 pub struct PythonParser;
 
 impl LanguageParser for PythonParser {
-    fn language_name(&self) -> &str { "python" }
-    fn extensions(&self) -> &[&'static str] { &["py"] }
+    fn language_name(&self) -> &str {
+        "python"
+    }
+    fn extensions(&self) -> &[&'static str] {
+        &["py"]
+    }
 
     fn parse(&self, source: &str, path: &Path, repo: &str, version: &str) -> ParsedFile {
         let mut ts_parser = tree_sitter::Parser::new();
-        ts_parser.set_language(&tree_sitter_python::language()).unwrap();
+        ts_parser
+            .set_language(&tree_sitter_python::language())
+            .unwrap();
 
         let tree = match ts_parser.parse(source, None) {
             Some(t) => t,
@@ -204,33 +238,45 @@ impl LanguageParser for PythonParser {
             &lang,
             "[(call function: (identifier) @callee)
               (call function: (attribute attribute: (identifier) @callee))]",
-        ).expect("valid Python call query");
+        )
+        .expect("valid Python call query");
         let callee_idx = call_q.capture_index_for_name("callee").unwrap();
 
-        let fn_q = tree_sitter::Query::new(
-            &lang,
-            "(function_definition name: (identifier) @name) @fn",
-        ).expect("valid Python function query");
-        let fn_idx   = fn_q.capture_index_for_name("fn").unwrap();
+        let fn_q =
+            tree_sitter::Query::new(&lang, "(function_definition name: (identifier) @name) @fn")
+                .expect("valid Python function query");
+        let fn_idx = fn_q.capture_index_for_name("fn").unwrap();
         let name_idx = fn_q.capture_index_for_name("name").unwrap();
         {
             let mut cursor = tree_sitter::QueryCursor::new();
             for m in cursor.matches(&fn_q, tree.root_node(), source.as_bytes()) {
-                let fn_node   = m.captures.iter().find(|c| c.index == fn_idx).map(|c| c.node);
-                let name_node = m.captures.iter().find(|c| c.index == name_idx).map(|c| c.node);
+                let fn_node = m
+                    .captures
+                    .iter()
+                    .find(|c| c.index == fn_idx)
+                    .map(|c| c.node);
+                let name_node = m
+                    .captures
+                    .iter()
+                    .find(|c| c.index == name_idx)
+                    .map(|c| c.node);
                 if let (Some(fn_n), Some(nm_n)) = (fn_node, name_node) {
-                    let name       = &source[nm_n.byte_range()];
+                    let name = &source[nm_n.byte_range()];
                     let start_line = fn_n.start_position().row as u32 + 1;
-                    let end_line   = fn_n.end_position().row as u32 + 1;
-                    let src_text   = &source[fn_n.byte_range()];
-                    let kind = if python_has_class_ancestor(fn_n) { "method" } else { "function" };
+                    let end_line = fn_n.end_position().row as u32 + 1;
+                    let src_text = &source[fn_n.byte_range()];
+                    let kind = if python_has_class_ancestor(fn_n) {
+                        "method"
+                    } else {
+                        "function"
+                    };
 
                     let mut calls = Vec::new();
                     let mut call_cursor = tree_sitter::QueryCursor::new();
                     for cm in call_cursor.matches(&call_q, fn_n, source.as_bytes()) {
                         if let Some(cap) = cm.captures.iter().find(|c| c.index == callee_idx) {
                             let callee = source[cap.node.byte_range()].to_string();
-                            let line   = cap.node.start_position().row as u32 + 1;
+                            let line = cap.node.start_position().row as u32 + 1;
                             calls.push(CallRef { callee, line });
                         }
                     }
@@ -253,22 +299,29 @@ impl LanguageParser for PythonParser {
             }
         }
 
-        let cls_q = tree_sitter::Query::new(
-            &lang,
-            "(class_definition name: (identifier) @name) @class",
-        ).expect("valid Python class query");
-        let cls_idx  = cls_q.capture_index_for_name("class").unwrap();
-        let cnm_idx  = cls_q.capture_index_for_name("name").unwrap();
+        let cls_q =
+            tree_sitter::Query::new(&lang, "(class_definition name: (identifier) @name) @class")
+                .expect("valid Python class query");
+        let cls_idx = cls_q.capture_index_for_name("class").unwrap();
+        let cnm_idx = cls_q.capture_index_for_name("name").unwrap();
         {
             let mut cursor = tree_sitter::QueryCursor::new();
             for m in cursor.matches(&cls_q, tree.root_node(), source.as_bytes()) {
-                let cls_node  = m.captures.iter().find(|c| c.index == cls_idx).map(|c| c.node);
-                let name_node = m.captures.iter().find(|c| c.index == cnm_idx).map(|c| c.node);
+                let cls_node = m
+                    .captures
+                    .iter()
+                    .find(|c| c.index == cls_idx)
+                    .map(|c| c.node);
+                let name_node = m
+                    .captures
+                    .iter()
+                    .find(|c| c.index == cnm_idx)
+                    .map(|c| c.node);
                 if let (Some(cls_n), Some(nm_n)) = (cls_node, name_node) {
-                    let name       = &source[nm_n.byte_range()];
+                    let name = &source[nm_n.byte_range()];
                     let start_line = cls_n.start_position().row as u32 + 1;
-                    let end_line   = cls_n.end_position().row as u32 + 1;
-                    let src_text   = &source[cls_n.byte_range()];
+                    let end_line = cls_n.end_position().row as u32 + 1;
+                    let src_text = &source[cls_n.byte_range()];
                     out.classes.push(ClassNode {
                         repo: repo.into(),
                         version: version.into(),
@@ -294,7 +347,7 @@ impl LanguageParser for PythonParser {
             "(class_definition name: (identifier) @class_name superclasses: (argument_list [(identifier) @base_name (attribute attribute: (identifier) @base_name)]))",
         ).expect("valid Python inheritance query");
         let iclass_idx = inherit_q.capture_index_for_name("class_name").unwrap();
-        let ibase_idx  = inherit_q.capture_index_for_name("base_name").unwrap();
+        let ibase_idx = inherit_q.capture_index_for_name("base_name").unwrap();
         {
             let mut bases_map: HashMap<String, Vec<String>> = HashMap::new();
             let mut cursor = tree_sitter::QueryCursor::new();
@@ -318,13 +371,14 @@ impl LanguageParser for PythonParser {
         let imp_q = tree_sitter::Query::new(
             &lang,
             "[(import_statement) (import_from_statement)] @import",
-        ).expect("valid Python import query");
+        )
+        .expect("valid Python import query");
         let imp_idx = imp_q.capture_index_for_name("import").unwrap();
         {
             let mut cursor = tree_sitter::QueryCursor::new();
             for m in cursor.matches(&imp_q, tree.root_node(), source.as_bytes()) {
                 if let Some(cap) = m.captures.iter().find(|c| c.index == imp_idx) {
-                    let line   = cap.node.start_position().row as u32 + 1;
+                    let line = cap.node.start_position().row as u32 + 1;
                     let target = python_import_target(source, cap.node);
                     if !target.is_empty() {
                         out.imports.push(ImportNode {
@@ -346,34 +400,58 @@ impl LanguageParser for PythonParser {
 pub struct TypeScriptParser;
 
 impl LanguageParser for TypeScriptParser {
-    fn language_name(&self) -> &str { "typescript" }
-    fn extensions(&self) -> &[&'static str] { &["ts", "tsx"] }
+    fn language_name(&self) -> &str {
+        "typescript"
+    }
+    fn extensions(&self) -> &[&'static str] {
+        &["ts", "tsx"]
+    }
 
     fn parse(&self, _source: &str, path: &Path, _repo: &str, _version: &str) -> ParsedFile {
         let mut ts_parser = tree_sitter::Parser::new();
-        ts_parser.set_language(&tree_sitter_typescript::language_typescript()).unwrap();
-        ParsedFile { path: path.to_string_lossy().into_owned(), language: "typescript".into(), ..Default::default() }
+        ts_parser
+            .set_language(&tree_sitter_typescript::language_typescript())
+            .unwrap();
+        ParsedFile {
+            path: path.to_string_lossy().into_owned(),
+            language: "typescript".into(),
+            ..Default::default()
+        }
     }
 }
 
 pub struct JavaScriptParser;
 
 impl LanguageParser for JavaScriptParser {
-    fn language_name(&self) -> &str { "javascript" }
-    fn extensions(&self) -> &[&'static str] { &["js", "jsx", "mjs"] }
+    fn language_name(&self) -> &str {
+        "javascript"
+    }
+    fn extensions(&self) -> &[&'static str] {
+        &["js", "jsx", "mjs"]
+    }
 
     fn parse(&self, _source: &str, path: &Path, _repo: &str, _version: &str) -> ParsedFile {
         let mut ts_parser = tree_sitter::Parser::new();
-        ts_parser.set_language(&tree_sitter_javascript::language()).unwrap();
-        ParsedFile { path: path.to_string_lossy().into_owned(), language: "javascript".into(), ..Default::default() }
+        ts_parser
+            .set_language(&tree_sitter_javascript::language())
+            .unwrap();
+        ParsedFile {
+            path: path.to_string_lossy().into_owned(),
+            language: "javascript".into(),
+            ..Default::default()
+        }
     }
 }
 
 pub struct GoParser;
 
 impl LanguageParser for GoParser {
-    fn language_name(&self) -> &str { "go" }
-    fn extensions(&self) -> &[&'static str] { &["go"] }
+    fn language_name(&self) -> &str {
+        "go"
+    }
+    fn extensions(&self) -> &[&'static str] {
+        &["go"]
+    }
 
     fn parse(&self, source: &str, path: &Path, repo: &str, version: &str) -> ParsedFile {
         let mut ts_parser = tree_sitter::Parser::new();
@@ -396,7 +474,8 @@ impl LanguageParser for GoParser {
             &lang,
             "[(call_expression function: (identifier) @callee)
               (call_expression function: (selector_expression field: (field_identifier) @callee))]",
-        ).expect("valid Go call query");
+        )
+        .expect("valid Go call query");
         let callee_idx = call_q.capture_index_for_name("callee").unwrap();
 
         let mut receiver_map: HashMap<usize, String> = HashMap::new();
@@ -406,7 +485,11 @@ impl LanguageParser for GoParser {
         {
             let mut cursor = tree_sitter::QueryCursor::new();
             for mat in cursor.matches(&method_q, tree.root_node(), source.as_bytes()) {
-                let mn = mat.captures.iter().find(|c| c.index == m_idx).map(|c| c.node);
+                let mn = mat
+                    .captures
+                    .iter()
+                    .find(|c| c.index == m_idx)
+                    .map(|c| c.node);
                 if let Some(mn) = mn {
                     if let Some(rt) = go_receiver_type_name(source, mn) {
                         receiver_map.insert(mn.start_byte(), rt.to_string());
@@ -419,21 +502,34 @@ impl LanguageParser for GoParser {
             &lang,
             "[(function_declaration name: (identifier) @name) @fn
               (method_declaration   name: (field_identifier) @name) @fn]",
-        ).expect("valid Go function query");
-        let fn_idx   = fn_q.capture_index_for_name("fn").unwrap();
+        )
+        .expect("valid Go function query");
+        let fn_idx = fn_q.capture_index_for_name("fn").unwrap();
         let name_idx = fn_q.capture_index_for_name("name").unwrap();
         {
             let mut cursor = tree_sitter::QueryCursor::new();
             for m in cursor.matches(&fn_q, tree.root_node(), source.as_bytes()) {
-                let fn_node   = m.captures.iter().find(|c| c.index == fn_idx).map(|c| c.node);
-                let name_node = m.captures.iter().find(|c| c.index == name_idx).map(|c| c.node);
+                let fn_node = m
+                    .captures
+                    .iter()
+                    .find(|c| c.index == fn_idx)
+                    .map(|c| c.node);
+                let name_node = m
+                    .captures
+                    .iter()
+                    .find(|c| c.index == name_idx)
+                    .map(|c| c.node);
                 if let (Some(fn_n), Some(nm_n)) = (fn_node, name_node) {
-                    let name       = &source[nm_n.byte_range()];
+                    let name = &source[nm_n.byte_range()];
                     let start_line = fn_n.start_position().row as u32 + 1;
-                    let end_line   = fn_n.end_position().row as u32 + 1;
-                    let src_text   = &source[fn_n.byte_range()];
-                    let impl_type  = receiver_map.get(&fn_n.start_byte()).cloned();
-                    let kind       = if impl_type.is_some() { "method" } else { "function" };
+                    let end_line = fn_n.end_position().row as u32 + 1;
+                    let src_text = &source[fn_n.byte_range()];
+                    let impl_type = receiver_map.get(&fn_n.start_byte()).cloned();
+                    let kind = if impl_type.is_some() {
+                        "method"
+                    } else {
+                        "function"
+                    };
 
                     let mut calls = Vec::new();
                     let mut call_cur = tree_sitter::QueryCursor::new();
@@ -441,7 +537,7 @@ impl LanguageParser for GoParser {
                         if let Some(cap) = cm.captures.iter().find(|c| c.index == callee_idx) {
                             calls.push(CallRef {
                                 callee: source[cap.node.byte_range()].to_string(),
-                                line:   cap.node.start_position().row as u32 + 1,
+                                line: cap.node.start_position().row as u32 + 1,
                             });
                         }
                     }
@@ -467,26 +563,37 @@ impl LanguageParser for GoParser {
         let type_q = tree_sitter::Query::new(
             &lang,
             "(type_spec name: (type_identifier) @name) @type_spec",
-        ).expect("valid Go type query");
-        let ts_idx  = type_q.capture_index_for_name("type_spec").unwrap();
+        )
+        .expect("valid Go type query");
+        let ts_idx = type_q.capture_index_for_name("type_spec").unwrap();
         let tnm_idx = type_q.capture_index_for_name("name").unwrap();
         {
             let mut cursor = tree_sitter::QueryCursor::new();
             for m in cursor.matches(&type_q, tree.root_node(), source.as_bytes()) {
-                let ts_node   = m.captures.iter().find(|c| c.index == ts_idx).map(|c| c.node);
-                let name_node = m.captures.iter().find(|c| c.index == tnm_idx).map(|c| c.node);
+                let ts_node = m
+                    .captures
+                    .iter()
+                    .find(|c| c.index == ts_idx)
+                    .map(|c| c.node);
+                let name_node = m
+                    .captures
+                    .iter()
+                    .find(|c| c.index == tnm_idx)
+                    .map(|c| c.node);
                 if let (Some(ts_n), Some(nm_n)) = (ts_node, name_node) {
-                    let kind = ts_n.children(&mut ts_n.walk()).find_map(|c| match c.kind() {
-                        "struct_type"    => Some("struct"),
-                        "interface_type" => Some("interface"),
-                        _ => None,
-                    });
+                    let kind = ts_n
+                        .children(&mut ts_n.walk())
+                        .find_map(|c| match c.kind() {
+                            "struct_type" => Some("struct"),
+                            "interface_type" => Some("interface"),
+                            _ => None,
+                        });
                     let Some(kind) = kind else { continue };
 
-                    let name       = &source[nm_n.byte_range()];
+                    let name = &source[nm_n.byte_range()];
                     let start_line = ts_n.start_position().row as u32 + 1;
-                    let end_line   = ts_n.end_position().row as u32 + 1;
-                    let src_text   = &source[ts_n.byte_range()];
+                    let end_line = ts_n.end_position().row as u32 + 1;
+                    let src_text = &source[ts_n.byte_range()];
 
                     let embeds = if kind == "struct" {
                         go_struct_embedded_types(source, ts_n)
@@ -517,14 +624,15 @@ impl LanguageParser for GoParser {
         let imp_q = tree_sitter::Query::new(
             &lang,
             "(import_spec path: (interpreted_string_literal) @path)",
-        ).expect("valid Go import query");
+        )
+        .expect("valid Go import query");
         let path_idx = imp_q.capture_index_for_name("path").unwrap();
         {
             let mut cursor = tree_sitter::QueryCursor::new();
             for m in cursor.matches(&imp_q, tree.root_node(), source.as_bytes()) {
                 if let Some(cap) = m.captures.iter().find(|c| c.index == path_idx) {
-                    let line   = cap.node.start_position().row as u32 + 1;
-                    let raw    = &source[cap.node.byte_range()];
+                    let line = cap.node.start_position().row as u32 + 1;
+                    let raw = &source[cap.node.byte_range()];
                     let target = raw.trim_matches('"').to_string();
                     if !target.is_empty() {
                         out.imports.push(ImportNode {
@@ -546,32 +654,52 @@ impl LanguageParser for GoParser {
 pub struct CParser;
 
 impl LanguageParser for CParser {
-    fn language_name(&self) -> &str { "c" }
-    fn extensions(&self) -> &[&'static str] { &["c", "h"] }
+    fn language_name(&self) -> &str {
+        "c"
+    }
+    fn extensions(&self) -> &[&'static str] {
+        &["c", "h"]
+    }
 
     fn parse(&self, _source: &str, path: &Path, _repo: &str, _version: &str) -> ParsedFile {
         let mut ts_parser = tree_sitter::Parser::new();
         ts_parser.set_language(&tree_sitter_c::language()).unwrap();
-        ParsedFile { path: path.to_string_lossy().into_owned(), language: "c".into(), ..Default::default() }
+        ParsedFile {
+            path: path.to_string_lossy().into_owned(),
+            language: "c".into(),
+            ..Default::default()
+        }
     }
 }
 
 pub struct CppParser;
 
 impl LanguageParser for CppParser {
-    fn language_name(&self) -> &str { "cpp" }
-    fn extensions(&self) -> &[&'static str] { &["cpp", "cc", "cxx", "hpp"] }
+    fn language_name(&self) -> &str {
+        "cpp"
+    }
+    fn extensions(&self) -> &[&'static str] {
+        &["cpp", "cc", "cxx", "hpp"]
+    }
 
     fn parse(&self, _source: &str, path: &Path, _repo: &str, _version: &str) -> ParsedFile {
         let mut ts_parser = tree_sitter::Parser::new();
-        ts_parser.set_language(&tree_sitter_cpp::language()).unwrap();
-        ParsedFile { path: path.to_string_lossy().into_owned(), language: "cpp".into(), ..Default::default() }
+        ts_parser
+            .set_language(&tree_sitter_cpp::language())
+            .unwrap();
+        ParsedFile {
+            path: path.to_string_lossy().into_owned(),
+            language: "cpp".into(),
+            ..Default::default()
+        }
     }
 }
 
 fn python_has_class_ancestor(mut node: tree_sitter::Node) -> bool {
     while let Some(parent) = node.parent() {
-        if parent.kind() == "class_definition" { return true; }
+        if parent.kind() == "class_definition" {
+            return true;
+        }
         node = parent;
     }
     false
@@ -580,7 +708,10 @@ fn python_has_class_ancestor(mut node: tree_sitter::Node) -> bool {
 fn strip_docstring_quotes(text: &str) -> String {
     let trimmed = text.trim();
     for quote in ["\"\"\"", "'''"] {
-        if let Some(inner) = trimmed.strip_prefix(quote).and_then(|t| t.strip_suffix(quote)) {
+        if let Some(inner) = trimmed
+            .strip_prefix(quote)
+            .and_then(|t| t.strip_suffix(quote))
+        {
             let dedented = dedent_lines(inner);
             return dedented.trim().to_string();
         }
@@ -602,7 +733,13 @@ fn dedent_lines(text: &str) -> String {
         .min()
         .unwrap_or(0);
     text.lines()
-        .map(|l| if l.len() >= indent { &l[indent..] } else { l.trim_start() })
+        .map(|l| {
+            if l.len() >= indent {
+                &l[indent..]
+            } else {
+                l.trim_start()
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -610,21 +747,37 @@ fn dedent_lines(text: &str) -> String {
 fn python_docstring(source: &str, node: tree_sitter::Node) -> Option<String> {
     let body = node.child_by_field_name("body")?;
     let first = body.named_child(0)?;
-    if first.kind() != "expression_statement" { return None; }
+    if first.kind() != "expression_statement" {
+        return None;
+    }
     let literal = first.named_child(0)?;
-    if !matches!(literal.kind(), "string" | "concatenated_string") { return None; }
+    if !matches!(literal.kind(), "string" | "concatenated_string") {
+        return None;
+    }
     let text = strip_docstring_quotes(&source[literal.byte_range()]);
-    if text.is_empty() { None } else { Some(text) }
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 fn python_decorators(source: &str, node: tree_sitter::Node) -> Vec<String> {
-    let Some(parent) = node.parent().filter(|p| p.kind() == "decorated_definition") else { return Vec::new() };
+    let Some(parent) = node.parent().filter(|p| p.kind() == "decorated_definition") else {
+        return Vec::new();
+    };
     let mut decorators = Vec::new();
     for i in 0..parent.named_child_count() {
-        let Some(decorator) = parent.named_child(i).filter(|c| c.kind() == "decorator") else { continue };
-        let Some(expression) = decorator.named_child(0) else { continue };
+        let Some(decorator) = parent.named_child(i).filter(|c| c.kind() == "decorator") else {
+            continue;
+        };
+        let Some(expression) = decorator.named_child(0) else {
+            continue;
+        };
         let target = if expression.kind() == "call" {
-            expression.child_by_field_name("function").unwrap_or(expression)
+            expression
+                .child_by_field_name("function")
+                .unwrap_or(expression)
         } else {
             expression
         };
@@ -661,7 +814,10 @@ fn python_import_target(source: &str, node: tree_sitter::Node) -> String {
     }
 }
 
-fn go_receiver_type_name<'a>(source: &'a str, method_node: tree_sitter::Node<'a>) -> Option<&'a str> {
+fn go_receiver_type_name<'a>(
+    source: &'a str,
+    method_node: tree_sitter::Node<'a>,
+) -> Option<&'a str> {
     let receiver = method_node.child_by_field_name("receiver")?;
     let mut walk = receiver.walk();
     for child in receiver.named_children(&mut walk) {
@@ -676,8 +832,8 @@ fn go_receiver_type_name<'a>(source: &'a str, method_node: tree_sitter::Node<'a>
 fn go_base_type_name<'a>(source: &'a str, node: tree_sitter::Node<'a>) -> Option<&'a str> {
     match node.kind() {
         "type_identifier" => Some(&source[node.byte_range()]),
-        "pointer_type"    => go_base_type_name(source, node.named_child(0)?),
-        "generic_type"    => go_base_type_name(source, node.child_by_field_name("type")?),
+        "pointer_type" => go_base_type_name(source, node.named_child(0)?),
+        "generic_type" => go_base_type_name(source, node.child_by_field_name("type")?),
         _ => None,
     }
 }
@@ -686,13 +842,19 @@ fn go_struct_embedded_types(source: &str, type_spec_node: tree_sitter::Node) -> 
     let mut embeds = Vec::new();
     let mut spec_walk = type_spec_node.walk();
     for child in type_spec_node.named_children(&mut spec_walk) {
-        if child.kind() != "struct_type" { continue; }
+        if child.kind() != "struct_type" {
+            continue;
+        }
         let mut struct_walk = child.walk();
         for list_child in child.named_children(&mut struct_walk) {
-            if list_child.kind() != "field_declaration_list" { continue; }
+            if list_child.kind() != "field_declaration_list" {
+                continue;
+            }
             let mut list_walk = list_child.walk();
             for field in list_child.named_children(&mut list_walk) {
-                if field.kind() != "field_declaration" { continue; }
+                if field.kind() != "field_declaration" {
+                    continue;
+                }
                 if field.child_by_field_name("name").is_none() {
                     if let Some(type_node) = field.child_by_field_name("type") {
                         if let Some(name) = go_base_type_name(source, type_node) {
@@ -710,7 +872,9 @@ fn rust_get_derives(source: &str, type_item: tree_sitter::Node) -> Vec<String> {
     let mut derives = Vec::new();
     let mut prev = type_item.prev_named_sibling();
     while let Some(node) = prev {
-        if node.kind() != "attribute_item" { break; }
+        if node.kind() != "attribute_item" {
+            break;
+        }
         derives.extend(rust_derives_from_attr(source, node));
         prev = node.prev_named_sibling();
     }
@@ -721,9 +885,15 @@ fn rust_derives_from_attr(source: &str, attr_item: tree_sitter::Node) -> Vec<Str
     let mut result = Vec::new();
     let mut walk = attr_item.walk();
     for attr in attr_item.named_children(&mut walk) {
-        if attr.kind() != "attribute" { continue; }
-        let Some(path) = attr.named_child(0) else { continue };
-        if source[path.byte_range()].trim() != "derive" { continue; }
+        if attr.kind() != "attribute" {
+            continue;
+        }
+        let Some(path) = attr.named_child(0) else {
+            continue;
+        };
+        if source[path.byte_range()].trim() != "derive" {
+            continue;
+        }
         let mut a_walk = attr.walk();
         for sub in attr.named_children(&mut a_walk) {
             if sub.kind() == "token_tree" {
@@ -791,8 +961,12 @@ pub fn leading_doc_comment(source: &str, node: tree_sitter::Node) -> Option<Stri
     let mut current = node;
     loop {
         let prev = current.prev_sibling()?;
-        if prev.kind() != "comment" { break; }
-        if !prev.end_position().row + 1 >= current.start_position().row { break; }
+        if prev.kind() != "comment" {
+            break;
+        }
+        if !prev.end_position().row + 1 >= current.start_position().row {
+            break;
+        }
         let text = &source[prev.byte_range()];
         let cleaned = text
             .trim_start()
@@ -806,21 +980,31 @@ pub fn leading_doc_comment(source: &str, node: tree_sitter::Node) -> Option<Stri
         lines.push(cleaned);
         current = prev;
     }
-    if lines.is_empty() { return None; }
+    if lines.is_empty() {
+        return None;
+    }
     lines.reverse();
     let joined = lines.join("\n").trim().to_string();
-    if joined.is_empty() { None } else { Some(joined) }
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
 }
 
 fn first_line(text: &str) -> String {
-    text.lines().find(|l| !l.trim().is_empty()).unwrap_or(text).trim().to_string()
+    text.lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(text)
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use super::*;
     use crate::parser::LanguageParser;
+    use std::path::Path;
 
     fn parse_rust(source: &str) -> crate::graph::model::ParsedFile {
         RustParser.parse(source, Path::new("src/lib.rs"), "myrepo", "v1.0")
@@ -834,7 +1018,8 @@ mod tests {
         GoParser.parse(source, Path::new("main.go"), "myrepo", "v1.0")
     }
 
-    #[test] fn rust_single_function() {
+    #[test]
+    fn rust_single_function() {
         let pf = parse_rust(r#"fn hello() { println!("hi"); }"#);
         assert_eq!(pf.functions.len(), 1);
         let f = &pf.functions[0];
@@ -845,254 +1030,344 @@ mod tests {
         assert_eq!(f.version, "v1.0");
     }
 
-    #[test] fn rust_two_functions() {
+    #[test]
+    fn rust_two_functions() {
         let pf = parse_rust("fn foo() {}\nfn bar() {}");
         assert_eq!(pf.functions.len(), 2);
         assert!(pf.functions.iter().all(|f| f.kind == "function"));
     }
 
-    #[test] fn rust_function_line_numbers() {
+    #[test]
+    fn rust_function_line_numbers() {
         let pf = parse_rust("struct S;\n\nfn third_line() {}");
         assert_eq!(pf.functions[0].start_line, 3);
         assert_eq!(pf.functions[0].end_line, 3);
     }
 
-    #[test] fn rust_function_with_return_type_signature() {
+    #[test]
+    fn rust_function_with_return_type_signature() {
         let pf = parse_rust("fn add(a: i32, b: i32) -> i32 { a + b }");
         let sig = &pf.functions[0].signature;
         assert!(sig.contains("fn add") && sig.contains("->"), "sig: {sig}");
     }
 
-    #[test] fn rust_empty_file() {
+    #[test]
+    fn rust_empty_file() {
         let pf = parse_rust("");
         assert!(pf.functions.is_empty() && pf.classes.is_empty());
     }
 
-    #[test] fn rust_parsed_file_metadata() {
+    #[test]
+    fn rust_parsed_file_metadata() {
         let pf = parse_rust("fn f() {}");
         assert_eq!(pf.language, "rust");
         assert_eq!(pf.path, "src/lib.rs");
     }
 
-    #[test] fn rust_multiline_function_end_line() {
+    #[test]
+    fn rust_multiline_function_end_line() {
         let pf = parse_rust("fn multi() {\n    let x = 1;\n    let y = 2;\n}");
         assert_eq!(pf.functions[0].start_line, 1);
         assert_eq!(pf.functions[0].end_line, 4);
     }
 
-    #[test] fn rust_source_text_captured() {
+    #[test]
+    fn rust_source_text_captured() {
         let src = "fn greet() { \"hello\" }";
         let pf = parse_rust(src);
         assert_eq!(pf.functions[0].source, src);
     }
 
-    #[test] fn rust_struct_extracted_as_class() {
+    #[test]
+    fn rust_struct_extracted_as_class() {
         let pf = parse_rust("pub struct Foo { x: i32 }");
         assert_eq!(pf.classes.len(), 1);
         assert_eq!(pf.classes[0].name, "Foo");
         assert_eq!(pf.classes[0].kind, "struct");
     }
 
-    #[test] fn rust_enum_extracted_as_class() {
+    #[test]
+    fn rust_enum_extracted_as_class() {
         let pf = parse_rust("pub enum Color { Red, Green, Blue }");
         assert_eq!(pf.classes.len(), 1);
         assert_eq!(pf.classes[0].kind, "enum");
     }
 
-    #[test] fn rust_trait_extracted_as_class() {
+    #[test]
+    fn rust_trait_extracted_as_class() {
         let pf = parse_rust("pub trait Drawable { fn draw(&self); }");
         assert_eq!(pf.classes.len(), 1);
         assert_eq!(pf.classes[0].kind, "trait");
     }
 
-    #[test] fn rust_impl_method_kind() {
+    #[test]
+    fn rust_impl_method_kind() {
         let pf = parse_rust("struct Foo;\nimpl Foo {\n    fn bar(&self) {}\n}");
         let bar = pf.functions.iter().find(|f| f.name == "bar").unwrap();
         assert_eq!(bar.kind, "method");
         assert_eq!(bar.impl_type.as_deref(), Some("Foo"));
     }
 
-    #[test] fn rust_standalone_function_kind() {
+    #[test]
+    fn rust_standalone_function_kind() {
         let pf = parse_rust("fn standalone() {}");
         assert_eq!(pf.functions[0].kind, "function");
         assert_eq!(pf.functions[0].impl_type, None);
     }
 
-    #[test] fn rust_generic_impl_method() {
-        let pf = parse_rust("struct Container<T>(T);\nimpl<T> Container<T> {\n    fn get(&self) {}\n}");
+    #[test]
+    fn rust_generic_impl_method() {
+        let pf =
+            parse_rust("struct Container<T>(T);\nimpl<T> Container<T> {\n    fn get(&self) {}\n}");
         let get = pf.functions.iter().find(|f| f.name == "get").unwrap();
         assert_eq!(get.kind, "method");
         assert_eq!(get.impl_type.as_deref(), Some("Container"));
     }
 
-    #[test] fn rust_trait_impl_stored_on_struct() {
+    #[test]
+    fn rust_trait_impl_stored_on_struct() {
         let src = "struct Foo;\ntrait Bar {}\nimpl Bar for Foo {}";
         let pf = parse_rust(src);
         let foo = pf.classes.iter().find(|c| c.name == "Foo").unwrap();
-        assert!(foo.traits.contains(&"Bar".to_string()), "traits: {:?}", foo.traits);
+        assert!(
+            foo.traits.contains(&"Bar".to_string()),
+            "traits: {:?}",
+            foo.traits
+        );
     }
 
-    #[test] fn rust_generic_trait_impl() {
+    #[test]
+    fn rust_generic_trait_impl() {
         let src = "struct Vec2;\ntrait From<T> {}\nimpl From<i32> for Vec2 {}";
         let pf = parse_rust(src);
         let v = pf.classes.iter().find(|c| c.name == "Vec2").unwrap();
-        assert!(v.traits.contains(&"From".to_string()), "traits: {:?}", v.traits);
+        assert!(
+            v.traits.contains(&"From".to_string()),
+            "traits: {:?}",
+            v.traits
+        );
     }
 
-    #[test] fn python_single_function() {
+    #[test]
+    fn python_single_function() {
         let pf = parse_python("def hello():\n    pass");
         assert_eq!(pf.functions.len(), 1);
         assert_eq!(pf.functions[0].name, "hello");
         assert_eq!(pf.functions[0].kind, "function");
     }
 
-    #[test] fn python_method_kind() {
+    #[test]
+    fn python_method_kind() {
         let src = "class Foo:\n    def bar(self):\n        pass";
         let pf = parse_python(src);
         let bar = pf.functions.iter().find(|f| f.name == "bar").unwrap();
         assert_eq!(bar.kind, "method");
     }
 
-    #[test] fn python_standalone_function_kind() {
+    #[test]
+    fn python_standalone_function_kind() {
         let pf = parse_python("def standalone():\n    pass");
         assert_eq!(pf.functions[0].kind, "function");
     }
 
-    #[test] fn python_class_kind() {
+    #[test]
+    fn python_class_kind() {
         let pf = parse_python("class Foo:\n    pass");
         assert_eq!(pf.classes[0].kind, "class");
     }
 
-    #[test] fn python_calls_extracted() {
+    #[test]
+    fn python_calls_extracted() {
         let src = "def caller():\n    foo()\n    bar()";
         let pf = parse_python(src);
-        let callees: Vec<&str> = pf.functions[0].calls.iter().map(|c| c.callee.as_str()).collect();
-        assert!(callees.contains(&"foo") && callees.contains(&"bar"), "callees: {callees:?}");
+        let callees: Vec<&str> = pf.functions[0]
+            .calls
+            .iter()
+            .map(|c| c.callee.as_str())
+            .collect();
+        assert!(
+            callees.contains(&"foo") && callees.contains(&"bar"),
+            "callees: {callees:?}"
+        );
     }
 
-    #[test] fn python_method_calls_extracted() {
+    #[test]
+    fn python_method_calls_extracted() {
         let src = "def f():\n    self.helper()\n    other()";
         let pf = parse_python(src);
-        let callees: Vec<&str> = pf.functions[0].calls.iter().map(|c| c.callee.as_str()).collect();
-        assert!(callees.contains(&"helper") && callees.contains(&"other"), "callees: {callees:?}");
+        let callees: Vec<&str> = pf.functions[0]
+            .calls
+            .iter()
+            .map(|c| c.callee.as_str())
+            .collect();
+        assert!(
+            callees.contains(&"helper") && callees.contains(&"other"),
+            "callees: {callees:?}"
+        );
     }
 
-    #[test] fn python_two_functions() {
+    #[test]
+    fn python_two_functions() {
         let pf = parse_python("def foo():\n    pass\n\ndef bar():\n    pass");
         assert_eq!(pf.functions.len(), 2);
     }
 
-    #[test] fn python_class_definition() {
+    #[test]
+    fn python_class_definition() {
         let pf = parse_python("class Foo:\n    pass");
         assert_eq!(pf.classes.len(), 1);
         assert_eq!(pf.classes[0].name, "Foo");
     }
 
-    #[test] fn python_single_inheritance() {
+    #[test]
+    fn python_single_inheritance() {
         let pf = parse_python("class Child(Parent):\n    pass");
         assert_eq!(pf.classes[0].bases, vec!["Parent"]);
     }
 
-    #[test] fn python_class_decorators_are_captured_in_order() {
+    #[test]
+    fn python_class_decorators_are_captured_in_order() {
         let pf = parse_python(
             "@interface.volumedriver\n@six.add_metaclass(abc.ABCMeta)\n@registered\nclass LVMVolumeDriver(driver.VolumeDriver):\n    pass\n",
         );
-        assert_eq!(pf.classes[0].decorators, vec!["interface.volumedriver", "six.add_metaclass", "registered"]);
+        assert_eq!(
+            pf.classes[0].decorators,
+            vec!["interface.volumedriver", "six.add_metaclass", "registered"]
+        );
         assert_eq!(pf.classes[0].start_line, 4);
     }
 
-    #[test] fn python_undecorated_class_has_no_decorators() {
+    #[test]
+    fn python_undecorated_class_has_no_decorators() {
         let pf = parse_python("class Plain:\n    pass\n");
         assert!(pf.classes[0].decorators.is_empty());
     }
 
-    #[test] fn python_method_decorators_are_not_class_decorators() {
+    #[test]
+    fn python_method_decorators_are_not_class_decorators() {
         let pf = parse_python("class A:\n    @staticmethod\n    def f():\n        pass\n");
         assert!(pf.classes[0].decorators.is_empty());
     }
 
-    #[test] fn python_dotted_base_inheritance() {
+    #[test]
+    fn python_dotted_base_inheritance() {
         let pf = parse_python("class Child(some.module.Parent):\n    pass");
-        assert_eq!(pf.classes[0].bases, vec!["Parent"], "dotted bases must still be captured");
+        assert_eq!(
+            pf.classes[0].bases,
+            vec!["Parent"],
+            "dotted bases must still be captured"
+        );
     }
 
-    #[test] fn python_mixed_base_inheritance() {
+    #[test]
+    fn python_mixed_base_inheritance() {
         let pf = parse_python("class Child(First, mod.Second):\n    pass");
-        assert!(pf.classes[0].bases.contains(&"First".to_string()), "bases: {:?}", pf.classes[0].bases);
-        assert!(pf.classes[0].bases.contains(&"Second".to_string()), "bases: {:?}", pf.classes[0].bases);
+        assert!(
+            pf.classes[0].bases.contains(&"First".to_string()),
+            "bases: {:?}",
+            pf.classes[0].bases
+        );
+        assert!(
+            pf.classes[0].bases.contains(&"Second".to_string()),
+            "bases: {:?}",
+            pf.classes[0].bases
+        );
     }
 
-    #[test] fn python_class_docstring_extracted() {
+    #[test]
+    fn python_class_docstring_extracted() {
         let src = "class Foo:\n    \"\"\"Handles the thing.\n\n    More detail here.\n    \"\"\"\n    pass";
         let pf = parse_python(src);
         let doc = pf.classes[0].docstring.as_deref().unwrap_or("");
         assert!(doc.contains("Handles the thing."), "doc: {doc:?}");
         assert!(doc.contains("More detail here."), "doc: {doc:?}");
-        assert!(!doc.contains("\"\"\""), "quotes should be stripped: {doc:?}");
+        assert!(
+            !doc.contains("\"\"\""),
+            "quotes should be stripped: {doc:?}"
+        );
     }
 
-    #[test] fn python_function_docstring_extracted() {
+    #[test]
+    fn python_function_docstring_extracted() {
         let src = "def helper():\n    \"\"\"Does a thing.\"\"\"\n    return 1";
         let pf = parse_python(src);
         assert_eq!(pf.functions[0].docstring.as_deref(), Some("Does a thing."));
     }
 
-    #[test] fn python_single_quoted_docstring_extracted() {
+    #[test]
+    fn python_single_quoted_docstring_extracted() {
         let src = "def helper():\n    'One liner.'\n    return 1";
         let pf = parse_python(src);
         assert_eq!(pf.functions[0].docstring.as_deref(), Some("One liner."));
     }
 
-    #[test] fn python_missing_docstring_is_none() {
+    #[test]
+    fn python_missing_docstring_is_none() {
         let pf = parse_python("def helper():\n    return 1");
         assert!(pf.functions[0].docstring.is_none());
     }
 
-    #[test] fn python_attribute_initialiser_is_not_a_docstring() {
+    #[test]
+    fn python_attribute_initialiser_is_not_a_docstring() {
         let src = "class Foo:\n    BAR = 1\n    pass";
         let pf = parse_python(src);
-        assert!(pf.classes[0].docstring.is_none(), "got {:?}", pf.classes[0].docstring);
+        assert!(
+            pf.classes[0].docstring.is_none(),
+            "got {:?}",
+            pf.classes[0].docstring
+        );
     }
 
-    #[test] fn python_class_docstring_and_capability_constant_coexist() {
-        let src = "class Driver(Base):\n    \"\"\"NFS driver.\"\"\"\n    SUPPORTS_ACTIVE_ACTIVE = True";
+    #[test]
+    fn python_class_docstring_and_capability_constant_coexist() {
+        let src =
+            "class Driver(Base):\n    \"\"\"NFS driver.\"\"\"\n    SUPPORTS_ACTIVE_ACTIVE = True";
         let pf = parse_python(src);
         assert_eq!(pf.classes[0].docstring.as_deref(), Some("NFS driver."));
-        assert!(pf.classes[0].source.contains("SUPPORTS_ACTIVE_ACTIVE = True"));
+        assert!(pf.classes[0]
+            .source
+            .contains("SUPPORTS_ACTIVE_ACTIVE = True"));
     }
 
-    #[test] fn python_multiple_inheritance() {
+    #[test]
+    fn python_multiple_inheritance() {
         let pf = parse_python("class Multi(Base1, Base2):\n    pass");
         let bases = &pf.classes[0].bases;
         assert!(bases.contains(&"Base1".to_string()) && bases.contains(&"Base2".to_string()));
     }
 
-    #[test] fn python_no_inheritance() {
+    #[test]
+    fn python_no_inheritance() {
         let pf = parse_python("class Plain:\n    pass");
         assert!(pf.classes[0].bases.is_empty());
     }
 
-    #[test] fn python_simple_import() {
+    #[test]
+    fn python_simple_import() {
         let pf = parse_python("import os");
         assert_eq!(pf.imports[0].target, "os");
     }
 
-    #[test] fn python_from_import() {
+    #[test]
+    fn python_from_import() {
         let pf = parse_python("from os import path");
         assert_eq!(pf.imports[0].target, "os");
     }
 
-    #[test] fn python_empty_file() {
+    #[test]
+    fn python_empty_file() {
         let pf = parse_python("");
         assert!(pf.functions.is_empty() && pf.classes.is_empty() && pf.imports.is_empty());
     }
 
-    #[test] fn go_function_kind() {
+    #[test]
+    fn go_function_kind() {
         let pf = parse_go("package main\n\nfunc Hello() {}");
         assert_eq!(pf.functions[0].kind, "function");
     }
 
-    #[test] fn go_method_kind() {
+    #[test]
+    fn go_method_kind() {
         let src = "package main\n\ntype Foo struct{}\n\nfunc (f Foo) Bar() {}";
         let pf = parse_go(src);
         let bar = pf.functions.iter().find(|f| f.name == "Bar").unwrap();
@@ -1100,7 +1375,8 @@ mod tests {
         assert_eq!(bar.impl_type.as_deref(), Some("Foo"));
     }
 
-    #[test] fn go_pointer_receiver_kind() {
+    #[test]
+    fn go_pointer_receiver_kind() {
         let src = "package main\n\ntype Foo struct{}\n\nfunc (f *Foo) Bar() {}";
         let pf = parse_go(src);
         let bar = pf.functions.iter().find(|f| f.name == "Bar").unwrap();
@@ -1108,147 +1384,238 @@ mod tests {
         assert_eq!(bar.impl_type.as_deref(), Some("Foo"));
     }
 
-    #[test] fn go_generic_receiver_type() {
+    #[test]
+    fn go_generic_receiver_type() {
         let src = "package main\n\ntype Stack[T any] struct{}\n\nfunc (s *Stack[T]) Push(v T) {}";
         let pf = parse_go(src);
         let push = pf.functions.iter().find(|f| f.name == "Push").unwrap();
         assert_eq!(push.impl_type.as_deref(), Some("Stack"));
     }
 
-    #[test] fn go_struct_kind() {
+    #[test]
+    fn go_struct_kind() {
         let src = "package main\n\ntype Foo struct {\n    X int\n}";
         let pf = parse_go(src);
         assert_eq!(pf.classes[0].kind, "struct");
     }
 
-    #[test] fn go_interface_kind() {
+    #[test]
+    fn go_interface_kind() {
         let src = "package main\n\ntype Reader interface {\n    Read() []byte\n}";
         let pf = parse_go(src);
         assert_eq!(pf.classes[0].kind, "interface");
     }
 
-    #[test] fn go_struct_embed() {
-        let src = "package main\n\ntype Base struct{}\n\ntype Child struct {\n    Base\n    X int\n}";
+    #[test]
+    fn go_struct_embed() {
+        let src =
+            "package main\n\ntype Base struct{}\n\ntype Child struct {\n    Base\n    X int\n}";
         let pf = parse_go(src);
         let child = pf.classes.iter().find(|c| c.name == "Child").unwrap();
-        assert!(child.embeds.contains(&"Base".to_string()), "embeds: {:?}", child.embeds);
+        assert!(
+            child.embeds.contains(&"Base".to_string()),
+            "embeds: {:?}",
+            child.embeds
+        );
     }
 
-    #[test] fn go_struct_pointer_embed() {
-        let src = "package main\n\ntype Base struct{}\n\ntype Child struct {\n    *Base\n    X int\n}";
+    #[test]
+    fn go_struct_pointer_embed() {
+        let src =
+            "package main\n\ntype Base struct{}\n\ntype Child struct {\n    *Base\n    X int\n}";
         let pf = parse_go(src);
         let child = pf.classes.iter().find(|c| c.name == "Child").unwrap();
-        assert!(child.embeds.contains(&"Base".to_string()), "embeds: {:?}", child.embeds);
+        assert!(
+            child.embeds.contains(&"Base".to_string()),
+            "embeds: {:?}",
+            child.embeds
+        );
     }
 
-    #[test] fn go_type_alias_excluded() {
+    #[test]
+    fn go_type_alias_excluded() {
         let src = "package main\n\ntype MyInt = int";
         let pf = parse_go(src);
         assert!(pf.classes.is_empty(), "type alias should not be a class");
     }
 
-    #[test] fn go_single_import() {
+    #[test]
+    fn go_single_import() {
         let src = "package main\nimport \"fmt\"\nfunc main() {}";
         let pf = parse_go(src);
         assert!(pf.imports.iter().any(|i| i.target == "fmt"));
     }
 
-    #[test] fn go_empty_file() {
+    #[test]
+    fn go_empty_file() {
         let pf = parse_go("package main");
         assert!(pf.functions.is_empty() && pf.language == "go");
     }
 
-    #[test] fn rust_free_call_extracted() {
+    #[test]
+    fn rust_free_call_extracted() {
         let src = "fn caller() { foo(); bar(); }";
         let pf = parse_rust(src);
-        let callees: Vec<&str> = pf.functions.iter().find(|f| f.name == "caller").unwrap()
-            .calls.iter().map(|c| c.callee.as_str()).collect();
-        assert!(callees.contains(&"foo") && callees.contains(&"bar"), "callees: {callees:?}");
+        let callees: Vec<&str> = pf
+            .functions
+            .iter()
+            .find(|f| f.name == "caller")
+            .unwrap()
+            .calls
+            .iter()
+            .map(|c| c.callee.as_str())
+            .collect();
+        assert!(
+            callees.contains(&"foo") && callees.contains(&"bar"),
+            "callees: {callees:?}"
+        );
     }
 
-    #[test] fn rust_method_call_extracted() {
+    #[test]
+    fn rust_method_call_extracted() {
         let src = "fn f(obj: Foo) { obj.bar(); }";
         let pf = parse_rust(src);
-        let callees: Vec<&str> = pf.functions[0].calls.iter().map(|c| c.callee.as_str()).collect();
+        let callees: Vec<&str> = pf.functions[0]
+            .calls
+            .iter()
+            .map(|c| c.callee.as_str())
+            .collect();
         assert!(callees.contains(&"bar"), "callees: {callees:?}");
     }
 
-    #[test] fn rust_scoped_call_extracted() {
+    #[test]
+    fn rust_scoped_call_extracted() {
         let src = "fn f() { Vec::new(); Foo::create(); }";
         let pf = parse_rust(src);
-        let callees: Vec<&str> = pf.functions[0].calls.iter().map(|c| c.callee.as_str()).collect();
-        assert!(callees.contains(&"new") && callees.contains(&"create"), "callees: {callees:?}");
+        let callees: Vec<&str> = pf.functions[0]
+            .calls
+            .iter()
+            .map(|c| c.callee.as_str())
+            .collect();
+        assert!(
+            callees.contains(&"new") && callees.contains(&"create"),
+            "callees: {callees:?}"
+        );
     }
 
-    #[test] fn rust_derive_augments_traits() {
+    #[test]
+    fn rust_derive_augments_traits() {
         let src = "#[derive(Debug, Clone)]\nstruct Foo;";
         let pf = parse_rust(src);
         let foo = pf.classes.iter().find(|c| c.name == "Foo").unwrap();
-        assert!(foo.traits.contains(&"Debug".to_string()), "traits: {:?}", foo.traits);
-        assert!(foo.traits.contains(&"Clone".to_string()), "traits: {:?}", foo.traits);
+        assert!(
+            foo.traits.contains(&"Debug".to_string()),
+            "traits: {:?}",
+            foo.traits
+        );
+        assert!(
+            foo.traits.contains(&"Clone".to_string()),
+            "traits: {:?}",
+            foo.traits
+        );
     }
 
-    #[test] fn rust_derive_and_impl_merged() {
+    #[test]
+    fn rust_derive_and_impl_merged() {
         let src = "#[derive(Debug)]\nstruct Foo;\ntrait Bar {}\nimpl Bar for Foo {}";
         let pf = parse_rust(src);
         let foo = pf.classes.iter().find(|c| c.name == "Foo").unwrap();
-        assert!(foo.traits.contains(&"Debug".to_string()) && foo.traits.contains(&"Bar".to_string()),
-            "traits: {:?}", foo.traits);
+        assert!(
+            foo.traits.contains(&"Debug".to_string()) && foo.traits.contains(&"Bar".to_string()),
+            "traits: {:?}",
+            foo.traits
+        );
     }
 
-    #[test] fn rust_struct_field_uses_extracted() {
+    #[test]
+    fn rust_struct_field_uses_extracted() {
         let src = "struct Config;\nstruct Server { config: Config, count: usize }";
         let pf = parse_rust(src);
         let server = pf.classes.iter().find(|c| c.name == "Server").unwrap();
-        assert!(server.uses.contains(&"Config".to_string()), "uses: {:?}", server.uses);
-        assert!(!server.uses.contains(&"usize".to_string()), "primitive leaked: {:?}", server.uses);
+        assert!(
+            server.uses.contains(&"Config".to_string()),
+            "uses: {:?}",
+            server.uses
+        );
+        assert!(
+            !server.uses.contains(&"usize".to_string()),
+            "primitive leaked: {:?}",
+            server.uses
+        );
     }
 
-    #[test] fn rust_generic_field_uses_extracted() {
+    #[test]
+    fn rust_generic_field_uses_extracted() {
         let src = "struct Peer;\nstruct Server { peers: Vec<Peer>, name: String }";
         let pf = parse_rust(src);
         let server = pf.classes.iter().find(|c| c.name == "Server").unwrap();
-        assert!(server.uses.contains(&"Peer".to_string()), "uses: {:?}", server.uses);
+        assert!(
+            server.uses.contains(&"Peer".to_string()),
+            "uses: {:?}",
+            server.uses
+        );
     }
 
-    #[test] fn rust_self_reference_excluded_from_uses() {
+    #[test]
+    fn rust_self_reference_excluded_from_uses() {
         let src = "struct Tree { left: Option<Box<Tree>>, value: i32 }";
         let pf = parse_rust(src);
         let tree = pf.classes.iter().find(|c| c.name == "Tree").unwrap();
-        assert!(!tree.uses.contains(&"Tree".to_string()), "self-ref leaked: {:?}", tree.uses);
+        assert!(
+            !tree.uses.contains(&"Tree".to_string()),
+            "self-ref leaked: {:?}",
+            tree.uses
+        );
     }
 
-    #[test] fn go_direct_call_extracted() {
+    #[test]
+    fn go_direct_call_extracted() {
         let src = "package main\n\nfunc caller() { foo() }";
         let pf = parse_go(src);
-        let callees: Vec<&str> = pf.functions.iter().find(|f| f.name == "caller").unwrap()
-            .calls.iter().map(|c| c.callee.as_str()).collect();
+        let callees: Vec<&str> = pf
+            .functions
+            .iter()
+            .find(|f| f.name == "caller")
+            .unwrap()
+            .calls
+            .iter()
+            .map(|c| c.callee.as_str())
+            .collect();
         assert!(callees.contains(&"foo"), "callees: {callees:?}");
     }
 
-    #[test] fn go_selector_call_extracted() {
+    #[test]
+    fn go_selector_call_extracted() {
         let src = "package main\n\nfunc f(obj *Foo) { obj.Bar() }";
         let pf = parse_go(src);
-        let callees: Vec<&str> = pf.functions[0].calls.iter().map(|c| c.callee.as_str()).collect();
+        let callees: Vec<&str> = pf.functions[0]
+            .calls
+            .iter()
+            .map(|c| c.callee.as_str())
+            .collect();
         assert!(callees.contains(&"Bar"), "callees: {callees:?}");
     }
 
-    #[test] fn typescript_stub_returns_empty() {
+    #[test]
+    fn typescript_stub_returns_empty() {
         let pf = TypeScriptParser.parse("function foo() {}", Path::new("a.ts"), "r", "v1");
         assert!(pf.functions.is_empty() && pf.language == "typescript");
     }
 
-    #[test] fn javascript_stub_returns_empty() {
+    #[test]
+    fn javascript_stub_returns_empty() {
         let pf = JavaScriptParser.parse("function foo() {}", Path::new("a.js"), "r", "v1");
         assert!(pf.functions.is_empty() && pf.language == "javascript");
     }
 
-    #[test] fn c_stub_returns_empty() {
+    #[test]
+    fn c_stub_returns_empty() {
         let pf = CParser.parse("void foo() {}", Path::new("a.c"), "r", "v1");
         assert!(pf.functions.is_empty() && pf.language == "c");
     }
 
-    #[test] fn cpp_stub_returns_empty() {
+    #[test]
+    fn cpp_stub_returns_empty() {
         let pf = CppParser.parse("void foo() {}", Path::new("a.cpp"), "r", "v1");
         assert!(pf.functions.is_empty() && pf.language == "cpp");
     }
