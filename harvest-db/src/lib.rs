@@ -14,9 +14,9 @@ use serde_json::Value;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::NoTls;
 
-pub use tokio_postgres;
-pub use connection::{DbOptions, Listener, Notification, DEFAULT_POOL_SIZE};
 use connection::Tls;
+pub use connection::{DbOptions, Listener, Notification, DEFAULT_POOL_SIZE};
+pub use tokio_postgres;
 
 use params::{bind_named, JsonParam};
 use rows::row_to_json;
@@ -60,10 +60,14 @@ impl Db {
     pub fn connect_with_without_migrating(options: &DbOptions) -> Result<Self> {
         let config = options.parsed()?;
         let tls = Tls::from_options(options)?;
-        let manager_config = ManagerConfig { recycling_method: RecyclingMethod::Verified };
+        let manager_config = ManagerConfig {
+            recycling_method: RecyclingMethod::Verified,
+        };
         let manager = match &tls {
             Tls::Plain => Manager::from_config(config.clone(), NoTls, manager_config),
-            Tls::Rustls(connector) => Manager::from_config(config.clone(), connector.clone(), manager_config),
+            Tls::Rustls(connector) => {
+                Manager::from_config(config.clone(), connector.clone(), manager_config)
+            }
         };
         let pool = Pool::builder(manager)
             .max_size(options.pool_size)
@@ -72,7 +76,11 @@ impl Db {
             .create_timeout(Some(POOL_CREATE_TIMEOUT))
             .recycle_timeout(Some(POOL_RECYCLE_TIMEOUT))
             .build()?;
-        Ok(Self { pool, config: Arc::new(config), tls })
+        Ok(Self {
+            pool,
+            config: Arc::new(config),
+            tls,
+        })
     }
 
     pub fn max_pool_size(&self) -> usize {
@@ -82,7 +90,10 @@ impl Db {
     pub async fn ping(&self) -> Result<()> {
         tokio::time::timeout(PING_TIMEOUT, async {
             let client = self.client().await?;
-            client.simple_query("SELECT 1").await.context("database ping failed")?;
+            client
+                .simple_query("SELECT 1")
+                .await
+                .context("database ping failed")?;
             Ok::<(), anyhow::Error>(())
         })
         .await
@@ -108,7 +119,10 @@ impl Db {
     }
 
     async fn client(&self) -> Result<Object> {
-        self.pool.get().await.context("could not get a database connection")
+        self.pool
+            .get()
+            .await
+            .context("could not get a database connection")
     }
 
     pub async fn query(&self, sql: &str, params: Value) -> Result<Vec<Value>> {
@@ -129,7 +143,9 @@ impl Db {
     pub async fn begin(&self) -> Result<Tx> {
         let client = self.client().await?;
         client.batch_execute("BEGIN").await?;
-        Ok(Tx { client: Some(client) })
+        Ok(Tx {
+            client: Some(client),
+        })
     }
 }
 
@@ -153,7 +169,8 @@ impl Tx {
     pub async fn query_uncached(&self, sql: &str, params: Value) -> Result<Vec<Value>> {
         let (sql, values) = bind_named(sql, &params)?;
         let wrapped: Vec<JsonParam> = values.iter().map(JsonParam).collect();
-        let refs: Vec<&(dyn ToSql + Sync)> = wrapped.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+        let refs: Vec<&(dyn ToSql + Sync)> =
+            wrapped.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
         let rows = self.client().query(sql.as_str(), &refs).await?;
         rows.iter().map(row_to_json).collect()
     }
@@ -192,7 +209,9 @@ impl Drop for Tx {
 
 async fn query_on(client: &Object, sql: &str, params: &Value) -> Result<Vec<Value>> {
     let (sql, values) = bind_named(sql, params)?;
-    let stmt = client.prepare_cached(&sql).await
+    let stmt = client
+        .prepare_cached(&sql)
+        .await
         .with_context(|| format!("failed to prepare: {sql}"))?;
     let wrapped: Vec<JsonParam> = values.iter().map(JsonParam).collect();
     let refs: Vec<&(dyn ToSql + Sync)> = wrapped.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
@@ -202,7 +221,9 @@ async fn query_on(client: &Object, sql: &str, params: &Value) -> Result<Vec<Valu
 
 async fn execute_on(client: &Object, sql: &str, params: &Value) -> Result<u64> {
     let (sql, values) = bind_named(sql, params)?;
-    let stmt = client.prepare_cached(&sql).await
+    let stmt = client
+        .prepare_cached(&sql)
+        .await
         .with_context(|| format!("failed to prepare: {sql}"))?;
     let wrapped: Vec<JsonParam> = values.iter().map(JsonParam).collect();
     let refs: Vec<&(dyn ToSql + Sync)> = wrapped.iter().map(|p| p as &(dyn ToSql + Sync)).collect();

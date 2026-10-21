@@ -23,7 +23,11 @@ pub struct DbOptions {
 
 impl DbOptions {
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into(), pool_size: DEFAULT_POOL_SIZE, ca_file: None }
+        Self {
+            url: url.into(),
+            pool_size: DEFAULT_POOL_SIZE,
+            ca_file: None,
+        }
     }
 
     pub fn with_pool_size(mut self, pool_size: usize) -> Self {
@@ -64,19 +68,26 @@ impl Tls {
                     .collect::<Result<Vec<_>, _>>()
                     .with_context(|| format!("parsing database CA file {}", path.display()))?;
                 if certs.is_empty() {
-                    anyhow::bail!("database CA file {} contains no certificate", path.display());
+                    anyhow::bail!(
+                        "database CA file {} contains no certificate",
+                        path.display()
+                    );
                 }
                 for cert in certs {
-                    roots.add(cert).with_context(|| format!("adding certificate from {}", path.display()))?;
+                    roots
+                        .add(cert)
+                        .with_context(|| format!("adding certificate from {}", path.display()))?;
                 }
             }
             None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
         }
-        let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .context("configuring TLS protocol versions")?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .context("configuring TLS protocol versions")?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
         Ok(Self::Rustls(MakeRustlsConnect::new(config)))
     }
 }
@@ -107,8 +118,10 @@ impl Listener {
     }
 }
 
-fn drive<S, T>(mut connection: Connection<S, T>, sender: Option<mpsc::UnboundedSender<Notification>>)
-where
+fn drive<S, T>(
+    mut connection: Connection<S, T>,
+    sender: Option<mpsc::UnboundedSender<Notification>>,
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -141,12 +154,18 @@ pub(crate) async fn connect_dedicated(
 ) -> Result<Client> {
     match tls {
         Tls::Plain => {
-            let (client, connection) = config.connect(NoTls).await.context("could not open a database connection")?;
+            let (client, connection) = config
+                .connect(NoTls)
+                .await
+                .context("could not open a database connection")?;
             drive(connection, sender);
             Ok(client)
         }
         Tls::Rustls(connector) => {
-            let (client, connection) = config.connect(connector.clone()).await.context("could not open a database connection")?;
+            let (client, connection) = config
+                .connect(connector.clone())
+                .await
+                .context("could not open a database connection")?;
             drive(connection, sender);
             Ok(client)
         }
@@ -162,6 +181,13 @@ pub(crate) async fn listen(config: &Config, tls: &Tls, channels: &[&str]) -> Res
             .await
             .with_context(|| format!("LISTEN {channel}"))?;
     }
-    let backend_pid: i32 = client.query_one("SELECT pg_backend_pid()", &[]).await?.get(0);
-    Ok(Listener { client, receiver, backend_pid })
+    let backend_pid: i32 = client
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await?
+        .get(0);
+    Ok(Listener {
+        client,
+        receiver,
+        backend_pid,
+    })
 }
