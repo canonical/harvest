@@ -105,7 +105,10 @@ impl ClusterNode {
 
     pub async fn deregister(&self) -> Result<()> {
         self.db
-            .execute("DELETE FROM cluster_nodes WHERE node_id = $id", json!({ "id": self.node_id }))
+            .execute(
+                "DELETE FROM cluster_nodes WHERE node_id = $id",
+                json!({ "id": self.node_id }),
+            )
             .await?;
         Ok(())
     }

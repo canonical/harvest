@@ -9,20 +9,46 @@ pub struct SystemOneThresholds {
     pub confidence_threshold: f64,
 }
 
-fn default_system_one_confidence() -> f64 { 0.5 }
-fn default_system_one_model() -> String { "~typesafe/jev-latest".into() }
-fn default_system_one_timeout() -> u64 { 10 }
-fn default_fast_path_threshold() -> f64 { 0.7 }
-fn default_early_synthesis_threshold() -> f64 { 0.85 }
-fn default_early_synthesis_research_threshold() -> f64 { 0.95 }
-fn default_relevance_threshold() -> f64 { 0.4 }
-fn default_relevance_preserve_recent() -> usize { 2 }
-fn default_early_synthesis_coverage_threshold() -> f64 { 0.8 }
-fn default_early_synthesis_min_iterations_first_turn() -> usize { 5 }
-fn default_early_synthesis_uniform_threshold() -> f64 { 0.7 }
+fn default_system_one_confidence() -> f64 {
+    0.5
+}
+fn default_system_one_model() -> String {
+    "~typesafe/jev-latest".into()
+}
+fn default_system_one_timeout() -> u64 {
+    10
+}
+fn default_fast_path_threshold() -> f64 {
+    0.7
+}
+fn default_early_synthesis_threshold() -> f64 {
+    0.85
+}
+fn default_early_synthesis_research_threshold() -> f64 {
+    0.95
+}
+fn default_relevance_threshold() -> f64 {
+    0.4
+}
+fn default_relevance_preserve_recent() -> usize {
+    2
+}
+fn default_early_synthesis_coverage_threshold() -> f64 {
+    0.8
+}
+fn default_early_synthesis_min_iterations_first_turn() -> usize {
+    5
+}
+fn default_early_synthesis_uniform_threshold() -> f64 {
+    0.7
+}
 
-fn default_early_synthesis_capability_gate_threshold() -> f64 { 0.8 }
-fn default_next_action_confidence() -> f64 { 0.5 }
+fn default_early_synthesis_capability_gate_threshold() -> f64 {
+    0.8
+}
+fn default_next_action_confidence() -> f64 {
+    0.5
+}
 
 #[derive(Deserialize, Clone, Default)]
 pub struct SystemOneModelRouting {
@@ -87,7 +113,10 @@ impl SystemOneConfig {
     }
 
     pub fn bundled_llm_provider_id(&self, llm_configs: &[LlmProviderConfig]) -> Option<String> {
-        let so_host = reqwest::Url::parse(&self.endpoint).ok()?.host_str()?.to_string();
+        let so_host = reqwest::Url::parse(&self.endpoint)
+            .ok()?
+            .host_str()?
+            .to_string();
         for config in llm_configs {
             if let Some(base_url) = config.base_url() {
                 if let Ok(url) = reqwest::Url::parse(base_url) {
@@ -158,11 +187,21 @@ pub struct Config {
     pub cluster: ClusterConfig,
 }
 
-fn default_heartbeat_interval_ms() -> u64 { 5_000 }
-fn default_node_timeout_ms() -> u64 { 20_000 }
-fn default_bus_batch_window_ms() -> u64 { 50 }
-fn default_drain_grace_secs() -> u64 { 10 }
-fn default_drain_timeout_secs() -> u64 { 120 }
+fn default_heartbeat_interval_ms() -> u64 {
+    5_000
+}
+fn default_node_timeout_ms() -> u64 {
+    20_000
+}
+fn default_bus_batch_window_ms() -> u64 {
+    50
+}
+fn default_drain_grace_secs() -> u64 {
+    10
+}
+fn default_drain_timeout_secs() -> u64 {
+    120
+}
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct ClusterConfig {
@@ -214,21 +253,35 @@ impl ClusterConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.internal_listen.is_some() && self.shared_secret.as_deref().map_or(true, str::is_empty) {
+        if self.internal_listen.is_some()
+            && self.shared_secret.as_deref().map_or(true, str::is_empty)
+        {
             anyhow::bail!("cluster.shared_secret is required when cluster.internal_listen is set");
         }
         if self.node_timeout_ms < self.heartbeat_interval_ms.saturating_mul(2) {
-            anyhow::bail!("cluster.node_timeout_ms must be at least twice cluster.heartbeat_interval_ms");
+            anyhow::bail!(
+                "cluster.node_timeout_ms must be at least twice cluster.heartbeat_interval_ms"
+            );
         }
         Ok(())
     }
 }
 
-fn default_semantic_model() -> String { "text-embedding-004".to_string() }
-fn default_semantic_dimensions() -> usize { 768 }
-fn default_semantic_lexical_weight() -> f64 { 0.6 }
-fn default_semantic_semantic_weight() -> f64 { 0.4 }
-fn default_semantic_batch_size() -> usize { 64 }
+fn default_semantic_model() -> String {
+    "text-embedding-004".to_string()
+}
+fn default_semantic_dimensions() -> usize {
+    768
+}
+fn default_semantic_lexical_weight() -> f64 {
+    0.6
+}
+fn default_semantic_semantic_weight() -> f64 {
+    0.4
+}
+fn default_semantic_batch_size() -> usize {
+    64
+}
 
 #[derive(Deserialize, Clone)]
 pub struct SemanticConfig {
@@ -264,8 +317,12 @@ impl Default for SemanticConfig {
 
 impl SemanticConfig {
     pub fn effective_weights(&self) -> (f64, f64) {
-        crate::agent::semantic::hybrid_weights(self.lexical_weight, self.semantic_weight)
-            .unwrap_or((crate::agent::semantic::DEFAULT_LEXICAL_WEIGHT, crate::agent::semantic::DEFAULT_SEMANTIC_WEIGHT))
+        crate::agent::semantic::hybrid_weights(self.lexical_weight, self.semantic_weight).unwrap_or(
+            (
+                crate::agent::semantic::DEFAULT_LEXICAL_WEIGHT,
+                crate::agent::semantic::DEFAULT_SEMANTIC_WEIGHT,
+            ),
+        )
     }
 
     pub fn effective_batch_size(&self) -> usize {
@@ -300,11 +357,15 @@ pub struct AuthConfig {
 
 impl AuthConfig {
     pub fn secure_cookies(&self) -> bool {
-        self.public_url.as_deref().is_some_and(|url| url.starts_with("https://"))
+        self.public_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("https://"))
     }
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Deserialize, Clone)]
 pub struct GoogleConfig {
@@ -330,7 +391,7 @@ pub struct DocumentationConfig {
 #[derive(Deserialize, Default, Clone)]
 pub struct AgentsConfig {
     pub binary_path: Option<std::path::PathBuf>,
-    pub public_url:  Option<String>,
+    pub public_url: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -356,10 +417,18 @@ pub struct LxdConfig {
     pub profile: String,
 }
 
-fn default_lxd_project() -> String { "default".into() }
-fn default_lxd_image_alias() -> String { "24.04".into() }
-fn default_lxd_image_server() -> String { "https://cloud-images.ubuntu.com/releases".into() }
-fn default_lxd_profile() -> String { "default".into() }
+fn default_lxd_project() -> String {
+    "default".into()
+}
+fn default_lxd_image_alias() -> String {
+    "24.04".into()
+}
+fn default_lxd_image_server() -> String {
+    "https://cloud-images.ubuntu.com/releases".into()
+}
+fn default_lxd_profile() -> String {
+    "default".into()
+}
 
 #[derive(Deserialize, Clone)]
 pub struct CollocateConfig {
@@ -390,11 +459,21 @@ pub struct CollocateConfig {
     pub image_presets: HashMap<String, String>,
 }
 
-fn default_collocate_project() -> String { "harvest".into() }
-fn default_collocate_image() -> String { "ubuntu:24.04".into() }
-fn default_collocate_user() -> String { "root".into() }
-fn default_collocate_idle_timeout() -> u64 { 600 }
-fn default_collocate_max_containers() -> usize { 20 }
+fn default_collocate_project() -> String {
+    "harvest".into()
+}
+fn default_collocate_image() -> String {
+    "ubuntu:24.04".into()
+}
+fn default_collocate_user() -> String {
+    "root".into()
+}
+fn default_collocate_idle_timeout() -> u64 {
+    600
+}
+fn default_collocate_max_containers() -> usize {
+    20
+}
 
 #[derive(Deserialize)]
 pub struct ServerConfig {
@@ -404,10 +483,16 @@ pub struct ServerConfig {
     pub port: u16,
 }
 
-fn default_host() -> String { "0.0.0.0".into() }
-fn default_port() -> u16 { 8080 }
+fn default_host() -> String {
+    "0.0.0.0".into()
+}
+fn default_port() -> u16 {
+    8080
+}
 
-fn default_pool_size() -> usize { harvest_db::DEFAULT_POOL_SIZE }
+fn default_pool_size() -> usize {
+    harvest_db::DEFAULT_POOL_SIZE
+}
 
 #[derive(Deserialize)]
 pub struct DatabaseConfig {
@@ -552,88 +637,94 @@ pub enum LlmProviderConfig {
 impl LlmProviderConfig {
     pub fn priority(&self) -> u32 {
         match self {
-            Self::Anthropic    { priority, .. } => *priority,
-            Self::Gemini       { priority, .. } => *priority,
+            Self::Anthropic { priority, .. } => *priority,
+            Self::Gemini { priority, .. } => *priority,
             Self::OpenAiCompat { priority, .. } => *priority,
         }
     }
 
     pub fn id(&self) -> &str {
         match self {
-            Self::Anthropic    { id, .. } => id,
-            Self::Gemini       { id, .. } => id,
+            Self::Anthropic { id, .. } => id,
+            Self::Gemini { id, .. } => id,
             Self::OpenAiCompat { id, .. } => id,
         }
     }
 
     fn id_mut(&mut self) -> &mut String {
         match self {
-            Self::Anthropic    { id, .. } => id,
-            Self::Gemini       { id, .. } => id,
+            Self::Anthropic { id, .. } => id,
+            Self::Gemini { id, .. } => id,
             Self::OpenAiCompat { id, .. } => id,
         }
     }
 
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::Anthropic    { .. } => "anthropic",
-            Self::Gemini       { .. } => "gemini",
+            Self::Anthropic { .. } => "anthropic",
+            Self::Gemini { .. } => "gemini",
             Self::OpenAiCompat { .. } => "openai-compatible",
         }
     }
 
     pub fn expose_to_ui(&self) -> bool {
         match self {
-            Self::Anthropic    { expose_to_ui, .. } => *expose_to_ui,
-            Self::Gemini       { expose_to_ui, .. } => *expose_to_ui,
+            Self::Anthropic { expose_to_ui, .. } => *expose_to_ui,
+            Self::Gemini { expose_to_ui, .. } => *expose_to_ui,
             Self::OpenAiCompat { expose_to_ui, .. } => *expose_to_ui,
         }
     }
 
     pub fn name(&self) -> Option<&str> {
         match self {
-            Self::Anthropic    { name, .. } => name.as_deref(),
-            Self::Gemini       { name, .. } => name.as_deref(),
+            Self::Anthropic { name, .. } => name.as_deref(),
+            Self::Gemini { name, .. } => name.as_deref(),
             Self::OpenAiCompat { name, .. } => name.as_deref(),
         }
     }
 
     pub fn models(&self) -> Option<&[String]> {
         match self {
-            Self::Anthropic    { models, .. } => models.as_deref(),
-            Self::Gemini       { models, .. } => models.as_deref(),
+            Self::Anthropic { models, .. } => models.as_deref(),
+            Self::Gemini { models, .. } => models.as_deref(),
             Self::OpenAiCompat { models, .. } => models.as_deref(),
         }
     }
 
     pub fn user_provided_key(&self) -> bool {
         match self {
-            Self::Anthropic    { user_provided_key, .. } => *user_provided_key,
-            Self::Gemini       { user_provided_key, .. } => *user_provided_key,
-            Self::OpenAiCompat { user_provided_key, .. } => *user_provided_key,
+            Self::Anthropic {
+                user_provided_key, ..
+            } => *user_provided_key,
+            Self::Gemini {
+                user_provided_key, ..
+            } => *user_provided_key,
+            Self::OpenAiCompat {
+                user_provided_key, ..
+            } => *user_provided_key,
         }
     }
 
     pub fn api_key(&self) -> &str {
         match self {
-            Self::Anthropic    { api_key, .. } => api_key,
-            Self::Gemini       { api_key, .. } => api_key,
+            Self::Anthropic { api_key, .. } => api_key,
+            Self::Gemini { api_key, .. } => api_key,
             Self::OpenAiCompat { api_key, .. } => api_key,
         }
     }
 
     pub fn timeout_secs(&self) -> u64 {
         match self {
-            Self::Anthropic    { timeout_secs, .. } => *timeout_secs,
-            Self::Gemini       { timeout_secs, .. } => *timeout_secs,
+            Self::Anthropic { timeout_secs, .. } => *timeout_secs,
+            Self::Gemini { timeout_secs, .. } => *timeout_secs,
             Self::OpenAiCompat { timeout_secs, .. } => *timeout_secs,
         }
     }
 
     pub fn max_retries(&self) -> u32 {
         match self {
-            Self::Anthropic    { max_retries, .. } => *max_retries,
-            Self::Gemini       { max_retries, .. } => *max_retries,
+            Self::Anthropic { max_retries, .. } => *max_retries,
+            Self::Gemini { max_retries, .. } => *max_retries,
             Self::OpenAiCompat { max_retries, .. } => *max_retries,
         }
     }
@@ -647,33 +738,46 @@ impl LlmProviderConfig {
 
     pub fn enable_prompt_caching(&self) -> bool {
         match self {
-            Self::OpenAiCompat { enable_prompt_caching, .. } => *enable_prompt_caching,
+            Self::OpenAiCompat {
+                enable_prompt_caching,
+                ..
+            } => *enable_prompt_caching,
             _ => false,
         }
     }
 
     pub fn pricing(&self) -> Option<&PricingConfig> {
         match self {
-            Self::Anthropic    { pricing, .. } => pricing.as_ref(),
-            Self::Gemini       { pricing, .. } => pricing.as_ref(),
+            Self::Anthropic { pricing, .. } => pricing.as_ref(),
+            Self::Gemini { pricing, .. } => pricing.as_ref(),
             Self::OpenAiCompat { pricing, .. } => pricing.as_ref(),
         }
     }
 
     pub fn model(&self) -> &str {
         match self {
-            Self::Anthropic    { model, .. } => model,
-            Self::Gemini       { model, .. } => model,
+            Self::Anthropic { model, .. } => model,
+            Self::Gemini { model, .. } => model,
             Self::OpenAiCompat { model, .. } => model,
         }
     }
 }
 
-fn default_max_iterations() -> usize { 20 }
-fn default_timeout_secs() -> u64 { 120 }
-fn default_max_retries() -> u32 { 3 }
-fn default_compaction_threshold_chars() -> usize { 40_000 }
-fn default_compaction_keep_last() -> usize { 6 }
+fn default_max_iterations() -> usize {
+    20
+}
+fn default_timeout_secs() -> u64 {
+    120
+}
+fn default_max_retries() -> u32 {
+    3
+}
+fn default_compaction_threshold_chars() -> usize {
+    40_000
+}
+fn default_compaction_keep_last() -> usize {
+    6
+}
 
 impl Config {
     pub fn from_file(path: &Path) -> Result<Self> {
@@ -712,7 +816,9 @@ mod tests {
 
     fn parse_auth(toml: &str) -> AuthConfig {
         #[derive(serde::Deserialize)]
-        struct Wrapper { auth: AuthConfig }
+        struct Wrapper {
+            auth: AuthConfig,
+        }
         toml::from_str::<Wrapper>(toml).expect("parse failed").auth
     }
 
@@ -728,7 +834,8 @@ mod tests {
 
     #[test]
     fn oidc_config_parses_all_fields() {
-        let cfg = parse_auth(r#"
+        let cfg = parse_auth(
+            r#"
             [auth]
             jwt_secret = "s3cr3t"
             [auth.oidc]
@@ -737,18 +844,23 @@ mod tests {
             client_secret = "abc123"
             redirect_uri = "https://harvest.example.com/auth/oidc/callback"
             display_name = "Ubuntu One"
-        "#);
+        "#,
+        );
         let oidc = cfg.oidc.expect("oidc should be present");
         assert_eq!(oidc.issuer_url, "https://login.ubuntu.com");
         assert_eq!(oidc.client_id, "harvest");
         assert_eq!(oidc.client_secret, "abc123");
-        assert_eq!(oidc.redirect_uri, "https://harvest.example.com/auth/oidc/callback");
+        assert_eq!(
+            oidc.redirect_uri,
+            "https://harvest.example.com/auth/oidc/callback"
+        );
         assert_eq!(oidc.display_name.as_deref(), Some("Ubuntu One"));
     }
 
     #[test]
     fn oidc_display_name_is_optional() {
-        let cfg = parse_auth(r#"
+        let cfg = parse_auth(
+            r#"
             [auth]
             jwt_secret = "s3cr3t"
             [auth.oidc]
@@ -756,42 +868,50 @@ mod tests {
             client_id    = "harvest"
             client_secret = "abc123"
             redirect_uri = "https://harvest.example.com/auth/oidc/callback"
-        "#);
+        "#,
+        );
         let oidc = cfg.oidc.expect("oidc should be present");
         assert!(oidc.display_name.is_none());
     }
 
     #[test]
     fn oidc_absent_gives_none() {
-        let cfg = parse_auth(r#"
+        let cfg = parse_auth(
+            r#"
             [auth]
             jwt_secret = "s3cr3t"
-        "#);
+        "#,
+        );
         assert!(cfg.oidc.is_none());
     }
 
     #[test]
     fn local_login_defaults_to_true() {
-        let cfg = parse_auth(r#"
+        let cfg = parse_auth(
+            r#"
             [auth]
             jwt_secret = "s3cr3t"
-        "#);
+        "#,
+        );
         assert!(cfg.allow_local_login);
     }
 
     #[test]
     fn local_login_can_be_disabled() {
-        let cfg = parse_auth(r#"
+        let cfg = parse_auth(
+            r#"
             [auth]
             jwt_secret = "s3cr3t"
             allow_local_login = false
-        "#);
+        "#,
+        );
         assert!(!cfg.allow_local_login);
     }
 
     #[test]
     fn google_and_oidc_can_coexist() {
-        let cfg = parse_auth(r#"
+        let cfg = parse_auth(
+            r#"
             [auth]
             jwt_secret = "s3cr3t"
             [auth.google]
@@ -803,7 +923,8 @@ mod tests {
             client_id     = "harvest"
             client_secret = "oidcsec"
             redirect_uri  = "https://example.com/auth/oidc/callback"
-        "#);
+        "#,
+        );
         assert!(cfg.google.is_some());
         assert!(cfg.oidc.is_some());
     }
@@ -816,51 +937,64 @@ mod tests {
     "#;
 
     fn minimal_config(llm_block: &str) -> String {
-        format!(r#"
+        format!(
+            r#"
             [server]
             [database]
             url = "postgres://harvest:pw@localhost:5432/harvest"
             [auth]
             jwt_secret = "secret"
             {llm_block}
-        "#)
+        "#
+        )
     }
 
     #[test]
     fn single_gemini_provider_parses() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "gemini-2.5-flash"
             api_key  = "key1"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert_eq!(cfg.llm.len(), 1);
         match &cfg.llm[0] {
             LlmProviderConfig::Gemini { model, .. } => assert_eq!(model, "gemini-2.5-flash"),
-            other => panic!("expected Gemini, got something else: {other:?}", other = std::mem::discriminant(other)),
+            other => panic!(
+                "expected Gemini, got something else: {other:?}",
+                other = std::mem::discriminant(other)
+            ),
         }
     }
 
     #[test]
     fn single_anthropic_provider_parses() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "anthropic"
             model    = "claude-sonnet-4-6"
             api_key  = "key2"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert_eq!(cfg.llm.len(), 1);
         match &cfg.llm[0] {
             LlmProviderConfig::Anthropic { model, .. } => assert_eq!(model, "claude-sonnet-4-6"),
-            other => panic!("expected Anthropic: {other:?}", other = std::mem::discriminant(other)),
+            other => panic!(
+                "expected Anthropic: {other:?}",
+                other = std::mem::discriminant(other)
+            ),
         }
     }
 
     #[test]
     fn two_providers_parse_as_vec_of_two() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "gemini-flash"
@@ -872,7 +1006,8 @@ mod tests {
             model    = "claude-sonnet-4-6"
             api_key  = "k2"
             priority = 2
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert_eq!(cfg.llm.len(), 2);
         assert_eq!(cfg.llm[0].priority(), 1);
@@ -881,24 +1016,28 @@ mod tests {
 
     #[test]
     fn priority_defaults_to_zero() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "gemini-flash"
             api_key  = "k"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert_eq!(cfg.llm[0].priority(), 0);
     }
 
     #[test]
     fn agent_section_uses_defaults_when_absent() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
             api_key  = "k"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert_eq!(cfg.agent.max_iterations, 20);
         assert_eq!(cfg.agent.compaction_threshold_chars, 40_000);
@@ -907,7 +1046,8 @@ mod tests {
 
     #[test]
     fn agent_section_parses_explicit_values() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
@@ -917,7 +1057,8 @@ mod tests {
             max_iterations = 10
             compaction_threshold_chars = 10000
             compaction_keep_last = 3
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert_eq!(cfg.agent.max_iterations, 10);
         assert_eq!(cfg.agent.compaction_threshold_chars, 10_000);
@@ -926,27 +1067,35 @@ mod tests {
 
     #[test]
     fn openai_compat_provider_parses() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "openai-compatible"
             base_url = "https://openai.example.com"
             api_key  = "k"
             model    = "gpt-4o"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert_eq!(cfg.llm.len(), 1);
         match &cfg.llm[0] {
-            LlmProviderConfig::OpenAiCompat { model, base_url, .. } => {
+            LlmProviderConfig::OpenAiCompat {
+                model, base_url, ..
+            } => {
                 assert_eq!(model, "gpt-4o");
                 assert_eq!(base_url, "https://openai.example.com");
             }
-            other => panic!("expected OpenAiCompat: {other:?}", other = std::mem::discriminant(other)),
+            other => panic!(
+                "expected OpenAiCompat: {other:?}",
+                other = std::mem::discriminant(other)
+            ),
         }
     }
 
     #[test]
     fn openrouter_provider_with_user_supplied_key_parses() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider           = "openai-compatible"
             base_url           = "https://openrouter.ai/api/v1"
@@ -957,12 +1106,19 @@ mod tests {
             name               = "OpenRouter"
             priority           = 1
             user_provided_key  = true
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert_eq!(cfg.llm.len(), 1);
         match &cfg.llm[0] {
             LlmProviderConfig::OpenAiCompat {
-                base_url, model, id, name, priority, user_provided_key, ..
+                base_url,
+                model,
+                id,
+                name,
+                priority,
+                user_provided_key,
+                ..
             } => {
                 assert_eq!(base_url, "https://openrouter.ai/api/v1");
                 assert_eq!(model, "z-ai/glm-5.3-flash");
@@ -973,12 +1129,16 @@ mod tests {
             }
             other => panic!("expected OpenAiCompat: {:?}", std::mem::discriminant(other)),
         }
-        assert!(cfg.llm[0].api_key().is_empty(), "user-supplied keys must not be baked into the config");
+        assert!(
+            cfg.llm[0].api_key().is_empty(),
+            "user-supplied keys must not be baked into the config"
+        );
     }
 
     #[test]
     fn opencode_zen_free_fallback_sits_after_openrouter() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider           = "openai-compatible"
             base_url           = "https://openrouter.ai/api/v1"
@@ -1000,7 +1160,8 @@ mod tests {
             name               = "OpenCode Zen"
             priority           = 2
             user_provided_key  = true
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert_eq!(cfg.llm.len(), 2);
         let priorities: Vec<u32> = cfg.llm.iter().map(|c| c.priority()).collect();
@@ -1008,7 +1169,13 @@ mod tests {
         assert_eq!(cfg.llm[0].id(), "openrouter");
         assert_eq!(cfg.llm[1].id(), "opencode-zen");
         match &cfg.llm[1] {
-            LlmProviderConfig::OpenAiCompat { base_url, model, models, user_provided_key, .. } => {
+            LlmProviderConfig::OpenAiCompat {
+                base_url,
+                model,
+                models,
+                user_provided_key,
+                ..
+            } => {
                 assert_eq!(base_url, "https://opencode.ai/zen/v1");
                 assert_eq!(model, "longcat-2.5-preview-free");
                 assert_eq!(
@@ -1022,20 +1189,30 @@ mod tests {
             }
             other => panic!("expected OpenAiCompat: {:?}", std::mem::discriminant(other)),
         }
-        assert_eq!(cfg.llm[1].api_key().len(), 0, "zen fallback must not bake in a key");
+        assert_eq!(
+            cfg.llm[1].api_key().len(),
+            0,
+            "zen fallback must not bake in a key"
+        );
     }
 
     #[test]
     fn timeout_and_retries_have_defaults() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "anthropic"
             model    = "m"
             api_key  = "k"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         match &cfg.llm[0] {
-            LlmProviderConfig::Anthropic { timeout_secs, max_retries, .. } => {
+            LlmProviderConfig::Anthropic {
+                timeout_secs,
+                max_retries,
+                ..
+            } => {
                 assert_eq!(*timeout_secs, 120);
                 assert_eq!(*max_retries, 3);
             }
@@ -1045,115 +1222,136 @@ mod tests {
 
     #[test]
     fn expose_to_ui_defaults_to_true() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
             api_key  = "k"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert!(cfg.llm[0].expose_to_ui());
     }
 
     #[test]
     fn expose_to_ui_can_be_set_false() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider     = "openai-compatible"
             base_url     = "https://openai.example.com"
             model        = "gpt-4o"
             api_key      = "k"
             expose_to_ui = false
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert!(!cfg.llm[0].expose_to_ui());
     }
 
     #[test]
     fn name_defaults_to_none() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
             api_key  = "k"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert_eq!(cfg.llm[0].name(), None);
     }
 
     #[test]
     fn name_is_preserved_when_set() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "openai-compatible"
             base_url = "https://lemonade.example.com/api/v1"
             model    = "Mistral-3-3B"
             api_key  = ""
             name     = "Lemonade (local)"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert_eq!(cfg.llm[0].name(), Some("Lemonade (local)"));
     }
 
     #[test]
     fn models_defaults_to_none() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
             api_key  = "k"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert_eq!(cfg.llm[0].models(), None);
     }
 
     #[test]
     fn models_allowlist_is_preserved_when_set() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "gemini-3.1-pro-preview"
             api_key  = "k"
             models   = ["gemini-2.5-flash", "gemini-2.5-pro"]
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
-        assert_eq!(cfg.llm[0].models(), Some(&["gemini-2.5-flash".to_string(), "gemini-2.5-pro".to_string()][..]));
+        assert_eq!(
+            cfg.llm[0].models(),
+            Some(&["gemini-2.5-flash".to_string(), "gemini-2.5-pro".to_string()][..])
+        );
     }
 
     #[test]
     fn user_provided_key_defaults_to_false() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
             api_key  = "k"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert!(!cfg.llm[0].user_provided_key());
     }
 
     #[test]
     fn user_provided_key_can_be_set_true() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider           = "anthropic"
             model              = "m"
             api_key            = ""
             user_provided_key  = true
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert!(cfg.llm[0].user_provided_key());
     }
 
     #[test]
     fn blank_id_normalizes_to_kind_and_priority() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "gemini-flash"
             api_key  = "k"
             priority = 2
-        "#);
+        "#,
+        );
         let cfg = parse_and_normalize(&toml).expect("normalize failed");
         assert_eq!(cfg.llm[0].id(), "gemini-2");
         assert_eq!(cfg.llm[0].kind(), "gemini");
@@ -1161,20 +1359,23 @@ mod tests {
 
     #[test]
     fn explicit_id_is_preserved() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "anthropic"
             model    = "claude-sonnet-4-6"
             api_key  = "k"
             id       = "main-anthropic"
-        "#);
+        "#,
+        );
         let cfg = parse_and_normalize(&toml).expect("normalize failed");
         assert_eq!(cfg.llm[0].id(), "main-anthropic");
     }
 
     #[test]
     fn duplicate_explicit_ids_are_rejected() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "gemini-flash"
@@ -1186,16 +1387,21 @@ mod tests {
             model    = "claude-sonnet-4-6"
             api_key  = "k2"
             id       = "dup"
-        "#);
+        "#,
+        );
         let result = parse_and_normalize(&toml);
         assert!(result.is_err());
         let err = result.err().unwrap();
-        assert!(err.to_string().contains("dup"), "expected error to mention id, got: {err}");
+        assert!(
+            err.to_string().contains("dup"),
+            "expected error to mention id, got: {err}"
+        );
     }
 
     #[test]
     fn two_blank_ids_with_same_kind_and_priority_still_collide() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "gemini-flash"
@@ -1205,25 +1411,29 @@ mod tests {
             provider = "gemini"
             model    = "gemini-pro"
             api_key  = "k2"
-        "#);
+        "#,
+        );
         assert!(parse_and_normalize(&toml).is_err());
     }
 
     #[test]
     fn lxd_absent_gives_none() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
             api_key  = "k"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert!(cfg.lxd.is_none());
     }
 
     #[test]
     fn lxd_config_parses_required_fields() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
@@ -1233,7 +1443,8 @@ mod tests {
             endpoint    = "https://lxd.example.com:8443"
             client_cert = "cert-pem"
             client_key  = "key-pem"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         let lxd = cfg.lxd.expect("lxd should be present");
         assert_eq!(lxd.endpoint, "https://lxd.example.com:8443");
@@ -1245,7 +1456,8 @@ mod tests {
 
     #[test]
     fn lxd_config_client_cert_and_key_are_optional() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
@@ -1253,7 +1465,8 @@ mod tests {
 
             [lxd]
             endpoint = "https://lxd.example.com:8443"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         let lxd = cfg.lxd.expect("lxd should be present");
         assert!(lxd.client_cert.is_none());
@@ -1263,7 +1476,8 @@ mod tests {
 
     #[test]
     fn lxd_config_trust_token_parses() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
@@ -1272,15 +1486,20 @@ mod tests {
             [lxd]
             endpoint    = "https://lxd.example.com:8443"
             trust_token = "eyJjbGllbnRfbmFtZSI6Li4ufQ=="
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         let lxd = cfg.lxd.expect("lxd should be present");
-        assert_eq!(lxd.trust_token.as_deref(), Some("eyJjbGllbnRfbmFtZSI6Li4ufQ=="));
+        assert_eq!(
+            lxd.trust_token.as_deref(),
+            Some("eyJjbGllbnRfbmFtZSI6Li4ufQ==")
+        );
     }
 
     #[test]
     fn lxd_config_defaults_apply_when_omitted() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
@@ -1290,7 +1509,8 @@ mod tests {
             endpoint    = "https://lxd.example.com:8443"
             client_cert = "cert-pem"
             client_key  = "key-pem"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         let lxd = cfg.lxd.expect("lxd should be present");
         assert_eq!(lxd.project, "default");
@@ -1301,7 +1521,8 @@ mod tests {
 
     #[test]
     fn lxd_config_explicit_values_override_defaults() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
@@ -1317,7 +1538,8 @@ mod tests {
             image_alias  = "22.04"
             image_server = "https://images.example.com"
             profile      = "harvest-profile"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         let lxd = cfg.lxd.expect("lxd should be present");
         assert_eq!(lxd.ca_cert.as_deref(), Some("ca-pem"));
@@ -1330,34 +1552,39 @@ mod tests {
 
     #[test]
     fn openai_compat_enable_prompt_caching_defaults_to_false() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "openai-compatible"
             base_url = "https://openai.example.com"
             api_key  = "k"
             model    = "gpt-4o"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert!(!cfg.llm[0].enable_prompt_caching());
     }
 
     #[test]
     fn openai_compat_enable_prompt_caching_can_be_set_true() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider           = "openai-compatible"
             base_url           = "https://openai.example.com"
             api_key            = "k"
             model              = "gpt-4o"
             enable_prompt_caching = true
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         assert!(cfg.llm[0].enable_prompt_caching());
     }
 
     #[test]
     fn system_one_thresholds_default_when_absent() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
@@ -1365,7 +1592,8 @@ mod tests {
 
             [system_one]
             endpoint = "https://so.example.com"
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         let so = cfg.system_one.expect("system_one should be present");
         assert!((so.fast_path - 0.7).abs() < f64::EPSILON);
@@ -1380,7 +1608,8 @@ mod tests {
 
     #[test]
     fn system_one_thresholds_can_be_overridden() {
-        let toml = minimal_config(r#"
+        let toml = minimal_config(
+            r#"
             [[llm]]
             provider = "gemini"
             model    = "m"
@@ -1396,7 +1625,8 @@ mod tests {
             early_synthesis_coverage = 0.85
             early_synthesis_min_iterations_first_turn = 6
             early_synthesis_uniform = 0.75
-        "#);
+        "#,
+        );
         let cfg = parse_config(&toml);
         let so = cfg.system_one.expect("system_one should be present");
         assert!((so.fast_path - 0.8).abs() < f64::EPSILON);
@@ -1417,7 +1647,9 @@ mod tests {
             endpoint = "http://localhost:1"
             "#
         ));
-        let so = parse_config(&toml).system_one.expect("system_one should be present");
+        let so = parse_config(&toml)
+            .system_one
+            .expect("system_one should be present");
         assert!((so.next_action_confidence - 0.5).abs() < f64::EPSILON);
     }
 
@@ -1430,7 +1662,9 @@ mod tests {
             next_action_confidence = 0.9
             "#
         ));
-        let so = parse_config(&toml).system_one.expect("system_one should be present");
+        let so = parse_config(&toml)
+            .system_one
+            .expect("system_one should be present");
         assert!((so.next_action_confidence - 0.9).abs() < f64::EPSILON);
     }
 
@@ -1522,7 +1756,8 @@ mod cluster_config_tests {
     use super::*;
 
     fn with_sections(extra: &str) -> Config {
-        let text = format!(r#"
+        let text = format!(
+            r#"
             [server]
             [database]
             url = "postgres://harvest:pw@localhost:5432/harvest"
@@ -1533,7 +1768,8 @@ mod cluster_config_tests {
             provider = "gemini"
             model    = "gemini-2.5-flash"
             api_key  = "key1"
-        "#);
+        "#
+        );
         toml::from_str::<Config>(&text).expect("parse failed")
     }
 
@@ -1547,7 +1783,8 @@ mod cluster_config_tests {
 
     #[test]
     fn database_pool_size_ca_file_and_migration_mode_are_configurable() {
-        let cfg = toml::from_str::<Config>(r#"
+        let cfg = toml::from_str::<Config>(
+            r#"
             [server]
             [database]
             url = "postgres://h1:5432,h2:5432/harvest?target_session_attrs=read-write"
@@ -1560,9 +1797,14 @@ mod cluster_config_tests {
             provider = "gemini"
             model    = "gemini-2.5-flash"
             api_key  = "key1"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(cfg.database.pool_size, 24);
-        assert_eq!(cfg.database.ca_file.as_deref(), Some(std::path::Path::new("/var/snap/harvest/common/db-ca.pem")));
+        assert_eq!(
+            cfg.database.ca_file.as_deref(),
+            Some(std::path::Path::new("/var/snap/harvest/common/db-ca.pem"))
+        );
         assert!(!cfg.database.migrate_on_start);
         let options = cfg.database.options();
         assert_eq!(options.pool_size, 24);
@@ -1585,7 +1827,8 @@ mod cluster_config_tests {
 
     #[test]
     fn cluster_section_parses() {
-        let cfg = toml::from_str::<Config>(r#"
+        let cfg = toml::from_str::<Config>(
+            r#"
             [server]
             [database]
             url = "postgres://harvest:pw@localhost:5432/harvest"
@@ -1605,10 +1848,15 @@ mod cluster_config_tests {
             provider = "gemini"
             model    = "gemini-2.5-flash"
             api_key  = "key1"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(cfg.cluster.node_name.as_deref(), Some("harvest-server-0"));
         assert_eq!(cfg.cluster.internal_listen.as_deref(), Some("0.0.0.0:8081"));
-        assert_eq!(cfg.cluster.internal_url.as_deref(), Some("http://10.0.0.11:8081"));
+        assert_eq!(
+            cfg.cluster.internal_url.as_deref(),
+            Some("http://10.0.0.11:8081")
+        );
         assert_eq!(cfg.cluster.shared_secret.as_deref(), Some("cluster-secret"));
         assert_eq!(cfg.cluster.heartbeat_interval_ms, 1000);
         assert_eq!(cfg.cluster.node_timeout_ms, 4000);
@@ -1631,14 +1879,27 @@ mod cluster_config_tests {
     fn advertised_url_prefers_the_configured_value() {
         let mut cfg = with_sections("");
         cfg.cluster.internal_url = Some("http://10.0.0.5:8081/".into());
-        assert_eq!(cfg.cluster.advertised_url("0.0.0.0:8081".parse().unwrap()).unwrap(), "http://10.0.0.5:8081");
+        assert_eq!(
+            cfg.cluster
+                .advertised_url("0.0.0.0:8081".parse().unwrap())
+                .unwrap(),
+            "http://10.0.0.5:8081"
+        );
     }
 
     #[test]
     fn advertised_url_is_derived_from_a_specific_bind_address() {
         let cfg = with_sections("");
-        assert_eq!(cfg.cluster.advertised_url("127.0.0.1:9000".parse().unwrap()).unwrap(), "http://127.0.0.1:9000");
-        assert!(cfg.cluster.advertised_url("0.0.0.0:9000".parse().unwrap()).is_err());
+        assert_eq!(
+            cfg.cluster
+                .advertised_url("127.0.0.1:9000".parse().unwrap())
+                .unwrap(),
+            "http://127.0.0.1:9000"
+        );
+        assert!(cfg
+            .cluster
+            .advertised_url("0.0.0.0:9000".parse().unwrap())
+            .is_err());
     }
 
     #[test]

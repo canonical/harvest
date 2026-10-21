@@ -46,7 +46,12 @@ impl ClusterBus {
             listening,
             listener_pid: Mutex::new(None),
         });
-        tokio::spawn(run_publisher(Arc::clone(&db), node_id, batch_window, receiver));
+        tokio::spawn(run_publisher(
+            Arc::clone(&db),
+            node_id,
+            batch_window,
+            receiver,
+        ));
         tokio::spawn(run_listener(Arc::downgrade(&bus), db));
         bus
     }
@@ -107,7 +112,9 @@ impl ClusterBus {
         if envelope["o"].as_str() == Some(self.node_id.as_str()) {
             return;
         }
-        let Some(messages) = envelope["m"].as_array() else { return };
+        let Some(messages) = envelope["m"].as_array() else {
+            return;
+        };
         for message in messages {
             if let (Some(topic), Some(data)) = (message[0].as_str(), message[1].as_str()) {
                 self.deliver(topic, data.to_string());
@@ -122,7 +129,8 @@ enum Encoded {
 }
 
 fn envelope(node_id: &str, messages: &[(String, String)]) -> String {
-    json!({ "o": node_id, "m": messages.iter().map(|(t, d)| json!([t, d])).collect::<Vec<_>>() }).to_string()
+    json!({ "o": node_id, "m": messages.iter().map(|(t, d)| json!([t, d])).collect::<Vec<_>>() })
+        .to_string()
 }
 
 fn encode(node_id: &str, batch: Vec<(String, String)>) -> Vec<Encoded> {
@@ -158,12 +166,19 @@ async fn publisher_client(db: &Db) -> Result<harvest_db::tokio_postgres::Client>
     Ok(client)
 }
 
-async fn send_one(client: &harvest_db::tokio_postgres::Client, node_id: &str, item: &Encoded) -> Result<()> {
+async fn send_one(
+    client: &harvest_db::tokio_postgres::Client,
+    node_id: &str,
+    item: &Encoded,
+) -> Result<()> {
     let payload = match item {
         Encoded::Inline(text) => text.clone(),
         Encoded::Stored(body) => {
             let id: i64 = client
-                .query_one("INSERT INTO bus_payloads (body) VALUES ($1) RETURNING id", &[body])
+                .query_one(
+                    "INSERT INTO bus_payloads (body) VALUES ($1) RETURNING id",
+                    &[body],
+                )
                 .await
                 .context("storing large bus payload")?
                 .get(0);
@@ -171,7 +186,9 @@ async fn send_one(client: &harvest_db::tokio_postgres::Client, node_id: &str, it
         }
     };
     let channel = CHANNEL.to_string();
-    client.execute("SELECT pg_notify($1, $2)", &[&channel, &payload]).await?;
+    client
+        .execute("SELECT pg_notify($1, $2)", &[&channel, &payload])
+        .await?;
     Ok(())
 }
 
@@ -228,9 +245,14 @@ async fn run_publisher(
 
 async fn resolve_envelope(db: &Db, payload: &str) -> Option<Value> {
     let envelope: Value = serde_json::from_str(payload).ok()?;
-    let Some(id) = envelope["r"].as_i64() else { return Some(envelope) };
+    let Some(id) = envelope["r"].as_i64() else {
+        return Some(envelope);
+    };
     let rows = db
-        .query("SELECT body FROM bus_payloads WHERE id = $id", json!({ "id": id }))
+        .query(
+            "SELECT body FROM bus_payloads WHERE id = $id",
+            json!({ "id": id }),
+        )
         .await
         .ok()?;
     let body = rows.into_iter().next()?["body"].as_str()?.to_string();
@@ -249,7 +271,8 @@ async fn run_listener(bus: Weak<ClusterBus>, db: Arc<Db>) {
                 backoff = Duration::from_millis(100);
                 {
                     let Some(bus) = bus.upgrade() else { return };
-                    *bus.listener_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(listener.backend_pid());
+                    *bus.listener_pid.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(listener.backend_pid());
                     if connected_before {
                         bus.deliver_to_all(&resync_event());
                     }
@@ -257,7 +280,9 @@ async fn run_listener(bus: Weak<ClusterBus>, db: Arc<Db>) {
                 }
                 connected_before = true;
                 while let Some(notification) = listener.recv().await {
-                    let Some(envelope) = resolve_envelope(&db, &notification.payload).await else { continue };
+                    let Some(envelope) = resolve_envelope(&db, &notification.payload).await else {
+                        continue;
+                    };
                     let Some(bus) = bus.upgrade() else { return };
                     bus.deliver_envelope(&envelope);
                 }
@@ -281,7 +306,9 @@ mod tests {
 
     #[test]
     fn small_messages_share_one_notification() {
-        let batch: Vec<(String, String)> = (0..10).map(|i| ("t".to_string(), format!("m{i}"))).collect();
+        let batch: Vec<(String, String)> = (0..10)
+            .map(|i| ("t".to_string(), format!("m{i}")))
+            .collect();
         let encoded = encode("n", batch);
         assert_eq!(encoded.len(), 1);
         assert!(matches!(&encoded[0], Encoded::Inline(text) if text.len() <= MAX_NOTIFY_BYTES));
@@ -289,16 +316,28 @@ mod tests {
 
     #[test]
     fn batches_split_before_reaching_the_notify_limit() {
-        let batch: Vec<(String, String)> = (0..100).map(|i| ("t".to_string(), format!("{i}:{}", "x".repeat(300)))).collect();
+        let batch: Vec<(String, String)> = (0..100)
+            .map(|i| ("t".to_string(), format!("{i}:{}", "x".repeat(300))))
+            .collect();
         let encoded = encode("n", batch);
         assert!(encoded.len() > 1);
         let mut seen = Vec::new();
         for item in &encoded {
-            let Encoded::Inline(text) = item else { panic!("unexpected stored payload") };
+            let Encoded::Inline(text) = item else {
+                panic!("unexpected stored payload")
+            };
             assert!(text.len() <= MAX_NOTIFY_BYTES);
             let value: Value = serde_json::from_str(text).unwrap();
             for m in value["m"].as_array().unwrap() {
-                seen.push(m[1].as_str().unwrap().split(':').next().unwrap().parse::<usize>().unwrap());
+                seen.push(
+                    m[1].as_str()
+                        .unwrap()
+                        .split(':')
+                        .next()
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap(),
+                );
             }
         }
         assert_eq!(seen, (0..100).collect::<Vec<_>>());
