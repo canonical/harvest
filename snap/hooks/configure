@@ -74,6 +74,9 @@ LXD_PROFILE=$(snapctl get lxd.profile)
 : "${LOG_LEVEL:=warn}"
 
 mkdir -p "$SNAP_COMMON" "$DOCS_DIR"
+SERVER_TOML_TMP=$(mktemp "$SNAP_COMMON/server.toml.XXXXXX")
+HARVESTER_TOML_TMP=$(mktemp "$SNAP_COMMON/harvester.toml.XXXXXX")
+trap 'rm -f "$SERVER_TOML_TMP" "$HARVESTER_TOML_TMP"' EXIT
 
 printf 'RUST_LOG=%s\n' "$LOG_LEVEL" > "$SNAP_COMMON/env"
 
@@ -148,6 +151,12 @@ for name, cfg in sorted(providers.items(), key=sort_key):
 '
 }
 
+if llm_blocks=$(generate_llm_blocks); then
+  :
+else
+  llm_blocks=""
+fi
+
 {
   cat << TOML
 [server]
@@ -171,7 +180,6 @@ TOML
     [ -n "${CLUSTER_NODE_NAME:-}" ]     && echo "node_name = \"${CLUSTER_NODE_NAME}\""
   fi
 
-  llm_blocks=$(generate_llm_blocks)
   if [ -n "$llm_blocks" ]; then
     echo "$llm_blocks"
   else
@@ -280,7 +288,9 @@ TOML
     [ -n "${LXD_PROFILE:-}" ]      && echo "profile      = \"${LXD_PROFILE}\""
   fi
   true
-} > "$SNAP_COMMON/server.toml"
+} > "$SERVER_TOML_TMP"
+
+mv "$SERVER_TOML_TMP" "$SNAP_COMMON/server.toml"
 
 snapctl restart harvest.server 2>/dev/null || true
 snapctl restart harvest.ui   2>/dev/null || true
@@ -341,12 +351,22 @@ for name, cfg in sorted(providers.items(), key=sort_key):
 '
 }
 
+if harvester_llm_block=$(generate_harvester_llm_block); then
+  :
+else
+  harvester_llm_block=""
+fi
+
 {
   cat << TOML
 [database]
 url = "${DATABASE_URL}"
 TOML
 
-  generate_harvester_llm_block
+  if [ -n "$harvester_llm_block" ]; then
+    echo "$harvester_llm_block"
+  fi
 
-} > "$SNAP_COMMON/harvester.toml"
+} > "$HARVESTER_TOML_TMP"
+
+mv "$HARVESTER_TOML_TMP" "$SNAP_COMMON/harvester.toml"
