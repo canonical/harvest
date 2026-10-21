@@ -32,7 +32,13 @@ impl LlmState {
         user_key_store: Option<Arc<UserKeyStore>>,
         system_one_config: Option<crate::config::SystemOneConfig>,
     ) -> Self {
-        Self { llm, configs, user_key_store, system_one_config, cache: RwLock::new(None) }
+        Self {
+            llm,
+            configs,
+            user_key_store,
+            system_one_config,
+            cache: RwLock::new(None),
+        }
     }
 }
 
@@ -43,7 +49,10 @@ fn effective_providers(llm: &Arc<dyn LlmProvider>) -> Vec<Arc<dyn LlmProvider>> 
     } else {
         children.to_vec()
     };
-    candidates.into_iter().filter(|p| p.expose_to_ui()).collect()
+    candidates
+        .into_iter()
+        .filter(|p| p.expose_to_ui())
+        .collect()
 }
 
 fn has_user_key_providers(configs: &[LlmProviderConfig]) -> bool {
@@ -104,13 +113,16 @@ pub async fn list_providers(
     };
 
     let all = effective_providers(&state.llm);
-    let visible: Vec<Arc<dyn LlmProvider>> = all.into_iter().filter(|p| {
-        if p.user_provided_key() {
-            user_keys.iter().any(|k| k == p.id())
-        } else {
-            true
-        }
-    }).collect();
+    let visible: Vec<Arc<dyn LlmProvider>> = all
+        .into_iter()
+        .filter(|p| {
+            if p.user_provided_key() {
+                user_keys.iter().any(|k| k == p.id())
+            } else {
+                true
+            }
+        })
+        .collect();
 
     Json(build_providers_response(&visible).await)
 }
@@ -124,7 +136,9 @@ pub async fn get_user_keys(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<LlmState>>,
 ) -> Response {
-    let user_key_providers: Vec<&LlmProviderConfig> = state.configs.iter()
+    let user_key_providers: Vec<&LlmProviderConfig> = state
+        .configs
+        .iter()
         .filter(|c| c.user_provided_key())
         .collect();
 
@@ -133,16 +147,19 @@ pub async fn get_user_keys(
         None => vec![],
     };
 
-    let mut providers: Vec<Value> = user_key_providers.iter().map(|config| {
-        let status = statuses.iter().find(|s| s.provider_id == config.id());
-        json!({
-            "id": config.id(),
-            "kind": config.kind(),
-            "name": config.name().unwrap_or_else(|| config.kind()),
-            "key_set": status.is_some(),
-            "updated_at": status.and_then(|s| s.updated_at.clone()),
+    let mut providers: Vec<Value> = user_key_providers
+        .iter()
+        .map(|config| {
+            let status = statuses.iter().find(|s| s.provider_id == config.id());
+            json!({
+                "id": config.id(),
+                "kind": config.kind(),
+                "name": config.name().unwrap_or_else(|| config.kind()),
+                "key_set": status.is_some(),
+                "updated_at": status.and_then(|s| s.updated_at.clone()),
+            })
         })
-    }).collect();
+        .collect();
 
     if let Some(so_config) = &state.system_one_config {
         if so_config.needs_user_key(&state.configs) {
@@ -167,29 +184,38 @@ pub async fn set_user_key(
     Path(provider_id): Path<String>,
     Json(body): Json<SetKeyBody>,
 ) -> Response {
-    let llm_config = state.configs.iter().find(|c| c.id() == provider_id && c.user_provided_key());
+    let llm_config = state
+        .configs
+        .iter()
+        .find(|c| c.id() == provider_id && c.user_provided_key());
     let is_system_one = provider_id == "system-one"
-        && state.system_one_config.as_ref().map_or(false, |c| c.needs_user_key(&state.configs));
+        && state
+            .system_one_config
+            .as_ref()
+            .map_or(false, |c| c.needs_user_key(&state.configs));
 
     if llm_config.is_none() && !is_system_one {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "provider not found or does not use user-provided keys" })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     let Some(store) = &state.user_key_store else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "user key storage is not configured" })),
-        ).into_response();
+        )
+            .into_response();
     };
 
     if body.api_key.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "api_key must not be empty" })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     match store.upsert(&user.sub, &provider_id, &body.api_key).await {
@@ -202,7 +228,8 @@ pub async fn set_user_key(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "failed to store key" })),
-            ).into_response()
+            )
+                .into_response()
         }
     }
 }
@@ -212,22 +239,30 @@ pub async fn delete_user_key(
     State(state): State<Arc<LlmState>>,
     Path(provider_id): Path<String>,
 ) -> Response {
-    let llm_config = state.configs.iter().find(|c| c.id() == provider_id && c.user_provided_key());
+    let llm_config = state
+        .configs
+        .iter()
+        .find(|c| c.id() == provider_id && c.user_provided_key());
     let is_system_one = provider_id == "system-one"
-        && state.system_one_config.as_ref().map_or(false, |c| c.needs_user_key(&state.configs));
+        && state
+            .system_one_config
+            .as_ref()
+            .map_or(false, |c| c.needs_user_key(&state.configs));
 
     if llm_config.is_none() && !is_system_one {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "error": "provider not found or does not use user-provided keys" })),
-        ).into_response();
+        )
+            .into_response();
     }
 
     let Some(store) = &state.user_key_store else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "user key storage is not configured" })),
-        ).into_response();
+        )
+            .into_response();
     };
 
     match store.delete(&user.sub, &provider_id).await {
@@ -240,7 +275,8 @@ pub async fn delete_user_key(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": "failed to delete key" })),
-            ).into_response()
+            )
+                .into_response()
         }
     }
 }
@@ -271,7 +307,10 @@ mod tests {
                 id: id.into(),
                 kind: "mock".into(),
                 default_model: "mock-model".into(),
-                models: vec![ModelInfo { id: "mock-model".into(), display_name: None }],
+                models: vec![ModelInfo {
+                    id: "mock-model".into(),
+                    display_name: None,
+                }],
                 children: vec![],
                 list_models_calls: AtomicUsize::new(0),
                 expose_to_ui: true,
@@ -286,7 +325,10 @@ mod tests {
                 id: id.into(),
                 kind: "mock".into(),
                 default_model: "mock-model".into(),
-                models: vec![ModelInfo { id: "mock-model".into(), display_name: None }],
+                models: vec![ModelInfo {
+                    id: "mock-model".into(),
+                    display_name: None,
+                }],
                 children: vec![],
                 list_models_calls: AtomicUsize::new(0),
                 expose_to_ui: true,
@@ -301,7 +343,10 @@ mod tests {
                 id: id.into(),
                 kind: "mock".into(),
                 default_model: "mock-model".into(),
-                models: vec![ModelInfo { id: "mock-model".into(), display_name: None }],
+                models: vec![ModelInfo {
+                    id: "mock-model".into(),
+                    display_name: None,
+                }],
                 children: vec![],
                 list_models_calls: AtomicUsize::new(0),
                 expose_to_ui: false,
@@ -344,14 +389,30 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for TestProvider {
-        fn id(&self) -> &str { &self.id }
-        fn kind(&self) -> &str { &self.kind }
-        fn default_model(&self) -> &str { &self.default_model }
-        fn configured_models(&self) -> Option<&[String]> { self.configured_models.as_deref() }
-        fn name(&self) -> Option<&str> { self.name.as_deref() }
-        fn children(&self) -> &[Arc<dyn LlmProvider>] { &self.children }
-        fn expose_to_ui(&self) -> bool { self.expose_to_ui }
-        fn user_provided_key(&self) -> bool { self.user_provided_key }
+        fn id(&self) -> &str {
+            &self.id
+        }
+        fn kind(&self) -> &str {
+            &self.kind
+        }
+        fn default_model(&self) -> &str {
+            &self.default_model
+        }
+        fn configured_models(&self) -> Option<&[String]> {
+            self.configured_models.as_deref()
+        }
+        fn name(&self) -> Option<&str> {
+            self.name.as_deref()
+        }
+        fn children(&self) -> &[Arc<dyn LlmProvider>] {
+            &self.children
+        }
+        fn expose_to_ui(&self) -> bool {
+            self.expose_to_ui
+        }
+        fn user_provided_key(&self) -> bool {
+            self.user_provided_key
+        }
 
         async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
             self.list_models_calls.fetch_add(1, Ordering::SeqCst);
@@ -434,12 +495,23 @@ mod tests {
     #[tokio::test]
     async fn build_providers_response_honors_configured_models_allowlist() {
         let discovered = vec![
-            ModelInfo { id: "gemini-2.5-flash".into(), display_name: None },
-            ModelInfo { id: "gemini-2.5-pro".into(), display_name: None },
-            ModelInfo { id: "gemini-3-pro-preview".into(), display_name: None },
+            ModelInfo {
+                id: "gemini-2.5-flash".into(),
+                display_name: None,
+            },
+            ModelInfo {
+                id: "gemini-2.5-pro".into(),
+                display_name: None,
+            },
+            ModelInfo {
+                id: "gemini-3-pro-preview".into(),
+                display_name: None,
+            },
         ];
         let a = TestProvider::with_allowlist(
-            "a", discovered, vec!["gemini-2.5-pro".into(), "does-not-exist".into()],
+            "a",
+            discovered,
+            vec!["gemini-2.5-pro".into(), "does-not-exist".into()],
         ) as Arc<dyn LlmProvider>;
         let response = build_providers_response(&[a]).await;
         let models = response["providers"][0]["models"].as_array().unwrap();
@@ -450,7 +522,12 @@ mod tests {
     #[tokio::test]
     async fn second_call_within_ttl_uses_cache_not_a_fresh_fetch() {
         let leaf = TestProvider::leaf("a");
-        let state = LlmState::new(Arc::clone(&leaf) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, None);
+        let state = LlmState::new(
+            Arc::clone(&leaf) as Arc<dyn LlmProvider>,
+            Arc::new(vec![]),
+            None,
+            None,
+        );
 
         let _ = cached_or_fresh(&state, false).await;
         let _ = cached_or_fresh(&state, false).await;
@@ -461,7 +538,12 @@ mod tests {
     #[tokio::test]
     async fn force_refresh_bypasses_cache() {
         let leaf = TestProvider::leaf("a");
-        let state = LlmState::new(Arc::clone(&leaf) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, None);
+        let state = LlmState::new(
+            Arc::clone(&leaf) as Arc<dyn LlmProvider>,
+            Arc::new(vec![]),
+            None,
+            None,
+        );
 
         let _ = cached_or_fresh(&state, false).await;
         let _ = cached_or_fresh(&state, true).await;

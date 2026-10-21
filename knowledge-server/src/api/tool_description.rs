@@ -22,5 +22,8 @@ pub async fn handle_tool_description(
     if req.name.is_empty() {
         return (StatusCode::UNPROCESSABLE_ENTITY, "name is required").into_response();
     }
-    Json(ToolDescriptionResponse { description: String::new() }).into_response()
+    Json(ToolDescriptionResponse {
+        description: String::new(),
+    })
+    .into_response()
 }

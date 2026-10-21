@@ -1,7 +1,7 @@
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{HeaderValue, StatusCode, header},
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -36,9 +36,11 @@ pub async fn handle_get_index(
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
             }
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            (StatusCode::NOT_FOUND, axum::Json(json!({"error": "documentation not found"}))).into_response()
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({"error": "documentation not found"})),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!(error = %e, "failed to read index.json");
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
@@ -51,21 +53,38 @@ pub async fn handle_get_page(
     State(docs_dir): State<Arc<PathBuf>>,
 ) -> impl IntoResponse {
     if !SECTIONS.contains(&section.as_str()) {
-        return (StatusCode::NOT_FOUND, axum::Json(json!({"error": "unknown section"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({"error": "unknown section"})),
+        )
+            .into_response();
     }
     if filename.contains("..") || filename.contains('/') {
-        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": "invalid filename"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({"error": "invalid filename"})),
+        )
+            .into_response();
     }
-    let file_path = docs_dir.join(&repo).join(&version).join(&section).join(&filename);
+    let file_path = docs_dir
+        .join(&repo)
+        .join(&version)
+        .join(&section)
+        .join(&filename);
     match tokio::fs::read(&file_path).await {
         Ok(bytes) => Response::builder()
             .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, HeaderValue::from_static("text/markdown; charset=utf-8"))
+            .header(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/markdown; charset=utf-8"),
+            )
             .body(Body::from(bytes))
             .unwrap(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            (StatusCode::NOT_FOUND, axum::Json(json!({"error": "page not found"}))).into_response()
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::NOT_FOUND,
+            axum::Json(json!({"error": "page not found"})),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!(error = %e, "failed to read doc page");
             (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()

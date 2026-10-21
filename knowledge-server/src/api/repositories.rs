@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
-use crate::api::GraphState;
 use crate::api::GraphCache;
+use crate::api::GraphState;
 use crate::ingestion::IngestionStatus;
 
 pub const GRAPH_TOPIC: &str = "graph:invalidate";
@@ -100,10 +100,9 @@ pub struct RepositoryStats {
     pub totals: RepositoryTotals,
 }
 
-pub async fn handle_list_repositories(
-    State(state): State<Arc<GraphState>>,
-) -> impl IntoResponse {
-    let result = state.db
+pub async fn handle_list_repositories(State(state): State<Arc<GraphState>>) -> impl IntoResponse {
+    let result = state
+        .db
         .query(
             "SELECT r.name, r.url, array_agg(v.tag ORDER BY v.timestamp) AS versions
              FROM repositories r JOIN versions v ON v.repository_id = r.id AND v.ingested
@@ -128,8 +127,10 @@ pub async fn handle_list_repositories(
                 .into_iter()
                 .map(|row| {
                     let name = row["name"].as_str().unwrap_or("").to_string();
-                    let (ingestion_status, ingestion_error) =
-                        ingestion_statuses.get(&name).cloned().unwrap_or((None, None));
+                    let (ingestion_status, ingestion_error) = ingestion_statuses
+                        .get(&name)
+                        .cloned()
+                        .unwrap_or((None, None));
                     RepositoryInfo {
                         name: name.clone(),
                         url: row["url"].as_str().map(String::from),
@@ -259,11 +260,7 @@ pub async fn handle_verify_repository(
 ) -> impl IntoResponse {
     let url = body.url.trim().to_string();
     if url.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            "url is required".to_string(),
-        )
-            .into_response();
+        return (StatusCode::BAD_REQUEST, "url is required".to_string()).into_response();
     }
 
     let pipeline = match knowledge_harvester::pipeline::Pipeline::with_db((*state.db).clone()) {
@@ -312,7 +309,10 @@ pub async fn handle_delete_repository(
         Ok(true) => {
             return (
                 StatusCode::CONFLICT,
-                format!("cannot delete repository '{}' while it is being ingested", repo),
+                format!(
+                    "cannot delete repository '{}' while it is being ingested",
+                    repo
+                ),
             )
                 .into_response();
         }
@@ -320,7 +320,8 @@ pub async fn handle_delete_repository(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 
-    let result = state.db
+    let result = state
+        .db
         .execute(
             "DELETE FROM repositories WHERE name = $repo",
             json!({ "repo": repo }),
@@ -383,11 +384,7 @@ pub async fn handle_ingest_versions(
             .next()
             .and_then(|r| r["url"].as_str().map(String::from)),
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                e.to_string(),
-            )
-                .into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     };
 
@@ -493,11 +490,7 @@ pub async fn handle_resync_version(
             .next()
             .and_then(|r| r["url"].as_str().map(String::from)),
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                e.to_string(),
-            )
-                .into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     };
 
@@ -563,7 +556,10 @@ pub async fn handle_delete_version(
         Ok(true) => {
             return (
                 StatusCode::CONFLICT,
-                format!("cannot delete version while repository '{}' is being ingested", repo),
+                format!(
+                    "cannot delete version while repository '{}' is being ingested",
+                    repo
+                ),
             )
                 .into_response();
         }
@@ -571,7 +567,8 @@ pub async fn handle_delete_version(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 
-    let result = state.db
+    let result = state
+        .db
         .execute(
             "DELETE FROM versions v USING repositories r
              WHERE v.repository_id = r.id AND r.name = $repo AND v.tag = $version",
@@ -619,27 +616,41 @@ pub async fn handle_repository_progress(
         let mut last_seq = 0;
         loop {
             let status = jobs.status(&job.id).await.ok().flatten();
-            let lines = jobs.progress_since(&job.id, last_seq).await.unwrap_or_default();
+            let lines = jobs
+                .progress_since(&job.id, last_seq)
+                .await
+                .unwrap_or_default();
             for (seq, line) in lines {
                 last_seq = seq;
-                let event = Event::default().data(json!({ "type": "progress", "message": line }).to_string());
+                let event = Event::default()
+                    .data(json!({ "type": "progress", "message": line }).to_string());
                 if tx.send(Ok(event)).await.is_err() {
                     return;
                 }
             }
             let final_event = match status {
-                Some(IngestionStatus::Completed { versions }) => Some(json!({ "type": "completed", "versions": versions })),
-                Some(IngestionStatus::Failed { error }) => Some(json!({ "type": "failed", "error": error })),
+                Some(IngestionStatus::Completed { versions }) => {
+                    Some(json!({ "type": "completed", "versions": versions }))
+                }
+                Some(IngestionStatus::Failed { error }) => {
+                    Some(json!({ "type": "failed", "error": error }))
+                }
                 None => Some(json!({ "type": "done" })),
                 _ => None,
             };
             if let Some(final_event) = final_event {
-                let remaining = jobs.progress_since(&job.id, last_seq).await.unwrap_or_default();
+                let remaining = jobs
+                    .progress_since(&job.id, last_seq)
+                    .await
+                    .unwrap_or_default();
                 for (_, line) in remaining {
-                    let event = Event::default().data(json!({ "type": "progress", "message": line }).to_string());
+                    let event = Event::default()
+                        .data(json!({ "type": "progress", "message": line }).to_string());
                     let _ = tx.send(Ok(event)).await;
                 }
-                let _ = tx.send(Ok(Event::default().data(final_event.to_string()))).await;
+                let _ = tx
+                    .send(Ok(Event::default().data(final_event.to_string())))
+                    .await;
                 return;
             }
             tokio::time::sleep(PROGRESS_POLL_INTERVAL).await;
@@ -648,8 +659,9 @@ pub async fn handle_repository_progress(
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx_sse);
 
-    let mut response =
-        Sse::new(stream).keep_alive(axum::response::sse::KeepAlive::default()).into_response();
+    let mut response = Sse::new(stream)
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response();
     response.headers_mut().insert(
         HeaderName::from_static("x-accel-buffering"),
         HeaderValue::from_static("no"),
@@ -675,16 +687,16 @@ pub async fn handle_get_repository_stats(
     let versions_rows = match versions_result {
         Ok(rows) => rows,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                e.to_string(),
-            )
-                .into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     };
 
     if versions_rows.is_empty() {
-        return (StatusCode::NOT_FOUND, "repository not found or has no ingested versions").into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            "repository not found or has no ingested versions",
+        )
+            .into_response();
     }
 
     let versions: Vec<String> = versions_rows
@@ -764,10 +776,7 @@ pub async fn handle_get_repository_stats(
         .and_then(|r| r["total"].as_i64())
         .unwrap_or(0);
 
-    let total_files: i64 = lang_rows
-        .iter()
-        .filter_map(|r| r["count"].as_i64())
-        .sum();
+    let total_files: i64 = lang_rows.iter().filter_map(|r| r["count"].as_i64()).sum();
 
     let languages: Vec<LanguageStat> = lang_rows
         .into_iter()

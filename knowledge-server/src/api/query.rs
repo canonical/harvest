@@ -33,7 +33,13 @@ pub struct QueryRequest {
 }
 
 fn selection_from(req: &QueryRequest) -> Option<ProviderSelection> {
-    req.provider_id.clone().map(|provider_id| ProviderSelection { provider_id, model: req.model.clone(), cache_breakpoint_index: None })
+    req.provider_id
+        .clone()
+        .map(|provider_id| ProviderSelection {
+            provider_id,
+            model: req.model.clone(),
+            cache_breakpoint_index: None,
+        })
 }
 
 pub async fn handle_query(
@@ -42,7 +48,8 @@ pub async fn handle_query(
     Json(req): Json<QueryRequest>,
 ) -> impl IntoResponse {
     let attachments = req.attachments.as_deref().unwrap_or(&[]);
-    let (raw_messages, history) = load_context_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
+    let (raw_messages, history) =
+        load_context_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
     let selection = selection_from(&req);
     let user_llm = resolve_user_llm(&qs.llm, &qs.llm_configs, &qs.user_key_store, &user.sub).await;
     let agent = if Arc::ptr_eq(&user_llm, &qs.llm) {
@@ -52,46 +59,79 @@ pub async fn handle_query(
             panic!("db must be available when user key providers are configured")
         });
         Arc::new(
-            Agent::new(user_llm, crate::agent::graph_tools::all_tools_with_semantic(db, qs.semantic.clone()), qs.max_iterations)
-                .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
-                .with_parallel_research(true),
+            Agent::new(
+                user_llm,
+                crate::agent::graph_tools::all_tools_with_semantic(db, qs.semantic.clone()),
+                qs.max_iterations,
+            )
+            .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
+            .with_parallel_research(true),
         )
     };
-    match agent.query(&req.query, &history, attachments, selection.as_ref()).await {
+    match agent
+        .query(&req.query, &history, attachments, selection.as_ref())
+        .await
+    {
         Ok(response) => {
             if let (Some(db), Some(cid)) = (&qs.db, &req.conversation_id) {
-                let att_meta: Vec<_> = attachments.iter()
+                let att_meta: Vec<_> = attachments
+                    .iter()
                     .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
                     .collect();
                 let turn_id = uuid::Uuid::new_v4().to_string();
                 let msg_count = raw_messages.len() + 2;
                 let _ = append_user_turn(
-                    db, &user.sub, cid,
-                    &req.query, &user.name, &att_meta, raw_messages,
-                    &response.answer, &response.sources, response.tool_calls_made,
-                    response.tool_errors, response.turns,
-                    vec![], None, None, response.provider_used.as_ref(), response.duration_ms,
-                    &response.usage, response.llm_call_count, &turn_id, &qs.pricing,
-                ).await;
+                    db,
+                    &user.sub,
+                    cid,
+                    &req.query,
+                    &user.name,
+                    &att_meta,
+                    raw_messages,
+                    &response.answer,
+                    &response.sources,
+                    response.tool_calls_made,
+                    response.tool_errors,
+                    response.turns,
+                    vec![],
+                    None,
+                    None,
+                    response.provider_used.as_ref(),
+                    response.duration_ms,
+                    &response.usage,
+                    response.llm_call_count,
+                    &turn_id,
+                    &qs.pricing,
+                )
+                .await;
                 spawn_summary_refresh(Arc::clone(db), Arc::clone(&agent), cid.clone());
 
-                let db_t   = Arc::clone(db);
-                let llm_t     = Arc::clone(agent.llm());
-                let cid_t     = cid.clone();
-                let prior_t   = history.clone();
-                let query_t   = req.query.clone();
-                let answer_t  = response.answer.clone();
+                let db_t = Arc::clone(db);
+                let llm_t = Arc::clone(agent.llm());
+                let cid_t = cid.clone();
+                let prior_t = history.clone();
+                let query_t = req.query.clone();
+                let answer_t = response.answer.clone();
                 tokio::spawn(async move {
                     maybe_regenerate_title(
                         &db_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, msg_count,
-                    ).await;
+                    )
+                    .await;
                 });
             }
             let mut response = response;
             response.cost_microusd = qs.pricing.price_call(
                 &response.usage,
-                response.provider_used.as_ref().map(|p| p.kind.as_str()).unwrap_or(""),
-                response.provider_used.as_ref().map(|p| p.model.as_str()).unwrap_or(""),
+                response
+                    .provider_used
+                    .as_ref()
+                    .map(|p| p.kind.as_str())
+                    .unwrap_or(""),
+                response
+                    .provider_used
+                    .as_ref()
+                    .map(|p| p.model.as_str())
+                    .unwrap_or(""),
             );
             Json(response).into_response()
         }
@@ -119,19 +159,24 @@ pub async fn handle_query_stream(
             panic!("db must be available when user key providers are configured")
         });
         Arc::new(
-            Agent::new(user_llm.clone(), crate::agent::graph_tools::all_tools_with_semantic(db, qs.semantic.clone()), qs.max_iterations)
-                .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
-                .with_parallel_research(true),
+            Agent::new(
+                user_llm.clone(),
+                crate::agent::graph_tools::all_tools_with_semantic(db, qs.semantic.clone()),
+                qs.max_iterations,
+            )
+            .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
+            .with_parallel_research(true),
         )
     };
-    let llm      = Arc::clone(agent.llm());
-    let qs_ctx   = Arc::clone(&qs);
-    let db    = qs.db.clone();
-    let user_id  = user.sub.clone();
+    let llm = Arc::clone(agent.llm());
+    let qs_ctx = Arc::clone(&qs);
+    let db = qs.db.clone();
+    let user_id = user.sub.clone();
     let username = user.name.clone();
-    let query    = req.query.clone();
-    let conv_id  = req.conversation_id.clone();
-    let att_meta: Vec<_> = attachments.iter()
+    let query = req.query.clone();
+    let conv_id = req.conversation_id.clone();
+    let att_meta: Vec<_> = attachments
+        .iter()
         .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
         .collect();
 
@@ -139,12 +184,20 @@ pub async fn handle_query_stream(
         let (raw_messages, history) =
             load_context_if_needed(&qs_ctx, &user_id, conv_id.as_deref()).await;
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
-        let query_for_agent     = query.clone();
-        let history_for_agent   = history.clone();
+        let query_for_agent = query.clone();
+        let history_for_agent = history.clone();
         let selection_for_agent = selection.clone();
-        let agent_for_query     = Arc::clone(&agent);
+        let agent_for_query = Arc::clone(&agent);
         tokio::spawn(async move {
-            agent_for_query.query_streaming(&query_for_agent, &history_for_agent, &attachments, selection_for_agent.as_ref(), agent_tx).await;
+            agent_for_query
+                .query_streaming(
+                    &query_for_agent,
+                    &history_for_agent,
+                    &attachments,
+                    selection_for_agent.as_ref(),
+                    agent_tx,
+                )
+                .await;
         });
 
         let mut chain_builder = ChainBuilder::new();
@@ -156,13 +209,26 @@ pub async fn handle_query_stream(
                 AgentEvent::TextDelta { text } => chain_builder.text_delta(text),
                 AgentEvent::ThinkingDelta { text } => chain_builder.thinking_delta(text),
                 AgentEvent::Thinking { text } => chain_builder.thinking(text),
-                AgentEvent::ToolCall { name, input } => chain_builder.tool_call(name, input, None, None),
-                AgentEvent::ToolResult { name, preview } => chain_builder.tool_result(name, preview),
-                AgentEvent::Enumeration { tool, input, result } => chain_builder.enumeration(tool, input, result),
+                AgentEvent::ToolCall { name, input } => {
+                    chain_builder.tool_call(name, input, None, None)
+                }
+                AgentEvent::ToolResult { name, preview } => {
+                    chain_builder.tool_result(name, preview)
+                }
+                AgentEvent::Enumeration {
+                    tool,
+                    input,
+                    result,
+                } => chain_builder.enumeration(tool, input, result),
                 AgentEvent::Question { question, choices } => {
                     pending_question = Some(json!({ "question": question, "choices": choices }));
                 }
-                AgentEvent::ConfirmAction { name, input, description, .. } => {
+                AgentEvent::ConfirmAction {
+                    name,
+                    input,
+                    description,
+                    ..
+                } => {
                     pending_confirm_action = Some(json!({
                         "name": name, "input": input, "description": description,
                         "status": "pending", "steps": [], "result_text": "",
@@ -171,8 +237,18 @@ pub async fn handle_query_stream(
                 AgentEvent::ParallelResearchStarted { leads } => {
                     chain_builder.parallel_research_started(leads);
                 }
-                AgentEvent::ParallelResearchLeadDone { index, iterations, preview, duration_ms } => {
-                    chain_builder.parallel_research_lead_done(*index, *iterations, preview, *duration_ms);
+                AgentEvent::ParallelResearchLeadDone {
+                    index,
+                    iterations,
+                    preview,
+                    duration_ms,
+                } => {
+                    chain_builder.parallel_research_lead_done(
+                        *index,
+                        *iterations,
+                        preview,
+                        *duration_ms,
+                    );
                 }
                 AgentEvent::ParallelResearchMergeStarted { duration_ms } => {
                     chain_builder.parallel_research_merge_started(*duration_ms);
@@ -181,34 +257,64 @@ pub async fn handle_query_stream(
             }
 
             if let (
-                AgentEvent::Done { answer, sources, tool_calls_made, tool_errors, turns, provider_used, duration_ms, usage, llm_call_count, .. },
+                AgentEvent::Done {
+                    answer,
+                    sources,
+                    tool_calls_made,
+                    tool_errors,
+                    turns,
+                    provider_used,
+                    duration_ms,
+                    usage,
+                    llm_call_count,
+                    ..
+                },
                 Some(cid),
                 Some(db),
-            ) = (&event, &conv_id, &db) {
+            ) = (&event, &conv_id, &db)
+            {
                 let chain = std::mem::take(&mut chain_builder).finish();
                 let turn_id = uuid::Uuid::new_v4().to_string();
                 let _ = append_user_turn(
-                    db, &user_id, cid,
-                    &query, &username, &att_meta, raw_messages.clone(),
-                    answer, sources, *tool_calls_made, *tool_errors, *turns,
-                    chain, pending_question.clone(), pending_confirm_action.clone(),
-                    provider_used.as_ref(), *duration_ms,
-                    usage, *llm_call_count, &turn_id, &qs_ctx.pricing,
-                ).await;
+                    db,
+                    &user_id,
+                    cid,
+                    &query,
+                    &username,
+                    &att_meta,
+                    raw_messages.clone(),
+                    answer,
+                    sources,
+                    *tool_calls_made,
+                    *tool_errors,
+                    *turns,
+                    chain,
+                    pending_question.clone(),
+                    pending_confirm_action.clone(),
+                    provider_used.as_ref(),
+                    *duration_ms,
+                    usage,
+                    *llm_call_count,
+                    &turn_id,
+                    &qs_ctx.pricing,
+                )
+                .await;
                 spawn_summary_refresh(Arc::clone(db), Arc::clone(&agent), cid.clone());
 
                 let msg_count = raw_messages.len() + 2;
-                let db_t  = Arc::clone(db);
-                let llm_t    = Arc::clone(&llm);
-                let cid_t    = cid.clone();
-                let prior_t  = history.clone();
-                let query_t  = query.clone();
+                let db_t = Arc::clone(db);
+                let llm_t = Arc::clone(&llm);
+                let cid_t = cid.clone();
+                let prior_t = history.clone();
+                let query_t = query.clone();
                 let answer_t = answer.clone();
-                let tx_t     = tx.clone();
+                let tx_t = tx.clone();
                 tokio::spawn(async move {
                     if let Some(title) = maybe_regenerate_title(
                         &db_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, msg_count,
-                    ).await {
+                    )
+                    .await
+                    {
                         let _ = tx_t.send(AgentEvent::TitleUpdated { title }).await;
                     }
                 });
@@ -225,11 +331,20 @@ pub async fn handle_query_stream(
         let mut value = serde_json::to_value(&event).unwrap_or_default();
         if value.get("type").and_then(|v| v.as_str()) == Some("done") {
             if let Some(usage) = value.get("usage").cloned() {
-                let kind = value.get("provider_used").and_then(|p| p.get("kind")).and_then(|v| v.as_str()).unwrap_or("");
-                let model = value.get("provider_used").and_then(|p| p.get("model")).and_then(|v| v.as_str()).unwrap_or("");
+                let kind = value
+                    .get("provider_used")
+                    .and_then(|p| p.get("kind"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let model = value
+                    .get("provider_used")
+                    .and_then(|p| p.get("model"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let cost = pricing_for_stream.price_call(
                     &serde_json::from_value::<crate::llm::types::Usage>(usage).unwrap_or_default(),
-                    kind, model,
+                    kind,
+                    model,
                 );
                 if let Some(obj) = value.as_object_mut() {
                     obj.insert("cost_microusd".to_string(), json!(cost));
@@ -240,7 +355,9 @@ pub async fn handle_query_stream(
         Ok::<Event, Infallible>(Event::default().data(data))
     });
 
-    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response();
     response.headers_mut().insert(
         HeaderName::from_static("x-accel-buffering"),
         HeaderValue::from_static("no"),
@@ -254,9 +371,9 @@ async fn load_context_if_needed(
     conv_id: Option<&str>,
 ) -> (Vec<Value>, Vec<crate::agent::HistoryMessage>) {
     match (conv_id, &qs.db) {
-        (Some(cid), Some(db)) => {
-            load_conversation_context(db, user_id, cid).await.unwrap_or_default()
-        }
+        (Some(cid), Some(db)) => load_conversation_context(db, user_id, cid)
+            .await
+            .unwrap_or_default(),
         _ => (vec![], vec![]),
     }
 }

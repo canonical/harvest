@@ -1,5 +1,7 @@
+pub mod api_keys;
 pub mod cost;
 pub mod docs;
+pub mod external_chat;
 pub mod graph;
 pub mod health;
 pub mod llm;
@@ -10,7 +12,7 @@ pub mod tool_description;
 use axum::{
     extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
-    routing::{delete, get, post, put},
+    routing::{delete, get, patch, post, put},
     Json, Router,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -18,29 +20,28 @@ use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::agent::{
-    artifact_tools, deployment_tools, graph_tools, lxd_tools, machine_tools,
-    port_forward_tools, prompt, skill_tools, terraform_tools, tool, Agent,
+    artifact_tools, deployment_tools, graph_tools, lxd_tools, machine_tools, port_forward_tools,
+    prompt, skill_tools, terraform_tools, tool, Agent,
 };
 use crate::artifacts::handlers::{self as artifact_handlers, ArtifactState};
-use crate::skills::{handlers as skill_handlers, SkillStore};
+use crate::auth::api_keys::ApiKeyStore;
+use crate::auth::user_keys::UserKeyStore;
 use crate::auth::{self, handlers as auth_handlers, tui as auth_tui, AuthState};
 use crate::chat_layouts::handlers::{self as chat_layout_handlers, ChatLayoutState};
-use crate::config::{LlmProviderConfig, UiConfig};
 use crate::config::AuthConfig;
+use crate::config::{LlmProviderConfig, UiConfig};
 use crate::conversations::handlers::{self as conv_handlers, ConvState};
 use crate::deployments::{self, handlers as deployment_handlers};
+use crate::ingestion::IngestionRegistry;
 use crate::llm::LlmProvider;
 use crate::lxd::LxdClient;
 use crate::machines::{
-    handlers::{
-        machines_protected_router, machines_router, MachineState,
-    },
+    handlers::{machines_protected_router, machines_router, MachineState},
     MachineRegistry,
 };
-use harvest_db::Db;
 use crate::projects::handlers::{self as proj_handlers, ProjectState};
-use crate::auth::user_keys::UserKeyStore;
-use crate::ingestion::IngestionRegistry;
+use crate::skills::{handlers as skill_handlers, SkillStore};
+use harvest_db::Db;
 
 pub type GraphCache = RwLock<HashMap<String, Arc<String>>>;
 
@@ -78,7 +79,8 @@ pub async fn resolve_user_system_one(
         llm_configs,
         user_key_store,
         user_id,
-    ).await
+    )
+    .await
 }
 
 #[derive(Clone)]
@@ -105,24 +107,25 @@ pub struct QueryState {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub agent:            Arc<Agent>,
-    pub db:               Arc<Db>,
-    pub ingestion:        IngestionRegistry,
-    pub docs_dir:         Option<Arc<PathBuf>>,
-    pub auth:             Arc<AuthConfig>,
-    pub ui:               Arc<UiConfig>,
+    pub agent: Arc<Agent>,
+    pub db: Arc<Db>,
+    pub ingestion: IngestionRegistry,
+    pub docs_dir: Option<Arc<PathBuf>>,
+    pub auth: Arc<AuthConfig>,
+    pub ui: Arc<UiConfig>,
     pub machine_registry: Arc<MachineRegistry>,
-    pub agent_builder:    Arc<ProjectAgentBuilder>,
-    pub binary_path:      Option<PathBuf>,
-    pub llm:              Arc<dyn LlmProvider>,
-    pub llm_configs:      Arc<Vec<LlmProviderConfig>>,
+    pub agent_builder: Arc<ProjectAgentBuilder>,
+    pub binary_path: Option<PathBuf>,
+    pub llm: Arc<dyn LlmProvider>,
+    pub llm_configs: Arc<Vec<LlmProviderConfig>>,
     pub system_one_config: Option<crate::config::SystemOneConfig>,
-    pub user_key_store:   Option<Arc<UserKeyStore>>,
-    pub lxd:              Option<Arc<LxdClient>>,
+    pub user_key_store: Option<Arc<UserKeyStore>>,
+    pub api_key_store: Arc<ApiKeyStore>,
+    pub lxd: Option<Arc<LxdClient>>,
     pub collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
-    pub pricing:          Arc<crate::cost::PricingTable>,
-    pub semantic:         Option<Arc<graph_tools::SemanticHandle>>,
-    pub live:             Arc<crate::projects::live::ProjectLive>,
+    pub pricing: Arc<crate::cost::PricingTable>,
+    pub semantic: Option<Arc<graph_tools::SemanticHandle>>,
+    pub live: Arc<crate::projects::live::ProjectLive>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -149,7 +152,8 @@ impl Thresholds {
                 early_synthesis_research: so.early_synthesis_research,
                 relevance_preserve_recent: so.relevance_preserve_recent,
                 early_synthesis_coverage: so.early_synthesis_coverage,
-                early_synthesis_min_iterations_first_turn: so.early_synthesis_min_iterations_first_turn,
+                early_synthesis_min_iterations_first_turn: so
+                    .early_synthesis_min_iterations_first_turn,
                 early_synthesis_uniform: so.early_synthesis_uniform,
                 early_synthesis_capability_gate: so.early_synthesis_capability_gate,
                 next_action_confidence: so.next_action_confidence,
@@ -188,89 +192,90 @@ impl Thresholds {
 
 #[derive(Clone)]
 pub struct ProjectAgentBuilder {
-    pub llm:                        Arc<dyn LlmProvider>,
-    pub system_one:                 Option<Arc<crate::llm::system_one::SystemOneClient>>,
-    pub db:                         Arc<Db>,
-    pub registry:                   Arc<MachineRegistry>,
-    pub skills:                     Arc<SkillStore>,
-    pub lxd:                        Option<Arc<LxdClient>>,
-    pub collocate:                  Option<crate::collocate::client::CollocateHandle>,
-    pub collocate_registry:         Arc<crate::collocate::sessions::SessionContainerRegistry>,
-    pub server_url:                 String,
-    pub max_iterations:             usize,
+    pub llm: Arc<dyn LlmProvider>,
+    pub system_one: Option<Arc<crate::llm::system_one::SystemOneClient>>,
+    pub db: Arc<Db>,
+    pub registry: Arc<MachineRegistry>,
+    pub skills: Arc<SkillStore>,
+    pub lxd: Option<Arc<LxdClient>>,
+    pub collocate: Option<crate::collocate::client::CollocateHandle>,
+    pub collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
+    pub server_url: String,
+    pub max_iterations: usize,
     pub compaction_threshold_chars: usize,
-    pub compaction_keep_last:       usize,
-    pub thresholds:                 Option<Thresholds>,
-    pub semantic:                   Option<Arc<graph_tools::SemanticHandle>>,
+    pub compaction_keep_last: usize,
+    pub thresholds: Option<Thresholds>,
+    pub semantic: Option<Arc<graph_tools::SemanticHandle>>,
 }
 
 impl ProjectAgentBuilder {
     fn base_tools(&self, project_id: String, conversation_id: String) -> Vec<Box<dyn tool::Tool>> {
-        let mut tools = graph_tools::all_tools_with_semantic(Arc::clone(&self.db), self.semantic.clone());
+        let mut tools =
+            graph_tools::all_tools_with_semantic(Arc::clone(&self.db), self.semantic.clone());
         tools.push(Box::new(machine_tools::ListAgentsTool {
-            registry:   Arc::clone(&self.registry),
+            registry: Arc::clone(&self.registry),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(machine_tools::RunCommandTool {
-            registry:   Arc::clone(&self.registry),
+            registry: Arc::clone(&self.registry),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(skill_tools::ListSkillsTool {
-            store:      Arc::clone(&self.skills),
+            store: Arc::clone(&self.skills),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(skill_tools::LoadSkillTool {
-            store:      Arc::clone(&self.skills),
+            store: Arc::clone(&self.skills),
             project_id: project_id.clone(),
         }));
         if let Some(lxd) = &self.lxd {
             tools.push(Box::new(lxd_tools::CreateLxdAgentTool {
-                db:      Arc::clone(&self.db),
-                lxd:        Arc::clone(lxd),
+                db: Arc::clone(&self.db),
+                lxd: Arc::clone(lxd),
                 server_url: self.server_url.clone(),
                 project_id: project_id.clone(),
             }));
         }
         tools.push(Box::new(lxd_tools::DeleteAgentTool {
-            db:      Arc::clone(&self.db),
-            lxd:        self.lxd.clone(),
-            registry:   Arc::clone(&self.registry),
+            db: Arc::clone(&self.db),
+            lxd: self.lxd.clone(),
+            registry: Arc::clone(&self.registry),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(port_forward_tools::ListPortForwardsTool {
-            db:      Arc::clone(&self.db),
+            db: Arc::clone(&self.db),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(port_forward_tools::CreatePortForwardTool {
-            db:      Arc::clone(&self.db),
+            db: Arc::clone(&self.db),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(port_forward_tools::UpdatePortForwardTool {
-            db:      Arc::clone(&self.db),
+            db: Arc::clone(&self.db),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(port_forward_tools::DeletePortForwardTool {
-            db:      Arc::clone(&self.db),
+            db: Arc::clone(&self.db),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(artifact_tools::GenerateArtifactTool {
-            db:      Arc::clone(&self.db),
+            db: Arc::clone(&self.db),
             project_id: project_id.clone(),
             server_url: self.server_url.clone(),
         }));
         tools.push(Box::new(terraform_tools::RunTerraformPlanTool {
-            db:      Arc::clone(&self.db),
-            registry:   Arc::clone(&self.registry),
+            db: Arc::clone(&self.db),
+            registry: Arc::clone(&self.registry),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(terraform_tools::RunTerraformApplyTool {
-            db:      Arc::clone(&self.db),
-            registry:   Arc::clone(&self.registry),
+            db: Arc::clone(&self.db),
+            registry: Arc::clone(&self.registry),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(terraform_tools::RunTerraformDestroyTool {
-            db:      Arc::clone(&self.db),
-            registry:   Arc::clone(&self.registry),
+            db: Arc::clone(&self.db),
+            registry: Arc::clone(&self.registry),
             project_id: project_id.clone(),
         }));
         if let Some(handle) = &self.collocate {
@@ -278,35 +283,43 @@ impl ProjectAgentBuilder {
                 handle: handle.clone(),
                 project_id: project_id.clone(),
             }));
-            tools.push(Box::new(crate::collocate::tools::CollocateCreateSessionTool {
-                handle: handle.clone(),
-                registry: Arc::clone(&self.collocate_registry),
-                project_id: project_id.clone(),
-                conversation_id: conversation_id.clone(),
-            }));
+            tools.push(Box::new(
+                crate::collocate::tools::CollocateCreateSessionTool {
+                    handle: handle.clone(),
+                    registry: Arc::clone(&self.collocate_registry),
+                    project_id: project_id.clone(),
+                    conversation_id: conversation_id.clone(),
+                },
+            ));
             tools.push(Box::new(crate::collocate::tools::CollocateExecTool {
                 handle: handle.clone(),
                 registry: Arc::clone(&self.collocate_registry),
                 project_id: project_id.clone(),
                 conversation_id: conversation_id.clone(),
             }));
-            tools.push(Box::new(crate::collocate::tools::CollocateDeleteSessionTool {
-                handle: handle.clone(),
-                registry: Arc::clone(&self.collocate_registry),
-                project_id: project_id.clone(),
-                conversation_id: conversation_id.clone(),
-            }));
-            tools.push(Box::new(crate::collocate::tools::CollocateListContainersTool {
-                registry: Arc::clone(&self.collocate_registry),
-                project_id: project_id.clone(),
-                conversation_id: conversation_id.clone(),
-            }));
-            tools.push(Box::new(crate::collocate::tools::CollocateTransferFileTool {
-                handle: handle.clone(),
-                registry: Arc::clone(&self.collocate_registry),
-                project_id: project_id.clone(),
-                conversation_id: conversation_id.clone(),
-            }));
+            tools.push(Box::new(
+                crate::collocate::tools::CollocateDeleteSessionTool {
+                    handle: handle.clone(),
+                    registry: Arc::clone(&self.collocate_registry),
+                    project_id: project_id.clone(),
+                    conversation_id: conversation_id.clone(),
+                },
+            ));
+            tools.push(Box::new(
+                crate::collocate::tools::CollocateListContainersTool {
+                    registry: Arc::clone(&self.collocate_registry),
+                    project_id: project_id.clone(),
+                    conversation_id: conversation_id.clone(),
+                },
+            ));
+            tools.push(Box::new(
+                crate::collocate::tools::CollocateTransferFileTool {
+                    handle: handle.clone(),
+                    registry: Arc::clone(&self.collocate_registry),
+                    project_id: project_id.clone(),
+                    conversation_id: conversation_id.clone(),
+                },
+            ));
         }
         tools
     }
@@ -333,7 +346,12 @@ impl ProjectAgentBuilder {
         conversation_id: String,
         llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        self.build_for_conversation_with_llm_and_system_one(project_id, conversation_id, llm, self.system_one.clone())
+        self.build_for_conversation_with_llm_and_system_one(
+            project_id,
+            conversation_id,
+            llm,
+            self.system_one.clone(),
+        )
     }
 
     pub fn build_for_conversation_with_llm_and_system_one(
@@ -357,8 +375,8 @@ impl ProjectAgentBuilder {
     pub fn build_for_deployment(
         &self,
         project_id: String,
-        group_id:   String,
-        ctx:        &deployments::DeploymentContext,
+        group_id: String,
+        ctx: &deployments::DeploymentContext,
     ) -> Arc<Agent> {
         self.build_for_deployment_with_llm(project_id, group_id, ctx, Arc::clone(&self.llm))
     }
@@ -366,24 +384,24 @@ impl ProjectAgentBuilder {
     pub fn build_for_deployment_with_llm(
         &self,
         project_id: String,
-        group_id:   String,
-        ctx:        &deployments::DeploymentContext,
-        llm:        Arc<dyn LlmProvider>,
+        group_id: String,
+        ctx: &deployments::DeploymentContext,
+        llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
         let mut tools = self.base_tools(project_id.clone(), String::new());
         tools.push(Box::new(deployment_tools::LinkDeploymentArtifactTool {
-            db:         Arc::clone(&self.db),
-            project_id:    project_id.clone(),
+            db: Arc::clone(&self.db),
+            project_id: project_id.clone(),
             deployment_id: ctx.deployment_id.clone(),
         }));
         tools.push(Box::new(deployment_tools::UpdateProductTemplateTool {
-            db:         Arc::clone(&self.db),
+            db: Arc::clone(&self.db),
             group_id,
             deployment_id: ctx.deployment_id.clone(),
         }));
         tools.push(Box::new(deployment_tools::SetExecutionPlanTool {
-            db:         Arc::clone(&self.db),
-            project_id:    project_id.clone(),
+            db: Arc::clone(&self.db),
+            project_id: project_id.clone(),
             deployment_id: ctx.deployment_id.clone(),
         }));
         let agent = Agent::new(llm, tools, self.max_iterations)
@@ -395,7 +413,10 @@ impl ProjectAgentBuilder {
         }
     }
 
-    pub fn build_for_deployment_text_only(&self, ctx: &deployments::DeploymentContext) -> Arc<Agent> {
+    pub fn build_for_deployment_text_only(
+        &self,
+        ctx: &deployments::DeploymentContext,
+    ) -> Arc<Agent> {
         self.build_for_deployment_text_only_with_llm(ctx, Arc::clone(&self.llm))
     }
 
@@ -416,7 +437,7 @@ impl ProjectAgentBuilder {
     pub fn build_for_deployment_design(
         &self,
         project_id: String,
-        ctx:        &deployments::DeploymentContext,
+        ctx: &deployments::DeploymentContext,
     ) -> Arc<Agent> {
         self.build_for_deployment_design_with_llm(project_id, ctx, Arc::clone(&self.llm))
     }
@@ -424,16 +445,17 @@ impl ProjectAgentBuilder {
     pub fn build_for_deployment_design_with_llm(
         &self,
         project_id: String,
-        ctx:        &deployments::DeploymentContext,
-        llm:        Arc<dyn LlmProvider>,
+        ctx: &deployments::DeploymentContext,
+        llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        let mut tools = graph_tools::all_tools_with_semantic(Arc::clone(&self.db), self.semantic.clone());
+        let mut tools =
+            graph_tools::all_tools_with_semantic(Arc::clone(&self.db), self.semantic.clone());
         tools.push(Box::new(skill_tools::ListSkillsTool {
-            store:      Arc::clone(&self.skills),
+            store: Arc::clone(&self.skills),
             project_id: project_id.clone(),
         }));
         tools.push(Box::new(skill_tools::LoadSkillTool {
-            store:      Arc::clone(&self.skills),
+            store: Arc::clone(&self.skills),
             project_id,
         }));
         let agent = Agent::new(llm, tools, self.max_iterations)
@@ -444,7 +466,6 @@ impl ProjectAgentBuilder {
             None => Arc::new(agent),
         }
     }
-
 }
 
 pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Router {
@@ -471,19 +492,19 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         None
     };
     let auth_state = Arc::new(AuthState {
-        db:          Arc::clone(&state.db),
-        config:         Arc::clone(&state.auth),
-        ui:             Arc::clone(&state.ui),
+        db: Arc::clone(&state.db),
+        config: Arc::clone(&state.auth),
+        ui: Arc::clone(&state.ui),
         http,
         oidc_endpoints,
-        lxd_enabled:    state.lxd.is_some(),
+        lxd_enabled: state.lxd.is_some(),
     });
 
     let jwt_secret = Arc::new(state.auth.jwt_secret.clone());
 
     let health_state = Arc::new(health::HealthState {
-        db:       Arc::clone(&state.db),
-        live:     Arc::clone(&state.live),
+        db: Arc::clone(&state.db),
+        live: Arc::clone(&state.live),
         registry: Arc::clone(&state.machine_registry),
     });
 
@@ -496,20 +517,32 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     });
 
     let public_router = Router::new()
-        .route("/health", get(|| async { Json(serde_json::json!({ "status": "ok" })) }))
-        .route("/health/ready", get(health::ready).with_state(Arc::clone(&health_state)))
-        .route("/version", get(health::version).with_state(Arc::clone(&health_state)))
-        .route("/metrics", get(health::metrics).with_state(Arc::clone(&health_state)))
-        .route("/auth/config",            get(auth_handlers::config))
-        .route("/auth/register",          post(auth_handlers::register))
-        .route("/auth/login",             post(auth_handlers::login))
-        .route("/auth/logout",            post(auth_handlers::logout))
-        .route("/auth/google",            get(auth_handlers::google_redirect))
-        .route("/auth/google/callback",   get(auth_handlers::google_callback))
-        .route("/auth/oidc",              get(auth_handlers::oidc_redirect))
-        .route("/auth/oidc/callback",     get(auth_handlers::oidc_callback))
-        .route("/auth/tui/login",         post(auth_tui::create_auth_request))
-        .route("/auth/tui/poll/:uuid",    get(auth_tui::poll_auth_request))
+        .route(
+            "/health",
+            get(|| async { Json(serde_json::json!({ "status": "ok" })) }),
+        )
+        .route(
+            "/health/ready",
+            get(health::ready).with_state(Arc::clone(&health_state)),
+        )
+        .route(
+            "/version",
+            get(health::version).with_state(Arc::clone(&health_state)),
+        )
+        .route(
+            "/metrics",
+            get(health::metrics).with_state(Arc::clone(&health_state)),
+        )
+        .route("/auth/config", get(auth_handlers::config))
+        .route("/auth/register", post(auth_handlers::register))
+        .route("/auth/login", post(auth_handlers::login))
+        .route("/auth/logout", post(auth_handlers::logout))
+        .route("/auth/google", get(auth_handlers::google_redirect))
+        .route("/auth/google/callback", get(auth_handlers::google_callback))
+        .route("/auth/oidc", get(auth_handlers::oidc_redirect))
+        .route("/auth/oidc/callback", get(auth_handlers::oidc_callback))
+        .route("/auth/tui/login", post(auth_tui::create_auth_request))
+        .route("/auth/tui/poll/:uuid", get(auth_tui::poll_auth_request))
         .with_state(Arc::clone(&auth_state));
 
     let query_state = Arc::new(QueryState {
@@ -525,21 +558,48 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         semantic: state.semantic.clone(),
     });
     let agent_router = Router::new()
-        .route("/query",            post(query::handle_query))
-        .route("/query/stream",     post(query::handle_query_stream))
-        .route("/tool-description", post(tool_description::handle_tool_description))
-        .with_state(query_state);
+        .route("/query", post(query::handle_query))
+        .route("/query/stream", post(query::handle_query_stream))
+        .route(
+            "/tool-description",
+            post(tool_description::handle_tool_description),
+        )
+        .with_state(Arc::clone(&query_state));
+
+    let external_chat_state = Arc::new(external_chat::ExternalChatState {
+        qs: Arc::clone(&query_state),
+    });
 
     let graph_router = Router::new()
-        .route("/repositories",                     get(repositories::handle_list_repositories)
-                                                    .post(repositories::handle_add_repository))
-        .route("/repositories/verify",               post(repositories::handle_verify_repository))
-        .route("/repositories/:name/progress",        get(repositories::handle_repository_progress))
-        .route("/repositories/:name/stats",          get(repositories::handle_get_repository_stats))
-        .route("/repositories/:name/versions",        post(repositories::handle_ingest_versions))
-        .route("/repositories/:name/versions/:version/resync", post(repositories::handle_resync_version))
-        .route("/graph/:repo/:version",             get(graph::handle_get_graph))
-        .route("/graph/:repo/:version/source",      get(graph::handle_get_symbol_source))
+        .route(
+            "/repositories",
+            get(repositories::handle_list_repositories).post(repositories::handle_add_repository),
+        )
+        .route(
+            "/repositories/verify",
+            post(repositories::handle_verify_repository),
+        )
+        .route(
+            "/repositories/:name/progress",
+            get(repositories::handle_repository_progress),
+        )
+        .route(
+            "/repositories/:name/stats",
+            get(repositories::handle_get_repository_stats),
+        )
+        .route(
+            "/repositories/:name/versions",
+            post(repositories::handle_ingest_versions),
+        )
+        .route(
+            "/repositories/:name/versions/:version/resync",
+            post(repositories::handle_resync_version),
+        )
+        .route("/graph/:repo/:version", get(graph::handle_get_graph))
+        .route(
+            "/graph/:repo/:version/source",
+            get(graph::handle_get_symbol_source),
+        )
         .with_state(Arc::clone(&graph_state));
 
     let llm_state = Arc::new(llm::LlmState::new(
@@ -551,29 +611,65 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let llm_router = Router::new()
         .route("/llm/providers", get(llm::list_providers))
         .route("/llm/user-keys", get(llm::get_user_keys))
-        .route("/llm/user-keys/:provider_id", put(llm::set_user_key).delete(llm::delete_user_key))
+        .route(
+            "/llm/user-keys/:provider_id",
+            put(llm::set_user_key).delete(llm::delete_user_key),
+        )
         .with_state(llm_state);
 
     let me_router = Router::new()
-        .route("/auth/me", get(auth_handlers::me).patch(auth_handlers::update_me))
-        .route("/auth/tui/authorize/:uuid", post(auth_tui::authorize_request))
+        .route(
+            "/auth/me",
+            get(auth_handlers::me).patch(auth_handlers::update_me),
+        )
+        .route(
+            "/auth/tui/authorize/:uuid",
+            post(auth_tui::authorize_request),
+        )
         .with_state(Arc::clone(&auth_state));
 
+    let api_key_state = Arc::new(api_keys::ApiKeyState {
+        store: Arc::clone(&state.api_key_store),
+    });
+    let api_key_router = Router::new()
+        .route(
+            "/api-keys",
+            get(api_keys::list_api_keys).post(api_keys::create_api_key),
+        )
+        .route(
+            "/api-keys/:id",
+            patch(api_keys::rename_api_key).delete(api_keys::revoke_api_key),
+        )
+        .with_state(api_key_state);
+
     let conv_router = Router::new()
-        .route("/conversations",      get(conv_handlers::list).post(conv_handlers::create))
-        .route("/conversations/:id",  get(conv_handlers::get)
-                                     .put(conv_handlers::update)
-                                     .delete(conv_handlers::delete))
+        .route(
+            "/conversations",
+            get(conv_handlers::list).post(conv_handlers::create),
+        )
+        .route(
+            "/conversations/:id",
+            get(conv_handlers::get)
+                .put(conv_handlers::update)
+                .delete(conv_handlers::delete),
+        )
         .with_state(Arc::clone(&conv_state));
 
     let chat_layout_router = Router::new()
-        .route("/chat-layouts/current", get(chat_layout_handlers::get_current)
-                                       .put(chat_layout_handlers::put_current))
-        .route("/chat-layouts",         get(chat_layout_handlers::list_named)
-                                       .post(chat_layout_handlers::create_named))
-        .route("/chat-layouts/:id",     get(chat_layout_handlers::get_named)
-                                       .put(chat_layout_handlers::update_named)
-                                       .delete(chat_layout_handlers::delete_named))
+        .route(
+            "/chat-layouts/current",
+            get(chat_layout_handlers::get_current).put(chat_layout_handlers::put_current),
+        )
+        .route(
+            "/chat-layouts",
+            get(chat_layout_handlers::list_named).post(chat_layout_handlers::create_named),
+        )
+        .route(
+            "/chat-layouts/:id",
+            get(chat_layout_handlers::get_named)
+                .put(chat_layout_handlers::update_named)
+                .delete(chat_layout_handlers::delete_named),
+        )
         .with_state(Arc::clone(&chat_layout_state));
 
     let project_state = Arc::new(ProjectState::with_live(
@@ -592,117 +688,247 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let skill_store = Arc::new(SkillStore::new(Arc::clone(&state.db)));
 
     let project_router = Router::new()
-        .route("/groups",       get(proj_handlers::list_my_groups))
-        .route("/projects",     get(proj_handlers::list_projects).post(proj_handlers::create_project))
-        .route("/projects/:pid", get(proj_handlers::get_project)
-                                .put(proj_handlers::update_project)
-                                .delete(proj_handlers::delete_project))
-        .route("/projects/:pid/conversations",
-               get(proj_handlers::list_conversations).post(proj_handlers::create_conversation))
-        .route("/projects/:pid/conversations/:cid",
-               get(proj_handlers::get_conversation)
-               .put(proj_handlers::update_conversation)
-               .delete(proj_handlers::delete_conversation))
-        .route("/projects/:pid/conversations/:cid/confirm-action/resume",
-               post(proj_handlers::resume_confirm_action))
-        .route("/projects/:pid/events",        get(proj_handlers::project_events))
-        .route("/projects/:pid/query",         post(proj_handlers::project_query))
-        .route("/projects/:pid/query/stream",  post(proj_handlers::project_query_stream))
-        .route("/projects/:pid/artifacts",
-               get(proj_handlers::list_artifacts).post(proj_handlers::create_artifact_route))
-        .route("/projects/:pid/skills",
-               get(proj_handlers::list_project_skills).post(proj_handlers::create_project_skill))
-        .route("/projects/:pid/skills/:sid",
-               get(proj_handlers::get_project_skill)
-               .put(proj_handlers::update_project_skill)
-               .delete(proj_handlers::delete_project_skill))
-        .route("/projects/:pid/deployment",
-               get(deployment_handlers::get_project_deployment))
-        .route("/projects/:pid/deployments",
-               get(deployment_handlers::list_deployments).post(deployment_handlers::create_deployment))
-        .route("/projects/:pid/deployments/:did",
-               get(deployment_handlers::get_deployment)
-               .patch(deployment_handlers::update_deployment)
-               .delete(deployment_handlers::delete_deployment))
-        .route("/projects/:pid/deployments/:did/deploy",   post(deployment_handlers::deploy_deployment))
-        .route("/projects/:pid/deployments/:did/redeploy", post(deployment_handlers::redeploy_deployment))
-        .route("/projects/:pid/deployments/:did/destroy",  post(deployment_handlers::destroy_deployment))
-        .route("/projects/:pid/deployments/:did/runs",     get(deployment_handlers::list_deployment_runs))
-        .route("/projects/:pid/deployments/:did/environment/questions",
-               post(deployment_handlers::generate_environment_questions))
-        .route("/projects/:pid/deployments/:did/design/generate",  post(deployment_handlers::generate_design))
-        .route("/projects/:pid/deployments/:did/design/generate/stream", post(deployment_handlers::generate_design_stream))
-        .route("/projects/:pid/deployments/:did/design/decisions", post(deployment_handlers::generate_design_decisions))
-        .route("/projects/:pid/deployments/:did/design/revise",    post(deployment_handlers::revise_design))
-        .route("/projects/:pid/deployments/:did/design/propose-change/stream", post(deployment_handlers::propose_design_change_stream))
-        .route("/projects/:pid/deployments/:did/design/pdf", get(deployment_handlers::get_design_pdf))
-        .route("/projects/:pid/deployments/:did/design/content", put(deployment_handlers::update_design_content))
-        .route("/projects/:pid/deployments/:did/provision/generate", post(deployment_handlers::generate_provision))
-        .route("/projects/:pid/deployments/:did/provision/generate/stream", post(deployment_handlers::generate_provision_stream))
-        .route("/projects/:pid/deployments/:did/provision/propose-change", post(deployment_handlers::propose_provision_change))
-        .route("/projects/:pid/deployments/:did/provision/propose-change/stream", post(deployment_handlers::propose_provision_change_stream))
-        .route("/projects/:pid/deployments/:did/provision/apply-change", post(deployment_handlers::apply_provision_change))
-        .route("/projects/:pid/deployments/:did/context-artifacts",
-               post(deployment_handlers::add_context_artifact))
-        .route("/projects/:pid/deployments/:did/context-artifacts/link",
-               post(deployment_handlers::link_context_artifact))
-        .route("/projects/:pid/deployments/:did/context-artifacts/:aid",
-               delete(deployment_handlers::remove_context_artifact))
-        .route("/projects/:pid/deployments/:did/proposals",
-               get(deployment_handlers::list_proposals).post(deployment_handlers::propose_artifact_change))
-        .route("/projects/:pid/deployments/:did/proposals/:propid/approve",
-               post(deployment_handlers::approve_proposal))
-        .route("/projects/:pid/deployments/:did/proposals/:propid/discard",
-               post(deployment_handlers::discard_proposal))
-        .route("/projects/:pid/deployments/:did/execution-plan",
-               get(deployment_handlers::get_execution_plan).post(deployment_handlers::set_execution_plan))
-        .route("/projects/:pid/deployments/:did/run-dag",
-               post(deployment_handlers::run_dag))
-        .route("/projects/:pid/deployments/:did/run-destroy-dag",
-               post(deployment_handlers::run_destroy_dag))
-        .route("/templates",
-               get(deployment_handlers::list_templates).post(deployment_handlers::create_template))
-        .route("/templates/upload", post(deployment_handlers::upload_template))
-        .route("/templates/:tid",
-               get(deployment_handlers::get_template)
-               .put(deployment_handlers::update_template)
-               .delete(deployment_handlers::delete_template))
-        .route("/templates/:tid/download", get(deployment_handlers::download_template))
-        .route("/projects/:pid/cost",               get(cost::project_cost))
-        .route("/projects/:pid/cost/by-model",      get(cost::project_cost_by_model))
-        .route("/projects/:pid/cost/by-user",       get(cost::project_cost_by_user))
-        .route("/projects/:pid/conversations/:cid/cost",   get(cost::conversation_cost))
-        .route("/projects/:pid/deployments/:did/cost",     get(cost::deployment_cost))
-        .route("/projects/:pid/deployments/:did/cost/calls", get(cost::deployment_cost_calls))
+        .route("/groups", get(proj_handlers::list_my_groups))
+        .route(
+            "/projects",
+            get(proj_handlers::list_projects).post(proj_handlers::create_project),
+        )
+        .route(
+            "/projects/:pid",
+            get(proj_handlers::get_project)
+                .put(proj_handlers::update_project)
+                .delete(proj_handlers::delete_project),
+        )
+        .route(
+            "/projects/:pid/conversations",
+            get(proj_handlers::list_conversations).post(proj_handlers::create_conversation),
+        )
+        .route(
+            "/projects/:pid/conversations/:cid",
+            get(proj_handlers::get_conversation)
+                .put(proj_handlers::update_conversation)
+                .delete(proj_handlers::delete_conversation),
+        )
+        .route(
+            "/projects/:pid/conversations/:cid/confirm-action/resume",
+            post(proj_handlers::resume_confirm_action),
+        )
+        .route("/projects/:pid/events", get(proj_handlers::project_events))
+        .route("/projects/:pid/query", post(proj_handlers::project_query))
+        .route(
+            "/projects/:pid/query/stream",
+            post(proj_handlers::project_query_stream),
+        )
+        .route(
+            "/projects/:pid/artifacts",
+            get(proj_handlers::list_artifacts).post(proj_handlers::create_artifact_route),
+        )
+        .route(
+            "/projects/:pid/skills",
+            get(proj_handlers::list_project_skills).post(proj_handlers::create_project_skill),
+        )
+        .route(
+            "/projects/:pid/skills/:sid",
+            get(proj_handlers::get_project_skill)
+                .put(proj_handlers::update_project_skill)
+                .delete(proj_handlers::delete_project_skill),
+        )
+        .route(
+            "/projects/:pid/deployment",
+            get(deployment_handlers::get_project_deployment),
+        )
+        .route(
+            "/projects/:pid/deployments",
+            get(deployment_handlers::list_deployments).post(deployment_handlers::create_deployment),
+        )
+        .route(
+            "/projects/:pid/deployments/:did",
+            get(deployment_handlers::get_deployment)
+                .patch(deployment_handlers::update_deployment)
+                .delete(deployment_handlers::delete_deployment),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/deploy",
+            post(deployment_handlers::deploy_deployment),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/redeploy",
+            post(deployment_handlers::redeploy_deployment),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/destroy",
+            post(deployment_handlers::destroy_deployment),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/runs",
+            get(deployment_handlers::list_deployment_runs),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/environment/questions",
+            post(deployment_handlers::generate_environment_questions),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/design/generate",
+            post(deployment_handlers::generate_design),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/design/generate/stream",
+            post(deployment_handlers::generate_design_stream),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/design/decisions",
+            post(deployment_handlers::generate_design_decisions),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/design/revise",
+            post(deployment_handlers::revise_design),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/design/propose-change/stream",
+            post(deployment_handlers::propose_design_change_stream),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/design/pdf",
+            get(deployment_handlers::get_design_pdf),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/design/content",
+            put(deployment_handlers::update_design_content),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/provision/generate",
+            post(deployment_handlers::generate_provision),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/provision/generate/stream",
+            post(deployment_handlers::generate_provision_stream),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/provision/propose-change",
+            post(deployment_handlers::propose_provision_change),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/provision/propose-change/stream",
+            post(deployment_handlers::propose_provision_change_stream),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/provision/apply-change",
+            post(deployment_handlers::apply_provision_change),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/context-artifacts",
+            post(deployment_handlers::add_context_artifact),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/context-artifacts/link",
+            post(deployment_handlers::link_context_artifact),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/context-artifacts/:aid",
+            delete(deployment_handlers::remove_context_artifact),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/proposals",
+            get(deployment_handlers::list_proposals)
+                .post(deployment_handlers::propose_artifact_change),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/proposals/:propid/approve",
+            post(deployment_handlers::approve_proposal),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/proposals/:propid/discard",
+            post(deployment_handlers::discard_proposal),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/execution-plan",
+            get(deployment_handlers::get_execution_plan)
+                .post(deployment_handlers::set_execution_plan),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/run-dag",
+            post(deployment_handlers::run_dag),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/run-destroy-dag",
+            post(deployment_handlers::run_destroy_dag),
+        )
+        .route(
+            "/templates",
+            get(deployment_handlers::list_templates).post(deployment_handlers::create_template),
+        )
+        .route(
+            "/templates/upload",
+            post(deployment_handlers::upload_template),
+        )
+        .route(
+            "/templates/:tid",
+            get(deployment_handlers::get_template)
+                .put(deployment_handlers::update_template)
+                .delete(deployment_handlers::delete_template),
+        )
+        .route(
+            "/templates/:tid/download",
+            get(deployment_handlers::download_template),
+        )
+        .route("/projects/:pid/cost", get(cost::project_cost))
+        .route(
+            "/projects/:pid/cost/by-model",
+            get(cost::project_cost_by_model),
+        )
+        .route(
+            "/projects/:pid/cost/by-user",
+            get(cost::project_cost_by_user),
+        )
+        .route(
+            "/projects/:pid/conversations/:cid/cost",
+            get(cost::conversation_cost),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/cost",
+            get(cost::deployment_cost),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/cost/calls",
+            get(cost::deployment_cost_calls),
+        )
         .with_state(project_state);
 
     let machine_state = Arc::new(MachineState {
-        registry:    Arc::clone(&state.machine_registry),
-        db:       Some(Arc::clone(&state.db)),
+        registry: Arc::clone(&state.machine_registry),
+        db: Some(Arc::clone(&state.db)),
         binary_path: state.binary_path.clone(),
         server_url,
-        lxd:         state.lxd.clone(),
+        lxd: state.lxd.clone(),
     });
 
     let machines_public = machines_router(Arc::clone(&machine_state));
     let machines_protected = machines_protected_router(Arc::clone(&machine_state));
 
     let skills_read_router = Router::new()
-        .route("/skills",     get(skill_handlers::list_global_skills))
+        .route("/skills", get(skill_handlers::list_global_skills))
         .route("/skills/:id", get(skill_handlers::get_global_skill))
         .with_state(Arc::clone(&skill_store));
 
-    let artifact_state = Arc::new(ArtifactState { db: Arc::clone(&state.db) });
+    let artifact_state = Arc::new(ArtifactState {
+        db: Arc::clone(&state.db),
+    });
     let artifact_router = Router::new()
-        .route("/artifacts/:id",
-               get(artifact_handlers::get_artifact)
-               .put(artifact_handlers::update_artifact_route)
-               .delete(artifact_handlers::delete_artifact))
-        .route("/artifacts/:id/download", get(artifact_handlers::download_artifact))
+        .route(
+            "/artifacts/:id",
+            get(artifact_handlers::get_artifact)
+                .put(artifact_handlers::update_artifact_route)
+                .delete(artifact_handlers::delete_artifact),
+        )
+        .route(
+            "/artifacts/:id/download",
+            get(artifact_handlers::download_artifact),
+        )
         .with_state(artifact_state);
 
     let mut protected_router = Router::new()
         .merge(me_router)
+        .merge(api_key_router)
         .merge(conv_router)
         .merge(chat_layout_router)
         .merge(agent_router)
@@ -715,43 +941,83 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
 
     if let Some(docs_dir) = state.docs_dir {
         let docs_router = Router::new()
-            .route("/docs/:repo/:version",              get(docs::handle_get_index))
-            .route("/docs/:repo/:version/:section/*filename", get(docs::handle_get_page))
+            .route("/docs/:repo/:version", get(docs::handle_get_index))
+            .route(
+                "/docs/:repo/:version/:section/*filename",
+                get(docs::handle_get_page),
+            )
             .with_state(docs_dir);
         protected_router = protected_router.merge(docs_router);
     }
 
-    let protected_router = protected_router
-        .layer(from_fn_with_state(Arc::clone(&jwt_secret), auth::require_auth));
+    let protected_router = protected_router.layer(from_fn_with_state(
+        Arc::clone(&jwt_secret),
+        auth::require_auth,
+    ));
 
     let admin_auth_routes = Router::new()
-        .route("/admin/users",          get(crate::admin::handlers::list_users))
-        .route("/admin/users/:id/role", put(crate::admin::handlers::set_user_role))
-        .route("/admin/users/:id/groups", put(crate::admin::handlers::set_user_groups))
-        .route("/admin/groups",         get(crate::admin::handlers::list_groups)
-                                       .post(crate::admin::handlers::create_group))
-        .route("/admin/groups/:id",     delete(crate::admin::handlers::delete_group))
-        .route("/admin/groups/:id/default", put(crate::admin::handlers::set_group_default))
+        .route("/admin/users", get(crate::admin::handlers::list_users))
+        .route(
+            "/admin/users/:id/role",
+            put(crate::admin::handlers::set_user_role),
+        )
+        .route(
+            "/admin/users/:id/groups",
+            put(crate::admin::handlers::set_user_groups),
+        )
+        .route(
+            "/admin/groups",
+            get(crate::admin::handlers::list_groups).post(crate::admin::handlers::create_group),
+        )
+        .route(
+            "/admin/groups/:id",
+            delete(crate::admin::handlers::delete_group),
+        )
+        .route(
+            "/admin/groups/:id/default",
+            put(crate::admin::handlers::set_group_default),
+        )
         .with_state(Arc::clone(&auth_state));
 
     let admin_skills_routes = Router::new()
-        .route("/admin/skills",     post(skill_handlers::create_global_skill))
-        .route("/admin/skills/:id", put(skill_handlers::update_global_skill)
-                                   .delete(skill_handlers::delete_global_skill))
+        .route("/admin/skills", post(skill_handlers::create_global_skill))
+        .route(
+            "/admin/skills/:id",
+            put(skill_handlers::update_global_skill).delete(skill_handlers::delete_global_skill),
+        )
         .with_state(Arc::clone(&skill_store));
 
     let admin_graph_routes = Router::new()
-        .route("/admin/repositories/:name",                   delete(repositories::handle_delete_repository))
-        .route("/admin/repositories/:name/versions/:version",  delete(repositories::handle_delete_version))
+        .route(
+            "/admin/repositories/:name",
+            delete(repositories::handle_delete_repository),
+        )
+        .route(
+            "/admin/repositories/:name/versions/:version",
+            delete(repositories::handle_delete_version),
+        )
         .with_state(Arc::clone(&graph_state));
 
     let admin_router = admin_auth_routes
         .merge(admin_skills_routes)
         .merge(admin_graph_routes)
-        .layer(from_fn_with_state(Arc::clone(&jwt_secret), auth::require_admin));
+        .layer(from_fn_with_state(
+            Arc::clone(&jwt_secret),
+            auth::require_admin,
+        ));
+
+    let external_router = Router::new()
+        .route("/v1/chat", post(external_chat::chat))
+        .route("/v1/chat/:tracking_id", get(external_chat::history))
+        .with_state(external_chat_state)
+        .layer(from_fn_with_state(
+            Arc::clone(&state.api_key_store),
+            auth::api_keys::require_api_key,
+        ));
 
     Router::new()
         .merge(public_router)
+        .merge(external_router)
         .merge(machines_public)
         .merge(protected_router)
         .merge(admin_router)
@@ -767,7 +1033,10 @@ mod tests {
     #[test]
     fn builder_without_thresholds_uses_agent_defaults() {
         let t: Option<Thresholds> = None;
-        assert!(t.is_none(), "an unset threshold bundle must leave agent defaults alone");
+        assert!(
+            t.is_none(),
+            "an unset threshold bundle must leave agent defaults alone"
+        );
     }
 
     #[test]

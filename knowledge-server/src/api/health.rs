@@ -13,15 +13,15 @@ use crate::machines::MachineRegistry;
 use crate::projects::live::ProjectLive;
 
 pub struct HealthState {
-    pub db:       Arc<Db>,
-    pub live:     Arc<ProjectLive>,
+    pub db: Arc<Db>,
+    pub live: Arc<ProjectLive>,
     pub registry: Arc<MachineRegistry>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Readiness {
     pub database: bool,
-    pub bus:      bool,
+    pub bus: bool,
     pub draining: bool,
 }
 
@@ -34,21 +34,29 @@ impl Readiness {
 pub async fn readiness(state: &HealthState) -> Readiness {
     Readiness {
         database: state.db.ping().await.is_ok(),
-        bus:      state.live.bus().is_listening(),
+        bus: state.live.bus().is_listening(),
         draining: state.live.node().is_draining(),
     }
 }
 
 pub async fn ready(State(state): State<Arc<HealthState>>) -> Response {
     let readiness = readiness(&state).await;
-    let status = if readiness.ready() { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
-    (status, Json(json!({
-        "status":   if readiness.ready() { "ready" } else { "unavailable" },
-        "database": readiness.database,
-        "bus":      readiness.bus,
-        "draining": readiness.draining,
-        "node_id":  state.live.node().node_id(),
-    }))).into_response()
+    let status = if readiness.ready() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(json!({
+            "status":   if readiness.ready() { "ready" } else { "unavailable" },
+            "database": readiness.database,
+            "bus":      readiness.bus,
+            "draining": readiness.draining,
+            "node_id":  state.live.node().node_id(),
+        })),
+    )
+        .into_response()
 }
 
 pub async fn version(State(state): State<Arc<HealthState>>) -> Response {
@@ -58,7 +66,8 @@ pub async fn version(State(state): State<Arc<HealthState>>) -> Response {
         "schema_version":  schema,
         "binary_schema":   harvest_db::LATEST_SCHEMA_VERSION,
         "node_id":         state.live.node().node_id(),
-    })).into_response()
+    }))
+    .into_response()
 }
 
 pub async fn metrics(State(state): State<Arc<HealthState>>) -> Response {
@@ -69,7 +78,10 @@ pub async fn metrics(State(state): State<Arc<HealthState>>) -> Response {
     let pool_size = state.db.max_pool_size();
     let mut out = String::new();
     let _ = writeln!(out, "# TYPE harvest_node_info gauge");
-    let _ = writeln!(out, "harvest_node_info{{node_id=\"{node_id}\",version=\"{VERSION}\"}} 1");
+    let _ = writeln!(
+        out,
+        "harvest_node_info{{node_id=\"{node_id}\",version=\"{VERSION}\"}} 1"
+    );
     let _ = writeln!(out, "# TYPE harvest_ready gauge");
     let _ = writeln!(out, "harvest_ready {}", u8::from(readiness.ready()));
     let _ = writeln!(out, "# TYPE harvest_database_up gauge");
@@ -93,9 +105,29 @@ mod tests {
 
     #[test]
     fn ready_requires_database_bus_and_no_drain() {
-        assert!(Readiness { database: true, bus: true, draining: false }.ready());
-        assert!(!Readiness { database: false, bus: true, draining: false }.ready());
-        assert!(!Readiness { database: true, bus: false, draining: false }.ready());
-        assert!(!Readiness { database: true, bus: true, draining: true }.ready());
+        assert!(Readiness {
+            database: true,
+            bus: true,
+            draining: false
+        }
+        .ready());
+        assert!(!Readiness {
+            database: false,
+            bus: true,
+            draining: false
+        }
+        .ready());
+        assert!(!Readiness {
+            database: true,
+            bus: false,
+            draining: false
+        }
+        .ready());
+        assert!(!Readiness {
+            database: true,
+            bus: true,
+            draining: true
+        }
+        .ready());
     }
 }

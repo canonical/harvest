@@ -133,14 +133,14 @@ async fn fetch_graph_data(db: &Db, repo: &str, version: &str) -> Result<GraphDat
         };
     }
 
-    let node_rows          = require!(r_nodes,          "node query");
-    let edge_rows          = require!(r_calls,           "calls query");
-    let contains_rows      = require!(r_contains,        "contains query");
-    let impl_contains_rows = require!(r_impl_contains,   "impl_contains query");
-    let inherits_rows      = require!(r_inherits,        "inherits query");
-    let implements_rows    = require!(r_implements,      "implements query");
-    let uses_rows          = require!(r_uses,            "uses query");
-    let embeds_rows        = require!(r_embeds,          "embeds query");
+    let node_rows = require!(r_nodes, "node query");
+    let edge_rows = require!(r_calls, "calls query");
+    let contains_rows = require!(r_contains, "contains query");
+    let impl_contains_rows = require!(r_impl_contains, "impl_contains query");
+    let inherits_rows = require!(r_inherits, "inherits query");
+    let implements_rows = require!(r_implements, "implements query");
+    let uses_rows = require!(r_uses, "uses query");
+    let embeds_rows = require!(r_embeds, "embeds query");
 
     let mut seen_ids = HashSet::new();
     let mut nodes: Vec<GraphNode> = node_rows
@@ -149,7 +149,9 @@ async fn fetch_graph_data(db: &Db, repo: &str, version: &str) -> Result<GraphDat
             let name = r["name"].as_str()?.to_string();
             let file = r["file"].as_str()?.to_string();
             let id = format!("{}:{}", file, name);
-            if !seen_ids.insert(id.clone()) { return None; }
+            if !seen_ids.insert(id.clone()) {
+                return None;
+            }
             Some(GraphNode {
                 id,
                 kind: r["kind"].as_str().unwrap_or("function").to_string(),
@@ -165,8 +167,8 @@ async fn fetch_graph_data(db: &Db, repo: &str, version: &str) -> Result<GraphDat
     if total_nodes > MAX_NODES {
         fn kind_priority(k: &str) -> u8 {
             match k {
-                "class" | "struct" | "trait" | "interface" | "enum"
-                | "module" | "impl" | "type" => 0,
+                "class" | "struct" | "trait" | "interface" | "enum" | "module" | "impl"
+                | "type" => 0,
                 _ => 1,
             }
         }
@@ -182,25 +184,51 @@ async fn fetch_graph_data(db: &Db, repo: &str, version: &str) -> Result<GraphDat
         .filter_map(|r| {
             let src = format!("{}:{}", r["src_file"].as_str()?, r["src_name"].as_str()?);
             let tgt = format!("{}:{}", r["tgt_file"].as_str()?, r["tgt_name"].as_str()?);
-            if !node_ids.contains(&src) || !node_ids.contains(&tgt) || src == tgt { return None; }
+            if !node_ids.contains(&src) || !node_ids.contains(&tgt) || src == tgt {
+                return None;
+            }
             let key = format!("calls:{}>{}", src, tgt);
-            if !seen_edges.insert(key.clone()) { return None; }
-            Some(GraphEdge { id: key, source: src, target: tgt, relation: "calls".into() })
+            if !seen_edges.insert(key.clone()) {
+                return None;
+            }
+            Some(GraphEdge {
+                id: key,
+                source: src,
+                target: tgt,
+                relation: "calls".into(),
+            })
         })
         .collect();
 
     for rows in [&contains_rows, &impl_contains_rows] {
         for r in rows {
-            let Some(cf) = r["cls_file"].as_str() else { continue };
-            let Some(cn) = r["cls_name"].as_str() else { continue };
-            let Some(ff) = r["fn_file"].as_str()  else { continue };
-            let Some(fn_) = r["fn_name"].as_str() else { continue };
+            let Some(cf) = r["cls_file"].as_str() else {
+                continue;
+            };
+            let Some(cn) = r["cls_name"].as_str() else {
+                continue;
+            };
+            let Some(ff) = r["fn_file"].as_str() else {
+                continue;
+            };
+            let Some(fn_) = r["fn_name"].as_str() else {
+                continue;
+            };
             let src = format!("{}:{}", cf, cn);
             let tgt = format!("{}:{}", ff, fn_);
-            if !node_ids.contains(&src) || !node_ids.contains(&tgt) { continue; }
+            if !node_ids.contains(&src) || !node_ids.contains(&tgt) {
+                continue;
+            }
             let key = format!("contains:{}>{}", src, tgt);
-            if !seen_edges.insert(key.clone()) { continue; }
-            edges.push(GraphEdge { id: key, source: src, target: tgt, relation: "contains".into() });
+            if !seen_edges.insert(key.clone()) {
+                continue;
+            }
+            edges.push(GraphEdge {
+                id: key,
+                source: src,
+                target: tgt,
+                relation: "contains".into(),
+            });
         }
     }
 
@@ -213,18 +241,55 @@ async fn fetch_graph_data(db: &Db, repo: &str, version: &str) -> Result<GraphDat
                 let Some(tn) = r[$tn].as_str() else { continue };
                 let src = format!("{}:{}", sf, sn);
                 let tgt = format!("{}:{}", tf, tn);
-                if !node_ids.contains(&src) || !node_ids.contains(&tgt) { continue; }
+                if !node_ids.contains(&src) || !node_ids.contains(&tgt) {
+                    continue;
+                }
                 let key = format!("{}:{}>{}", $rel, src, tgt);
-                if !seen_edges.insert(key.clone()) { continue; }
-                edges.push(GraphEdge { id: key, source: src, target: tgt, relation: $rel.into() });
+                if !seen_edges.insert(key.clone()) {
+                    continue;
+                }
+                edges.push(GraphEdge {
+                    id: key,
+                    source: src,
+                    target: tgt,
+                    relation: $rel.into(),
+                });
             }
         };
     }
 
-    add_edges!(&inherits_rows,   "inherits",   "child_file", "child_name", "parent_file", "parent_name");
-    add_edges!(&implements_rows, "implements", "impl_file",  "impl_name",  "trait_file",  "trait_name");
-    add_edges!(&embeds_rows,     "embeds",     "outer_file", "outer_name", "inner_file",  "inner_name");
-    add_edges!(&uses_rows,       "uses",       "user_file",  "user_name",  "used_file",   "used_name");
+    add_edges!(
+        &inherits_rows,
+        "inherits",
+        "child_file",
+        "child_name",
+        "parent_file",
+        "parent_name"
+    );
+    add_edges!(
+        &implements_rows,
+        "implements",
+        "impl_file",
+        "impl_name",
+        "trait_file",
+        "trait_name"
+    );
+    add_edges!(
+        &embeds_rows,
+        "embeds",
+        "outer_file",
+        "outer_name",
+        "inner_file",
+        "inner_name"
+    );
+    add_edges!(
+        &uses_rows,
+        "uses",
+        "user_file",
+        "user_name",
+        "used_file",
+        "used_name"
+    );
 
     if edges.len() > MAX_EDGES {
         edges.retain(|e| e.relation != "calls");
@@ -236,7 +301,12 @@ async fn fetch_graph_data(db: &Db, repo: &str, version: &str) -> Result<GraphDat
         edges.truncate(MAX_EDGES);
     }
 
-    Ok(GraphData { nodes, edges, truncated: total_nodes > MAX_NODES, total_nodes })
+    Ok(GraphData {
+        nodes,
+        edges,
+        truncated: total_nodes > MAX_NODES,
+        total_nodes,
+    })
 }
 
 pub async fn warm_graph_cache(db: Arc<Db>, cache: Arc<GraphCache>) {
@@ -248,7 +318,10 @@ pub async fn warm_graph_cache(db: Arc<Db>, cache: Arc<GraphCache>) {
         .await
     {
         Ok(rows) => rows,
-        Err(e) => { tracing::error!(error = %e, "cache warm: failed to list versions"); return; }
+        Err(e) => {
+            tracing::error!(error = %e, "cache warm: failed to list versions");
+            return;
+        }
     };
 
     if pairs.is_empty() {
@@ -259,11 +332,17 @@ pub async fn warm_graph_cache(db: Arc<Db>, cache: Arc<GraphCache>) {
     tracing::info!(count = pairs.len(), "pre-warming graph cache");
 
     for row in pairs {
-        let Some(repo)    = row["repo"].as_str()    else { continue };
-        let Some(version) = row["version"].as_str() else { continue };
+        let Some(repo) = row["repo"].as_str() else {
+            continue;
+        };
+        let Some(version) = row["version"].as_str() else {
+            continue;
+        };
         let key = format!("{}:{}", repo, version);
 
-        if cache.read().await.contains_key(&key) { continue; }
+        if cache.read().await.contains_key(&key) {
+            continue;
+        }
 
         match fetch_graph_data(&db, repo, version).await {
             Ok(data) => {
@@ -286,13 +365,21 @@ pub async fn handle_get_graph(
 
     if let Some(cached) = state.cache.read().await.get(&key) {
         let json = Arc::clone(cached);
-        return ([("content-type", "application/json")], json.as_ref().to_owned()).into_response();
+        return (
+            [("content-type", "application/json")],
+            json.as_ref().to_owned(),
+        )
+            .into_response();
     }
 
     match fetch_graph_data(&state.db, &repo, &version).await {
         Ok(data) => {
             let json = serde_json::to_string(&data).unwrap_or_default();
-            state.cache.write().await.insert(key, Arc::new(json.clone()));
+            state
+                .cache
+                .write()
+                .await
+                .insert(key, Arc::new(json.clone()));
             ([("content-type", "application/json")], json).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
@@ -304,7 +391,8 @@ pub async fn handle_get_symbol_source(
     Path((repo, version)): Path<(String, String)>,
     Query(params): Query<SourceParams>,
 ) -> impl IntoResponse {
-    let rows = match state.db
+    let rows = match state
+        .db
         .query(
             "SELECT name, file, label AS kind, COALESCE(start_line, 0) AS start_line,
                     end_line, signature, source
