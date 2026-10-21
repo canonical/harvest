@@ -18,7 +18,7 @@ pub enum TerraformFlavor {
 impl TerraformFlavor {
     pub fn binary(&self) -> &'static str {
         match self {
-            Self::Terraform  => "terraform",
+            Self::Terraform => "terraform",
             Self::Terragrunt => "terragrunt",
         }
     }
@@ -65,7 +65,11 @@ pub fn sync_workspace(dir: &Path, files: &BTreeMap<String, String>) -> std::io::
     Ok(())
 }
 
-fn remove_stale_entries(root: &Path, dir: &Path, files: &BTreeMap<String, String>) -> std::io::Result<()> {
+fn remove_stale_entries(
+    root: &Path,
+    dir: &Path,
+    files: &BTreeMap<String, String>,
+) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -92,8 +96,8 @@ fn remove_stale_entries(root: &Path, dir: &Path, files: &BTreeMap<String, String
 pub fn action_subcommand(flavor: TerraformFlavor, action: TerraformAction) -> String {
     let bin = flavor.binary();
     match action {
-        TerraformAction::Plan    => format!("{bin} plan -input=false -no-color"),
-        TerraformAction::Apply   => format!("{bin} apply -input=false -no-color -auto-approve"),
+        TerraformAction::Plan => format!("{bin} plan -input=false -no-color"),
+        TerraformAction::Apply => format!("{bin} apply -input=false -no-color -auto-approve"),
         TerraformAction::Destroy => format!("{bin} destroy -input=false -no-color -auto-approve"),
     }
 }
@@ -115,8 +119,12 @@ chmod +x /usr/local/bin/terragrunt; }".to_string()
 
 pub fn install_guard_snippet(flavor: TerraformFlavor) -> String {
     match flavor {
-        TerraformFlavor::Terraform  => install_terraform_snippet(),
-        TerraformFlavor::Terragrunt => format!("{} && {}", install_terraform_snippet(), install_terragrunt_snippet()),
+        TerraformFlavor::Terraform => install_terraform_snippet(),
+        TerraformFlavor::Terragrunt => format!(
+            "{} && {}",
+            install_terraform_snippet(),
+            install_terragrunt_snippet()
+        ),
     }
 }
 
@@ -138,7 +146,16 @@ pub async fn run(
     timeout_secs: u64,
     on_line: Option<mpsc::UnboundedSender<OutputLine>>,
 ) -> Result<executor::CommandResult, String> {
-    run_in_streaming(Path::new(WORKSPACE_ROOT), artifact_id, flavor, action, files, timeout_secs, on_line).await
+    run_in_streaming(
+        Path::new(WORKSPACE_ROOT),
+        artifact_id,
+        flavor,
+        action,
+        files,
+        timeout_secs,
+        on_line,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -165,7 +182,9 @@ mod tests {
 
     #[test]
     fn is_preserved_path_matches_terraform_state_dir() {
-        assert!(is_preserved_path(Path::new(".terraform/providers/registry.terraform.io")));
+        assert!(is_preserved_path(Path::new(
+            ".terraform/providers/registry.terraform.io"
+        )));
     }
 
     #[test]
@@ -189,7 +208,10 @@ mod tests {
     #[test]
     fn workspace_dir_joins_root_and_artifact_id() {
         let dir = workspace_dir(Path::new("/var/lib/harvest-agent/terraform"), "artifact-1");
-        assert_eq!(dir, Path::new("/var/lib/harvest-agent/terraform/artifact-1"));
+        assert_eq!(
+            dir,
+            Path::new("/var/lib/harvest-agent/terraform/artifact-1")
+        );
     }
 
     #[test]
@@ -201,7 +223,10 @@ mod tests {
 
         sync_workspace(tmp.path(), &files).unwrap();
 
-        assert_eq!(std::fs::read_to_string(tmp.path().join("main.tf")).unwrap(), "root");
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("main.tf")).unwrap(),
+            "root"
+        );
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("modules/network/main.tf")).unwrap(),
             "nested"
@@ -288,10 +313,12 @@ mod tests {
         let dir = Path::new("/var/lib/harvest-agent/terraform/artifact-1");
         let command = compose_command(dir, TerraformFlavor::Terraform, TerraformAction::Plan);
 
-        let cd_pos     = command.find("cd '/var/lib/harvest-agent/terraform/artifact-1'").unwrap();
+        let cd_pos = command
+            .find("cd '/var/lib/harvest-agent/terraform/artifact-1'")
+            .unwrap();
         let install_pos = command.find("command -v terraform").unwrap();
-        let init_pos    = command.find("terraform init").unwrap();
-        let plan_pos    = command.find("terraform plan").unwrap();
+        let init_pos = command.find("terraform init").unwrap();
+        let plan_pos = command.find("terraform plan").unwrap();
 
         assert!(cd_pos < install_pos);
         assert!(install_pos < init_pos);
@@ -315,7 +342,10 @@ mod tests {
                 format!("{}:{original}", extra.display())
             };
             unsafe { std::env::set_var("PATH", &new_path) };
-            PathGuard { _lock: lock, original }
+            PathGuard {
+                _lock: lock,
+                original,
+            }
         }
     }
 
@@ -336,7 +366,10 @@ mod tests {
         let _path = PathGuard::prepend(bin_dir.path());
 
         let mut files = BTreeMap::new();
-        files.insert("main.tf".to_string(), "resource \"local_file\" \"x\" {}".to_string());
+        files.insert(
+            "main.tf".to_string(),
+            "resource \"local_file\" \"x\" {}".to_string(),
+        );
 
         let result = run_in_streaming(
             workspace_root.path(),
@@ -346,13 +379,26 @@ mod tests {
             &files,
             10,
             None,
-        ).await;
+        )
+        .await;
 
         let result = result.unwrap();
-        assert!(result.stdout.contains("ran: init"), "stdout: {}", result.stdout);
-        assert!(result.stdout.contains("ran: plan"), "stdout: {}", result.stdout);
+        assert!(
+            result.stdout.contains("ran: init"),
+            "stdout: {}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("ran: plan"),
+            "stdout: {}",
+            result.stdout
+        );
         assert_eq!(result.exit_code, 0);
-        assert!(workspace_root.path().join("artifact-1").join("main.tf").exists());
+        assert!(workspace_root
+            .path()
+            .join("artifact-1")
+            .join("main.tf")
+            .exists());
     }
 
     #[tokio::test]
@@ -366,7 +412,10 @@ mod tests {
         let _path = PathGuard::prepend(bin_dir.path());
 
         let mut files = BTreeMap::new();
-        files.insert("main.tf".to_string(), "resource \"local_file\" \"x\" {}".to_string());
+        files.insert(
+            "main.tf".to_string(),
+            "resource \"local_file\" \"x\" {}".to_string(),
+        );
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let result = run_in_streaming(
@@ -377,7 +426,8 @@ mod tests {
             &files,
             10,
             Some(tx),
-        ).await;
+        )
+        .await;
 
         let result = result.unwrap();
 
@@ -388,6 +438,10 @@ mod tests {
             streamed_stdout.push('\n');
         }
         assert_eq!(streamed_stdout, result.stdout);
-        assert!(streamed_stdout.contains("ran: plan"), "stdout: {}", streamed_stdout);
+        assert!(
+            streamed_stdout.contains("ran: plan"),
+            "stdout: {}",
+            streamed_stdout
+        );
     }
 }

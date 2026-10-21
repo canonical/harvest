@@ -21,17 +21,21 @@ fn console_ws_url(server_url: &str, session_id: &str) -> String {
 }
 
 pub async fn run_console_session(
-    server_url:  &str,
+    server_url: &str,
     agent_token: &str,
-    session_id:  &str,
-    cols:        u16,
-    rows:        u16,
+    session_id: &str,
+    cols: u16,
+    rows: u16,
 ) -> Result<()> {
     let url = console_ws_url(server_url, session_id);
-    let mut request = url.into_client_request().context("building console request")?;
+    let mut request = url
+        .into_client_request()
+        .context("building console request")?;
     request.headers_mut().insert(
         "Authorization",
-        format!("Bearer {agent_token}").parse().context("invalid agent token header")?,
+        format!("Bearer {agent_token}")
+            .parse()
+            .context("invalid agent token header")?,
     );
 
     let (ws_stream, _) = tokio_tungstenite::connect_async(request)
@@ -42,7 +46,8 @@ pub async fn run_console_session(
     ws_tx.send(Message::text(r#"{"type":"ready"}"#)).await.ok();
 
     let (pty, pts) = pty_process::open().context("allocating pty")?;
-    pty.resize(pty_process::Size::new(rows, cols)).context("sizing pty")?;
+    pty.resize(pty_process::Size::new(rows, cols))
+        .context("sizing pty")?;
 
     let child = pty_process::Command::new("bash")
         .env("TERM", DEFAULT_TERM)
@@ -59,7 +64,11 @@ pub async fn run_console_session(
             match pty_read.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if ws_tx.send(Message::binary(buf[..n].to_vec())).await.is_err() {
+                    if ws_tx
+                        .send(Message::binary(buf[..n].to_vec()))
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -69,7 +78,7 @@ pub async fn run_console_session(
         let code = child.wait().await.ok().and_then(|s| s.code());
         let payload = match code {
             Some(c) => format!(r#"{{"type":"exited","code":{c}}}"#),
-            None     => r#"{"type":"exited","code":null}"#.to_string(),
+            None => r#"{"type":"exited","code":null}"#.to_string(),
         };
         let _ = ws_tx.send(Message::text(payload)).await;
         let _ = ws_tx.close().await;
@@ -130,16 +139,26 @@ mod tests {
             .unwrap();
 
         let (mut read_half, mut write_half) = pty.into_split();
-        write_half.write_all(b"echo hello-from-pty\n").await.unwrap();
+        write_half
+            .write_all(b"echo hello-from-pty\n")
+            .await
+            .unwrap();
 
         let mut buf = [0u8; 4096];
         let mut collected = String::new();
         loop {
-            let n = tokio::time::timeout(std::time::Duration::from_secs(5), read_half.read(&mut buf))
-                .await.unwrap().unwrap();
-            if n == 0 { break; }
+            let n =
+                tokio::time::timeout(std::time::Duration::from_secs(5), read_half.read(&mut buf))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            if n == 0 {
+                break;
+            }
             collected.push_str(&String::from_utf8_lossy(&buf[..n]));
-            if collected.contains("hello-from-pty\r\n") { break; }
+            if collected.contains("hello-from-pty\r\n") {
+                break;
+            }
         }
 
         assert!(collected.contains("hello-from-pty"), "got: {collected:?}");
@@ -164,14 +183,24 @@ mod tests {
         let mut buf = [0u8; 4096];
         let mut collected = String::new();
         loop {
-            let n = tokio::time::timeout(std::time::Duration::from_secs(5), read_half.read(&mut buf))
-                .await.unwrap().unwrap();
-            if n == 0 { break; }
+            let n =
+                tokio::time::timeout(std::time::Duration::from_secs(5), read_half.read(&mut buf))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            if n == 0 {
+                break;
+            }
             collected.push_str(&String::from_utf8_lossy(&buf[..n]));
-            if collected.contains(&format!("TERM-IS-{DEFAULT_TERM}\r\n")) { break; }
+            if collected.contains(&format!("TERM-IS-{DEFAULT_TERM}\r\n")) {
+                break;
+            }
         }
 
-        assert!(collected.contains(&format!("TERM-IS-{DEFAULT_TERM}")), "got: {collected:?}");
+        assert!(
+            collected.contains(&format!("TERM-IS-{DEFAULT_TERM}")),
+            "got: {collected:?}"
+        );
 
         write_half.write_all(b"exit\n").await.unwrap();
         let _ = child.wait().await;

@@ -4,7 +4,7 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    pub server_url:  String,
+    pub server_url: String,
     pub agent_token: String,
 }
 
@@ -17,8 +17,7 @@ impl Config {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         let text = toml::to_string_pretty(self).context("serialising config")?;
-        std::fs::write(path, text)
-            .with_context(|| format!("writing config: {}", path.display()))
+        std::fs::write(path, text).with_context(|| format!("writing config: {}", path.display()))
     }
 }
 
@@ -29,7 +28,7 @@ mod tests {
 
     fn sample() -> Config {
         Config {
-            server_url:  "https://harvest.example.com".into(),
+            server_url: "https://harvest.example.com".into(),
             agent_token: "tok-abc-123".into(),
         }
     }
