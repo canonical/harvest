@@ -1,5 +1,5 @@
 use crate::agent::HistoryMessage;
-use crate::llm::{LlmProvider, types::Message};
+use crate::llm::{types::Message, LlmProvider};
 use harvest_db::Db;
 use serde_json::json;
 
@@ -12,10 +12,10 @@ pub fn should_regenerate_title(message_count: usize) -> bool {
 
 fn role_label(role: &str) -> &str {
     match role {
-        "user"      => "User",
+        "user" => "User",
         "assistant" => "Assistant",
-        "summary"   => "[Summary]",
-        other       => other,
+        "summary" => "[Summary]",
+        other => other,
     }
 }
 
@@ -71,7 +71,11 @@ pub async fn generate_title(
         truncate_at_word_boundary(&cleaned, TITLE_MAX_CHARS)
     };
 
-    if title.is_empty() { None } else { Some(title) }
+    if title.is_empty() {
+        None
+    } else {
+        Some(title)
+    }
 }
 
 fn clean_title_text(text: &str) -> String {
@@ -101,11 +105,16 @@ fn truncate_at_word_boundary(text: &str, max_chars: usize) -> String {
 }
 
 fn looks_like_body_text(sanitized: &str) -> bool {
-    let starts_like_heading = sanitized.starts_with('#') || sanitized.starts_with('-') || sanitized.starts_with('*');
+    let starts_like_heading =
+        sanitized.starts_with('#') || sanitized.starts_with('-') || sanitized.starts_with('*');
     let starts_like_list_item = sanitized
         .split_whitespace()
         .next()
-        .map(|w| w.ends_with('.') && w.trim_end_matches('.').chars().all(|c| c.is_ascii_digit()) && !w.trim_end_matches('.').is_empty())
+        .map(|w| {
+            w.ends_with('.')
+                && w.trim_end_matches('.').chars().all(|c| c.is_ascii_digit())
+                && !w.trim_end_matches('.').is_empty()
+        })
         .unwrap_or(false);
     let too_many_words = sanitized.split_whitespace().count() > 12;
     starts_like_heading || starts_like_list_item || too_many_words
@@ -115,7 +124,9 @@ async fn update_title(db: &Db, conv_id: &str, title: &str) -> bool {
     db.query(
         "UPDATE conversations SET title = $title WHERE id = $cid RETURNING id",
         json!({ "cid": conv_id, "title": title }),
-    ).await.is_ok()
+    )
+    .await
+    .is_ok()
 }
 
 pub async fn maybe_regenerate_title(
@@ -141,20 +152,36 @@ pub async fn maybe_regenerate_title(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::types::{LlmResponse, ModelInfo, ToolDefinition};
     use anyhow::Result;
     use async_trait::async_trait;
-    use crate::llm::types::{LlmResponse, ModelInfo, ToolDefinition};
 
     struct MockLlm(String);
 
     #[async_trait]
     impl LlmProvider for MockLlm {
-        fn id(&self) -> &str { "mock" }
-        fn kind(&self) -> &str { "mock" }
-        fn default_model(&self) -> &str { "mock-model" }
-        async fn list_models(&self) -> Result<Vec<ModelInfo>> { Ok(vec![]) }
-        async fn chat_with(&self, _: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
-            Ok(LlmResponse::Message { text: self.0.clone(), usage: crate::llm::types::Usage::default() })
+        fn id(&self) -> &str {
+            "mock"
+        }
+        fn kind(&self) -> &str {
+            "mock"
+        }
+        fn default_model(&self) -> &str {
+            "mock-model"
+        }
+        async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat_with(
+            &self,
+            _: Option<&str>,
+            _: &[Message],
+            _: &[ToolDefinition],
+        ) -> Result<LlmResponse> {
+            Ok(LlmResponse::Message {
+                text: self.0.clone(),
+                usage: crate::llm::types::Usage::default(),
+            })
         }
     }
 
@@ -162,65 +189,116 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for FailLlm {
-        fn id(&self) -> &str { "fail" }
-        fn kind(&self) -> &str { "mock" }
-        fn default_model(&self) -> &str { "mock-model" }
-        async fn list_models(&self) -> Result<Vec<ModelInfo>> { Ok(vec![]) }
-        async fn chat_with(&self, _: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> Result<LlmResponse> {
+        fn id(&self) -> &str {
+            "fail"
+        }
+        fn kind(&self) -> &str {
+            "mock"
+        }
+        fn default_model(&self) -> &str {
+            "mock-model"
+        }
+        async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat_with(
+            &self,
+            _: Option<&str>,
+            _: &[Message],
+            _: &[ToolDefinition],
+        ) -> Result<LlmResponse> {
             Err(anyhow::anyhow!("LLM failure"))
         }
     }
 
     fn msg(role: &str, text: &str) -> HistoryMessage {
-        HistoryMessage { role: role.into(), text: text.into(), ..Default::default() }
+        HistoryMessage {
+            role: role.into(),
+            text: text.into(),
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn regenerate_at_count_2() { assert!(should_regenerate_title(2)); }
+    fn regenerate_at_count_2() {
+        assert!(should_regenerate_title(2));
+    }
 
     #[test]
-    fn regenerate_at_count_6() { assert!(should_regenerate_title(6)); }
+    fn regenerate_at_count_6() {
+        assert!(should_regenerate_title(6));
+    }
 
     #[test]
-    fn regenerate_at_count_12() { assert!(should_regenerate_title(12)); }
+    fn regenerate_at_count_12() {
+        assert!(should_regenerate_title(12));
+    }
 
     #[test]
-    fn regenerate_at_count_22() { assert!(should_regenerate_title(22)); }
+    fn regenerate_at_count_22() {
+        assert!(should_regenerate_title(22));
+    }
 
     #[test]
-    fn regenerate_at_count_32() { assert!(should_regenerate_title(32)); }
+    fn regenerate_at_count_32() {
+        assert!(should_regenerate_title(32));
+    }
 
     #[test]
-    fn no_regenerate_at_count_0() { assert!(!should_regenerate_title(0)); }
+    fn no_regenerate_at_count_0() {
+        assert!(!should_regenerate_title(0));
+    }
 
     #[test]
-    fn no_regenerate_at_count_1() { assert!(!should_regenerate_title(1)); }
+    fn no_regenerate_at_count_1() {
+        assert!(!should_regenerate_title(1));
+    }
 
     #[test]
-    fn no_regenerate_at_count_3() { assert!(!should_regenerate_title(3)); }
+    fn no_regenerate_at_count_3() {
+        assert!(!should_regenerate_title(3));
+    }
 
     #[test]
-    fn no_regenerate_at_count_4() { assert!(!should_regenerate_title(4)); }
+    fn no_regenerate_at_count_4() {
+        assert!(!should_regenerate_title(4));
+    }
 
     #[test]
-    fn no_regenerate_at_count_5() { assert!(!should_regenerate_title(5)); }
+    fn no_regenerate_at_count_5() {
+        assert!(!should_regenerate_title(5));
+    }
 
     #[test]
-    fn no_regenerate_at_count_7() { assert!(!should_regenerate_title(7)); }
+    fn no_regenerate_at_count_7() {
+        assert!(!should_regenerate_title(7));
+    }
 
     #[test]
-    fn no_regenerate_at_count_11() { assert!(!should_regenerate_title(11)); }
+    fn no_regenerate_at_count_11() {
+        assert!(!should_regenerate_title(11));
+    }
 
     #[test]
-    fn no_regenerate_at_count_13() { assert!(!should_regenerate_title(13)); }
+    fn no_regenerate_at_count_13() {
+        assert!(!should_regenerate_title(13));
+    }
 
     #[test]
-    fn no_regenerate_at_count_21() { assert!(!should_regenerate_title(21)); }
+    fn no_regenerate_at_count_21() {
+        assert!(!should_regenerate_title(21));
+    }
 
     #[tokio::test]
     async fn generate_title_returns_llm_text() {
         let llm = MockLlm("Rust Async Patterns".into());
-        let result = generate_title(&llm, &[], "How do async traits work?", "Async traits in Rust use...").await;
+        let result = generate_title(
+            &llm,
+            &[],
+            "How do async traits work?",
+            "Async traits in Rust use...",
+        )
+        .await;
         assert_eq!(result, Some("Rust Async Patterns".into()));
     }
 
@@ -247,12 +325,16 @@ mod tests {
 
     #[tokio::test]
     async fn generate_title_collapses_newlines_and_strips_code_fences() {
-        let llm = MockLlm("```mermaid\nflowchart TD\n    A[Start: _configure_ovn_external]\n```".into());
+        let llm =
+            MockLlm("```mermaid\nflowchart TD\n    A[Start: _configure_ovn_external]\n```".into());
         let result = generate_title(&llm, &[], "q", "a").await;
         let title = result.expect("title should not be none");
         assert!(!title.contains('\n'));
         assert!(!title.contains("```"));
-        assert_eq!(title, "mermaid flowchart TD A[Start: _configure_ovn_external]");
+        assert_eq!(
+            title,
+            "mermaid flowchart TD A[Start: _configure_ovn_external]"
+        );
     }
 
     #[tokio::test]
@@ -303,9 +385,15 @@ mod tests {
 
     #[tokio::test]
     async fn generate_title_falls_back_to_question_for_markdown_body_text() {
-        let llm = MockLlm("### Step 4: The Weigher Pipeline\n1. Once filtering is complete, backends are scored.".into());
+        let llm = MockLlm(
+            "### Step 4: The Weigher Pipeline\n1. Once filtering is complete, backends are scored."
+                .into(),
+        );
         let result = generate_title(&llm, &[], "How does the scheduler weigh backends?", "a").await;
-        assert_eq!(result, Some("How does the scheduler weigh backends?".into()));
+        assert_eq!(
+            result,
+            Some("How does the scheduler weigh backends?".into())
+        );
     }
 
     #[tokio::test]
@@ -342,10 +430,7 @@ mod tests {
 
     #[test]
     fn build_context_with_few_prior_includes_all() {
-        let prior = vec![
-            msg("user", "first"),
-            msg("assistant", "second"),
-        ];
+        let prior = vec![msg("user", "first"), msg("assistant", "second")];
         let ctx = build_context(&prior, "third", "fourth");
         assert!(ctx.contains("User: first"));
         assert!(ctx.contains("Assistant: second"));

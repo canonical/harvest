@@ -9,16 +9,16 @@ use uuid::Uuid;
 
 use harvest_db::Db;
 
-const JUJU_MD:          &str = include_str!("../../skills/juju.md");
-const LXD_MD:           &str = include_str!("../../skills/lxd.md");
-const CEPH_MD:          &str = include_str!("../../skills/ceph.md");
+const JUJU_MD: &str = include_str!("../../skills/juju.md");
+const LXD_MD: &str = include_str!("../../skills/lxd.md");
+const CEPH_MD: &str = include_str!("../../skills/ceph.md");
 const CANONICAL_K8S_MD: &str = include_str!("../../skills/canonical-k8s.md");
-const LANDSCAPE_MD:     &str = include_str!("../../skills/landscape.md");
-const OPENSTACK_MD:     &str = include_str!("../../skills/openstack.md");
+const LANDSCAPE_MD: &str = include_str!("../../skills/landscape.md");
+const OPENSTACK_MD: &str = include_str!("../../skills/openstack.md");
 
 #[derive(Debug, Clone)]
 pub struct SkillSummary {
-    pub name:        String,
+    pub name: String,
     pub description: String,
 }
 
@@ -27,9 +27,10 @@ pub fn parse_frontmatter(content: &str) -> HashMap<String, String> {
     let Some(after_open) = content.strip_prefix("---\n") else {
         return map;
     };
-    let Some(close_pos) = after_open.find("\n---\n").or_else(|| {
-        after_open.strip_suffix("\n---").map(|s| s.len())
-    }) else {
+    let Some(close_pos) = after_open
+        .find("\n---\n")
+        .or_else(|| after_open.strip_suffix("\n---").map(|s| s.len()))
+    else {
         return map;
     };
     for line in after_open[..close_pos].lines() {
@@ -60,48 +61,69 @@ impl SkillStore {
     }
 
     pub async fn list_for_project(&self, project_id: &str) -> Vec<SkillSummary> {
-        let rows = self.db.query(
-            "SELECT name, description FROM skills
+        let rows = self
+            .db
+            .query(
+                "SELECT name, description FROM skills
              WHERE project_id IS NULL OR project_id = $pid
              ORDER BY is_global DESC, name ASC",
-            json!({ "pid": project_id }),
-        ).await.unwrap_or_default();
+                json!({ "pid": project_id }),
+            )
+            .await
+            .unwrap_or_default();
 
-        rows.into_iter().map(|r| SkillSummary {
-            name:        r["name"].as_str().unwrap_or_default().to_string(),
-            description: r["description"].as_str().unwrap_or_default().to_string(),
-        }).collect()
+        rows.into_iter()
+            .map(|r| SkillSummary {
+                name: r["name"].as_str().unwrap_or_default().to_string(),
+                description: r["description"].as_str().unwrap_or_default().to_string(),
+            })
+            .collect()
     }
 
     pub async fn load_content(&self, name: &str, project_id: &str) -> Option<String> {
-        let rows = self.db.query(
-            "SELECT content FROM skills
+        let rows = self
+            .db
+            .query(
+                "SELECT content FROM skills
              WHERE name = $name AND (project_id IS NULL OR project_id = $pid)
              ORDER BY is_global DESC
              LIMIT 1",
-            json!({ "name": name, "pid": project_id }),
-        ).await.unwrap_or_default();
+                json!({ "name": name, "pid": project_id }),
+            )
+            .await
+            .unwrap_or_default();
 
-        rows.into_iter().next().and_then(|r| r["content"].as_str().map(|s| s.to_string()))
+        rows.into_iter()
+            .next()
+            .and_then(|r| r["content"].as_str().map(|s| s.to_string()))
     }
 }
 
 pub async fn seed_defaults_if_needed(db: &Db) -> Result<()> {
-    let marker = db.query(
-        "SELECT set_at FROM app_flags WHERE key = 'skills_seeded'",
-        json!({}),
-    ).await?;
+    let marker = db
+        .query(
+            "SELECT set_at FROM app_flags WHERE key = 'skills_seeded'",
+            json!({}),
+        )
+        .await?;
     if !marker.is_empty() {
         return Ok(());
     }
 
     let now = harvest_db::now_rfc3339();
-    for raw in [JUJU_MD, LXD_MD, CEPH_MD, CANONICAL_K8S_MD, LANDSCAPE_MD, OPENSTACK_MD] {
-        let fm          = parse_frontmatter(raw);
-        let name        = fm.get("name").cloned().unwrap_or_default();
+    for raw in [
+        JUJU_MD,
+        LXD_MD,
+        CEPH_MD,
+        CANONICAL_K8S_MD,
+        LANDSCAPE_MD,
+        OPENSTACK_MD,
+    ] {
+        let fm = parse_frontmatter(raw);
+        let name = fm.get("name").cloned().unwrap_or_default();
         let description = fm.get("description").cloned().unwrap_or_default();
-        let content     = skill_body(raw).to_string();
-        let id          = Uuid::new_v4().to_string();
+        let content = skill_body(raw).to_string();
+        let id = Uuid::new_v4().to_string();
 
         db.query(
             "INSERT INTO skills (id, project_id, name, description, content, created_by, created_at, updated_at)
@@ -131,7 +153,10 @@ mod tests {
         let content = "---\nname: juju\ndescription: Juju guide\n---\n\nBody here";
         let fm = parse_frontmatter(content);
         assert_eq!(fm.get("name").map(String::as_str), Some("juju"));
-        assert_eq!(fm.get("description").map(String::as_str), Some("Juju guide"));
+        assert_eq!(
+            fm.get("description").map(String::as_str),
+            Some("Juju guide")
+        );
     }
 
     #[test]

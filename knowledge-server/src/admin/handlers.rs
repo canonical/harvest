@@ -43,12 +43,19 @@ pub async fn set_user_role(
     Json(body): Json<SetRoleBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.role != "admin" && body.role != "regular" {
-        return Err(err(StatusCode::BAD_REQUEST, "role must be admin or regular"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "role must be admin or regular",
+        ));
     }
-    state.db.query(
-        "UPDATE users SET role = $role WHERE id = $id RETURNING id",
-        json!({ "id": user_id, "role": body.role }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    state
+        .db
+        .query(
+            "UPDATE users SET role = $role WHERE id = $id RETURNING id",
+            json!({ "id": user_id, "role": body.role }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -64,14 +71,20 @@ pub async fn set_user_groups(
 ) -> Result<impl IntoResponse, ApiError> {
     let server_error = |_: anyhow::Error| err(StatusCode::INTERNAL_SERVER_ERROR, "server error");
     let tx = state.db.begin().await.map_err(server_error)?;
-    tx.execute("DELETE FROM user_groups WHERE user_id = $id", json!({ "id": user_id }))
-        .await.map_err(server_error)?;
+    tx.execute(
+        "DELETE FROM user_groups WHERE user_id = $id",
+        json!({ "id": user_id }),
+    )
+    .await
+    .map_err(server_error)?;
     tx.execute(
         "INSERT INTO user_groups (user_id, group_id)
          SELECT u.id, g.id FROM users u JOIN groups g ON g.id = ANY($group_ids)
          WHERE u.id = $id",
         json!({ "id": user_id, "group_ids": body.group_ids }),
-    ).await.map_err(server_error)?;
+    )
+    .await
+    .map_err(server_error)?;
     tx.commit().await.map_err(server_error)?;
 
     Ok(Json(json!({ "ok": true })))
@@ -80,11 +93,15 @@ pub async fn set_user_groups(
 pub async fn list_groups(
     State(state): State<Arc<AuthState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.db.query(
-        "SELECT id, name, description, created_at, is_default
+    let rows = state
+        .db
+        .query(
+            "SELECT id, name, description, created_at, is_default
          FROM groups ORDER BY name",
-        json!({}),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({}),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(rows))
 }
 
@@ -103,19 +120,26 @@ pub async fn create_group(
     }
     let id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
-    let rows = state.db.query(
-        "INSERT INTO groups (id, name, description, created_at, is_default)
+    let rows = state
+        .db
+        .query(
+            "INSERT INTO groups (id, name, description, created_at, is_default)
          VALUES ($id, $name, $description, $created_at, false)
          RETURNING id, name, description, is_default",
-        json!({
-            "id": id,
-            "name": body.name,
-            "description": body.description.unwrap_or_default(),
-            "created_at": now
-        }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({
+                "id": id,
+                "name": body.name,
+                "description": body.description.unwrap_or_default(),
+                "created_at": now
+            }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
-    Ok((StatusCode::CREATED, Json(rows.into_iter().next().unwrap_or(json!({})))))
+    Ok((
+        StatusCode::CREATED,
+        Json(rows.into_iter().next().unwrap_or(json!({}))),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -128,10 +152,14 @@ pub async fn set_group_default(
     Path(group_id): Path<String>,
     Json(body): Json<SetGroupDefaultBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.db.query(
-        "UPDATE groups SET is_default = $is_default WHERE id = $id RETURNING id",
-        json!({ "id": group_id, "is_default": body.is_default }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    state
+        .db
+        .query(
+            "UPDATE groups SET is_default = $is_default WHERE id = $id RETURNING id",
+            json!({ "id": group_id, "is_default": body.is_default }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -139,11 +167,19 @@ pub async fn delete_group(
     State(state): State<Arc<AuthState>>,
     Path(group_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    match state.db.execute("DELETE FROM groups WHERE id = $id", json!({ "id": group_id })).await {
+    match state
+        .db
+        .execute(
+            "DELETE FROM groups WHERE id = $id",
+            json!({ "id": group_id }),
+        )
+        .await
+    {
         Ok(_) => Ok(Json(json!({ "ok": true }))),
-        Err(e) if harvest_db::is_foreign_key_violation(&e) => {
-            Err(err(StatusCode::CONFLICT, "group still has projects; move or delete them first"))
-        }
+        Err(e) if harvest_db::is_foreign_key_violation(&e) => Err(err(
+            StatusCode::CONFLICT,
+            "group still has projects; move or delete them first",
+        )),
         Err(_) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, "server error")),
     }
 }

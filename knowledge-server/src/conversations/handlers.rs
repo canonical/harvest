@@ -29,8 +29,11 @@ async fn load_user_conversation(
         "SELECT messages, summary, summary_upto FROM conversations WHERE id = $cid AND user_id = $uid",
         json!({ "uid": user_id, "cid": conv_id }),
     ).await?;
-    let Some(row) = rows.into_iter().next() else { return Ok((vec![], None)) };
-    let messages = row.get("messages")
+    let Some(row) = rows.into_iter().next() else {
+        return Ok((vec![], None));
+    };
+    let messages = row
+        .get("messages")
         .and_then(|v| v.as_str())
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
@@ -38,7 +41,9 @@ async fn load_user_conversation(
 }
 
 pub fn history_messages_from_raw(raw: &[Value]) -> Vec<HistoryMessage> {
-    raw.iter().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect()
+    raw.iter()
+        .filter_map(|v| serde_json::from_value(v.clone()).ok())
+        .collect()
 }
 
 pub async fn load_conversation_context(
@@ -131,7 +136,11 @@ pub async fn append_user_turn(
         user_text.to_string()
     };
 
-    let cost_microusd = pricing.price_call(usage, provider_used.map(|p| p.kind.as_str()).unwrap_or(""), provider_used.map(|p| p.model.as_str()).unwrap_or(""));
+    let cost_microusd = pricing.price_call(
+        usage,
+        provider_used.map(|p| p.kind.as_str()).unwrap_or(""),
+        provider_used.map(|p| p.model.as_str()).unwrap_or(""),
+    );
 
     let mut messages = prior_messages;
     messages.push(json!({
@@ -141,8 +150,19 @@ pub async fn append_user_turn(
         "attachments": attachments_meta,
     }));
     messages.push(build_assistant_message(
-        assistant_text, sources, tool_calls_made, tool_errors, turns, chain, question, confirm_action,
-        provider_used, duration_ms, usage, llm_call_count, cost_microusd,
+        assistant_text,
+        sources,
+        tool_calls_made,
+        tool_errors,
+        turns,
+        chain,
+        question,
+        confirm_action,
+        provider_used,
+        duration_ms,
+        usage,
+        llm_call_count,
+        cost_microusd,
     ));
 
     let messages_json = serde_json::to_string(&messages)?;
@@ -165,8 +185,19 @@ pub async fn append_user_turn(
     ).await?;
 
     if let Some(record) = crate::cost::build_turn_record(
-        crate::cost::CostScope::Chat, turn_id, user_id, provider_used, usage, llm_call_count, pricing,
-        duration_ms, None, Some(conv_id), None, None, None,
+        crate::cost::CostScope::Chat,
+        turn_id,
+        user_id,
+        provider_used,
+        usage,
+        llm_call_count,
+        pricing,
+        duration_ms,
+        None,
+        Some(conv_id),
+        None,
+        None,
+        None,
     ) {
         let _ = crate::cost::record_llm_call(db, &record).await;
     }
@@ -186,12 +217,21 @@ pub async fn list(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ConvState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.db.query(
-        "SELECT id, title, message_count, created_at, updated_at
-         FROM conversations WHERE user_id = $uid
-         ORDER BY updated_at DESC",
-        json!({ "uid": user.sub }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let rows = state
+        .db
+        .query(
+            "SELECT c.id, c.title, c.message_count, c.created_at, c.updated_at,
+                c.origin_type, c.origin_tracking_id,
+                k.name AS origin_api_key_name,
+                k.revoked_at AS origin_api_key_revoked_at
+         FROM conversations c
+         LEFT JOIN user_api_keys k ON k.id = c.origin_api_key_id
+         WHERE c.user_id = $uid
+         ORDER BY c.updated_at DESC",
+            json!({ "uid": user.sub }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(rows))
 }
 
@@ -205,8 +245,8 @@ pub async fn create(
     State(state): State<Arc<ConvState>>,
     Json(body): Json<CreateBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let id    = Uuid::new_v4().to_string();
-    let now   = harvest_db::now_rfc3339();
+    let id = Uuid::new_v4().to_string();
+    let now = harvest_db::now_rfc3339();
     let title = body.title.unwrap_or_else(|| "New conversation".to_string());
 
     state.db.query(
@@ -216,7 +256,10 @@ pub async fn create(
         json!({ "uid": user.sub, "id": id, "title": title, "now": now }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
-    Ok((StatusCode::CREATED, Json(json!({ "id": id, "title": title, "created_at": now }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "title": title, "created_at": now })),
+    ))
 }
 
 pub async fn get(
@@ -224,13 +267,24 @@ pub async fn get(
     State(state): State<Arc<ConvState>>,
     Path(conv_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.db.query(
-        "SELECT id, title, messages, created_at, updated_at
-         FROM conversations WHERE id = $cid AND user_id = $uid",
-        json!({ "uid": user.sub, "cid": conv_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let rows = state
+        .db
+        .query(
+            "SELECT c.id, c.title, c.messages, c.created_at, c.updated_at,
+                c.origin_type, c.origin_tracking_id,
+                k.name AS origin_api_key_name,
+                k.revoked_at AS origin_api_key_revoked_at
+         FROM conversations c
+         LEFT JOIN user_api_keys k ON k.id = c.origin_api_key_id
+         WHERE c.id = $cid AND c.user_id = $uid",
+            json!({ "uid": user.sub, "cid": conv_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
-    let row = rows.into_iter().next()
+    let row = rows
+        .into_iter()
+        .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
 
     let mut obj = row.as_object().cloned().unwrap_or_default();
@@ -255,22 +309,30 @@ pub async fn update(
     Path(conv_id): Path<String>,
     Json(body): Json<UpdateBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let now           = harvest_db::now_rfc3339();
-    let message_count = body.messages.as_array().map(|a| a.len() as i64).unwrap_or(0);
+    let now = harvest_db::now_rfc3339();
+    let message_count = body
+        .messages
+        .as_array()
+        .map(|a| a.len() as i64)
+        .unwrap_or(0);
     let messages_json = body.messages.to_string();
 
-    state.db.query(
-        "UPDATE conversations
+    state
+        .db
+        .query(
+            "UPDATE conversations
          SET title = $title, messages = $messages, message_count = $count, updated_at = $now,
              summary = NULL, summary_upto = 0
          WHERE id = $cid AND user_id = $uid
          RETURNING id",
-        json!({
-            "uid": user.sub, "cid": conv_id,
-            "title": body.title, "messages": messages_json,
-            "count": message_count, "now": now,
-        }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({
+                "uid": user.sub, "cid": conv_id,
+                "title": body.title, "messages": messages_json,
+                "count": message_count, "now": now,
+            }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -280,10 +342,14 @@ pub async fn delete(
     State(state): State<Arc<ConvState>>,
     Path(conv_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.db.query(
-        "DELETE FROM conversations WHERE id = $cid AND user_id = $uid",
-        json!({ "uid": user.sub, "cid": conv_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    state
+        .db
+        .query(
+            "DELETE FROM conversations WHERE id = $cid AND user_id = $uid",
+            json!({ "uid": user.sub, "cid": conv_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -296,7 +362,21 @@ mod tests {
             json!({ "type": "tool_call", "name": "find_subclasses", "input": {}, "status": "done", "preview": "x" }),
             json!({ "type": "enumeration", "tool": "find_subclasses", "input": { "class": "BaseVD" }, "result": "full" }),
         ];
-        let msg = build_assistant_message("answer", &[], 1, 0, 1, chain, None, None, None, 0, &Usage::default(), 1, 0);
+        let msg = build_assistant_message(
+            "answer",
+            &[],
+            1,
+            0,
+            1,
+            chain,
+            None,
+            None,
+            None,
+            0,
+            &Usage::default(),
+            1,
+            0,
+        );
         assert_eq!(msg["chain"].as_array().unwrap().len(), 1);
         assert_eq!(msg["enumerations"][0]["result"], "full");
         let history = history_messages_from_raw(&[msg]);
@@ -307,7 +387,21 @@ mod tests {
 
     #[test]
     fn assistant_message_without_enumerations_has_no_enumerations_field() {
-        let msg = build_assistant_message("hi", &[], 0, 0, 0, vec![], None, None, None, 0, &Usage::default(), 0, 0);
+        let msg = build_assistant_message(
+            "hi",
+            &[],
+            0,
+            0,
+            0,
+            vec![],
+            None,
+            None,
+            None,
+            0,
+            &Usage::default(),
+            0,
+            0,
+        );
         assert!(msg.get("enumerations").is_none());
     }
 
@@ -324,7 +418,21 @@ mod tests {
     #[test]
     fn build_assistant_message_includes_provider_when_present() {
         let used = used_provider();
-        let msg = build_assistant_message("hi", &[], 0, 0, 0, vec![], None, None, Some(&used), 1234, &Usage::default(), 0, 0);
+        let msg = build_assistant_message(
+            "hi",
+            &[],
+            0,
+            0,
+            0,
+            vec![],
+            None,
+            None,
+            Some(&used),
+            1234,
+            &Usage::default(),
+            0,
+            0,
+        );
         assert_eq!(msg["provider"]["provider_id"], "anthropic-main");
         assert_eq!(msg["provider"]["kind"], "anthropic");
         assert_eq!(msg["provider"]["model"], "claude-sonnet-5");
@@ -332,28 +440,88 @@ mod tests {
 
     #[test]
     fn build_assistant_message_omits_provider_key_when_none() {
-        let msg = build_assistant_message("hi", &[], 0, 0, 0, vec![], None, None, None, 0, &Usage::default(), 0, 0);
+        let msg = build_assistant_message(
+            "hi",
+            &[],
+            0,
+            0,
+            0,
+            vec![],
+            None,
+            None,
+            None,
+            0,
+            &Usage::default(),
+            0,
+            0,
+        );
         assert!(msg.as_object().unwrap().get("provider").is_none());
     }
 
     #[test]
     fn build_assistant_message_includes_duration_ms() {
-        let msg = build_assistant_message("hi", &[], 0, 0, 0, vec![], None, None, None, 4200, &Usage::default(), 0, 0);
+        let msg = build_assistant_message(
+            "hi",
+            &[],
+            0,
+            0,
+            0,
+            vec![],
+            None,
+            None,
+            None,
+            4200,
+            &Usage::default(),
+            0,
+            0,
+        );
         assert_eq!(msg["duration_ms"], 4200);
     }
 
     #[test]
     fn build_assistant_message_provider_round_trips_through_json_string() {
         let used = used_provider();
-        let msg = build_assistant_message("hi", &[], 0, 0, 0, vec![], None, None, Some(&used), 1234, &Usage::default(), 0, 0);
+        let msg = build_assistant_message(
+            "hi",
+            &[],
+            0,
+            0,
+            0,
+            vec![],
+            None,
+            None,
+            Some(&used),
+            1234,
+            &Usage::default(),
+            0,
+            0,
+        );
         let serialized = serde_json::to_string(&vec![msg]).unwrap();
         let parsed: Value = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed[0]["provider"]["model"], "claude-sonnet-5");
     }
     #[test]
     fn assistant_message_persists_the_exact_tool_metrics() {
-        let used = UsedProvider { provider_id: "gemini".into(), kind: "gemini".into(), model: "m".into() };
-        let msg = build_assistant_message("hi", &[], 7, 2, 3, vec![], None, None, Some(&used), 1234, &Usage::default(), 4, 0);
+        let used = UsedProvider {
+            provider_id: "gemini".into(),
+            kind: "gemini".into(),
+            model: "m".into(),
+        };
+        let msg = build_assistant_message(
+            "hi",
+            &[],
+            7,
+            2,
+            3,
+            vec![],
+            None,
+            None,
+            Some(&used),
+            1234,
+            &Usage::default(),
+            4,
+            0,
+        );
         assert_eq!(msg["tool_calls_made"], 7);
         assert_eq!(msg["tool_errors"], 2);
         assert_eq!(msg["turns"], 3);
@@ -362,7 +530,21 @@ mod tests {
 
     #[test]
     fn assistant_message_defaults_to_zero_metrics() {
-        let msg = build_assistant_message("hi", &[], 0, 0, 0, vec![], None, None, None, 0, &Usage::default(), 0, 0);
+        let msg = build_assistant_message(
+            "hi",
+            &[],
+            0,
+            0,
+            0,
+            vec![],
+            None,
+            None,
+            None,
+            0,
+            &Usage::default(),
+            0,
+            0,
+        );
         assert_eq!(msg["tool_calls_made"], 0);
         assert_eq!(msg["tool_errors"], 0);
         assert_eq!(msg["turns"], 0);
