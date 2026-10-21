@@ -163,7 +163,12 @@ impl<'a> Workflow<'a> {
     ) -> Result<String> {
         let features_text = features
             .iter()
-            .map(|f| format!("## {}\nDescription: {}\nIntent: {}", f.name, f.description, f.intent))
+            .map(|f| {
+                format!(
+                    "## {}\nDescription: {}\nIntent: {}",
+                    f.name, f.description, f.intent
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n\n---\n\n");
 
@@ -214,7 +219,13 @@ impl<'a> Workflow<'a> {
             tracing::info!(section, filename = plan.filename, "generating page");
             let content = self
                 .generate_page_content(
-                    repo, version, section, section_guidance, plan, features, sources,
+                    repo,
+                    version,
+                    section,
+                    section_guidance,
+                    plan,
+                    features,
+                    sources,
                 )
                 .await?;
             pages.push(DocPage {
@@ -238,7 +249,9 @@ impl<'a> Workflow<'a> {
         tracing::info!(repo, version, count = features.len(), "identified features");
 
         tracing::info!(repo, version, "Phase 2+3: describing features and intent");
-        let described = self.describe_features(repo, version, &features, sources).await?;
+        let described = self
+            .describe_features(repo, version, &features, sources)
+            .await?;
 
         tracing::info!(repo, version, "Phase 4: generating Diataxis documentation");
         let sections = [
@@ -258,13 +271,15 @@ impl<'a> Workflow<'a> {
                 .await?;
 
             let section_dir = out_base.join(section);
-            tokio::fs::create_dir_all(&section_dir).await
+            tokio::fs::create_dir_all(&section_dir)
+                .await
                 .with_context(|| format!("creating section dir {}", section_dir.display()))?;
 
             let mut entries = Vec::new();
             for page in &pages {
                 let file_path = section_dir.join(&page.filename);
-                tokio::fs::write(&file_path, &page.content).await
+                tokio::fs::write(&file_path, &page.content)
+                    .await
                     .with_context(|| format!("writing {}", file_path.display()))?;
                 entries.push(crate::documentation::IndexEntry {
                     filename: page.filename.clone(),
@@ -330,7 +345,10 @@ fn extract_json(raw: &str) -> &str {
     let s = raw.trim();
     if s.starts_with("```") {
         let after_fence = s.find('\n').map(|i| &s[i + 1..]).unwrap_or(s);
-        after_fence.trim_end_matches("```").trim_end_matches("```json").trim()
+        after_fence
+            .trim_end_matches("```")
+            .trim_end_matches("```json")
+            .trim()
     } else {
         s
     }
@@ -455,7 +473,10 @@ mod tests {
 
     impl SequenceMock {
         fn new(responses: Vec<String>) -> Self {
-            Self { calls: Arc::new(AtomicUsize::new(0)), responses }
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                responses,
+            }
         }
     }
 
@@ -469,7 +490,9 @@ mod tests {
 
     #[tokio::test]
     async fn identify_features_parses_llm_json() {
-        let llm = MockLlmClient { response: features_json() };
+        let llm = MockLlmClient {
+            response: features_json(),
+        };
         let dir = tempfile::tempdir().unwrap();
         let docs_dir = dir.path().to_path_buf();
         let feats = make_workflow(&llm, &docs_dir)
@@ -496,13 +519,16 @@ mod tests {
 
     #[tokio::test]
     async fn describe_features_produces_described_features() {
-        let llm = MockLlmClient { response: describe_json() };
+        let llm = MockLlmClient {
+            response: describe_json(),
+        };
         let dir = tempfile::tempdir().unwrap();
         let docs_dir = dir.path().to_path_buf();
         let features = serde_json::from_str::<Vec<Feature>>(&features_json()).unwrap();
-        let sources = vec![
-            ("authenticate".to_string(), "fn authenticate(t: &str) -> bool { true }".to_string()),
-        ];
+        let sources = vec![(
+            "authenticate".to_string(),
+            "fn authenticate(t: &str) -> bool { true }".to_string(),
+        )];
         let described = make_workflow(&llm, &docs_dir)
             .describe_features("myrepo", "v1.0", &features, &sources)
             .await
@@ -519,7 +545,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let docs_dir = dir.path().to_path_buf();
         let pages = make_workflow(&llm, &docs_dir)
-            .generate_section("repo", "v1.0", "tutorials", "tutorial guidance", &sample_described(), &[])
+            .generate_section(
+                "repo",
+                "v1.0",
+                "tutorials",
+                "tutorial guidance",
+                &sample_described(),
+                &[],
+            )
             .await
             .unwrap();
         assert_eq!(pages.len(), 1);
@@ -535,7 +568,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let docs_dir = dir.path().to_path_buf();
         let pages = make_workflow(&llm, &docs_dir)
-            .generate_section("repo", "v1.0", "tutorials", "guidance", &sample_described(), &[])
+            .generate_section(
+                "repo",
+                "v1.0",
+                "tutorials",
+                "guidance",
+                &sample_described(),
+                &[],
+            )
             .await
             .unwrap();
         assert_eq!(pages[0].content, raw_md);
@@ -556,10 +596,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let docs_dir = dir.path().to_path_buf();
         make_workflow(&llm, &docs_dir)
-            .generate_section("repo", "v1.0", "tutorials", "guidance", &sample_described(), &[])
+            .generate_section(
+                "repo",
+                "v1.0",
+                "tutorials",
+                "guidance",
+                &sample_described(),
+                &[],
+            )
             .await
             .unwrap();
-        assert_eq!(counter.load(Ordering::SeqCst), 2, "expected exactly 2 LLM calls");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "expected exactly 2 LLM calls"
+        );
     }
 
     #[tokio::test]
@@ -579,7 +630,10 @@ mod tests {
         let llm = SequenceMock::new(responses);
         let dir = tempfile::tempdir().unwrap();
         let docs_dir = dir.path().to_path_buf();
-        let workflow = Workflow { llm: &llm, docs_dir: &docs_dir };
+        let workflow = Workflow {
+            llm: &llm,
+            docs_dir: &docs_dir,
+        };
 
         workflow
             .run("testrepo", "v1.0", &sample_structure(), &[])
@@ -592,7 +646,10 @@ mod tests {
             let page = section_dir.join("getting-started.md");
             assert!(page.exists(), "missing page file in {section}");
             let content = std::fs::read_to_string(&page).unwrap();
-            assert!(content.starts_with("# Getting Started"), "page content in {section}");
+            assert!(
+                content.starts_with("# Getting Started"),
+                "page content in {section}"
+            );
         }
 
         let index_path = dir.path().join("testrepo").join("v1.0").join("index.json");
@@ -618,11 +675,16 @@ mod tests {
             async fn complete(&self, _s: &str, _u: &str) -> Result<String> {
                 let idx = self.0.fetch_add(1, Ordering::SeqCst);
                 let responses = vec![
-                    features_json(), describe_json(),
-                    plan_json(), page_markdown(),
-                    plan_json(), page_markdown(),
-                    plan_json(), page_markdown(),
-                    plan_json(), page_markdown(),
+                    features_json(),
+                    describe_json(),
+                    plan_json(),
+                    page_markdown(),
+                    plan_json(),
+                    page_markdown(),
+                    plan_json(),
+                    page_markdown(),
+                    plan_json(),
+                    page_markdown(),
                 ];
                 Ok(responses[idx % responses.len()].clone())
             }
@@ -630,12 +692,16 @@ mod tests {
         let llm = CountingMock(Arc::clone(&counter));
         let dir = tempfile::tempdir().unwrap();
         let docs_dir = dir.path().to_path_buf();
-        Workflow { llm: &llm, docs_dir: &docs_dir }
-            .run("testrepo", "v1.0", &sample_structure(), &[])
-            .await
-            .unwrap();
+        Workflow {
+            llm: &llm,
+            docs_dir: &docs_dir,
+        }
+        .run("testrepo", "v1.0", &sample_structure(), &[])
+        .await
+        .unwrap();
         assert_eq!(
-            counter.load(Ordering::SeqCst), 10,
+            counter.load(Ordering::SeqCst),
+            10,
             "expected 10 LLM calls for 1 feature and 4 sections with 1 page each"
         );
     }

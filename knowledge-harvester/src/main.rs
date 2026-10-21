@@ -5,7 +5,10 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "knowledge-harvester", about = "Harvest code knowledge from git repositories")]
+#[command(
+    name = "knowledge-harvester",
+    about = "Harvest code knowledge from git repositories"
+)]
 struct Cli {
     #[arg(short, long, default_value = "harvester.toml")]
     config: PathBuf,
@@ -21,9 +24,16 @@ enum Command {
         #[arg(short, long, help = "Re-ingest versions that were already processed")]
         force: bool,
     },
-    #[command(about = "Continuously poll repositories and ingest new versions on a fixed interval")]
+    #[command(
+        about = "Continuously poll repositories and ingest new versions on a fixed interval"
+    )]
     Watch {
-        #[arg(short, long, default_value = "300", help = "Polling interval in seconds")]
+        #[arg(
+            short,
+            long,
+            default_value = "300",
+            help = "Polling interval in seconds"
+        )]
         interval_secs: u64,
     },
     #[command(about = "Mark all ingested versions as pending so the next run re-processes them")]

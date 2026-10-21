@@ -31,7 +31,9 @@ impl GraphWriter {
     }
 
     pub async fn reset_ingested(&self) -> Result<()> {
-        self.db.execute("UPDATE versions SET ingested = false", json!({})).await?;
+        self.db
+            .execute("UPDATE versions SET ingested = false", json!({}))
+            .await?;
         Ok(())
     }
 
@@ -44,33 +46,52 @@ impl GraphWriter {
             "SELECT parser_version FROM code_versions WHERE repo = $repo AND tag = $tag AND ingested LIMIT 1",
             json!({ "repo": repo, "tag": tag }),
         ).await?;
-        Ok(match rows.first().and_then(|r| r["parser_version"].as_i64()) {
-            None => IngestionStatus::NotIngested,
-            Some(v) if v < i64::from(PARSER_VERSION) => IngestionStatus::Stale { parser_version: v as i32 },
-            Some(_) => IngestionStatus::Current,
-        })
+        Ok(
+            match rows.first().and_then(|r| r["parser_version"].as_i64()) {
+                None => IngestionStatus::NotIngested,
+                Some(v) if v < i64::from(PARSER_VERSION) => IngestionStatus::Stale {
+                    parser_version: v as i32,
+                },
+                Some(_) => IngestionStatus::Current,
+            },
+        )
     }
 
     pub async fn ingested_versions(&self, repo: &str) -> Result<Vec<String>> {
-        let rows = self.db.query(
-            "SELECT tag FROM code_versions WHERE repo = $repo AND ingested ORDER BY timestamp",
-            json!({ "repo": repo }),
-        ).await?;
-        Ok(rows.iter().filter_map(|r| r["tag"].as_str().map(String::from)).collect())
+        let rows = self
+            .db
+            .query(
+                "SELECT tag FROM code_versions WHERE repo = $repo AND ingested ORDER BY timestamp",
+                json!({ "repo": repo }),
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| r["tag"].as_str().map(String::from))
+            .collect())
     }
 
     pub async fn upsert_repository(&self, name: &str, url: &str) -> Result<()> {
-        self.db.execute(
-            "INSERT INTO repositories (name, url) VALUES ($name, $url)
+        self.db
+            .execute(
+                "INSERT INTO repositories (name, url) VALUES ($name, $url)
              ON CONFLICT (name) DO UPDATE SET url = EXCLUDED.url",
-            json!({ "name": name, "url": url }),
-        ).await?;
+                json!({ "name": name, "url": url }),
+            )
+            .await?;
         Ok(())
     }
 
-    pub async fn upsert_version(&self, repo: &str, tag: &str, timestamp: i64, ingested: bool) -> Result<()> {
-        self.db.execute(
-            "WITH r AS (
+    pub async fn upsert_version(
+        &self,
+        repo: &str,
+        tag: &str,
+        timestamp: i64,
+        ingested: bool,
+    ) -> Result<()> {
+        self.db
+            .execute(
+                "WITH r AS (
                  INSERT INTO repositories (name) VALUES ($repo)
                  ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
                  RETURNING id
@@ -80,15 +101,20 @@ impl GraphWriter {
              ON CONFLICT (repository_id, tag)
                  DO UPDATE SET timestamp = EXCLUDED.timestamp,
                                ingested  = versions.ingested OR EXCLUDED.ingested",
-            json!({ "repo": repo, "tag": tag, "timestamp": timestamp, "ingested": ingested }),
-        ).await?;
+                json!({ "repo": repo, "tag": tag, "timestamp": timestamp, "ingested": ingested }),
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn write_version(&self, repo: &str, tag: &str, files: &[ParsedFile]) -> Result<()> {
         let tx = self.db.begin().await?;
         let version_id = ensure_version(&tx, repo, tag).await?;
-        tx.execute("DELETE FROM files WHERE version_id = $vid", json!({ "vid": version_id })).await?;
+        tx.execute(
+            "DELETE FROM files WHERE version_id = $vid",
+            json!({ "vid": version_id }),
+        )
+        .await?;
         for file in files {
             write_file(&tx, version_id, file).await?;
         }
@@ -101,14 +127,16 @@ impl GraphWriter {
         tx.execute(
             "UPDATE versions SET ingested = true, parser_version = $pv WHERE id = $vid",
             json!({ "vid": version_id, "pv": PARSER_VERSION }),
-        ).await?;
+        )
+        .await?;
         tx.commit().await
     }
 }
 
 async fn ensure_version(tx: &Tx, repo: &str, tag: &str) -> Result<i64> {
-    let rows = tx.query(
-        "WITH r AS (
+    let rows = tx
+        .query(
+            "WITH r AS (
              INSERT INTO repositories (name) VALUES ($repo)
              ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
              RETURNING id
@@ -116,8 +144,9 @@ async fn ensure_version(tx: &Tx, repo: &str, tag: &str) -> Result<i64> {
          INSERT INTO versions (repository_id, tag) SELECT id, $tag FROM r
          ON CONFLICT (repository_id, tag) DO UPDATE SET tag = EXCLUDED.tag
          RETURNING id",
-        json!({ "repo": repo, "tag": tag }),
-    ).await?;
+            json!({ "repo": repo, "tag": tag }),
+        )
+        .await?;
     rows.first()
         .and_then(|r| r["id"].as_i64())
         .ok_or_else(|| anyhow!("could not resolve version {repo}:{tag}"))
@@ -125,7 +154,9 @@ async fn ensure_version(tx: &Tx, repo: &str, tag: &str) -> Result<i64> {
 
 fn last_by_key(items: Vec<Value>, key: &str) -> Vec<Value> {
     let mut seen = HashSet::new();
-    let mut kept: Vec<Value> = items.into_iter().rev()
+    let mut kept: Vec<Value> = items
+        .into_iter()
+        .rev()
         .filter(|item| seen.insert(item[key].as_str().unwrap_or_default().to_string()))
         .collect();
     kept.reverse();
@@ -133,27 +164,38 @@ fn last_by_key(items: Vec<Value>, key: &str) -> Vec<Value> {
 }
 
 async fn write_file(tx: &Tx, version_id: i64, file: &ParsedFile) -> Result<()> {
-    let rows = tx.query(
-        "INSERT INTO files (version_id, path, language) VALUES ($vid, $path, $lang)
+    let rows = tx
+        .query(
+            "INSERT INTO files (version_id, path, language) VALUES ($vid, $path, $lang)
          ON CONFLICT (version_id, path) DO UPDATE SET language = EXCLUDED.language
          RETURNING id",
-        json!({ "vid": version_id, "path": file.path, "lang": file.language }),
-    ).await?;
-    let file_id = rows.first()
+            json!({ "vid": version_id, "path": file.path, "lang": file.language }),
+        )
+        .await?;
+    let file_id = rows
+        .first()
         .and_then(|r| r["id"].as_i64())
         .ok_or_else(|| anyhow!("could not insert file {}", file.path))?;
 
     if !file.functions.is_empty() {
-        let fns = last_by_key(file.functions.iter().map(|f| json!({
-            "name":       f.name,
-            "kind":       f.kind,
-            "signature":  f.signature,
-            "start_line": f.start_line,
-            "end_line":   f.end_line,
-            "source":     f.source,
-            "impl_type":  f.impl_type,
-            "docstring":  f.docstring,
-        })).collect(), "name");
+        let fns = last_by_key(
+            file.functions
+                .iter()
+                .map(|f| {
+                    json!({
+                        "name":       f.name,
+                        "kind":       f.kind,
+                        "signature":  f.signature,
+                        "start_line": f.start_line,
+                        "end_line":   f.end_line,
+                        "source":     f.source,
+                        "impl_type":  f.impl_type,
+                        "docstring":  f.docstring,
+                    })
+                })
+                .collect(),
+            "name",
+        );
         tx.execute(
             "INSERT INTO symbols (file_id, version_id, label, name, kind, signature,
                                   start_line, end_line, source, impl_type, docstring)
@@ -167,23 +209,32 @@ async fn write_file(tx: &Tx, version_id: i64, file: &ParsedFile) -> Result<()> {
                  source = EXCLUDED.source, impl_type = EXCLUDED.impl_type,
                  docstring = EXCLUDED.docstring",
             json!({ "file_id": file_id, "vid": version_id, "fns": fns }),
-        ).await?;
+        )
+        .await?;
     }
 
     if !file.classes.is_empty() {
-        let classes = last_by_key(file.classes.iter().map(|c| json!({
-            "name":       c.name,
-            "kind":       c.kind,
-            "start_line": c.start_line,
-            "end_line":   c.end_line,
-            "source":     c.source,
-            "bases":      c.bases,
-            "traits":     c.traits,
-            "embeds":     c.embeds,
-            "uses":       c.uses,
-            "docstring":  c.docstring,
-            "decorators": c.decorators,
-        })).collect(), "name");
+        let classes = last_by_key(
+            file.classes
+                .iter()
+                .map(|c| {
+                    json!({
+                        "name":       c.name,
+                        "kind":       c.kind,
+                        "start_line": c.start_line,
+                        "end_line":   c.end_line,
+                        "source":     c.source,
+                        "bases":      c.bases,
+                        "traits":     c.traits,
+                        "embeds":     c.embeds,
+                        "uses":       c.uses,
+                        "docstring":  c.docstring,
+                        "decorators": c.decorators,
+                    })
+                })
+                .collect(),
+            "name",
+        );
         tx.execute(
             "INSERT INTO symbols (file_id, version_id, label, name, kind, start_line, end_line,
                                   source, bases, traits, embeds, uses, docstring, decorators)
@@ -203,20 +254,26 @@ async fn write_file(tx: &Tx, version_id: i64, file: &ParsedFile) -> Result<()> {
                  embeds = EXCLUDED.embeds, uses = EXCLUDED.uses,
                  docstring = EXCLUDED.docstring, decorators = EXCLUDED.decorators",
             json!({ "file_id": file_id, "vid": version_id, "classes": classes }),
-        ).await?;
+        )
+        .await?;
     }
 
     if !file.imports.is_empty() {
-        let imports = last_by_key(file.imports.iter()
-            .map(|i| json!({ "target": i.target, "line": i.line }))
-            .collect(), "target");
+        let imports = last_by_key(
+            file.imports
+                .iter()
+                .map(|i| json!({ "target": i.target, "line": i.line }))
+                .collect(),
+            "target",
+        );
         tx.execute(
             "INSERT INTO imports (file_id, target, line)
              SELECT $file_id, i->>'target', (i->>'line')::int
              FROM jsonb_array_elements($imports::jsonb) AS i
              ON CONFLICT (file_id, target) DO UPDATE SET line = EXCLUDED.line",
             json!({ "file_id": file_id, "imports": imports }),
-        ).await?;
+        )
+        .await?;
     }
 
     Ok(())
@@ -278,6 +335,7 @@ async fn link_class_edges(tx: &Tx, version_id: i64, column: &str, relation: &str
              ON CONFLICT DO NOTHING"
         ),
         json!({ "vid": version_id }),
-    ).await?;
+    )
+    .await?;
     Ok(())
 }

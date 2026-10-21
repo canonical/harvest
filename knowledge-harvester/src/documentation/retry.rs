@@ -20,7 +20,12 @@ where
             Err(e) if e.is_timeout() && attempt < max_retries => {
                 attempt += 1;
                 let delay = 2u64 * (1u64 << attempt.min(4));
-                tracing::warn!(attempt, delay_secs = delay, provider, "request timed out — retrying");
+                tracing::warn!(
+                    attempt,
+                    delay_secs = delay,
+                    provider,
+                    "request timed out — retrying"
+                );
                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                 continue;
             }
@@ -38,7 +43,12 @@ where
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(RATE_LIMIT_BASE_DELAY_SECS * (1u64 << attempt.min(4)));
             attempt += 1;
-            tracing::warn!(attempt, delay_secs = delay, provider, "rate limited — retrying");
+            tracing::warn!(
+                attempt,
+                delay_secs = delay,
+                provider,
+                "rate limited — retrying"
+            );
             tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
             continue;
         }

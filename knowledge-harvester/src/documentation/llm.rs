@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
 
-use crate::config::LlmConfig;
 use super::retry;
+use crate::config::LlmConfig;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -21,31 +21,41 @@ pub trait LlmClient: Send + Sync {
 
 pub fn from_config(config: &LlmConfig) -> Box<dyn LlmClient> {
     match config {
-        LlmConfig::Anthropic { model, api_key, timeout_secs, max_retries } => {
-            Box::new(AnthropicClient::new(
-                model.clone(),
-                api_key.clone(),
-                *timeout_secs,
-                *max_retries,
-            ))
-        }
-        LlmConfig::Gemini { model, api_key, timeout_secs, max_retries } => {
-            Box::new(GeminiClient::new(
-                model.clone(),
-                api_key.clone(),
-                *timeout_secs,
-                *max_retries,
-            ))
-        }
-        LlmConfig::OpenAiCompat { base_url, api_key, model, timeout_secs, max_retries } => {
-            Box::new(OpenAiCompatClient::new(
-                base_url.clone(),
-                api_key.clone(),
-                model.clone(),
-                *timeout_secs,
-                *max_retries,
-            ))
-        }
+        LlmConfig::Anthropic {
+            model,
+            api_key,
+            timeout_secs,
+            max_retries,
+        } => Box::new(AnthropicClient::new(
+            model.clone(),
+            api_key.clone(),
+            *timeout_secs,
+            *max_retries,
+        )),
+        LlmConfig::Gemini {
+            model,
+            api_key,
+            timeout_secs,
+            max_retries,
+        } => Box::new(GeminiClient::new(
+            model.clone(),
+            api_key.clone(),
+            *timeout_secs,
+            *max_retries,
+        )),
+        LlmConfig::OpenAiCompat {
+            base_url,
+            api_key,
+            model,
+            timeout_secs,
+            max_retries,
+        } => Box::new(OpenAiCompatClient::new(
+            base_url.clone(),
+            api_key.clone(),
+            model.clone(),
+            *timeout_secs,
+            *max_retries,
+        )),
     }
 }
 
@@ -93,19 +103,25 @@ impl LlmClient for AnthropicClient {
             self.max_retries,
             ANTHROPIC_OVERLOAD_CODES,
             "Anthropic",
-            || self.client
-                .post(&self.base_url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", ANTHROPIC_VERSION)
-                .header("content-type", "application/json")
-                .json(&body)
-                .send(),
-        ).await?;
+            || {
+                self.client
+                    .post(&self.base_url)
+                    .header("x-api-key", &self.api_key)
+                    .header("anthropic-version", ANTHROPIC_VERSION)
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .send()
+            },
+        )
+        .await?;
 
         let status = response.status();
         let body_text = response.text().await?;
-        let json: Value = serde_json::from_str(&body_text)
-            .map_err(|e| anyhow::anyhow!("Anthropic API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+        let json: Value = serde_json::from_str(&body_text).map_err(|e| {
+            anyhow::anyhow!(
+                "Anthropic API returned non-JSON (status {status}): {e}\nbody: {body_text}"
+            )
+        })?;
 
         if !status.is_success() {
             bail!("Anthropic API error {status}: {json}");
@@ -141,7 +157,13 @@ impl OpenAiCompatClient {
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .expect("failed to build HTTP client");
-        Self { base_url, api_key, model, client, max_retries }
+        Self {
+            base_url,
+            api_key,
+            model,
+            client,
+            max_retries,
+        }
     }
 
     #[cfg(test)]
@@ -175,12 +197,16 @@ impl LlmClient for OpenAiCompatClient {
                 }
                 req.send()
             },
-        ).await?;
+        )
+        .await?;
 
         let status = response.status();
         let body_text = response.text().await?;
-        let json: Value = serde_json::from_str(&body_text)
-            .map_err(|e| anyhow::anyhow!("OpenAI-compat API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+        let json: Value = serde_json::from_str(&body_text).map_err(|e| {
+            anyhow::anyhow!(
+                "OpenAI-compat API returned non-JSON (status {status}): {e}\nbody: {body_text}"
+            )
+        })?;
 
         if !status.is_success() {
             bail!("OpenAI-compat API error {status}: {json}");
@@ -210,7 +236,13 @@ impl GeminiClient {
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .expect("failed to build HTTP client");
-        Self { model, api_key, client, base_url: GEMINI_API_BASE.to_string(), max_retries }
+        Self {
+            model,
+            api_key,
+            client,
+            base_url: GEMINI_API_BASE.to_string(),
+            max_retries,
+        }
     }
 
     #[cfg(test)]
@@ -220,7 +252,10 @@ impl GeminiClient {
     }
 
     fn endpoint_url(&self) -> String {
-        format!("{}/{}:generateContent?key={}", self.base_url, self.model, self.api_key)
+        format!(
+            "{}/{}:generateContent?key={}",
+            self.base_url, self.model, self.api_key
+        )
     }
 }
 
@@ -238,17 +273,19 @@ impl LlmClient for GeminiClient {
 
         let url = self.endpoint_url();
 
-        let response = retry::send_with_retry(
-            self.max_retries,
-            GEMINI_OVERLOAD_CODES,
-            "Gemini",
-            || self.client.post(&url).json(&body).send(),
-        ).await?;
+        let response =
+            retry::send_with_retry(self.max_retries, GEMINI_OVERLOAD_CODES, "Gemini", || {
+                self.client.post(&url).json(&body).send()
+            })
+            .await?;
 
         let status = response.status();
         let body_text = response.text().await?;
-        let json: Value = serde_json::from_str(&body_text)
-            .map_err(|e| anyhow::anyhow!("Gemini API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+        let json: Value = serde_json::from_str(&body_text).map_err(|e| {
+            anyhow::anyhow!(
+                "Gemini API returned non-JSON (status {status}): {e}\nbody: {body_text}"
+            )
+        })?;
 
         if !status.is_success() {
             bail!("Gemini API error {status}: {json}");
@@ -283,8 +320,7 @@ mod gemini_tests {
     use httpmock::prelude::*;
 
     fn make_client(base_url: &str) -> GeminiClient {
-        GeminiClient::new("gemini-test".into(), "test-key".into(), 30, 0)
-            .with_base_url(base_url)
+        GeminiClient::new("gemini-test".into(), "test-key".into(), 30, 0).with_base_url(base_url)
     }
 
     fn text_response() -> serde_json::Value {
@@ -313,7 +349,8 @@ mod gemini_tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("POST").path("/gemini-test:generateContent");
-            then.status(400).json_body(serde_json::json!({ "error": { "message": "bad" } }));
+            then.status(400)
+                .json_body(serde_json::json!({ "error": { "message": "bad" } }));
         });
 
         let client = make_client(&server.base_url());

@@ -1,10 +1,10 @@
+use harvest_db::test_support::TestDb;
+use knowledge_harvester::graph::model::CallRef;
 use knowledge_harvester::graph::{
     model::{ClassNode, FunctionNode, ImportNode, ParsedFile},
     writer::{GraphWriter, IngestionStatus},
 };
 use knowledge_harvester::parser::PARSER_VERSION;
-use harvest_db::test_support::TestDb;
-use knowledge_harvester::graph::model::CallRef;
 use serde_json::json;
 
 macro_rules! setup {
@@ -78,7 +78,10 @@ fn make_file(repo: &str, version: &str, path: &str) -> ParsedFile {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn upsert_version_not_yet_ingested() {
     setup!(writer, container);
-    writer.upsert_version("myrepo", "v1.0", 1_000_000, false).await.unwrap();
+    writer
+        .upsert_version("myrepo", "v1.0", 1_000_000, false)
+        .await
+        .unwrap();
     assert!(!writer.is_ingested("myrepo", "v1.0").await.unwrap());
 }
 
@@ -86,8 +89,14 @@ async fn upsert_version_not_yet_ingested() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn upsert_version_is_idempotent() {
     setup!(writer, container);
-    writer.upsert_version("repo", "v1.0", 1_000, false).await.unwrap();
-    writer.upsert_version("repo", "v1.0", 1_000, false).await.unwrap();
+    writer
+        .upsert_version("repo", "v1.0", 1_000, false)
+        .await
+        .unwrap();
+    writer
+        .upsert_version("repo", "v1.0", 1_000, false)
+        .await
+        .unwrap();
     assert!(!writer.is_ingested("repo", "v1.0").await.unwrap());
 }
 
@@ -128,8 +137,14 @@ async fn ingested_versions_empty_before_any_ingestion() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn ingested_versions_lists_only_completed_versions() {
     setup!(writer, container);
-    writer.upsert_version("r", "v1", 1_000, false).await.unwrap();
-    writer.upsert_version("r", "v2", 2_000, false).await.unwrap();
+    writer
+        .upsert_version("r", "v1", 1_000, false)
+        .await
+        .unwrap();
+    writer
+        .upsert_version("r", "v2", 2_000, false)
+        .await
+        .unwrap();
     writer.write_version("r", "v1", &[]).await.unwrap();
 
     let versions = writer.ingested_versions("r").await.unwrap();
@@ -161,7 +176,10 @@ async fn write_version_is_idempotent() {
     setup!(writer, container);
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
     let file = make_file("r", "v1", "src/lib.rs");
-    writer.write_version("r", "v1", &[file.clone()]).await.unwrap();
+    writer
+        .write_version("r", "v1", &[file.clone()])
+        .await
+        .unwrap();
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
     writer.write_version("r", "v1", &[file]).await.unwrap();
     assert!(writer.is_ingested("r", "v1").await.unwrap());
@@ -171,11 +189,23 @@ async fn write_version_is_idempotent() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn two_versions_are_tracked_independently() {
     setup!(writer, container);
-    writer.upsert_version("r", "v1", 1_000, false).await.unwrap();
-    writer.upsert_version("r", "v2", 2_000, false).await.unwrap();
+    writer
+        .upsert_version("r", "v1", 1_000, false)
+        .await
+        .unwrap();
+    writer
+        .upsert_version("r", "v2", 2_000, false)
+        .await
+        .unwrap();
 
-    writer.write_version("r", "v1", &[make_file("r", "v1", "src/lib.rs")]).await.unwrap();
-    writer.write_version("r", "v2", &[make_file("r", "v2", "src/lib.rs")]).await.unwrap();
+    writer
+        .write_version("r", "v1", &[make_file("r", "v1", "src/lib.rs")])
+        .await
+        .unwrap();
+    writer
+        .write_version("r", "v2", &[make_file("r", "v2", "src/lib.rs")])
+        .await
+        .unwrap();
 
     let versions = writer.ingested_versions("r").await.unwrap();
     assert_eq!(versions.len(), 2);
@@ -188,7 +218,16 @@ async fn two_versions_are_tracked_independently() {
 async fn write_version_stores_symbols_calls_and_class_links() {
     setup!(writer, test_db);
     let mut file = make_file("r", "v1", "src/lib.rs");
-    file.functions[0].calls = vec![CallRef { callee: "beta".into(), line: 2 }, CallRef { callee: "missing".into(), line: 2 }];
+    file.functions[0].calls = vec![
+        CallRef {
+            callee: "beta".into(),
+            line: 2,
+        },
+        CallRef {
+            callee: "missing".into(),
+            line: 2,
+        },
+    ];
     let mut child = file.classes[0].clone();
     child.name = "Child".into();
     child.bases = vec!["MyStruct".into()];
@@ -199,7 +238,10 @@ async fn write_version_stores_symbols_calls_and_class_links() {
     file.functions.push(duplicate);
 
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
-    writer.write_version("r", "v1", &[file.clone()]).await.unwrap();
+    writer
+        .write_version("r", "v1", &[file.clone()])
+        .await
+        .unwrap();
     writer.write_version("r", "v1", &[file]).await.unwrap();
 
     let db = &test_db.db;
@@ -207,21 +249,39 @@ async fn write_version_stores_symbols_calls_and_class_links() {
         "SELECT label, name, start_line FROM code_symbols WHERE repo = 'r' AND version = 'v1' ORDER BY label, name",
         json!({}),
     ).await.unwrap();
-    let names: Vec<_> = symbols.iter().map(|s| s["name"].as_str().unwrap()).collect();
+    let names: Vec<_> = symbols
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
     assert_eq!(names, ["Child", "MyStruct", "alpha", "beta"]);
-    assert_eq!(symbols[3]["start_line"], 40, "the last same-named function wins");
+    assert_eq!(
+        symbols[3]["start_line"], 40,
+        "the last same-named function wins"
+    );
 
-    let edges = db.query(
-        "SELECT relation, src_name, dst_name, line FROM code_edges ORDER BY relation",
-        json!({}),
-    ).await.unwrap();
-    assert_eq!(edges, vec![
-        json!({ "relation": "CALLS", "src_name": "alpha", "dst_name": "beta", "line": 2 }),
-        json!({ "relation": "INHERITS", "src_name": "Child", "dst_name": "MyStruct", "line": null }),
-    ]);
+    let edges = db
+        .query(
+            "SELECT relation, src_name, dst_name, line FROM code_edges ORDER BY relation",
+            json!({}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        edges,
+        vec![
+            json!({ "relation": "CALLS", "src_name": "alpha", "dst_name": "beta", "line": 2 }),
+            json!({ "relation": "INHERITS", "src_name": "Child", "dst_name": "MyStruct", "line": null }),
+        ]
+    );
 
-    let imports = db.query("SELECT target, line FROM code_imports", json!({})).await.unwrap();
-    assert_eq!(imports, vec![json!({ "target": "std::collections::HashMap", "line": 1 })]);
+    let imports = db
+        .query("SELECT target, line FROM code_imports", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        imports,
+        vec![json!({ "target": "std::collections::HashMap", "line": 1 })]
+    );
 }
 
 #[tokio::test]
@@ -230,20 +290,35 @@ async fn version_ingested_by_an_older_parser_is_stale_until_reingested() {
     setup!(writer, test_db);
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
     writer.write_version("r", "v1", &[]).await.unwrap();
-    assert_eq!(writer.ingestion_status("r", "v1").await.unwrap(), IngestionStatus::Current);
-
-    test_db.db.execute(
-        "UPDATE versions SET parser_version = $pv",
-        json!({ "pv": PARSER_VERSION - 1 }),
-    ).await.unwrap();
     assert_eq!(
         writer.ingestion_status("r", "v1").await.unwrap(),
-        IngestionStatus::Stale { parser_version: PARSER_VERSION - 1 },
+        IngestionStatus::Current
     );
-    assert!(!writer.is_ingested("r", "v1").await.unwrap(), "a stale version must be harvested again");
+
+    test_db
+        .db
+        .execute(
+            "UPDATE versions SET parser_version = $pv",
+            json!({ "pv": PARSER_VERSION - 1 }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        writer.ingestion_status("r", "v1").await.unwrap(),
+        IngestionStatus::Stale {
+            parser_version: PARSER_VERSION - 1
+        },
+    );
+    assert!(
+        !writer.is_ingested("r", "v1").await.unwrap(),
+        "a stale version must be harvested again"
+    );
 
     writer.write_version("r", "v1", &[]).await.unwrap();
-    assert_eq!(writer.ingestion_status("r", "v1").await.unwrap(), IngestionStatus::Current);
+    assert_eq!(
+        writer.ingestion_status("r", "v1").await.unwrap(),
+        IngestionStatus::Current
+    );
 }
 
 #[tokio::test]
@@ -253,9 +328,13 @@ async fn reingesting_keeps_the_old_data_visible_until_the_new_data_is_written() 
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
     writer.write_version("r", "v1", &[]).await.unwrap();
     writer.upsert_version("r", "v1", 0, false).await.unwrap();
-    let rows = test_db.db.query(
-        "SELECT ingested FROM code_versions WHERE repo = 'r' AND tag = 'v1'",
-        json!({}),
-    ).await.unwrap();
+    let rows = test_db
+        .db
+        .query(
+            "SELECT ingested FROM code_versions WHERE repo = 'r' AND tag = 'v1'",
+            json!({}),
+        )
+        .await
+        .unwrap();
     assert_eq!(rows[0]["ingested"], json!(true));
 }
