@@ -2,7 +2,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
+use ratatui::widgets::{
+    Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+};
 use ratatui::Frame;
 
 use crate::api::{AgentEvent, IntentMode, QueryRequest, Source, UsedProvider};
@@ -52,7 +54,10 @@ fn label_span(text: &str) -> Span<'static> {
 }
 
 fn chain_line(spans: Vec<Span<'_>>) -> Line<'_> {
-    let mut out = vec![Span::styled(CHAIN_INDENT.to_string(), Style::default().fg(Color::DarkGray))];
+    let mut out = vec![Span::styled(
+        CHAIN_INDENT.to_string(),
+        Style::default().fg(Color::DarkGray),
+    )];
     out.extend(spans);
     Line::from(out)
 }
@@ -98,11 +103,19 @@ fn describe_tool_call(name: &str, input: &serde_json::Value) -> String {
             let q = get("query");
             let kind = {
                 let k = get("kind");
-                if k.is_empty() || k == "any" { String::new() } else { format!(" {}s", k) }
+                if k.is_empty() || k == "any" {
+                    String::new()
+                } else {
+                    format!(" {}s", k)
+                }
             };
             let scope = {
                 let r = get("repo");
-                if r.is_empty() { String::new() } else { format!(" in {}", r) }
+                if r.is_empty() {
+                    String::new()
+                } else {
+                    format!(" in {}", r)
+                }
             };
             format!("Searching for \"{}\"{}{}", q, kind, scope)
         }
@@ -134,16 +147,32 @@ fn describe_tool_call(name: &str, input: &serde_json::Value) -> String {
             let cmd = get("command");
             let agent = get("agent_id");
             let host = get("hostname");
-            let target = if !host.is_empty() { host } else if !agent.is_empty() { agent } else { "agent" };
-            let cmd_short = if cmd.len() > 28 { format!("{}…", &cmd[..27]) } else { cmd.to_string() };
+            let target = if !host.is_empty() {
+                host
+            } else if !agent.is_empty() {
+                agent
+            } else {
+                "agent"
+            };
+            let cmd_short = if cmd.len() > 28 {
+                format!("{}…", &cmd[..27])
+            } else {
+                cmd.to_string()
+            };
             format!("Running \"{}\" on {}", cmd_short, target)
         }
         "create_lxd_agent" => format!("Provisioning agent {}", get("name")),
         "delete_agent" => format!("Deleting agent {}", get("agent_id")),
         "list_port_forwards" => "Listing port forwards".to_string(),
         "create_port_forward" => {
-            let lp = input.get("local_port").and_then(|v| v.as_i64()).unwrap_or(0);
-            let rp = input.get("remote_port").and_then(|v| v.as_i64()).unwrap_or(0);
+            let lp = input
+                .get("local_port")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let rp = input
+                .get("remote_port")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
             format!("Creating port forward {} → {}", lp, rp)
         }
         "update_port_forward" => format!("Updating port forward {}", get("id")),
@@ -179,11 +208,19 @@ fn summarize_tool_result(name: &str, preview: &str, input: &serde_json::Value) -
         "search_symbols" => {
             if let Some(arr) = parsed.as_array() {
                 let n = arr.len();
-                let names: Vec<&str> = arr.iter().take(3).filter_map(|v| v.get("name").and_then(|n| n.as_str())).collect();
+                let names: Vec<&str> = arr
+                    .iter()
+                    .take(3)
+                    .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+                    .collect();
                 if n == 0 {
                     return "no matches".to_string();
                 }
-                let label = if n <= 3 { names.join(", ") } else { format!("{}… +{} more", names.join(", "), n - 3) };
+                let label = if n <= 3 {
+                    names.join(", ")
+                } else {
+                    format!("{}… +{} more", names.join(", "), n - 3)
+                };
                 return format!("{} results: {}", n, label);
             }
             truncate(preview, 60)
@@ -200,7 +237,11 @@ fn summarize_tool_result(name: &str, preview: &str, input: &serde_json::Value) -
                 if n == 0 {
                     return "none found".to_string();
                 }
-                let names: Vec<&str> = arr.iter().take(2).filter_map(|v| v.get("name").and_then(|n| n.as_str())).collect();
+                let names: Vec<&str> = arr
+                    .iter()
+                    .take(2)
+                    .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+                    .collect();
                 return format!("{}: {}", n, names.join(", "));
             }
             truncate(preview, 60)
@@ -225,7 +266,8 @@ fn summarize_tool_result(name: &str, preview: &str, input: &serde_json::Value) -
                 if arr.is_empty() {
                     return "0 rows".to_string();
                 }
-                let keys: Vec<&str> = arr.first()
+                let keys: Vec<&str> = arr
+                    .first()
                     .and_then(|v| v.as_object())
                     .map(|o| o.keys().take(3).map(|k| k.as_str()).collect())
                     .unwrap_or_default();
@@ -235,7 +277,10 @@ fn summarize_tool_result(name: &str, preview: &str, input: &serde_json::Value) -
         }
         "run_command" => {
             let stdout = parsed.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
-            let exit = parsed.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let exit = parsed
+                .get("exit_code")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(-1);
             let first_line = stdout.lines().next().unwrap_or("");
             if !first_line.is_empty() {
                 return format!("[exit {}] {}", exit, truncate(first_line, 40));
@@ -244,7 +289,10 @@ fn summarize_tool_result(name: &str, preview: &str, input: &serde_json::Value) -
         }
         "list_agents" => {
             if let Some(arr) = parsed.as_array() {
-                let online = arr.iter().filter(|a| a.get("online").and_then(|v| v.as_bool()).unwrap_or(false)).count();
+                let online = arr
+                    .iter()
+                    .filter(|a| a.get("online").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .count();
                 return format!("{} agents ({} online)", arr.len(), online);
             }
             truncate(preview, 60)
@@ -286,14 +334,23 @@ fn summarize_tool_result(name: &str, preview: &str, input: &serde_json::Value) -
                     return "empty".to_string();
                 }
                 let keys: Vec<&str> = obj.keys().take(3).map(|k| k.as_str()).collect();
-                return format!("{{{}{}}}", keys.join(", "), if obj.len() > 3 { ", …" } else { "" });
+                return format!(
+                    "{{{}{}}}",
+                    keys.join(", "),
+                    if obj.len() > 3 { ", …" } else { "" }
+                );
             }
             truncate(preview, 60)
         }
     }
 }
 
-fn extract_result_lines(name: &str, preview: &str, _input: &serde_json::Value, width: usize) -> Vec<String> {
+fn extract_result_lines(
+    name: &str,
+    preview: &str,
+    _input: &serde_json::Value,
+    width: usize,
+) -> Vec<String> {
     let parsed: serde_json::Value = match serde_json::from_str(preview) {
         Ok(v) => v,
         Err(_) => {
@@ -307,7 +364,10 @@ fn extract_result_lines(name: &str, preview: &str, _input: &serde_json::Value, w
         "run_command" => {
             let stdout = parsed.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
             let stderr = parsed.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
-            let exit = parsed.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let exit = parsed
+                .get("exit_code")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(-1);
             let mut out = Vec::new();
             for l in stdout.lines().take(10) {
                 out.push(format!("  {}", truncate(l, w)));
@@ -359,12 +419,21 @@ fn extract_result_lines(name: &str, preview: &str, _input: &serde_json::Value, w
         }
         "list_repositories" | "list_agents" | "list_skills" | "list_port_forwards" => {
             if let Some(arr) = parsed.as_array() {
-                let name_key = if name == "list_repositories" { "name" } else if name == "list_agents" { "hostname" } else { "name" };
+                let name_key = if name == "list_repositories" {
+                    "name"
+                } else if name == "list_agents" {
+                    "hostname"
+                } else {
+                    "name"
+                };
                 let mut out = Vec::new();
                 for item in arr.iter().take(5) {
                     let n = item.get(name_key).and_then(|v| v.as_str()).unwrap_or("?");
                     if name == "list_agents" {
-                        let online = item.get("online").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let online = item
+                            .get("online")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
                         let dot = if online { "●" } else { "○" };
                         out.push(format!("  {} {}", dot, n));
                     } else {
@@ -391,7 +460,11 @@ fn extract_result_lines(name: &str, preview: &str, _input: &serde_json::Value, w
                 }
                 out
             } else {
-                preview.lines().take(8).map(|l| format!("  {}", truncate(l, w))).collect()
+                preview
+                    .lines()
+                    .take(8)
+                    .map(|l| format!("  {}", truncate(l, w)))
+                    .collect()
             }
         }
     }
@@ -613,11 +686,7 @@ impl ChatView {
                         .collect();
                 }
             }
-            AgentEvent::ParallelResearchLeadDone {
-                index,
-                preview,
-                ..
-            } => {
+            AgentEvent::ParallelResearchLeadDone { index, preview, .. } => {
                 if let Some(m) = self.current_assistant() {
                     if let Some(lead) = m.parallel_research.get_mut(index) {
                         lead.status = "done".to_string();
@@ -713,7 +782,10 @@ impl ChatView {
 
         if let Some(err) = &self.error_banner {
             lines.push(Line::from(vec![
-                Span::styled(" ✖ ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " ✖ ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(err.clone(), Style::default().fg(Color::Red)),
             ]));
             lines.push(Line::from(SECTION_GAP));
@@ -726,7 +798,9 @@ impl ChatView {
         if self.messages.is_empty() && self.error_banner.is_none() {
             lines.push(Line::from(Span::styled(
                 " Welcome to Harvest TUI.",
-                Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Reset)
+                    .add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(Span::styled(
                 " Type a question below and press Alt-Enter to send.",
@@ -763,13 +837,9 @@ impl ChatView {
         } else {
             0
         };
-        let visible_lines: Vec<Line> = lines
-            .into_iter()
-            .skip(start)
-            .take(visible)
-            .collect();
-        let transcript = Paragraph::new(visible_lines)
-            .block(Block::default().borders(Borders::BOTTOM));
+        let visible_lines: Vec<Line> = lines.into_iter().skip(start).take(visible).collect();
+        let transcript =
+            Paragraph::new(visible_lines).block(Block::default().borders(Borders::BOTTOM));
         f.render_widget(transcript, transcript_area);
 
         let mut scroll_state = ScrollbarState::new(max_scroll).position(self.scroll);
@@ -785,15 +855,16 @@ impl ChatView {
             " Query (Alt+Enter to send) "
         };
         let input_para = Paragraph::new(Line::from(vec![
-            Span::styled("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "> ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(self.input.clone()),
             Span::styled(" ", Style::default().add_modifier(Modifier::SLOW_BLINK)),
         ]))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(input_hint),
-        );
+        .block(Block::default().borders(Borders::ALL).title(input_hint));
         f.render_widget(input_para, chunks[1]);
     }
 
@@ -807,9 +878,22 @@ impl ChatView {
 
     fn render_user_message(&self, m: &MessageBlock, lines: &mut Vec<Line>) {
         lines.push(Line::from(vec![
-            Span::styled(" ● ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-            Span::styled("You", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {}", m.timestamp), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                " ● ",
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "You",
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {}", m.timestamp),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
         lines.push(Line::from(""));
         for l in m.text.lines() {
@@ -822,16 +906,35 @@ impl ChatView {
 
     fn render_assistant_message(&self, m: &MessageBlock, lines: &mut Vec<Line>, width: usize) {
         lines.push(Line::from(vec![
-            Span::styled(" ● ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::styled("Assistant", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("  {}", m.timestamp), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                " ● ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "Assistant",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {}", m.timestamp),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
 
         if let Some(p) = &m.provider {
             lines.push(Line::from(vec![
                 Span::styled("   ", Style::default()),
-                Span::styled(format!(" {} ", p.model), Style::default().fg(Color::LightRed)),
-                Span::styled(format!("· {} ", p.kind), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!(" {} ", p.model),
+                    Style::default().fg(Color::LightRed),
+                ),
+                Span::styled(
+                    format!("· {} ", p.kind),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]));
         }
 
@@ -853,7 +956,10 @@ impl ChatView {
             let label = intent_label(intent);
             lines.push(Line::from(vec![
                 Span::styled("   ", Style::default()),
-                Span::styled(format!(" {} ", label), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(" {} ", label),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
             ]));
         }
 
@@ -869,7 +975,12 @@ impl ChatView {
         if m.streaming {
             lines.push(Line::from(vec![
                 Span::styled("   ", Style::default()),
-                Span::styled("▮", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
+                Span::styled(
+                    "▮",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::SLOW_BLINK),
+                ),
             ]));
         }
 
@@ -894,14 +1005,24 @@ impl ChatView {
             lines.push(Line::from(vec![
                 Span::styled("   ", Style::default()),
                 Span::styled("Thinking", Style::default().fg(Color::DarkGray)),
-                Span::styled("…", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
+                Span::styled(
+                    "…",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::SLOW_BLINK),
+                ),
             ]));
         }
 
         if m.streaming && m.text.is_empty() && !m.thinking.is_empty() && m.steps.is_empty() {
             lines.push(Line::from(vec![
                 Span::styled("   ", Style::default()),
-                Span::styled("▮", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
+                Span::styled(
+                    "▮",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::SLOW_BLINK),
+                ),
             ]));
         }
 
@@ -914,8 +1035,18 @@ impl ChatView {
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
                 Span::styled("   ", Style::default()),
-                Span::styled("? ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-                Span::styled(question.clone(), Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "? ",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    question.clone(),
+                    Style::default()
+                        .fg(Color::Reset)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]));
             for (i, c) in choices.iter().enumerate() {
                 lines.push(Line::from(vec![
@@ -932,15 +1063,22 @@ impl ChatView {
     }
 
     fn render_activity_chain(&self, m: &MessageBlock, lines: &mut Vec<Line>, width: usize) {
-        let chain_color = if m.streaming { Color::Blue } else { Color::DarkGray };
+        let chain_color = if m.streaming {
+            Color::Blue
+        } else {
+            Color::DarkGray
+        };
 
         if !m.thinking.is_empty() {
             lines.push(chain_header("THINKING"));
             let wrapped = wrap_dim(&m.thinking, width.saturating_sub(6));
             for l in wrapped.into_iter().take(6) {
-                lines.push(chain_line(vec![
-                    Span::styled(l, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
-                ]));
+                lines.push(chain_line(vec![Span::styled(
+                    l,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )]));
             }
             lines.push(chain_close(chain_color));
         }
@@ -956,7 +1094,10 @@ impl ChatView {
                 lines.push(chain_line(vec![
                     Span::styled(format!("{dot} "), Style::default().fg(c)),
                     Span::styled(lead.name.clone(), Style::default().fg(Color::Reset)),
-                    Span::styled(format!("  ({})", lead.status), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("  ({})", lead.status),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]));
             }
             lines.push(chain_close(chain_color));
@@ -969,23 +1110,37 @@ impl ChatView {
         if let Some(confirm) = &m.confirm {
             lines.push(chain_header("CONFIRM ACTION"));
             lines.push(chain_line(vec![
-                Span::styled("! ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                Span::styled(confirm.name.clone(), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "! ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    confirm.name.clone(),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
             ]));
             let wrapped = wrap_dim(&confirm.description, width.saturating_sub(6));
             for l in &wrapped {
-                lines.push(chain_line(vec![
-                    Span::styled(l.clone(), Style::default().fg(Color::Reset)),
-                ]));
+                lines.push(chain_line(vec![Span::styled(
+                    l.clone(),
+                    Style::default().fg(Color::Reset),
+                )]));
             }
-            lines.push(chain_line(vec![
-                Span::styled("[y] approve   [n] deny", Style::default().fg(Color::Yellow)),
-            ]));
+            lines.push(chain_line(vec![Span::styled(
+                "[y] approve   [n] deny",
+                Style::default().fg(Color::Yellow),
+            )]));
             lines.push(chain_close(chain_color));
         }
     }
 
-    fn render_steps(&self, m: &MessageBlock, lines: &mut Vec<Line>, width: usize, chain_color: Color) {
+    fn render_steps(
+        &self,
+        m: &MessageBlock,
+        lines: &mut Vec<Line>,
+        width: usize,
+        chain_color: Color,
+    ) {
         let groups = group_tool_calls(&m.steps);
         let mut step_idx = 0usize;
         let total = m.steps.len();
@@ -999,12 +1154,27 @@ impl ChatView {
         for group in &groups {
             if group.steps.len() >= 3 {
                 lines.push(chain_line(vec![
-                    Span::styled(format!(" {} ", group.noun()), Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
-                    Span::styled(format!("× {}", group.steps.len()), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!(" {} ", group.noun()),
+                        Style::default()
+                            .fg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("× {}", group.steps.len()),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]));
                 for (i, step) in group.steps.iter().enumerate() {
                     let is_selected = self.step_mode && self.step_selected == Some(step_idx);
-                    self.render_step_line(step, is_selected, lines, width, i + 1, group.steps.len());
+                    self.render_step_line(
+                        step,
+                        is_selected,
+                        lines,
+                        width,
+                        i + 1,
+                        group.steps.len(),
+                    );
                     step_idx += 1;
                 }
             } else {
@@ -1017,9 +1187,10 @@ impl ChatView {
         }
 
         if self.step_mode {
-            lines.push(chain_line(vec![
-                Span::styled(" j/k select  Enter expand  Esc exit", Style::default().fg(Color::Blue)),
-            ]));
+            lines.push(chain_line(vec![Span::styled(
+                " j/k select  Enter expand  Esc exit",
+                Style::default().fg(Color::Blue),
+            )]));
         }
 
         lines.push(chain_close(chain_color));
@@ -1056,7 +1227,10 @@ impl ChatView {
         };
 
         lines.push(chain_line(vec![
-            Span::styled(format!("{}{}", sel_marker, prefix), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}{}", sel_marker, prefix),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(format!("{icon} "), Style::default().fg(status_color)),
             Span::styled(label, Style::default().fg(Color::Reset)),
         ]));
@@ -1071,24 +1245,27 @@ impl ChatView {
             }
             None => Color::Yellow,
         };
-        lines.push(chain_line(vec![
-            Span::styled(format!("    → {}", result_summary), Style::default().fg(result_color)),
-        ]));
+        lines.push(chain_line(vec![Span::styled(
+            format!("    → {}", result_summary),
+            Style::default().fg(result_color),
+        )]));
 
         if step.open {
             if let Some(preview) = &step.result_preview {
                 let detail_lines = extract_result_lines(&step.name, preview, &step.input, width);
                 for l in &detail_lines {
-                    lines.push(chain_line(vec![
-                        Span::styled(l.clone(), Style::default().fg(Color::DarkGray)),
-                    ]));
+                    lines.push(chain_line(vec![Span::styled(
+                        l.clone(),
+                        Style::default().fg(Color::DarkGray),
+                    )]));
                 }
             }
             let input_str = serde_json::to_string_pretty(&step.input).unwrap_or_default();
             for l in input_str.lines().take(4) {
-                lines.push(chain_line(vec![
-                    Span::styled(format!("  {}", truncate(l, width.saturating_sub(8))), Style::default().fg(Color::DarkGray)),
-                ]));
+                lines.push(chain_line(vec![Span::styled(
+                    format!("  {}", truncate(l, width.saturating_sub(8))),
+                    Style::default().fg(Color::DarkGray),
+                )]));
             }
         }
     }
@@ -1115,8 +1292,16 @@ impl ChatView {
 
             lines.push(Line::from(vec![
                 Span::styled("     ", Style::default()),
-                Span::styled(file.clone(), Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("  {} {}", repo, version), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    file.clone(),
+                    Style::default()
+                        .fg(Color::Reset)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {} {}", repo, version),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("       ", Style::default()),
@@ -1141,8 +1326,7 @@ impl ChatView {
             return;
         }
 
-        let is_send = (key.code == KeyCode::Enter
-            && key.modifiers.contains(KeyModifiers::ALT))
+        let is_send = (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::ALT))
             || (key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL));
 
         if is_send || (key.code == KeyCode::Enter && key.modifiers == KeyModifiers::NONE) {
@@ -1175,7 +1359,7 @@ impl ChatView {
                     }
                 }
             }
-if let Some(_confirm) = &m.confirm {
+            if let Some(_confirm) = &m.confirm {
                 if key.code == KeyCode::Char('y') && key.modifiers == KeyModifiers::NONE {
                     if let Some(m) = self.messages.iter_mut().rev().find(|m| m.streaming) {
                         m.confirm = None;
@@ -1192,7 +1376,9 @@ if let Some(_confirm) = &m.confirm {
         }
 
         match key.code {
-            KeyCode::Char(c) if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT => {
+            KeyCode::Char(c)
+                if key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT =>
+            {
                 self.input.push(c);
             }
             KeyCode::Backspace => {
@@ -1339,7 +1525,10 @@ fn render_markdown(input: &str, width: usize) -> Vec<Line<'static>> {
         let joined = para.join(" ");
         *para = Vec::new();
         for chunk in wrap_text(&joined, w) {
-            out.push(Line::from(Span::styled(chunk, Style::default().fg(Color::Reset))));
+            out.push(Line::from(Span::styled(
+                chunk,
+                Style::default().fg(Color::Reset),
+            )));
         }
         out.push(Line::from(""));
     };
@@ -1351,13 +1540,17 @@ fn render_markdown(input: &str, width: usize) -> Vec<Line<'static>> {
                 let code_content = code_buf.join("\n");
                 let lang_lower = code_lang.to_lowercase();
                 if lang_lower == "mermaid" || lang_lower == "harvest-graph" {
-                    let diagram_lines = crate::diagram::render_diagram(&code_content, &lang_lower, width);
+                    let diagram_lines =
+                        crate::diagram::render_diagram(&code_content, &lang_lower, width);
                     for dl in diagram_lines {
                         lines.push(dl);
                     }
                 } else {
                     for cl in &code_buf {
-                        lines.push(Line::from(Span::styled(cl.clone(), Style::default().fg(Color::Green))));
+                        lines.push(Line::from(Span::styled(
+                            cl.clone(),
+                            Style::default().fg(Color::Green),
+                        )));
                     }
                     lines.push(Line::from(""));
                 }
@@ -1369,10 +1562,14 @@ fn render_markdown(input: &str, width: usize) -> Vec<Line<'static>> {
                 in_code = true;
                 code_lang = line.trim_start().trim_start_matches('`').trim().to_string();
                 let lang_lower = code_lang.to_lowercase();
-                if lang_lower != "mermaid" && lang_lower != "harvest-graph" && !code_lang.is_empty() {
+                if lang_lower != "mermaid" && lang_lower != "harvest-graph" && !code_lang.is_empty()
+                {
                     lines.push(Line::from(Span::styled(
                         format!(" {} ", code_lang),
-                        Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::ITALIC),
                     )));
                 }
             }
@@ -1389,34 +1586,58 @@ fn render_markdown(input: &str, width: usize) -> Vec<Line<'static>> {
         if let Some(rest) = line.strip_prefix("# ") {
             flush_para(&mut paragraph, &mut lines, width);
             for w in wrap_text(rest.trim(), width.saturating_sub(2)) {
-                lines.push(Line::from(Span::styled(w, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+                lines.push(Line::from(Span::styled(
+                    w,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )));
             }
             lines.push(Line::from(""));
         } else if let Some(rest) = line.strip_prefix("## ") {
             flush_para(&mut paragraph, &mut lines, width);
             for w in wrap_text(rest.trim(), width.saturating_sub(2)) {
-                lines.push(Line::from(Span::styled(w, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+                lines.push(Line::from(Span::styled(
+                    w,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )));
             }
             lines.push(Line::from(""));
         } else if let Some(rest) = line.strip_prefix("### ") {
             flush_para(&mut paragraph, &mut lines, width);
             for w in wrap_text(rest.trim(), width.saturating_sub(2)) {
-                lines.push(Line::from(Span::styled(w, Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD))));
+                lines.push(Line::from(Span::styled(
+                    w,
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                )));
             }
             lines.push(Line::from(""));
         } else if line.starts_with("- ") || line.starts_with("* ") {
             flush_para(&mut paragraph, &mut lines, width);
             let item = line[2..].trim();
-            for (i, w) in wrap_text(item, width.saturating_sub(2)).into_iter().enumerate() {
+            for (i, w) in wrap_text(item, width.saturating_sub(2))
+                .into_iter()
+                .enumerate()
+            {
                 let prefix = if i == 0 { "  • " } else { "    " };
-                lines.push(Line::from(Span::styled(format!("{prefix}{w}"), Style::default().fg(Color::Reset))));
+                lines.push(Line::from(Span::styled(
+                    format!("{prefix}{w}"),
+                    Style::default().fg(Color::Reset),
+                )));
             }
         } else if let Some(idx) = line.find(". ") {
             if line[..idx].chars().all(|c| c.is_ascii_digit()) {
                 flush_para(&mut paragraph, &mut lines, width);
                 let item = line[idx + 2..].trim();
                 for w in wrap_text(item, width.saturating_sub(3)) {
-                    lines.push(Line::from(Span::styled(format!("  {w}"), Style::default().fg(Color::Reset))));
+                    lines.push(Line::from(Span::styled(
+                        format!("  {w}"),
+                        Style::default().fg(Color::Reset),
+                    )));
                 }
                 continue;
             }
@@ -1436,7 +1657,10 @@ fn render_markdown(input: &str, width: usize) -> Vec<Line<'static>> {
             }
         } else {
             for cl in &code_buf {
-                lines.push(Line::from(Span::styled(cl.clone(), Style::default().fg(Color::Green))));
+                lines.push(Line::from(Span::styled(
+                    cl.clone(),
+                    Style::default().fg(Color::Green),
+                )));
             }
         }
     } else {
