@@ -7,7 +7,10 @@ use tokio::sync::mpsc;
 
 use super::{
     retry,
-    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, StreamEvent, ToolCall, ToolDefinition, Usage},
+    types::{
+        ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role,
+        StreamEvent, ToolCall, ToolDefinition, Usage,
+    },
     LlmProvider,
 };
 
@@ -41,12 +44,25 @@ pub struct GeminiProvider {
 }
 
 impl GeminiProvider {
-    pub fn new(model: String, api_key: String, timeout_secs: u64, max_retries: u32, meta: ProviderMeta) -> Self {
+    pub fn new(
+        model: String,
+        api_key: String,
+        timeout_secs: u64,
+        max_retries: u32,
+        meta: ProviderMeta,
+    ) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .expect("failed to build HTTP client");
-        Self { model, api_key, client, base_url: API_BASE.to_string(), max_retries, meta }
+        Self {
+            model,
+            api_key,
+            client,
+            base_url: API_BASE.to_string(),
+            max_retries,
+            meta,
+        }
     }
 
     #[cfg(test)]
@@ -56,11 +72,17 @@ impl GeminiProvider {
     }
 
     fn endpoint_url(&self, model: &str) -> String {
-        format!("{}/{}:generateContent?key={}", self.base_url, model, self.api_key)
+        format!(
+            "{}/{}:generateContent?key={}",
+            self.base_url, model, self.api_key
+        )
     }
 
     fn stream_endpoint_url(&self, model: &str) -> String {
-        format!("{}/{}:streamGenerateContent?alt=sse&key={}", self.base_url, model, self.api_key)
+        format!(
+            "{}/{}:streamGenerateContent?alt=sse&key={}",
+            self.base_url, model, self.api_key
+        )
     }
 
     fn models_url(&self) -> String {
@@ -70,57 +92,100 @@ impl GeminiProvider {
 
 #[async_trait]
 impl LlmProvider for GeminiProvider {
-    fn id(&self) -> &str { &self.meta.id }
-    fn kind(&self) -> &str { "gemini" }
-    fn default_model(&self) -> &str { &self.model }
-    fn expose_to_ui(&self) -> bool { self.meta.expose_to_ui }
-    fn user_provided_key(&self) -> bool { self.meta.user_provided_key }
-    fn name(&self) -> Option<&str> { self.meta.name.as_deref() }
-    fn configured_models(&self) -> Option<&[String]> { self.meta.models.as_deref() }
+    fn id(&self) -> &str {
+        &self.meta.id
+    }
+    fn kind(&self) -> &str {
+        "gemini"
+    }
+    fn default_model(&self) -> &str {
+        &self.model
+    }
+    fn expose_to_ui(&self) -> bool {
+        self.meta.expose_to_ui
+    }
+    fn user_provided_key(&self) -> bool {
+        self.meta.user_provided_key
+    }
+    fn name(&self) -> Option<&str> {
+        self.meta.name.as_deref()
+    }
+    fn configured_models(&self) -> Option<&[String]> {
+        self.meta.models.as_deref()
+    }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        let fallback = vec![ModelInfo { id: self.model.clone(), display_name: None }];
-        let Ok(response) = self.client.get(self.models_url()).send().await else { return Ok(fallback) };
+        let fallback = vec![ModelInfo {
+            id: self.model.clone(),
+            display_name: None,
+        }];
+        let Ok(response) = self.client.get(self.models_url()).send().await else {
+            return Ok(fallback);
+        };
         if !response.status().is_success() {
             return Ok(fallback);
         }
-        let Ok(json) = response.json::<Value>().await else { return Ok(fallback) };
-        let Some(models) = json["models"].as_array() else { return Ok(fallback) };
-        let parsed: Vec<ModelInfo> = models.iter()
+        let Ok(json) = response.json::<Value>().await else {
+            return Ok(fallback);
+        };
+        let Some(models) = json["models"].as_array() else {
+            return Ok(fallback);
+        };
+        let parsed: Vec<ModelInfo> = models
+            .iter()
             .filter(|m| {
-                m["supportedGenerationMethods"].as_array()
-                    .map(|methods| methods.iter().any(|v| v.as_str() == Some("generateContent")))
+                m["supportedGenerationMethods"]
+                    .as_array()
+                    .map(|methods| {
+                        methods
+                            .iter()
+                            .any(|v| v.as_str() == Some("generateContent"))
+                    })
                     .unwrap_or(false)
             })
             .filter(|m| {
-                m["name"].as_str()
+                m["name"]
+                    .as_str()
                     .map(|name| is_chat_model(name.strip_prefix("models/").unwrap_or(name)))
                     .unwrap_or(false)
             })
-            .filter_map(|m| m["name"].as_str().map(|name| ModelInfo {
-                id: name.strip_prefix("models/").unwrap_or(name).to_string(),
-                display_name: m["displayName"].as_str().map(str::to_string),
-            }))
+            .filter_map(|m| {
+                m["name"].as_str().map(|name| ModelInfo {
+                    id: name.strip_prefix("models/").unwrap_or(name).to_string(),
+                    display_name: m["displayName"].as_str().map(str::to_string),
+                })
+            })
             .collect();
-        if parsed.is_empty() { Ok(fallback) } else { Ok(parsed) }
+        if parsed.is_empty() {
+            Ok(fallback)
+        } else {
+            Ok(parsed)
+        }
     }
 
-    async fn chat_with(&self, model: Option<&str>, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
+    async fn chat_with(
+        &self,
+        model: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<LlmResponse> {
         let resolved_model = model.unwrap_or(&self.model);
         let body = build_body(resolved_model, messages, tools);
         let url = self.endpoint_url(resolved_model);
 
-        let response = retry::send_with_retry(
-            self.max_retries,
-            OVERLOAD_STATUS_CODES,
-            "Gemini",
-            || self.client.post(&url).json(&body).send(),
-        ).await?;
+        let response =
+            retry::send_with_retry(self.max_retries, OVERLOAD_STATUS_CODES, "Gemini", || {
+                self.client.post(&url).json(&body).send()
+            })
+            .await?;
 
         let status = response.status();
         let body_text = response.text().await?;
-        let json: Value = serde_json::from_str(&body_text)
-            .map_err(|e| anyhow::anyhow!("Gemini API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+        let json: Value = serde_json::from_str(&body_text).map_err(|e| {
+            anyhow::anyhow!(
+                "Gemini API returned non-JSON (status {status}): {e}\nbody: {body_text}"
+            )
+        })?;
 
         if !status.is_success() {
             bail!("Gemini API error {status}: {json}");
@@ -152,12 +217,11 @@ impl GeminiProvider {
         let body = build_body(resolved_model, messages, tools);
         let url = self.stream_endpoint_url(resolved_model);
 
-        let response = retry::send_with_retry(
-            self.max_retries,
-            OVERLOAD_STATUS_CODES,
-            "Gemini",
-            || self.client.post(&url).json(&body).send(),
-        ).await?;
+        let response =
+            retry::send_with_retry(self.max_retries, OVERLOAD_STATUS_CODES, "Gemini", || {
+                self.client.post(&url).json(&body).send()
+            })
+            .await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -185,8 +249,17 @@ impl GeminiProvider {
                     .map(|l| l[5..].trim().to_string());
 
                 let Some(data) = data_line else { continue };
-                let Ok(json) = serde_json::from_str::<Value>(&data) else { continue };
-                process_stream_event(&json, &mut saw_tool_call, &mut finish_reason, &mut usage, &tx).await?;
+                let Ok(json) = serde_json::from_str::<Value>(&data) else {
+                    continue;
+                };
+                process_stream_event(
+                    &json,
+                    &mut saw_tool_call,
+                    &mut finish_reason,
+                    &mut usage,
+                    &tx,
+                )
+                .await?;
             }
         }
 
@@ -261,14 +334,16 @@ async fn process_stream_event(
         });
     }
 
-    let Some(parts) = candidate["content"]["parts"].as_array() else { return Ok(()) };
+    let Some(parts) = candidate["content"]["parts"].as_array() else {
+        return Ok(());
+    };
     for part in parts {
         if let Some(fc) = part.get("functionCall") {
             let name = fc["name"].as_str().unwrap_or("").to_string();
             let call = ToolCall {
-                id:                name.clone(),
+                id: name.clone(),
                 name,
-                input:             fc["args"].clone(),
+                input: fc["args"].clone(),
                 thought_signature: part["thoughtSignature"].as_str().map(str::to_string),
             };
             *saw_tool_call = true;
@@ -276,12 +351,24 @@ async fn process_stream_event(
             continue;
         }
 
-        let Some(text) = part["text"].as_str() else { continue };
-        if text.is_empty() { continue; }
+        let Some(text) = part["text"].as_str() else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
         if part["thought"].as_bool().unwrap_or(false) {
-            let _ = tx.send(StreamEvent::ThinkingDelta { text: text.to_string() }).await;
+            let _ = tx
+                .send(StreamEvent::ThinkingDelta {
+                    text: text.to_string(),
+                })
+                .await;
         } else {
-            let _ = tx.send(StreamEvent::TextDelta { text: text.to_string() }).await;
+            let _ = tx
+                .send(StreamEvent::TextDelta {
+                    text: text.to_string(),
+                })
+                .await;
         }
     }
 
@@ -291,38 +378,54 @@ async fn process_stream_event(
 fn to_gemini_message(msg: &Message) -> Value {
     let role = match msg.role {
         Role::User | Role::Tool => "user",
-        Role::Assistant         => "model",
-        Role::System            => unreachable!("system filtered before calling to_gemini_message"),
+        Role::Assistant => "model",
+        Role::System => unreachable!("system filtered before calling to_gemini_message"),
     };
 
     match &msg.content {
         MessageContent::Text(t) => json!({ "role": role, "parts": [{ "text": t }] }),
         MessageContent::Parts(parts) => {
-            let gemini_parts: Vec<Value> = parts.iter().map(|p| match p {
-                ContentPart::Text { text, thought_signature } => {
-                    let mut part = json!({ "text": text });
-                    if let Some(sig) = thought_signature {
-                        part["thoughtSignature"] = json!(sig);
+            let gemini_parts: Vec<Value> = parts
+                .iter()
+                .map(|p| match p {
+                    ContentPart::Text {
+                        text,
+                        thought_signature,
+                    } => {
+                        let mut part = json!({ "text": text });
+                        if let Some(sig) = thought_signature {
+                            part["thoughtSignature"] = json!(sig);
+                        }
+                        part
                     }
-                    part
-                }
-                ContentPart::ToolUse { name, input, thought_signature, .. } => {
-                    let mut part = json!({ "functionCall": { "name": name, "args": input } });
-                    if let Some(sig) = thought_signature {
-                        part["thoughtSignature"] = json!(sig);
+                    ContentPart::ToolUse {
+                        name,
+                        input,
+                        thought_signature,
+                        ..
+                    } => {
+                        let mut part = json!({ "functionCall": { "name": name, "args": input } });
+                        if let Some(sig) = thought_signature {
+                            part["thoughtSignature"] = json!(sig);
+                        }
+                        part
                     }
-                    part
-                }
-                ContentPart::ToolResult { tool_use_id, content, .. } =>
-                    json!({ "functionResponse": {
+                    ContentPart::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } => json!({ "functionResponse": {
                         "name": tool_use_id,
                         "response": { "result": content }
                     }}),
-                ContentPart::Image { media_type, data } =>
-                    json!({ "inlineData": { "mimeType": media_type, "data": data } }),
-                ContentPart::Document { media_type, data } =>
-                    json!({ "inlineData": { "mimeType": media_type, "data": data } }),
-            }).collect();
+                    ContentPart::Image { media_type, data } => {
+                        json!({ "inlineData": { "mimeType": media_type, "data": data } })
+                    }
+                    ContentPart::Document { media_type, data } => {
+                        json!({ "inlineData": { "mimeType": media_type, "data": data } })
+                    }
+                })
+                .collect();
             json!({ "role": role, "parts": gemini_parts })
         }
     }
@@ -350,11 +453,11 @@ fn usage_from_gemini(json: &Value) -> Usage {
         return Usage::default();
     }
     Usage {
-        input_tokens:         u["promptTokenCount"].as_u64().unwrap_or(0),
-        output_tokens:        u["candidatesTokenCount"].as_u64().unwrap_or(0),
-        cache_read_tokens:    u["cachedContentTokenCount"].as_u64().unwrap_or(0),
+        input_tokens: u["promptTokenCount"].as_u64().unwrap_or(0),
+        output_tokens: u["candidatesTokenCount"].as_u64().unwrap_or(0),
+        cache_read_tokens: u["cachedContentTokenCount"].as_u64().unwrap_or(0),
         cache_creation_tokens: 0,
-        reasoning_tokens:     u["thoughtsTokenCount"].as_u64().unwrap_or(0),
+        reasoning_tokens: u["thoughtsTokenCount"].as_u64().unwrap_or(0),
     }
 }
 
@@ -369,30 +472,40 @@ fn parse_gemini_response(json: Value) -> Result<LlmResponse> {
         .cloned()
         .unwrap_or_default();
 
-    let function_calls: Vec<&Value> = parts.iter()
+    let function_calls: Vec<&Value> = parts
+        .iter()
         .filter(|p| p.get("functionCall").is_some())
         .collect();
 
     if !function_calls.is_empty() {
-        let calls = function_calls.iter().map(|p| {
-            let fc = &p["functionCall"];
-            let name = fc["name"].as_str().unwrap_or("").to_string();
-            ToolCall {
-                id:                name.clone(),
-                name,
-                input:             fc["args"].clone(),
-                thought_signature: p["thoughtSignature"].as_str().map(|s| s.to_string()),
-            }
-        }).collect();
-        let preamble = parts.iter()
+        let calls = function_calls
+            .iter()
+            .map(|p| {
+                let fc = &p["functionCall"];
+                let name = fc["name"].as_str().unwrap_or("").to_string();
+                ToolCall {
+                    id: name.clone(),
+                    name,
+                    input: fc["args"].clone(),
+                    thought_signature: p["thoughtSignature"].as_str().map(|s| s.to_string()),
+                }
+            })
+            .collect();
+        let preamble = parts
+            .iter()
             .filter(|p| p.get("text").is_some())
             .filter_map(|p| p["text"].as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        return Ok(LlmResponse::ToolCalls { calls, preamble, usage });
+        return Ok(LlmResponse::ToolCalls {
+            calls,
+            preamble,
+            usage,
+        });
     }
 
-    let text = parts.iter()
+    let text = parts
+        .iter()
         .filter(|p| p.get("text").is_some() && p["thought"].as_bool().unwrap_or(false) == false)
         .filter_map(|p| p["text"].as_str())
         .collect::<Vec<_>>()
@@ -408,8 +521,14 @@ mod tests {
     use serde_json::json;
 
     fn make_provider(base_url: &str) -> GeminiProvider {
-        GeminiProvider::new("gemini-test".into(), "test-key".into(), 30, 0, ProviderMeta::new("gemini-1"))
-            .with_base_url(base_url)
+        GeminiProvider::new(
+            "gemini-test".into(),
+            "test-key".into(),
+            30,
+            0,
+            ProviderMeta::new("gemini-1"),
+        )
+        .with_base_url(base_url)
     }
 
     #[test]
@@ -507,15 +626,17 @@ mod tests {
         let msg = Message {
             role: Role::Assistant,
             content: MessageContent::Parts(vec![ContentPart::ToolUse {
-                id:                "search".into(),
-                name:              "search".into(),
-                input:             json!({}),
+                id: "search".into(),
+                name: "search".into(),
+                input: json!({}),
                 thought_signature: Some("CsIBCsMB==".into()),
             }]),
         };
         let v = to_gemini_message(&msg);
         assert_eq!(v["parts"][0]["thoughtSignature"], "CsIBCsMB==");
-        assert!(v["parts"][0]["functionCall"].get("thoughtSignature").is_none());
+        assert!(v["parts"][0]["functionCall"]
+            .get("thoughtSignature")
+            .is_none());
     }
 
     #[test]
@@ -523,15 +644,17 @@ mod tests {
         let msg = Message {
             role: Role::Assistant,
             content: MessageContent::Parts(vec![ContentPart::ToolUse {
-                id:                "search".into(),
-                name:              "search".into(),
-                input:             json!({}),
+                id: "search".into(),
+                name: "search".into(),
+                input: json!({}),
                 thought_signature: None,
             }]),
         };
         let v = to_gemini_message(&msg);
-        assert!(v["parts"][0].get("thoughtSignature").is_none()
-            || v["parts"][0]["thoughtSignature"].is_null());
+        assert!(
+            v["parts"][0].get("thoughtSignature").is_none()
+                || v["parts"][0]["thoughtSignature"].is_null()
+        );
     }
 
     #[test]
@@ -627,9 +750,9 @@ mod tests {
         let msg = Message {
             role: Role::Assistant,
             content: MessageContent::Parts(vec![ContentPart::ToolUse {
-                id:                "ignored_id".into(),
-                name:              "search".into(),
-                input:             json!({ "q": "rust" }),
+                id: "ignored_id".into(),
+                name: "search".into(),
+                input: json!({ "q": "rust" }),
                 thought_signature: None,
             }]),
         };
@@ -646,8 +769,8 @@ mod tests {
             role: Role::User,
             content: MessageContent::Parts(vec![ContentPart::ToolResult {
                 tool_use_id: "search".into(),
-                content:     "found it".into(),
-                is_error:    false,
+                content: "found it".into(),
+                is_error: false,
             }]),
         };
         let v = to_gemini_message(&msg);
@@ -662,8 +785,14 @@ mod tests {
         let msg = Message {
             role: Role::User,
             content: MessageContent::Parts(vec![
-                ContentPart::Text { text: "look".into(), thought_signature: None },
-                ContentPart::Image { media_type: "image/png".into(), data: "abc123".into() },
+                ContentPart::Text {
+                    text: "look".into(),
+                    thought_signature: None,
+                },
+                ContentPart::Image {
+                    media_type: "image/png".into(),
+                    data: "abc123".into(),
+                },
             ]),
         };
         let v = to_gemini_message(&msg);
@@ -676,9 +805,10 @@ mod tests {
     fn document_content_maps_to_inline_data() {
         let msg = Message {
             role: Role::User,
-            content: MessageContent::Parts(vec![
-                ContentPart::Document { media_type: "application/pdf".into(), data: "pdfdata".into() },
-            ]),
+            content: MessageContent::Parts(vec![ContentPart::Document {
+                media_type: "application/pdf".into(),
+                data: "pdfdata".into(),
+            }]),
         };
         let v = to_gemini_message(&msg);
         let parts = v["parts"].as_array().unwrap();
@@ -689,15 +819,18 @@ mod tests {
     #[test]
     fn tool_definition_has_parameters_key() {
         let def = ToolDefinition {
-            name:        "my_tool".into(),
+            name: "my_tool".into(),
             description: "does stuff".into(),
-            parameters:  json!({ "type": "object", "properties": {} }),
+            parameters: json!({ "type": "object", "properties": {} }),
         };
         let v = to_gemini_tool(&def);
         assert_eq!(v["name"], "my_tool");
         assert_eq!(v["description"], "does stuff");
         assert!(v.get("parameters").is_some(), "must use 'parameters' key");
-        assert!(v.get("input_schema").is_none(), "must NOT use anthropic 'input_schema' key");
+        assert!(
+            v.get("input_schema").is_none(),
+            "must NOT use anthropic 'input_schema' key"
+        );
     }
 
     fn text_response_body() -> Value {
@@ -747,7 +880,10 @@ mod tests {
         });
 
         let provider = make_provider(&server.base_url());
-        provider.chat_with(Some("override-model"), &[Message::user("hi")], &[]).await.unwrap();
+        provider
+            .chat_with(Some("override-model"), &[Message::user("hi")], &[])
+            .await
+            .unwrap();
         mock.assert();
     }
 
@@ -760,7 +896,10 @@ mod tests {
         });
 
         let provider = make_provider(&server.base_url());
-        provider.chat_with(None, &[Message::user("hi")], &[]).await.unwrap();
+        provider
+            .chat_with(None, &[Message::user("hi")], &[])
+            .await
+            .unwrap();
         mock.assert();
     }
 
@@ -848,20 +987,47 @@ mod tests {
 
         let provider = make_provider(&server.base_url());
         let models = provider.list_models().await.unwrap();
-        assert_eq!(models, vec![ModelInfo { id: "gemini-test".into(), display_name: None }]);
+        assert_eq!(
+            models,
+            vec![ModelInfo {
+                id: "gemini-test".into(),
+                display_name: None
+            }]
+        );
     }
 
     #[test]
     fn expose_to_ui_reflects_constructor_value() {
         let visible = GeminiProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("a"));
-        let hidden  = GeminiProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "b".into(), expose_to_ui: false, ..Default::default() });
+        let hidden = GeminiProvider::new(
+            "m".into(),
+            "k".into(),
+            30,
+            0,
+            ProviderMeta {
+                id: "b".into(),
+                expose_to_ui: false,
+                ..Default::default()
+            },
+        );
         assert!(visible.expose_to_ui());
         assert!(!hidden.expose_to_ui());
     }
 
     #[test]
     fn name_reflects_constructor_value() {
-        let named   = GeminiProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "a".into(), expose_to_ui: true, name: Some("Gemini Direct".into()), ..Default::default() });
+        let named = GeminiProvider::new(
+            "m".into(),
+            "k".into(),
+            30,
+            0,
+            ProviderMeta {
+                id: "a".into(),
+                expose_to_ui: true,
+                name: Some("Gemini Direct".into()),
+                ..Default::default()
+            },
+        );
         let unnamed = GeminiProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("b"));
         assert_eq!(named.name(), Some("Gemini Direct"));
         assert_eq!(unnamed.name(), None);
@@ -890,7 +1056,8 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("POST").path("/gemini-test:generateContent");
-            then.status(400).json_body(json!({ "error": { "message": "bad request" } }));
+            then.status(400)
+                .json_body(json!({ "error": { "message": "bad request" } }));
         });
 
         let provider = make_provider(&server.base_url());
@@ -941,9 +1108,9 @@ mod tests {
         });
 
         let tools = vec![ToolDefinition {
-            name:        "search".into(),
+            name: "search".into(),
             description: "search for things".into(),
-            parameters:  json!({ "type": "object" }),
+            parameters: json!({ "type": "object" }),
         }];
         let provider = make_provider(&server.base_url());
         provider.chat(&[Message::user("hi")], &tools).await.unwrap();
@@ -964,10 +1131,14 @@ mod tests {
             }]
         });
         match parse_gemini_response(json).unwrap() {
-            LlmResponse::ToolCalls { preamble, calls, .. } => {
+            LlmResponse::ToolCalls {
+                preamble, calls, ..
+            } => {
                 assert_eq!(calls.len(), 1);
-                assert!(preamble.contains("Let me think about this."),
-                    "thought text should appear in preamble, got: {preamble:?}");
+                assert!(
+                    preamble.contains("Let me think about this."),
+                    "thought text should appear in preamble, got: {preamble:?}"
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -989,8 +1160,11 @@ mod tests {
         });
         match parse_gemini_response(json).unwrap() {
             LlmResponse::ToolCalls { preamble, .. } => {
-                assert!(preamble.contains("First thought."),  "first thought missing");
-                assert!(preamble.contains("Second thought."), "second thought missing");
+                assert!(preamble.contains("First thought."), "first thought missing");
+                assert!(
+                    preamble.contains("Second thought."),
+                    "second thought missing"
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1012,8 +1186,14 @@ mod tests {
         });
         match parse_gemini_response(json).unwrap() {
             LlmResponse::ToolCalls { preamble, .. } => {
-                assert!(preamble.contains("I'll search for X."),   "thought text missing");
-                assert!(preamble.contains("Using the search tool."), "normal text missing");
+                assert!(
+                    preamble.contains("I'll search for X."),
+                    "thought text missing"
+                );
+                assert!(
+                    preamble.contains("Using the search tool."),
+                    "normal text missing"
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1035,8 +1215,10 @@ mod tests {
         });
         match parse_gemini_response(json).unwrap() {
             LlmResponse::Message { text, .. } => {
-                assert!(!text.contains("Internal reasoning here."),
-                    "thought text must not appear in final message");
+                assert!(
+                    !text.contains("Internal reasoning here."),
+                    "thought text must not appear in final message"
+                );
                 assert!(text.contains("Here is the answer."));
             }
             other => panic!("unexpected: {other:?}"),
@@ -1073,12 +1255,18 @@ mod tests {
     }
 
     fn sse_body(events: &[Value]) -> String {
-        events.iter().map(|e| format!("data: {}\r\n\r\n", e)).collect::<String>()
+        events
+            .iter()
+            .map(|e| format!("data: {}\r\n\r\n", e))
+            .collect::<String>()
     }
 
     async fn collect_stream_events(provider: &GeminiProvider) -> Vec<StreamEvent> {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        provider.stream(None, &[Message::user("hi")], &[], tx).await.unwrap();
+        provider
+            .stream(None, &[Message::user("hi")], &[], tx)
+            .await
+            .unwrap();
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() {
             events.push(e);
@@ -1102,13 +1290,18 @@ mod tests {
         let provider = make_provider(&server.base_url());
         let events = collect_stream_events(&provider).await;
 
-        let text_deltas: Vec<_> = events.iter().filter_map(|e| match e {
-            StreamEvent::TextDelta { text } => Some(text.as_str()),
-            _ => None,
-        }).collect();
+        let text_deltas: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(text_deltas, vec!["Hello", " world"]);
 
-        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "end_turn"));
+        let done = events.iter().any(
+            |e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "end_turn"),
+        );
         assert!(done, "expected Done(end_turn) event");
     }
 
@@ -1128,21 +1321,30 @@ mod tests {
         let provider = make_provider(&server.base_url());
         let events = collect_stream_events(&provider).await;
 
-        let thinking: Vec<_> = events.iter().filter_map(|e| match e {
-            StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
-            _ => None,
-        }).collect();
+        let thinking: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(thinking, vec!["I should search"]);
 
-        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "tool_use"));
-        assert!(done, "expected Done(tool_use) event since a tool call was streamed");
+        let done = events.iter().any(
+            |e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "tool_use"),
+        );
+        assert!(
+            done,
+            "expected Done(tool_use) event since a tool call was streamed"
+        );
     }
 
     #[tokio::test]
     async fn stream_tool_call_carries_thought_signature() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method("POST").path("/gemini-test:streamGenerateContent");
+            when.method("POST")
+                .path("/gemini-test:streamGenerateContent");
             then.status(200)
                 .header("content-type", "text/event-stream")
                 .body(sse_body(&[
@@ -1156,10 +1358,13 @@ mod tests {
         let provider = make_provider(&server.base_url());
         let events = collect_stream_events(&provider).await;
 
-        let call = events.iter().find_map(|e| match e {
-            StreamEvent::ToolCallReady(c) => Some(c),
-            _ => None,
-        }).expect("expected a ToolCallReady event");
+        let call = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::ToolCallReady(c) => Some(c),
+                _ => None,
+            })
+            .expect("expected a ToolCallReady event");
         assert_eq!(call.name, "search_symbols");
         assert_eq!(call.input["query"], "alpha");
         assert_eq!(call.thought_signature.as_deref(), Some("CsIBCsMB=="));
@@ -1169,12 +1374,17 @@ mod tests {
     async fn stream_4xx_returns_error() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method("POST").path("/gemini-test:streamGenerateContent");
-            then.status(400).json_body(json!({ "error": { "message": "bad request" } }));
+            when.method("POST")
+                .path("/gemini-test:streamGenerateContent");
+            then.status(400)
+                .json_body(json!({ "error": { "message": "bad request" } }));
         });
 
         let provider = make_provider(&server.base_url());
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
-        assert!(provider.stream(None, &[Message::user("hi")], &[], tx).await.is_err());
+        assert!(provider
+            .stream(None, &[Message::user("hi")], &[], tx)
+            .await
+            .is_err());
     }
 }
