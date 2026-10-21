@@ -22,7 +22,7 @@ pub fn generate_pkce_pair() -> (String, String) {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
-    let digest   = Sha256::digest(verifier.as_bytes());
+    let digest = Sha256::digest(verifier.as_bytes());
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
     (verifier, challenge)
 }
@@ -138,10 +138,18 @@ mod tests {
             }));
         });
 
-        let endpoints = discover_endpoints(&http(), &server.base_url()).await.unwrap();
-        assert_eq!(endpoints.authorization_endpoint, "https://idp.example.com/auth");
+        let endpoints = discover_endpoints(&http(), &server.base_url())
+            .await
+            .unwrap();
+        assert_eq!(
+            endpoints.authorization_endpoint,
+            "https://idp.example.com/auth"
+        );
         assert_eq!(endpoints.token_endpoint, "https://idp.example.com/token");
-        assert_eq!(endpoints.userinfo_endpoint, "https://idp.example.com/userinfo");
+        assert_eq!(
+            endpoints.userinfo_endpoint,
+            "https://idp.example.com/userinfo"
+        );
     }
 
     #[tokio::test]
@@ -157,8 +165,13 @@ mod tests {
         });
 
         let issuer_with_slash = format!("{}/", server.base_url());
-        let endpoints = discover_endpoints(&http(), &issuer_with_slash).await.unwrap();
-        assert_eq!(endpoints.authorization_endpoint, "https://idp.example.com/auth");
+        let endpoints = discover_endpoints(&http(), &issuer_with_slash)
+            .await
+            .unwrap();
+        assert_eq!(
+            endpoints.authorization_endpoint,
+            "https://idp.example.com/auth"
+        );
     }
 
     #[tokio::test]
@@ -213,11 +226,13 @@ mod tests {
     async fn exchange_code_returns_access_token() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/token")
+            when.method(POST)
+                .path("/token")
                 .form_urlencoded_tuple_exists("code")
                 .form_urlencoded_tuple("grant_type", "authorization_code")
                 .header_exists("Authorization");
-            then.status(200).json_body(json!({ "access_token": "tok_abc" }));
+            then.status(200)
+                .json_body(json!({ "access_token": "tok_abc" }));
         });
 
         let token = exchange_code(
@@ -239,13 +254,18 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/token");
-            then.status(400).json_body(json!({ "error": "invalid_grant" }));
+            then.status(400)
+                .json_body(json!({ "error": "invalid_grant" }));
         });
 
         let result = exchange_code(
             &http(),
             &format!("{}/token", server.base_url()),
-            "cid", "csec", "ruri", "bad_code", None,
+            "cid",
+            "csec",
+            "ruri",
+            "bad_code",
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -255,7 +275,8 @@ mod tests {
     async fn fetch_userinfo_returns_user() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(GET).path("/userinfo")
+            when.method(GET)
+                .path("/userinfo")
                 .header("Authorization", "Bearer tok_abc");
             then.status(200).json_body(json!({
                 "sub":   "uid-001",
@@ -287,13 +308,9 @@ mod tests {
             }));
         });
 
-        let user = fetch_userinfo(
-            &http(),
-            &format!("{}/userinfo", server.base_url()),
-            "tok",
-        )
-        .await
-        .unwrap();
+        let user = fetch_userinfo(&http(), &format!("{}/userinfo", server.base_url()), "tok")
+            .await
+            .unwrap();
         assert!(user.name.is_none());
     }
 
@@ -305,7 +322,8 @@ mod tests {
             then.status(401);
         });
 
-        let result = fetch_userinfo(&http(), &format!("{}/userinfo", server.base_url()), "tok").await;
+        let result =
+            fetch_userinfo(&http(), &format!("{}/userinfo", server.base_url()), "tok").await;
         assert!(result.is_err());
     }
 }

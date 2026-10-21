@@ -43,7 +43,10 @@ fn clear_token_cookie() -> Cookie<'static> {
 }
 
 pub async fn config(State(state): State<Arc<AuthState>>) -> impl IntoResponse {
-    let oidc_display_name = state.config.oidc.as_ref()
+    let oidc_display_name = state
+        .config
+        .oidc
+        .as_ref()
         .and_then(|o| o.display_name.clone());
     Json(serde_json::json!({
         "local_login": state.config.allow_local_login,
@@ -76,7 +79,8 @@ pub async fn register(
         return Err(err(StatusCode::BAD_REQUEST, "invalid input"));
     }
 
-    let hash = password::hash(&body.password).map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let hash = password::hash(&body.password)
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
 
@@ -95,47 +99,65 @@ pub async fn register(
         }
     })?;
 
-    let user = rows.into_iter().next().ok_or_else(|| err(StatusCode::CONFLICT, "email already registered"))?;
+    let user = rows
+        .into_iter()
+        .next()
+        .ok_or_else(|| err(StatusCode::CONFLICT, "email already registered"))?;
     assign_default_groups(&state, &id).await?;
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
-    Ok((jar.add(token_cookie(token, state.config.secure_cookies())), Json(json!({ "ok": true }))))
+    Ok((
+        jar.add(token_cookie(token, state.config.secure_cookies())),
+        Json(json!({ "ok": true })),
+    ))
 }
 
 async fn insert_user(db: &Db, sql: &str, params: Value) -> anyhow::Result<Vec<Value>> {
     let tx = db.begin().await?;
-    tx.execute("SELECT pg_advisory_xact_lock(hashtext('harvest:first-user'))", json!({})).await?;
+    tx.execute(
+        "SELECT pg_advisory_xact_lock(hashtext('harvest:first-user'))",
+        json!({}),
+    )
+    .await?;
     let rows = tx.query(sql, params).await?;
     tx.commit().await?;
     Ok(rows)
 }
 
 async fn assign_default_groups(state: &AuthState, user_id: &str) -> Result<(), ApiError> {
-    let rows = state.db.query(
-        "WITH defaults AS (SELECT id FROM groups WHERE is_default),
+    let rows = state
+        .db
+        .query(
+            "WITH defaults AS (SELECT id FROM groups WHERE is_default),
          inserted AS (
              INSERT INTO user_groups (user_id, group_id)
              SELECT u.id, d.id FROM users u CROSS JOIN defaults d WHERE u.id = $id
              ON CONFLICT DO NOTHING
          )
          SELECT id FROM defaults",
-        json!({ "id": user_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "id": user_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if !rows.is_empty() {
         return Ok(());
     }
 
     let group_id = Uuid::new_v4().to_string();
-    state.db.query(
-        "WITH g AS (
+    state
+        .db
+        .query(
+            "WITH g AS (
              INSERT INTO groups (id, name, description, is_default, created_at)
              SELECT $gid, u.name || '''s workspace', '', false, now() FROM users u WHERE u.id = $uid
              RETURNING id
          )
          INSERT INTO user_groups (user_id, group_id) SELECT $uid, id FROM g
          RETURNING group_id AS id",
-        json!({ "uid": user_id, "gid": group_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "uid": user_id, "gid": group_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(())
 }
 
@@ -153,13 +175,20 @@ pub async fn login(
     if !state.config.allow_local_login {
         return Err(err(StatusCode::FORBIDDEN, "local login is disabled"));
     }
-    let rows = state.db.query(
-        "SELECT id, email, name, role, password_hash
+    let rows = state
+        .db
+        .query(
+            "SELECT id, email, name, role, password_hash
          FROM users WHERE email = $email AND provider = 'local'",
-        json!({ "email": body.email }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "email": body.email }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
-    let user = rows.into_iter().next().ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid credentials"))?;
+    let user = rows
+        .into_iter()
+        .next()
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "invalid credentials"))?;
     let hash = user["password_hash"].as_str().unwrap_or("");
 
     let ok = password::verify(&body.password, hash)
@@ -169,7 +198,10 @@ pub async fn login(
     }
 
     let token = issue_token(&state.config.jwt_secret, &user)?;
-    Ok((jar.add(token_cookie(token, state.config.secure_cookies())), Json(json!({ "ok": true }))))
+    Ok((
+        jar.add(token_cookie(token, state.config.secure_cookies())),
+        Json(json!({ "ok": true })),
+    ))
 }
 
 pub async fn logout(jar: CookieJar) -> impl IntoResponse {
@@ -192,13 +224,20 @@ pub async fn me(
     jar: CookieJar,
 ) -> Result<impl IntoResponse, ApiError> {
     let claims = extract_claims(&state.config.jwt_secret, &jar)?;
-    let rows = state.db.query(
-        "SELECT last_project_id, last_llm_provider_id, last_llm_model
+    let rows = state
+        .db
+        .query(
+            "SELECT last_project_id, last_llm_provider_id, last_llm_model
          FROM users WHERE id = $id",
-        json!({ "id": claims.sub }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "id": claims.sub }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let row = rows.into_iter().next();
-    let field = |name: &str| row.as_ref().and_then(|r| r[name].as_str().map(String::from));
+    let field = |name: &str| {
+        row.as_ref()
+            .and_then(|r| r[name].as_str().map(String::from))
+    };
     Ok(Json(MeResponse {
         id: claims.sub,
         email: claims.email,
@@ -227,19 +266,23 @@ pub async fn update_me(
 ) -> Result<impl IntoResponse, ApiError> {
     let claims = extract_claims(&state.config.jwt_secret, &jar)?;
 
-    state.db.execute(
-        "UPDATE users SET
+    state
+        .db
+        .execute(
+            "UPDATE users SET
              last_project_id      = COALESCE($pid, last_project_id),
              last_llm_provider_id = COALESCE($provider_id, last_llm_provider_id),
              last_llm_model       = COALESCE($model, last_llm_model)
          WHERE id = $id",
-        json!({
-            "id": claims.sub,
-            "pid": body.last_project_id,
-            "provider_id": body.last_llm_provider_id,
-            "model": body.last_llm_model,
-        }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({
+                "id": claims.sub,
+                "pid": body.last_project_id,
+                "provider_id": body.last_llm_provider_id,
+                "model": body.last_llm_model,
+            }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -248,24 +291,34 @@ pub async fn google_redirect(
     State(state): State<Arc<AuthState>>,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, ApiError> {
-    let google = state.config.google.as_ref().ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "Google login not configured"))?;
+    let google = state
+        .config
+        .google
+        .as_ref()
+        .ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "Google login not configured"))?;
 
     let oauth_state = Uuid::new_v4().to_string();
     let url = build_google_auth_url(google, &oauth_state);
     tracing::info!(redirect_uri = %google.redirect_uri, auth_url = %url, "Initiating Google OAuth");
 
-    ephemeral::put(&state.db, ephemeral::OAUTH_KIND, &oauth_state, &json!({ "pkce_verifier": null }), SESSION_TTL)
-        .await
-        .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "could not start the login"))?;
+    ephemeral::put(
+        &state.db,
+        ephemeral::OAUTH_KIND,
+        &oauth_state,
+        &json!({ "pkce_verifier": null }),
+        SESSION_TTL,
+    )
+    .await
+    .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "could not start the login"))?;
 
     Ok((jar, Redirect::to(&url)))
 }
 
 #[derive(Deserialize)]
 pub struct GoogleCallbackParams {
-    pub code:              Option<String>,
-    pub state:             Option<String>,
-    pub error:             Option<String>,
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
     pub error_description: Option<String>,
 }
 
@@ -274,18 +327,30 @@ pub async fn google_callback(
     Query(params): Query<GoogleCallbackParams>,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, ApiError> {
-    let google = state.config.google.as_ref().ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "Google login not configured"))?;
+    let google = state
+        .config
+        .google
+        .as_ref()
+        .ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "Google login not configured"))?;
 
     if let Some(e) = params.error {
         let desc = params.error_description.unwrap_or_default();
         tracing::warn!(error = %e, description = %desc, "Google OAuth error");
-        return Err(err(StatusCode::BAD_REQUEST, &format!("Google OAuth error: {e}")));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            &format!("Google OAuth error: {e}"),
+        ));
     }
 
-    let code = params.code.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth code"))?;
-    let oauth_state = params.state.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth state"))?;
+    let code = params
+        .code
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth code"))?;
+    let oauth_state = params
+        .state
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth state"))?;
 
-    let session = ephemeral::take(&state.db, ephemeral::OAUTH_KIND, &oauth_state).await
+    let session = ephemeral::take(&state.db, ephemeral::OAUTH_KIND, &oauth_state)
+        .await
         .ok()
         .flatten()
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid OAuth state"))?;
@@ -301,7 +366,8 @@ pub async fn google_callback(
     let id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
 
-    let rows = insert_user(&state.db,
+    let rows = insert_user(
+        &state.db,
         "INSERT INTO users (id, google_id, email, name, provider, created_at, role)
          VALUES ($id, $google_id, $email, $name, 'google', $created_at,
                  CASE WHEN EXISTS (SELECT 1 FROM users) THEN 'regular' ELSE 'admin' END)
@@ -314,16 +380,24 @@ pub async fn google_callback(
             "name": google_user.name,
             "created_at": now
         }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    )
+    .await
+    .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
-    let user = rows.into_iter().next().ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let user = rows
+        .into_iter()
+        .next()
+        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if user["is_new"].as_bool().unwrap_or(false) {
         assign_default_groups(&state, user["id"].as_str().unwrap_or_default()).await?;
     }
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
     let _ = session;
-    Ok((jar.add(token_cookie(token, state.config.secure_cookies())), Redirect::to("/")))
+    Ok((
+        jar.add(token_cookie(token, state.config.secure_cookies())),
+        Redirect::to("/"),
+    ))
 }
 
 fn extract_claims(secret: &str, jar: &CookieJar) -> Result<jwt::Claims, ApiError> {
@@ -349,27 +423,43 @@ pub async fn oidc_redirect(
     State(state): State<Arc<AuthState>>,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, ApiError> {
-    let endpoints = state.oidc_endpoints.as_ref()
+    let endpoints = state
+        .oidc_endpoints
+        .as_ref()
         .ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "OIDC login not configured"))?;
-    let oidc_cfg = state.config.oidc.as_ref()
+    let oidc_cfg = state
+        .config
+        .oidc
+        .as_ref()
         .ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "OIDC login not configured"))?;
 
     let oauth_state = Uuid::new_v4().to_string();
     let (pkce_verifier, pkce_challenge) = oidc::generate_pkce_pair();
-    let url = build_oidc_auth_url(&endpoints.authorization_endpoint, oidc_cfg, &oauth_state, &pkce_challenge);
+    let url = build_oidc_auth_url(
+        &endpoints.authorization_endpoint,
+        oidc_cfg,
+        &oauth_state,
+        &pkce_challenge,
+    );
 
-    ephemeral::put(&state.db, ephemeral::OAUTH_KIND, &oauth_state, &json!({ "pkce_verifier": pkce_verifier }), SESSION_TTL)
-        .await
-        .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "could not start the login"))?;
+    ephemeral::put(
+        &state.db,
+        ephemeral::OAUTH_KIND,
+        &oauth_state,
+        &json!({ "pkce_verifier": pkce_verifier }),
+        SESSION_TTL,
+    )
+    .await
+    .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "could not start the login"))?;
 
     Ok((jar, Redirect::to(&url)))
 }
 
 #[derive(Deserialize)]
 pub struct OidcCallbackParams {
-    pub code:              Option<String>,
-    pub state:             Option<String>,
-    pub error:             Option<String>,
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
     pub error_description: Option<String>,
 }
 
@@ -378,9 +468,14 @@ pub async fn oidc_callback(
     Query(params): Query<OidcCallbackParams>,
     jar: CookieJar,
 ) -> Result<impl IntoResponse, ApiError> {
-    let endpoints = state.oidc_endpoints.as_ref()
+    let endpoints = state
+        .oidc_endpoints
+        .as_ref()
         .ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "OIDC login not configured"))?;
-    let oidc_cfg = state.config.oidc.as_ref()
+    let oidc_cfg = state
+        .config
+        .oidc
+        .as_ref()
         .ok_or_else(|| err(StatusCode::NOT_IMPLEMENTED, "OIDC login not configured"))?;
 
     if let Some(e) = params.error {
@@ -389,10 +484,15 @@ pub async fn oidc_callback(
         return Err(err(StatusCode::BAD_REQUEST, &format!("OIDC error: {e}")));
     }
 
-    let code = params.code.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth code"))?;
-    let oauth_state = params.state.ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth state"))?;
+    let code = params
+        .code
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth code"))?;
+    let oauth_state = params
+        .state
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "missing OAuth state"))?;
 
-    let session = ephemeral::take(&state.db, ephemeral::OAUTH_KIND, &oauth_state).await
+    let session = ephemeral::take(&state.db, ephemeral::OAUTH_KIND, &oauth_state)
+        .await
         .ok()
         .flatten()
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid OAuth state"))?;
@@ -422,13 +522,19 @@ pub async fn oidc_callback(
         })?;
 
     let display_name = user_info.name.unwrap_or_else(|| {
-        user_info.email.split('@').next().unwrap_or("user").to_string()
+        user_info
+            .email
+            .split('@')
+            .next()
+            .unwrap_or("user")
+            .to_string()
     });
 
     let id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
 
-    let rows = insert_user(&state.db,
+    let rows = insert_user(
+        &state.db,
         "INSERT INTO users (id, email, name, provider, created_at, role, oidc_sub)
          VALUES ($id, $email, $name, 'oidc', $created_at,
                  CASE WHEN EXISTS (SELECT 1 FROM users) THEN 'regular' ELSE 'admin' END, $oidc_sub)
@@ -448,17 +554,19 @@ pub async fn oidc_callback(
         err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
     })?;
 
-    let user = rows.into_iter().next()
-        .ok_or_else(|| {
-            tracing::error!("OIDC user upsert returned no rows");
-            err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
-        })?;
+    let user = rows.into_iter().next().ok_or_else(|| {
+        tracing::error!("OIDC user upsert returned no rows");
+        err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
+    })?;
     if user["is_new"].as_bool().unwrap_or(false) {
         assign_default_groups(&state, user["id"].as_str().unwrap_or_default()).await?;
     }
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
-    Ok((jar.add(token_cookie(token, state.config.secure_cookies())), Redirect::to("/")))
+    Ok((
+        jar.add(token_cookie(token, state.config.secure_cookies())),
+        Redirect::to("/"),
+    ))
 }
 
 fn build_oidc_auth_url(
