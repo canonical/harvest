@@ -7,11 +7,11 @@ mod db_tests {
     use serde_json::{json, Value};
     use tokio::sync::mpsc;
 
+    use harvest_db::test_support::TestDb;
+    use harvest_db::Db;
     use knowledge_server::config::LxdConfig;
     use knowledge_server::lxd::{self, identity, Flavor, LxdClient};
     use knowledge_server::machines::lxd_provision::create_lxd_agent;
-    use harvest_db::Db;
-    use harvest_db::test_support::TestDb;
 
     async fn connect() -> (Arc<Db>, TestDb) {
         let test_db = TestDb::new().await;
@@ -23,12 +23,16 @@ mod db_tests {
         db.execute(
             "INSERT INTO groups (id, name) VALUES ($gid, 'g1') ON CONFLICT DO NOTHING",
             json!({ "gid": "g1" }),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         db.execute(
             "INSERT INTO projects (id, name, group_id, created_by, created_at)
              VALUES ($id, 'test', 'g1', 'u1', '2026-01-01T00:00:00+00:00')",
             json!({ "id": id }),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         id
     }
 
@@ -38,15 +42,15 @@ mod db_tests {
     fn base_cfg(endpoint: String) -> LxdConfig {
         LxdConfig {
             endpoint,
-            client_cert:  None,
-            client_key:   None,
-            trust_token:  None,
-            ca_cert:      None,
-            insecure:     false,
-            project:      "default".into(),
-            image_alias:  "24.04".into(),
+            client_cert: None,
+            client_key: None,
+            trust_token: None,
+            ca_cert: None,
+            insecure: false,
+            project: "default".into(),
+            image_alias: "24.04".into(),
             image_server: "https://cloud-images.ubuntu.com/releases".into(),
-            profile:      "default".into(),
+            profile: "default".into(),
         }
     }
 
@@ -94,14 +98,15 @@ mod db_tests {
         let (db, _test_db) = connect().await;
         let mut cfg = base_cfg("https://lxd.example.com:8443".into());
         cfg.client_cert = Some(TEST_CERT.to_string());
-        cfg.client_key  = Some(TEST_KEY.to_string());
+        cfg.client_key = Some(TEST_KEY.to_string());
 
         let client = lxd::resolve_client(&cfg, &db).await.unwrap();
         assert!(client.is_some());
 
-        let rows = db.query(
-            "SELECT id FROM lxd_identity", json!({}),
-        ).await.unwrap();
+        let rows = db
+            .query("SELECT id FROM lxd_identity", json!({}))
+            .await
+            .unwrap();
         assert!(rows.is_empty());
     }
 
@@ -115,7 +120,10 @@ mod db_tests {
         assert!(client.is_none());
 
         let ident = identity::load_or_generate(&db).await.unwrap();
-        assert!(!ident.trusted, "identity should still be untrusted with no token supplied");
+        assert!(
+            !ident.trusted,
+            "identity should still be untrusted with no token supplied"
+        );
     }
 
     #[tokio::test]
@@ -125,7 +133,8 @@ mod db_tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("POST").path("/1.0/certificates");
-            then.status(200).json_body(json!({ "type": "sync", "status": "Success", "metadata": {} }));
+            then.status(200)
+                .json_body(json!({ "type": "sync", "status": "Success", "metadata": {} }));
         });
 
         let mut cfg = base_cfg(server.base_url());
@@ -145,7 +154,8 @@ mod db_tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("POST").path("/1.0/certificates");
-            then.status(403).json_body(json!({ "error": "invalid trust token" }));
+            then.status(403)
+                .json_body(json!({ "error": "invalid trust token" }));
         });
 
         let mut cfg = base_cfg(server.base_url());
@@ -166,16 +176,26 @@ mod db_tests {
 
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method("GET").path_matches(Regex::new(r"^/1\.0/networks/").unwrap());
+            when.method("GET")
+                .path_matches(Regex::new(r"^/1\.0/networks/").unwrap());
             then.status(500).json_body(json!({ "error": "boom" }));
         });
 
-        let lxd = LxdClient::from_identity(TEST_CERT, TEST_KEY, &base_cfg(server.base_url())).unwrap();
+        let lxd =
+            LxdClient::from_identity(TEST_CERT, TEST_KEY, &base_cfg(server.base_url())).unwrap();
         let (tx, mut rx) = mpsc::channel::<String>(64);
 
         let result = create_lxd_agent(
-            &db, &lxd, "http://localhost:8080", &project_id, "Test Agent", "desc", Flavor::Small, tx,
-        ).await;
+            &db,
+            &lxd,
+            "http://localhost:8080",
+            &project_id,
+            "Test Agent",
+            "desc",
+            Flavor::Small,
+            tx,
+        )
+        .await;
 
         assert!(result.is_err());
 
@@ -198,21 +218,26 @@ mod db_tests {
         let project_id = seed_project(&db).await;
 
         let instance_path = Regex::new(r"^/1\.0/instances/test-agent-[0-9a-f]{4}$").unwrap();
-        let instance_state_path = Regex::new(r"^/1\.0/instances/test-agent-[0-9a-f]{4}/state$").unwrap();
-        let instance_exec_path = Regex::new(r"^/1\.0/instances/test-agent-[0-9a-f]{4}/exec$").unwrap();
+        let instance_state_path =
+            Regex::new(r"^/1\.0/instances/test-agent-[0-9a-f]{4}/state$").unwrap();
+        let instance_exec_path =
+            Regex::new(r"^/1\.0/instances/test-agent-[0-9a-f]{4}/exec$").unwrap();
 
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method("GET").path_matches(Regex::new(r"^/1\.0/networks/").unwrap());
+            when.method("GET")
+                .path_matches(Regex::new(r"^/1\.0/networks/").unwrap());
             then.status(404).json_body(json!({ "error": "not found" }));
         });
         server.mock(|when, then| {
             when.method("POST").path("/1.0/networks");
-            then.status(200).json_body(json!({ "type": "sync", "status": "Success", "metadata": {} }));
+            then.status(200)
+                .json_body(json!({ "type": "sync", "status": "Success", "metadata": {} }));
         });
         server.mock(|when, then| {
             when.method("POST").path("/1.0/instances");
-            then.status(202).json_body(json!({ "type": "async", "metadata": { "id": "op-create" } }));
+            then.status(202)
+                .json_body(json!({ "type": "async", "metadata": { "id": "op-create" } }));
         });
         server.mock(|when, then| {
             when.method("GET").path("/1.0/operations/op-create/wait");
@@ -223,8 +248,10 @@ mod db_tests {
         });
         let instance_state_path_put = instance_state_path.clone();
         server.mock(move |when, then| {
-            when.method("PUT").path_matches(instance_state_path_put.clone());
-            then.status(202).json_body(json!({ "type": "async", "metadata": { "id": "op-state" } }));
+            when.method("PUT")
+                .path_matches(instance_state_path_put.clone());
+            then.status(202)
+                .json_body(json!({ "type": "async", "metadata": { "id": "op-state" } }));
         });
         server.mock(|when, then| {
             when.method("GET").path("/1.0/operations/op-state/wait");
@@ -235,11 +262,13 @@ mod db_tests {
         });
         server.mock(move |when, then| {
             when.method("GET").path_matches(instance_state_path.clone());
-            then.status(200).json_body(json!({ "type": "sync", "metadata": { "status": "Running" } }));
+            then.status(200)
+                .json_body(json!({ "type": "sync", "metadata": { "status": "Running" } }));
         });
         server.mock(move |when, then| {
             when.method("POST").path_matches(instance_exec_path.clone());
-            then.status(202).json_body(json!({ "type": "async", "metadata": { "id": "op-exec" } }));
+            then.status(202)
+                .json_body(json!({ "type": "async", "metadata": { "id": "op-exec" } }));
         });
         server.mock(|when, then| {
             when.method("GET").path("/1.0/operations/op-exec/wait");
@@ -253,15 +282,24 @@ mod db_tests {
             then.status(404).json_body(json!({ "error": "not found" }));
         });
 
-        let lxd = LxdClient::from_identity(TEST_CERT, TEST_KEY, &base_cfg(server.base_url())).unwrap();
+        let lxd =
+            LxdClient::from_identity(TEST_CERT, TEST_KEY, &base_cfg(server.base_url())).unwrap();
         let (tx, mut rx) = mpsc::channel::<String>(64);
 
         let db2 = Arc::clone(&db);
         let project_id2 = project_id.clone();
         let handle = tokio::spawn(async move {
             create_lxd_agent(
-                &db2, &lxd, "http://localhost:8080", &project_id2, "Test Agent", "desc", Flavor::Small, tx,
-            ).await
+                &db2,
+                &lxd,
+                "http://localhost:8080",
+                &project_id2,
+                "Test Agent",
+                "desc",
+                Flavor::Small,
+                tx,
+            )
+            .await
         });
 
         let mut events = Vec::new();
@@ -272,19 +310,39 @@ mod db_tests {
         assert!(result.is_ok(), "{result:?}");
 
         let types: Vec<&str> = events.iter().map(|e| e["type"].as_str().unwrap()).collect();
-        assert_eq!(types, vec![
-            "phase_start", "phase_start", "phase_start", "phase_start", "phase_start", "phase_start", "done",
-        ]);
+        assert_eq!(
+            types,
+            vec![
+                "phase_start",
+                "phase_start",
+                "phase_start",
+                "phase_start",
+                "phase_start",
+                "phase_start",
+                "done",
+            ]
+        );
 
-        let phases: Vec<&str> = events.iter()
+        let phases: Vec<&str> = events
+            .iter()
             .filter(|e| e["type"] == "phase_start")
             .map(|e| e["phase"].as_str().unwrap())
             .collect();
-        assert_eq!(phases, vec![
-            "ensure_network", "install_token", "create_container",
-            "start_container", "wait_running", "install_agent",
-        ]);
+        assert_eq!(
+            phases,
+            vec![
+                "ensure_network",
+                "install_token",
+                "create_container",
+                "start_container",
+                "wait_running",
+                "install_agent",
+            ]
+        );
 
-        assert!(events.last().unwrap()["hostname"].as_str().unwrap().starts_with("test-agent-"));
+        assert!(events.last().unwrap()["hostname"]
+            .as_str()
+            .unwrap()
+            .starts_with("test-agent-"));
     }
 }

@@ -14,7 +14,12 @@ use knowledge_server::machines::{
 };
 
 async fn body_bytes(resp: axum::response::Response) -> Vec<u8> {
-    resp.into_body().collect().await.unwrap().to_bytes().to_vec()
+    resp.into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec()
 }
 
 async fn body_text(resp: axum::response::Response) -> String {
@@ -28,17 +33,20 @@ async fn body_json(resp: axum::response::Response) -> Value {
 fn make_state(registry: Arc<MachineRegistry>) -> Arc<MachineState> {
     Arc::new(MachineState {
         registry,
-        db:       None,
+        db: None,
         binary_path: None,
-        server_url:  "https://harvest.example.com".into(),
-        lxd:         None,
+        server_url: "https://harvest.example.com".into(),
+        lxd: None,
     })
 }
 
 #[test]
 fn install_script_contains_server_url() {
     let s = generate_install_script("https://harvest.example.com", "tok-abc");
-    assert!(s.contains("https://harvest.example.com"), "missing server_url");
+    assert!(
+        s.contains("https://harvest.example.com"),
+        "missing server_url"
+    );
 }
 
 #[test]
@@ -62,20 +70,29 @@ fn install_script_does_not_write_project_id_to_config() {
 fn install_script_writes_server_url_and_agent_token_to_config() {
     let s = generate_install_script("https://harvest.example.com", "tok-abc");
     assert!(s.contains("server_url"), "config block missing server_url");
-    assert!(s.contains("agent_token"), "config block missing agent_token");
+    assert!(
+        s.contains("agent_token"),
+        "config block missing agent_token"
+    );
 }
 
 #[test]
 fn install_script_installs_uninstall_command() {
     let s = generate_install_script("https://harvest.example.com", "tok");
-    assert!(s.contains("uninstall-harvest-agent"), "missing uninstall script");
+    assert!(
+        s.contains("uninstall-harvest-agent"),
+        "missing uninstall script"
+    );
 }
 
 #[test]
 fn install_script_sets_up_systemd_service() {
     let s = generate_install_script("https://harvest.example.com", "tok");
     assert!(s.contains("systemd"), "missing systemd setup");
-    assert!(s.contains("harvest-agent.service"), "missing service file name");
+    assert!(
+        s.contains("harvest-agent.service"),
+        "missing service file name"
+    );
 }
 
 #[test]
@@ -87,33 +104,51 @@ fn install_script_exits_if_not_root() {
 #[tokio::test]
 async fn registry_execute_unknown_agent_returns_error() {
     let r = MachineRegistry::new();
-    let e = r.execute("nonexistent", "echo hi".into(), 5).await.unwrap_err();
+    let e = r
+        .execute("nonexistent", "echo hi".into(), 5)
+        .await
+        .unwrap_err();
     assert!(e.contains("not connected"), "got: {e}");
 }
 
 #[tokio::test]
 async fn registry_agents_for_project_empty_initially() {
-    assert!(MachineRegistry::new().agents_for_project("proj-1").await.is_empty());
+    assert!(MachineRegistry::new()
+        .agents_for_project("proj-1")
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
 async fn registry_agents_for_project_scoped_correctly() {
+    use chrono::Utc;
     use knowledge_server::machines::{ConnectedAgent, ServerToAgent};
     use tokio::sync::mpsc;
-    use chrono::Utc;
 
     let registry = MachineRegistry::new();
     let (tx1, _) = mpsc::channel::<ServerToAgent>(8);
     let (tx2, _) = mpsc::channel::<ServerToAgent>(8);
 
-    registry.agents.insert("a1".into(), ConnectedAgent {
-        id: "a1".into(), project_id: "proj-1".into(), hostname: "h1".into(),
-        connected_at: Utc::now(), sender: tx1,
-    });
-    registry.agents.insert("a2".into(), ConnectedAgent {
-        id: "a2".into(), project_id: "proj-2".into(), hostname: "h2".into(),
-        connected_at: Utc::now(), sender: tx2,
-    });
+    registry.agents.insert(
+        "a1".into(),
+        ConnectedAgent {
+            id: "a1".into(),
+            project_id: "proj-1".into(),
+            hostname: "h1".into(),
+            connected_at: Utc::now(),
+            sender: tx1,
+        },
+    );
+    registry.agents.insert(
+        "a2".into(),
+        ConnectedAgent {
+            id: "a2".into(),
+            project_id: "proj-2".into(),
+            hostname: "h2".into(),
+            connected_at: Utc::now(),
+            sender: tx2,
+        },
+    );
 
     let p1 = registry.agents_for_project("proj-1").await;
     assert_eq!(p1.len(), 1);
@@ -128,11 +163,13 @@ async fn install_script_endpoint_missing_project_returns_4xx_or_503() {
     let app = machines_router(make_state(MachineRegistry::new()));
     let req = Request::builder()
         .uri("/agents/missing-proj/install.sh")
-        .body(Body::empty()).unwrap();
+        .body(Body::empty())
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert!(
         resp.status() == StatusCode::NOT_FOUND || resp.status() == StatusCode::SERVICE_UNAVAILABLE,
-        "got {}", resp.status()
+        "got {}",
+        resp.status()
     );
 }
 
@@ -141,7 +178,8 @@ async fn binary_endpoint_missing_path_returns_404() {
     let app = machines_router(make_state(MachineRegistry::new()));
     let req = Request::builder()
         .uri("/agents/binary/harvest-agent")
-        .body(Body::empty()).unwrap();
+        .body(Body::empty())
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
@@ -151,7 +189,8 @@ async fn agent_events_no_token_returns_401() {
     let app = machines_router(make_state(MachineRegistry::new()));
     let req = Request::builder()
         .uri("/agent/events?hostname=test")
-        .body(Body::empty()).unwrap();
+        .body(Body::empty())
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
@@ -162,7 +201,8 @@ async fn agent_ping_no_token_returns_401() {
     let req = Request::builder()
         .method("POST")
         .uri("/agent/ping")
-        .body(Body::empty()).unwrap();
+        .body(Body::empty())
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
@@ -174,7 +214,9 @@ async fn agent_results_no_token_returns_401() {
         .method("POST")
         .uri("/agent/results")
         .header("content-type", "application/json")
-        .body(Body::from(r#"{"request_id":"x","stdout":"","stderr":"","exit_code":0}"#))
+        .body(Body::from(
+            r#"{"request_id":"x","stdout":"","stderr":"","exit_code":0}"#,
+        ))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -185,23 +227,28 @@ async fn agents_install_script_route_not_shadowed_by_proxy_route() {
     use knowledge_server::machines::handlers::machines_protected_router;
 
     let state = make_state(MachineRegistry::new());
-    let app = machines_router(Arc::clone(&state)).merge(machines_protected_router(Arc::clone(&state)));
+    let app =
+        machines_router(Arc::clone(&state)).merge(machines_protected_router(Arc::clone(&state)));
 
     let install_req = Request::builder()
         .uri("/agents/some-project/install.sh")
-        .body(Body::empty()).unwrap();
+        .body(Body::empty())
+        .unwrap();
     let install_resp = app.clone().oneshot(install_req).await.unwrap();
     assert_eq!(
-        install_resp.status(), StatusCode::SERVICE_UNAVAILABLE,
+        install_resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
         "install.sh must still resolve to the installer, not the proxy"
     );
 
     let proxy_req = Request::builder()
         .uri("/agents/some-agent/some-route")
-        .body(Body::empty()).unwrap();
+        .body(Body::empty())
+        .unwrap();
     let proxy_resp = app.oneshot(proxy_req).await.unwrap();
     assert_eq!(
-        proxy_resp.status(), StatusCode::INTERNAL_SERVER_ERROR,
+        proxy_resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
         "an arbitrary route name must fall through to the proxy handler (500 here because \
          Extension<Claims> isn't populated without the auth middleware layer in this test)"
     );
@@ -212,13 +259,19 @@ async fn agents_binary_route_not_shadowed_by_proxy_route() {
     use knowledge_server::machines::handlers::machines_protected_router;
 
     let state = make_state(MachineRegistry::new());
-    let app = machines_router(Arc::clone(&state)).merge(machines_protected_router(Arc::clone(&state)));
+    let app =
+        machines_router(Arc::clone(&state)).merge(machines_protected_router(Arc::clone(&state)));
 
     let req = Request::builder()
         .uri("/agents/binary/harvest-agent")
-        .body(Body::empty()).unwrap();
+        .body(Body::empty())
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "binary route must still resolve to the binary handler");
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "binary route must still resolve to the binary handler"
+    );
 }
 
 #[tokio::test]
@@ -228,7 +281,8 @@ async fn agent_ping_invalid_token_returns_401() {
         .method("POST")
         .uri("/agent/ping")
         .header("Authorization", "Bearer bad-token")
-        .body(Body::empty()).unwrap();
+        .body(Body::empty())
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
@@ -236,22 +290,22 @@ async fn agent_ping_invalid_token_returns_401() {
 #[cfg(test)]
 mod db_tests {
     use super::*;
-    use harvest_db::Db;
     use harvest_db::test_support::TestDb;
+    use harvest_db::Db;
     use std::future::IntoFuture as _;
     use tokio::net::TcpListener;
 
     async fn spawn_server(db: Arc<Db>) -> std::net::SocketAddr {
         let state = Arc::new(MachineState {
-            registry:    MachineRegistry::new(),
-            db:       Some(db),
+            registry: MachineRegistry::new(),
+            db: Some(db),
             binary_path: None,
-            server_url:  "http://localhost".into(),
-            lxd:         None,
+            server_url: "http://localhost".into(),
+            lxd: None,
         });
-        let app      = machines_router(state);
+        let app = machines_router(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr     = listener.local_addr().unwrap();
+        let addr = listener.local_addr().unwrap();
         tokio::spawn(axum::serve(listener, app).into_future());
         addr
     }
@@ -281,15 +335,26 @@ mod db_tests {
         seed_project(&db, install_token).await;
 
         let addr = spawn_server(db).await;
-        let url  = format!("http://127.0.0.1:{}/agent/events?hostname=test-host", addr.port());
+        let url = format!(
+            "http://127.0.0.1:{}/agent/events?hostname=test-host",
+            addr.port()
+        );
 
         let client = reqwest::Client::new();
-        let resp = client.get(&url)
+        let resp = client
+            .get(&url)
             .header("Authorization", format!("Bearer {install_token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
 
         assert_eq!(resp.status(), 200);
-        let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(ct.contains("text/event-stream"), "content-type: {ct}");
 
         use futures_util::StreamExt as _;
@@ -303,7 +368,8 @@ mod db_tests {
             }
         };
 
-        let data = event.lines()
+        let data = event
+            .lines()
             .find(|l| l.starts_with("data: "))
             .and_then(|l| l.strip_prefix("data: "))
             .expect("no data line in SSE event");
@@ -322,12 +388,18 @@ mod db_tests {
         let db = Arc::new(test_db.db.clone());
 
         let addr = spawn_server(db).await;
-        let url  = format!("http://127.0.0.1:{}/agent/events?hostname=attacker", addr.port());
+        let url = format!(
+            "http://127.0.0.1:{}/agent/events?hostname=attacker",
+            addr.port()
+        );
 
         let client = reqwest::Client::new();
-        let resp = client.get(&url)
+        let resp = client
+            .get(&url)
             .header("Authorization", "Bearer completely-wrong-token")
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
 
         assert_eq!(resp.status(), 401);
     }
@@ -346,9 +418,12 @@ mod db_tests {
 
         let client = reqwest::Client::new();
         use futures_util::StreamExt as _;
-        let sse_resp = client.get(format!("{base}/agent/events?hostname=ping-host"))
+        let sse_resp = client
+            .get(format!("{base}/agent/events?hostname=ping-host"))
             .header("Authorization", format!("Bearer {install_token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
 
         let mut stream = sse_resp.bytes_stream();
         let mut buf = String::new();
@@ -357,30 +432,38 @@ mod db_tests {
             buf.push_str(&String::from_utf8_lossy(&chunk));
             if let Some(pos) = buf.find("\n\n") {
                 let ev = buf[..pos].to_string();
-                let rest = buf[pos+2..].to_string();
+                let rest = buf[pos + 2..].to_string();
                 break (ev, rest);
             }
         };
 
-        let data = event.lines()
+        let data = event
+            .lines()
             .find(|l| l.starts_with("data: "))
-            .and_then(|l| l.strip_prefix("data: ")).unwrap();
+            .and_then(|l| l.strip_prefix("data: "))
+            .unwrap();
         let val: serde_json::Value = serde_json::from_str(data).unwrap();
         let perm_token = val["agent_token"].as_str().unwrap().to_string();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let ping_resp = client.post(format!("{base}/agent/ping"))
+        let ping_resp = client
+            .post(format!("{base}/agent/ping"))
             .header("Authorization", format!("Bearer {perm_token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
 
         assert_eq!(ping_resp.status(), 200);
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let rows = db.query(
-            "SELECT last_seen FROM machines WHERE hostname = 'ping-host'",
-            json!({}),
-        ).await.unwrap();
+        let rows = db
+            .query(
+                "SELECT last_seen FROM machines WHERE hostname = 'ping-host'",
+                json!({}),
+            )
+            .await
+            .unwrap();
         assert!(!rows.is_empty(), "machine not in DB");
         assert!(rows[0]["last_seen"].as_str().is_some());
     }
@@ -401,12 +484,18 @@ mod db_tests {
         ).await.unwrap();
 
         let addr = spawn_server(Arc::clone(&db)).await;
-        let url  = format!("http://127.0.0.1:{}/agent/events?hostname=agent-lxd-host", addr.port());
+        let url = format!(
+            "http://127.0.0.1:{}/agent/events?hostname=agent-lxd-host",
+            addr.port()
+        );
 
         let client = reqwest::Client::new();
-        let resp = client.get(&url)
+        let resp = client
+            .get(&url)
             .header("Authorization", format!("Bearer {install_token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
 
         use futures_util::StreamExt as _;
@@ -415,16 +504,21 @@ mod db_tests {
         loop {
             let chunk = stream.next().await.unwrap().unwrap();
             buf.push_str(&String::from_utf8_lossy(&chunk));
-            if buf.find("\n\n").is_some() { break; }
+            if buf.find("\n\n").is_some() {
+                break;
+            }
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let rows = db.query(
-            "SELECT provider, lxd_instance, description FROM machines
+        let rows = db
+            .query(
+                "SELECT provider, lxd_instance, description FROM machines
              WHERE project_id = $pid AND hostname = $h",
-            json!({ "pid": project_id, "h": "agent-lxd-host" }),
-        ).await.unwrap();
+                json!({ "pid": project_id, "h": "agent-lxd-host" }),
+            )
+            .await
+            .unwrap();
         let m = rows.into_iter().next().expect("machine not created");
         assert_eq!(m["provider"], "lxd");
         assert_eq!(m["lxd_instance"], "agent-lxd-host");
@@ -434,7 +528,10 @@ mod db_tests {
             "SELECT hostname FROM lxd_pending_instances WHERE project_id = $pid AND hostname = $h",
             json!({ "pid": project_id, "h": "agent-lxd-host" }),
         ).await.unwrap();
-        assert!(marker_rows.is_empty(), "LxdInstance marker should be consumed");
+        assert!(
+            marker_rows.is_empty(),
+            "LxdInstance marker should be consumed"
+        );
     }
 
     #[tokio::test]
@@ -447,12 +544,18 @@ mod db_tests {
         let project_id = seed_project(&db, install_token).await;
 
         let addr = spawn_server(Arc::clone(&db)).await;
-        let url  = format!("http://127.0.0.1:{}/agent/events?hostname=manual-host", addr.port());
+        let url = format!(
+            "http://127.0.0.1:{}/agent/events?hostname=manual-host",
+            addr.port()
+        );
 
         let client = reqwest::Client::new();
-        let resp = client.get(&url)
+        let resp = client
+            .get(&url)
             .header("Authorization", format!("Bearer {install_token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
 
         use futures_util::StreamExt as _;
@@ -461,39 +564,55 @@ mod db_tests {
         loop {
             let chunk = stream.next().await.unwrap().unwrap();
             buf.push_str(&String::from_utf8_lossy(&chunk));
-            if buf.find("\n\n").is_some() { break; }
+            if buf.find("\n\n").is_some() {
+                break;
+            }
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let rows = db.query(
-            "SELECT provider FROM machines WHERE project_id = $pid AND hostname = $h",
-            json!({ "pid": project_id, "h": "manual-host" }),
-        ).await.unwrap();
+        let rows = db
+            .query(
+                "SELECT provider FROM machines WHERE project_id = $pid AND hostname = $h",
+                json!({ "pid": project_id, "h": "manual-host" }),
+            )
+            .await
+            .unwrap();
         let m = rows.into_iter().next().expect("machine not created");
-        assert!(m["provider"].is_null(), "manually-installed machine should have no provider tag");
+        assert!(
+            m["provider"].is_null(),
+            "manually-installed machine should have no provider tag"
+        );
     }
 
-    use axum::{extract::Request, middleware::{from_fn, Next}};
-    use knowledge_server::{auth::jwt::Claims, machines::handlers::machines_protected_router, lxd::LxdClient};
+    use axum::{
+        extract::Request,
+        middleware::{from_fn, Next},
+    };
+    use knowledge_server::{
+        auth::jwt::Claims, lxd::LxdClient, machines::handlers::machines_protected_router,
+    };
 
     async fn inject_admin_claims(mut req: Request, next: Next) -> axum::response::Response {
         req.extensions_mut().insert(Claims {
-            sub:   "test-admin".into(),
+            sub: "test-admin".into(),
             email: "admin@example.com".into(),
-            name:  "Test Admin".into(),
-            role:  "admin".into(),
-            exp:   9_999_999_999,
+            name: "Test Admin".into(),
+            role: "admin".into(),
+            exp: 9_999_999_999,
         });
         next.run(req).await
     }
 
-    async fn spawn_protected_server(db: Arc<Db>, lxd: Option<Arc<LxdClient>>) -> std::net::SocketAddr {
+    async fn spawn_protected_server(
+        db: Arc<Db>,
+        lxd: Option<Arc<LxdClient>>,
+    ) -> std::net::SocketAddr {
         let state = Arc::new(MachineState {
-            registry:    MachineRegistry::new(),
-            db:       Some(db),
+            registry: MachineRegistry::new(),
+            db: Some(db),
             binary_path: None,
-            server_url:  "http://localhost".into(),
+            server_url: "http://localhost".into(),
             lxd,
         });
         let app = machines_protected_router(state).layer(from_fn(inject_admin_claims));
@@ -522,8 +641,14 @@ mod db_tests {
         let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
-        let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/nonexistent/start", addr.port()))
-            .send().await.unwrap();
+        let resp = client
+            .post(format!(
+                "http://127.0.0.1:{}/projects/{project_id}/agents/nonexistent/start",
+                addr.port()
+            ))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 404);
     }
 
@@ -538,8 +663,14 @@ mod db_tests {
         let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
-        let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/manual-agent/start", addr.port()))
-            .send().await.unwrap();
+        let resp = client
+            .post(format!(
+                "http://127.0.0.1:{}/projects/{project_id}/agents/manual-agent/start",
+                addr.port()
+            ))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 400);
     }
 
@@ -554,8 +685,14 @@ mod db_tests {
         let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
-        let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/lxd-agent/restart", addr.port()))
-            .send().await.unwrap();
+        let resp = client
+            .post(format!(
+                "http://127.0.0.1:{}/projects/{project_id}/agents/lxd-agent/restart",
+                addr.port()
+            ))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 503);
     }
 
@@ -570,15 +707,24 @@ mod db_tests {
         let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
-        let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
+        let resp = client
+            .post(format!(
+                "http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards",
+                addr.port()
+            ))
             .json(&json!({ "port": 8080, "route_name": "app" }))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
 
         let body: Value = resp.json().await.unwrap();
         assert_eq!(body["port"], 8080);
         assert_eq!(body["route_name"], "app");
-        assert!(body["url"].as_str().unwrap().ends_with("/agents/agent-1/app"));
+        assert!(body["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/agents/agent-1/app"));
     }
 
     #[tokio::test]
@@ -592,9 +738,15 @@ mod db_tests {
         let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
-        let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
+        let resp = client
+            .post(format!(
+                "http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards",
+                addr.port()
+            ))
             .json(&json!({ "port": 99999, "route_name": "app" }))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 400);
     }
 
@@ -609,9 +761,22 @@ mod db_tests {
         let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
-        let url = format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port());
-        client.post(&url).json(&json!({ "port": 8080, "route_name": "app" })).send().await.unwrap();
-        let resp = client.post(&url).json(&json!({ "port": 9090, "route_name": "app" })).send().await.unwrap();
+        let url = format!(
+            "http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards",
+            addr.port()
+        );
+        client
+            .post(&url)
+            .json(&json!({ "port": 8080, "route_name": "app" }))
+            .send()
+            .await
+            .unwrap();
+        let resp = client
+            .post(&url)
+            .json(&json!({ "port": 9090, "route_name": "app" }))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 409);
     }
 
@@ -627,13 +792,33 @@ mod db_tests {
         let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
-        client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
-            .json(&json!({ "port": 8080, "route_name": "app" })).send().await.unwrap();
-        client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-2/port-forwards", addr.port()))
-            .json(&json!({ "port": 9090, "route_name": "other" })).send().await.unwrap();
+        client
+            .post(format!(
+                "http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards",
+                addr.port()
+            ))
+            .json(&json!({ "port": 8080, "route_name": "app" }))
+            .send()
+            .await
+            .unwrap();
+        client
+            .post(format!(
+                "http://127.0.0.1:{}/projects/{project_id}/agents/agent-2/port-forwards",
+                addr.port()
+            ))
+            .json(&json!({ "port": 9090, "route_name": "other" }))
+            .send()
+            .await
+            .unwrap();
 
-        let resp = client.get(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
-            .send().await.unwrap();
+        let resp = client
+            .get(format!(
+                "http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards",
+                addr.port()
+            ))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
         let body: Value = resp.json().await.unwrap();
         let arr = body.as_array().unwrap();
@@ -652,8 +837,15 @@ mod db_tests {
         let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
-        let create_resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
-            .json(&json!({ "port": 8080, "route_name": "app" })).send().await.unwrap();
+        let create_resp = client
+            .post(format!(
+                "http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards",
+                addr.port()
+            ))
+            .json(&json!({ "port": 8080, "route_name": "app" }))
+            .send()
+            .await
+            .unwrap();
         let created: Value = create_resp.json().await.unwrap();
         let forward_id = created["id"].as_str().unwrap();
 
@@ -694,8 +886,15 @@ mod db_tests {
         let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
-        let create_resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
-            .json(&json!({ "port": 8080, "route_name": "app" })).send().await.unwrap();
+        let create_resp = client
+            .post(format!(
+                "http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards",
+                addr.port()
+            ))
+            .json(&json!({ "port": 8080, "route_name": "app" }))
+            .send()
+            .await
+            .unwrap();
         let created: Value = create_resp.json().await.unwrap();
         let forward_id = created["id"].as_str().unwrap();
 
@@ -703,8 +902,14 @@ mod db_tests {
             .send().await.unwrap();
         assert_eq!(del_resp.status(), 200);
 
-        let list_resp = client.get(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
-            .send().await.unwrap();
+        let list_resp = client
+            .get(format!(
+                "http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards",
+                addr.port()
+            ))
+            .send()
+            .await
+            .unwrap();
         let body: Value = list_resp.json().await.unwrap();
         assert!(body.as_array().unwrap().is_empty());
     }
@@ -720,22 +925,29 @@ mod db_tests {
         let addr = spawn_protected_server(Arc::clone(&db), None).await;
 
         let client = reqwest::Client::new();
-        let resp = client.post(format!("http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards", addr.port()))
+        let resp = client
+            .post(format!(
+                "http://127.0.0.1:{}/projects/{project_id}/agents/agent-1/port-forwards",
+                addr.port()
+            ))
             .json(&json!({ "port": 8080, "route_name": "install.sh" }))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 400);
     }
 
     async fn spawn_console_server(db: Arc<Db>) -> std::net::SocketAddr {
         let state = Arc::new(MachineState {
-            registry:    MachineRegistry::new(),
-            db:       Some(db),
+            registry: MachineRegistry::new(),
+            db: Some(db),
             binary_path: None,
-            server_url:  "http://localhost".into(),
-            lxd:         None,
+            server_url: "http://localhost".into(),
+            lxd: None,
         });
-        let app = machines_router(Arc::clone(&state))
-            .merge(machines_protected_router(Arc::clone(&state)).layer(from_fn(inject_admin_claims)));
+        let app = machines_router(Arc::clone(&state)).merge(
+            machines_protected_router(Arc::clone(&state)).layer(from_fn(inject_admin_claims)),
+        );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(axum::serve(listener, app).into_future());
@@ -745,14 +957,14 @@ mod db_tests {
     async fn connect_ws(
         url: &str,
         bearer: Option<&str>,
-    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let mut request = url.into_client_request().unwrap();
         if let Some(token) = bearer {
-            request.headers_mut().insert(
-                "Authorization",
-                format!("Bearer {token}").parse().unwrap(),
-            );
+            request
+                .headers_mut()
+                .insert("Authorization", format!("Bearer {token}").parse().unwrap());
         }
         let (stream, _) = tokio_tungstenite::connect_async(request).await.unwrap();
         stream
@@ -770,7 +982,9 @@ mod db_tests {
                 buf.drain(..pos + 2);
                 return ev;
             }
-            let Some(Ok(chunk)) = stream.next().await else { panic!("SSE stream ended unexpectedly") };
+            let Some(Ok(chunk)) = stream.next().await else {
+                panic!("SSE stream ended unexpectedly")
+            };
             buf.push_str(&String::from_utf8_lossy(chunk.as_ref()));
         }
     }
@@ -792,41 +1006,54 @@ mod db_tests {
         let ws_base = format!("ws://127.0.0.1:{}", addr.port());
 
         let http = reqwest::Client::new();
-        let sse_resp = http.get(format!("{base}/agent/events?hostname=console-relay-host"))
+        let sse_resp = http
+            .get(format!("{base}/agent/events?hostname=console-relay-host"))
             .header("Authorization", format!("Bearer {install_token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
 
         let mut stream = sse_resp.bytes_stream();
         let mut buf = String::new();
 
         let registered_event = next_sse_event(&mut buf, &mut stream).await;
-        let registered_data = registered_event.lines()
+        let registered_data = registered_event
+            .lines()
             .find(|l| l.starts_with("data: "))
-            .and_then(|l| l.strip_prefix("data: ")).unwrap();
+            .and_then(|l| l.strip_prefix("data: "))
+            .unwrap();
         let registered: Value = serde_json::from_str(registered_data).unwrap();
         let perm_token = registered["agent_token"].as_str().unwrap().to_string();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let rows = db.query(
-            "SELECT id FROM machines WHERE hostname = 'console-relay-host'",
-            json!({}),
-        ).await.unwrap();
+        let rows = db
+            .query(
+                "SELECT id FROM machines WHERE hostname = 'console-relay-host'",
+                json!({}),
+            )
+            .await
+            .unwrap();
         let agent_id = rows[0]["id"].as_str().unwrap().to_string();
 
         let browser_task = tokio::spawn({
             let ws_base = ws_base.clone();
             async move {
                 connect_ws(
-                    &format!("{ws_base}/projects/{project_id}/agents/{agent_id}/console?cols=80&rows=24"),
+                    &format!(
+                        "{ws_base}/projects/{project_id}/agents/{agent_id}/console?cols=80&rows=24"
+                    ),
                     None,
-                ).await
+                )
+                .await
             }
         });
 
         let open_shell_event = next_sse_event(&mut buf, &mut stream).await;
-        let open_shell_data = open_shell_event.lines()
+        let open_shell_data = open_shell_event
+            .lines()
             .find(|l| l.starts_with("data: "))
-            .and_then(|l| l.strip_prefix("data: ")).unwrap();
+            .and_then(|l| l.strip_prefix("data: "))
+            .unwrap();
         let open_shell: Value = serde_json::from_str(open_shell_data).unwrap();
         assert_eq!(open_shell["type"], "open_shell");
         assert_eq!(open_shell["cols"], 80);
@@ -836,26 +1063,42 @@ mod db_tests {
         let mut agent_ws = connect_ws(
             &format!("{ws_base}/agent/console/{session_id}"),
             Some(&perm_token),
-        ).await;
+        )
+        .await;
 
-        agent_ws.send(WsMessage::text(r#"{"type":"ready"}"#)).await.unwrap();
+        agent_ws
+            .send(WsMessage::text(r#"{"type":"ready"}"#))
+            .await
+            .unwrap();
 
         let mut browser_ws = browser_task.await.unwrap();
 
         let first = browser_ws.next().await.unwrap().unwrap();
         assert_eq!(first, WsMessage::text(r#"{"type":"ready"}"#));
 
-        browser_ws.send(WsMessage::binary(b"echo hi\n".to_vec())).await.unwrap();
+        browser_ws
+            .send(WsMessage::binary(b"echo hi\n".to_vec()))
+            .await
+            .unwrap();
         let got = agent_ws.next().await.unwrap().unwrap();
         assert_eq!(got, WsMessage::binary(b"echo hi\n".to_vec()));
 
-        agent_ws.send(WsMessage::binary(b"hi\n".to_vec())).await.unwrap();
+        agent_ws
+            .send(WsMessage::binary(b"hi\n".to_vec()))
+            .await
+            .unwrap();
         let got = browser_ws.next().await.unwrap().unwrap();
         assert_eq!(got, WsMessage::binary(b"hi\n".to_vec()));
 
-        browser_ws.send(WsMessage::text(r#"{"type":"resize","cols":100,"rows":40}"#)).await.unwrap();
+        browser_ws
+            .send(WsMessage::text(r#"{"type":"resize","cols":100,"rows":40}"#))
+            .await
+            .unwrap();
         let got = agent_ws.next().await.unwrap().unwrap();
-        assert_eq!(got, WsMessage::text(r#"{"type":"resize","cols":100,"rows":40}"#));
+        assert_eq!(
+            got,
+            WsMessage::text(r#"{"type":"resize","cols":100,"rows":40}"#)
+        );
 
         browser_ws.close(None).await.unwrap();
         let closed = agent_ws.next().await;
@@ -875,8 +1118,13 @@ mod db_tests {
         let base = format!("http://127.0.0.1:{}", addr.port());
 
         let client = reqwest::Client::new();
-        let resp = client.get(format!("{base}/projects/nonexistent-project/agents/nonexistent-agent/console"))
-            .send().await.unwrap();
+        let resp = client
+            .get(format!(
+                "{base}/projects/nonexistent-project/agents/nonexistent-agent/console"
+            ))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 404);
     }
 
@@ -893,9 +1141,12 @@ mod db_tests {
         let base = format!("http://127.0.0.1:{}", addr.port());
 
         let http = reqwest::Client::new();
-        let sse_resp = http.get(format!("{base}/agent/events?hostname=console-claim-host"))
+        let sse_resp = http
+            .get(format!("{base}/agent/events?hostname=console-claim-host"))
             .header("Authorization", format!("Bearer {install_token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
 
         use futures_util::StreamExt as _;
         let mut stream = sse_resp.bytes_stream();
@@ -903,14 +1154,19 @@ mod db_tests {
         loop {
             let chunk = stream.next().await.unwrap().unwrap();
             buf.push_str(&String::from_utf8_lossy(&chunk));
-            if buf.find("\n\n").is_some() { break; }
+            if buf.find("\n\n").is_some() {
+                break;
+            }
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let rows = db.query(
-            "SELECT id FROM machines WHERE hostname = 'console-claim-host'",
-            json!({}),
-        ).await.unwrap();
+        let rows = db
+            .query(
+                "SELECT id FROM machines WHERE hostname = 'console-claim-host'",
+                json!({}),
+            )
+            .await
+            .unwrap();
         let agent_id = rows[0]["id"].as_str().unwrap().to_string();
 
         let _browser_task = tokio::spawn({
@@ -919,15 +1175,19 @@ mod db_tests {
                 connect_ws(
                     &format!("{ws_base}/projects/{project_id}/agents/{agent_id}/console"),
                     None,
-                ).await
+                )
+                .await
             }
         });
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let resp = http.get(format!("{base}/agent/console/wrong-session-id"))
+        let resp = http
+            .get(format!("{base}/agent/console/wrong-session-id"))
             .header("Authorization", "Bearer completely-different-token")
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 401);
     }
 
@@ -942,22 +1202,39 @@ mod db_tests {
         addr
     }
 
-    async fn simulate_agent_tunnel(ws_base: &str, session_id: &str, agent_token: &str, target_port: u16) {
+    async fn simulate_agent_tunnel(
+        ws_base: &str,
+        session_id: &str,
+        agent_token: &str,
+        target_port: u16,
+    ) {
         use futures_util::{SinkExt as _, StreamExt as _};
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-        let mut agent_ws = connect_ws(&format!("{ws_base}/agent/tunnel/{session_id}"), Some(agent_token)).await;
+        let mut agent_ws = connect_ws(
+            &format!("{ws_base}/agent/tunnel/{session_id}"),
+            Some(agent_token),
+        )
+        .await;
 
         let tcp = match tokio::net::TcpStream::connect(("127.0.0.1", target_port)).await {
             Ok(t) => t,
             Err(e) => {
-                let _ = agent_ws.send(WsMessage::text(format!(r#"{{"type":"error","message":"{e}"}}"#))).await;
+                let _ = agent_ws
+                    .send(WsMessage::text(format!(
+                        r#"{{"type":"error","message":"{e}"}}"#
+                    )))
+                    .await;
                 return;
             }
         };
 
-        if agent_ws.send(WsMessage::text(r#"{"type":"connected"}"#)).await.is_err() {
+        if agent_ws
+            .send(WsMessage::text(r#"{"type":"connected"}"#))
+            .await
+            .is_err()
+        {
             return;
         }
 
@@ -970,7 +1247,11 @@ mod db_tests {
                 match tcp_read.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if ws_tx.send(WsMessage::binary(buf[..n].to_vec())).await.is_err() {
+                        if ws_tx
+                            .send(WsMessage::binary(buf[..n].to_vec()))
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -996,7 +1277,6 @@ mod db_tests {
     #[tokio::test]
     #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn port_forward_proxy_forwards_request_to_agent_port() {
-
         let test_db = TestDb::new().await;
         let db = Arc::new(test_db.db.clone());
 
@@ -1008,47 +1288,66 @@ mod db_tests {
         let ws_base = format!("ws://127.0.0.1:{}", addr.port());
 
         let http = reqwest::Client::new();
-        let sse_resp = http.get(format!("{base}/agent/events?hostname=pf-proxy-host"))
+        let sse_resp = http
+            .get(format!("{base}/agent/events?hostname=pf-proxy-host"))
             .header("Authorization", format!("Bearer {install_token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
 
         let mut stream = sse_resp.bytes_stream();
         let mut buf = String::new();
         let registered_event = next_sse_event(&mut buf, &mut stream).await;
-        let registered_data = registered_event.lines()
+        let registered_data = registered_event
+            .lines()
             .find(|l| l.starts_with("data: "))
-            .and_then(|l| l.strip_prefix("data: ")).unwrap();
+            .and_then(|l| l.strip_prefix("data: "))
+            .unwrap();
         let registered: Value = serde_json::from_str(registered_data).unwrap();
         let perm_token = registered["agent_token"].as_str().unwrap().to_string();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let rows = db.query(
-            "SELECT id FROM machines WHERE hostname = 'pf-proxy-host'",
-            json!({}),
-        ).await.unwrap();
+        let rows = db
+            .query(
+                "SELECT id FROM machines WHERE hostname = 'pf-proxy-host'",
+                json!({}),
+            )
+            .await
+            .unwrap();
         let agent_id = rows[0]["id"].as_str().unwrap().to_string();
 
         let stand_in_addr = spawn_stand_in_http_server().await;
-        http.post(format!("{base}/projects/{project_id}/agents/{agent_id}/port-forwards"))
-            .json(&json!({ "port": stand_in_addr.port(), "route_name": "app" }))
-            .send().await.unwrap();
+        http.post(format!(
+            "{base}/projects/{project_id}/agents/{agent_id}/port-forwards"
+        ))
+        .json(&json!({ "port": stand_in_addr.port(), "route_name": "app" }))
+        .send()
+        .await
+        .unwrap();
 
         let agent_task = tokio::spawn({
             let ws_base = ws_base.clone();
             let perm_token = perm_token.clone();
             async move {
                 let open_tunnel_event = next_sse_event(&mut buf, &mut stream).await;
-                let data = open_tunnel_event.lines()
+                let data = open_tunnel_event
+                    .lines()
                     .find(|l| l.starts_with("data: "))
-                    .and_then(|l| l.strip_prefix("data: ")).unwrap();
+                    .and_then(|l| l.strip_prefix("data: "))
+                    .unwrap();
                 let val: Value = serde_json::from_str(data).unwrap();
                 assert_eq!(val["type"], "open_tunnel");
                 let session_id = val["session_id"].as_str().unwrap().to_string();
-                simulate_agent_tunnel(&ws_base, &session_id, &perm_token, stand_in_addr.port()).await;
+                simulate_agent_tunnel(&ws_base, &session_id, &perm_token, stand_in_addr.port())
+                    .await;
             }
         });
 
-        let resp = http.get(format!("{base}/agents/{agent_id}/app")).send().await.unwrap();
+        let resp = http
+            .get(format!("{base}/agents/{agent_id}/app"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(resp.text().await.unwrap(), "/");
 
@@ -1058,7 +1357,6 @@ mod db_tests {
     #[tokio::test]
     #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn port_forward_proxy_forwards_subpath() {
-
         let test_db = TestDb::new().await;
         let db = Arc::new(test_db.db.clone());
 
@@ -1070,46 +1368,65 @@ mod db_tests {
         let ws_base = format!("ws://127.0.0.1:{}", addr.port());
 
         let http = reqwest::Client::new();
-        let sse_resp = http.get(format!("{base}/agent/events?hostname=pf-subpath-host"))
+        let sse_resp = http
+            .get(format!("{base}/agent/events?hostname=pf-subpath-host"))
             .header("Authorization", format!("Bearer {install_token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
 
         let mut stream = sse_resp.bytes_stream();
         let mut buf = String::new();
         let registered_event = next_sse_event(&mut buf, &mut stream).await;
-        let registered_data = registered_event.lines()
+        let registered_data = registered_event
+            .lines()
             .find(|l| l.starts_with("data: "))
-            .and_then(|l| l.strip_prefix("data: ")).unwrap();
+            .and_then(|l| l.strip_prefix("data: "))
+            .unwrap();
         let registered: Value = serde_json::from_str(registered_data).unwrap();
         let perm_token = registered["agent_token"].as_str().unwrap().to_string();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let rows = db.query(
-            "SELECT id FROM machines WHERE hostname = 'pf-subpath-host'",
-            json!({}),
-        ).await.unwrap();
+        let rows = db
+            .query(
+                "SELECT id FROM machines WHERE hostname = 'pf-subpath-host'",
+                json!({}),
+            )
+            .await
+            .unwrap();
         let agent_id = rows[0]["id"].as_str().unwrap().to_string();
 
         let stand_in_addr = spawn_stand_in_http_server().await;
-        http.post(format!("{base}/projects/{project_id}/agents/{agent_id}/port-forwards"))
-            .json(&json!({ "port": stand_in_addr.port(), "route_name": "app" }))
-            .send().await.unwrap();
+        http.post(format!(
+            "{base}/projects/{project_id}/agents/{agent_id}/port-forwards"
+        ))
+        .json(&json!({ "port": stand_in_addr.port(), "route_name": "app" }))
+        .send()
+        .await
+        .unwrap();
 
         let agent_task = tokio::spawn({
             let ws_base = ws_base.clone();
             let perm_token = perm_token.clone();
             async move {
                 let open_tunnel_event = next_sse_event(&mut buf, &mut stream).await;
-                let data = open_tunnel_event.lines()
+                let data = open_tunnel_event
+                    .lines()
                     .find(|l| l.starts_with("data: "))
-                    .and_then(|l| l.strip_prefix("data: ")).unwrap();
+                    .and_then(|l| l.strip_prefix("data: "))
+                    .unwrap();
                 let val: Value = serde_json::from_str(data).unwrap();
                 let session_id = val["session_id"].as_str().unwrap().to_string();
-                simulate_agent_tunnel(&ws_base, &session_id, &perm_token, stand_in_addr.port()).await;
+                simulate_agent_tunnel(&ws_base, &session_id, &perm_token, stand_in_addr.port())
+                    .await;
             }
         });
 
-        let resp = http.get(format!("{base}/agents/{agent_id}/app/foo/bar")).send().await.unwrap();
+        let resp = http
+            .get(format!("{base}/agents/{agent_id}/app/foo/bar"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(resp.text().await.unwrap(), "/foo/bar");
 
@@ -1129,11 +1446,19 @@ mod db_tests {
         let base = format!("http://127.0.0.1:{}", addr.port());
 
         let http = reqwest::Client::new();
-        http.post(format!("{base}/projects/{project_id}/agents/offline-agent/port-forwards"))
-            .json(&json!({ "port": 8080, "route_name": "app" }))
-            .send().await.unwrap();
+        http.post(format!(
+            "{base}/projects/{project_id}/agents/offline-agent/port-forwards"
+        ))
+        .json(&json!({ "port": 8080, "route_name": "app" }))
+        .send()
+        .await
+        .unwrap();
 
-        let resp = http.get(format!("{base}/agents/offline-agent/app")).send().await.unwrap();
+        let resp = http
+            .get(format!("{base}/agents/offline-agent/app"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 502);
     }
 
@@ -1153,46 +1478,67 @@ mod db_tests {
         let ws_base = format!("ws://127.0.0.1:{}", addr.port());
 
         let http = reqwest::Client::new();
-        let sse_resp = http.get(format!("{base}/agent/events?hostname=pf-trailing-slash-host"))
+        let sse_resp = http
+            .get(format!(
+                "{base}/agent/events?hostname=pf-trailing-slash-host"
+            ))
             .header("Authorization", format!("Bearer {install_token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
 
         let mut stream = sse_resp.bytes_stream();
         let mut buf = String::new();
         let registered_event = next_sse_event(&mut buf, &mut stream).await;
-        let registered_data = registered_event.lines()
+        let registered_data = registered_event
+            .lines()
             .find(|l| l.starts_with("data: "))
-            .and_then(|l| l.strip_prefix("data: ")).unwrap();
+            .and_then(|l| l.strip_prefix("data: "))
+            .unwrap();
         let registered: Value = serde_json::from_str(registered_data).unwrap();
         let perm_token = registered["agent_token"].as_str().unwrap().to_string();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let rows = db.query(
-            "SELECT id FROM machines WHERE hostname = 'pf-trailing-slash-host'",
-            json!({}),
-        ).await.unwrap();
+        let rows = db
+            .query(
+                "SELECT id FROM machines WHERE hostname = 'pf-trailing-slash-host'",
+                json!({}),
+            )
+            .await
+            .unwrap();
         let agent_id = rows[0]["id"].as_str().unwrap().to_string();
 
         let stand_in_addr = spawn_stand_in_http_server().await;
-        http.post(format!("{base}/projects/{project_id}/agents/{agent_id}/port-forwards"))
-            .json(&json!({ "port": stand_in_addr.port(), "route_name": "app" }))
-            .send().await.unwrap();
+        http.post(format!(
+            "{base}/projects/{project_id}/agents/{agent_id}/port-forwards"
+        ))
+        .json(&json!({ "port": stand_in_addr.port(), "route_name": "app" }))
+        .send()
+        .await
+        .unwrap();
 
         let agent_task = tokio::spawn({
             let ws_base = ws_base.clone();
             let perm_token = perm_token.clone();
             async move {
                 let open_tunnel_event = next_sse_event(&mut buf, &mut stream).await;
-                let data = open_tunnel_event.lines()
+                let data = open_tunnel_event
+                    .lines()
                     .find(|l| l.starts_with("data: "))
-                    .and_then(|l| l.strip_prefix("data: ")).unwrap();
+                    .and_then(|l| l.strip_prefix("data: "))
+                    .unwrap();
                 let val: Value = serde_json::from_str(data).unwrap();
                 let session_id = val["session_id"].as_str().unwrap().to_string();
-                simulate_agent_tunnel(&ws_base, &session_id, &perm_token, stand_in_addr.port()).await;
+                simulate_agent_tunnel(&ws_base, &session_id, &perm_token, stand_in_addr.port())
+                    .await;
             }
         });
 
-        let resp = http.get(format!("{base}/agents/{agent_id}/app/")).send().await.unwrap();
+        let resp = http
+            .get(format!("{base}/agents/{agent_id}/app/"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(resp.text().await.unwrap(), "/");
 
@@ -1212,14 +1558,17 @@ mod db_tests {
         let base = format!("http://127.0.0.1:{}", addr.port());
 
         let http = reqwest::Client::new();
-        let resp = http.get(format!("{base}/agents/some-agent/nope")).send().await.unwrap();
+        let resp = http
+            .get(format!("{base}/agents/some-agent/nope"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 404);
     }
 
     #[tokio::test]
     #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn port_forward_proxy_returns_502_when_agent_side_connection_refused() {
-
         let test_db = TestDb::new().await;
         let db = Arc::new(test_db.db.clone());
 
@@ -1231,49 +1580,67 @@ mod db_tests {
         let ws_base = format!("ws://127.0.0.1:{}", addr.port());
 
         let http = reqwest::Client::new();
-        let sse_resp = http.get(format!("{base}/agent/events?hostname=pf-refused-host"))
+        let sse_resp = http
+            .get(format!("{base}/agent/events?hostname=pf-refused-host"))
             .header("Authorization", format!("Bearer {install_token}"))
-            .send().await.unwrap();
+            .send()
+            .await
+            .unwrap();
 
         let mut stream = sse_resp.bytes_stream();
         let mut buf = String::new();
         let registered_event = next_sse_event(&mut buf, &mut stream).await;
-        let registered_data = registered_event.lines()
+        let registered_data = registered_event
+            .lines()
             .find(|l| l.starts_with("data: "))
-            .and_then(|l| l.strip_prefix("data: ")).unwrap();
+            .and_then(|l| l.strip_prefix("data: "))
+            .unwrap();
         let registered: Value = serde_json::from_str(registered_data).unwrap();
         let perm_token = registered["agent_token"].as_str().unwrap().to_string();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let rows = db.query(
-            "SELECT id FROM machines WHERE hostname = 'pf-refused-host'",
-            json!({}),
-        ).await.unwrap();
+        let rows = db
+            .query(
+                "SELECT id FROM machines WHERE hostname = 'pf-refused-host'",
+                json!({}),
+            )
+            .await
+            .unwrap();
         let agent_id = rows[0]["id"].as_str().unwrap().to_string();
 
         let closed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let closed_port = closed_listener.local_addr().unwrap().port();
         drop(closed_listener);
 
-        http.post(format!("{base}/projects/{project_id}/agents/{agent_id}/port-forwards"))
-            .json(&json!({ "port": closed_port, "route_name": "app" }))
-            .send().await.unwrap();
+        http.post(format!(
+            "{base}/projects/{project_id}/agents/{agent_id}/port-forwards"
+        ))
+        .json(&json!({ "port": closed_port, "route_name": "app" }))
+        .send()
+        .await
+        .unwrap();
 
         let agent_task = tokio::spawn({
             let ws_base = ws_base.clone();
             let perm_token = perm_token.clone();
             async move {
                 let open_tunnel_event = next_sse_event(&mut buf, &mut stream).await;
-                let data = open_tunnel_event.lines()
+                let data = open_tunnel_event
+                    .lines()
                     .find(|l| l.starts_with("data: "))
-                    .and_then(|l| l.strip_prefix("data: ")).unwrap();
+                    .and_then(|l| l.strip_prefix("data: "))
+                    .unwrap();
                 let val: Value = serde_json::from_str(data).unwrap();
                 let session_id = val["session_id"].as_str().unwrap().to_string();
                 simulate_agent_tunnel(&ws_base, &session_id, &perm_token, closed_port).await;
             }
         });
 
-        let resp = http.get(format!("{base}/agents/{agent_id}/app")).send().await.unwrap();
+        let resp = http
+            .get(format!("{base}/agents/{agent_id}/app"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 502);
 
         agent_task.await.unwrap();

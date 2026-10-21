@@ -21,9 +21,11 @@ use knowledge_server::{
     deployments::handlers::{
         create_template, delete_template, get_template, list_templates, upload_template,
     },
-    llm::{LlmProvider, types::{LlmResponse, Message, ModelInfo, ToolDefinition, Usage}},
+    llm::{
+        types::{LlmResponse, Message, ModelInfo, ToolDefinition, Usage},
+        LlmProvider,
+    },
     machines::MachineRegistry,
-
     projects::handlers::ProjectState,
     skills::SkillStore,
 };
@@ -32,20 +34,40 @@ const JWT_SECRET: &str = "test-templates-secret";
 
 struct FixedTextLlm(String);
 impl FixedTextLlm {
-    fn new(t: impl Into<String>) -> Arc<dyn LlmProvider> { Arc::new(Self(t.into())) }
+    fn new(t: impl Into<String>) -> Arc<dyn LlmProvider> {
+        Arc::new(Self(t.into()))
+    }
 }
 #[async_trait]
 impl LlmProvider for FixedTextLlm {
-    fn id(&self) -> &str { "fixed-text" }
-    fn kind(&self) -> &str { "mock" }
-    fn default_model(&self) -> &str { "mock-model" }
-    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> { Ok(vec![]) }
-    async fn chat_with(&self, _model: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> anyhow::Result<LlmResponse> {
-        Ok(LlmResponse::Message { text: self.0.clone(), usage: Usage::default() })
+    fn id(&self) -> &str {
+        "fixed-text"
+    }
+    fn kind(&self) -> &str {
+        "mock"
+    }
+    fn default_model(&self) -> &str {
+        "mock-model"
+    }
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_with(
+        &self,
+        _model: Option<&str>,
+        _: &[Message],
+        _: &[ToolDefinition],
+    ) -> anyhow::Result<LlmResponse> {
+        Ok(LlmResponse::Message {
+            text: self.0.clone(),
+            usage: Usage::default(),
+        })
     }
 }
 
-fn cookie(token: &str) -> String { format!("token={token}") }
+fn cookie(token: &str) -> String {
+    format!("token={token}")
+}
 
 macro_rules! db {
     ($c:ident, $db:ident) => {
@@ -55,19 +77,21 @@ macro_rules! db {
 }
 
 async fn make_user(db: &Db, email: &str, name: &str, role: &str) -> (String, String) {
-    let id  = uuid::Uuid::new_v4().to_string();
+    let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     db.query(
         "INSERT INTO users (id, email, name, role, provider, created_at)
          VALUES ($id, $email, $name, $role, 'password', $now)",
         json!({"id":id,"email":email,"name":name,"role":role,"now":now}),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let token = jwt::issue(JWT_SECRET, &id, email, name, role).unwrap();
     (id, token)
 }
 
 fn templates_app(db: Arc<Db>) -> Router {
-    let secret      = Arc::new(JWT_SECRET.to_string());
+    let secret = Arc::new(JWT_SECRET.to_string());
     let skill_store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let llm = FixedTextLlm::new("stub");
     let agent = Arc::new(Agent::new(Arc::clone(&llm), vec![], 2));
@@ -86,46 +110,82 @@ fn templates_app(db: Arc<Db>) -> Router {
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last: 6,
         thresholds: None,
-        semantic:  None,
+        semantic: None,
     });
-    let project_state = Arc::new(ProjectState::new(Arc::clone(&db), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, None, Arc::new(knowledge_server::cost::PricingTable::default()), knowledge_server::collocate::sessions::SessionContainerRegistry::new()));
+    let project_state = Arc::new(ProjectState::new(
+        Arc::clone(&db),
+        agent,
+        builder,
+        Arc::clone(&llm) as Arc<dyn LlmProvider>,
+        Arc::new(vec![]),
+        None,
+        None,
+        Arc::new(knowledge_server::cost::PricingTable::default()),
+        knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
+    ));
     Router::new()
-        .route("/templates", route_get(list_templates).post(create_template))
+        .route(
+            "/templates",
+            route_get(list_templates).post(create_template),
+        )
         .route("/templates/upload", route_post(upload_template))
-        .route("/templates/:tid", route_get(get_template).delete(delete_template))
+        .route(
+            "/templates/:tid",
+            route_get(get_template).delete(delete_template),
+        )
         .with_state(project_state)
         .layer(from_fn_with_state(Arc::clone(&secret), auth::require_auth))
 }
 
 fn req_get(uri: &str, token: &str) -> Request<Body> {
-    Request::builder().method("GET").uri(uri)
-        .header("Cookie", cookie(token)).body(Body::empty()).unwrap()
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("Cookie", cookie(token))
+        .body(Body::empty())
+        .unwrap()
 }
 
 fn req_post_json(uri: &str, token: &str, body: Value) -> Request<Body> {
-    Request::builder().method("POST").uri(uri)
+    Request::builder()
+        .method("POST")
+        .uri(uri)
         .header("Cookie", cookie(token))
         .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
 }
 
 fn req_post_multipart(uri: &str, token: &str, boundary: &str, body: Vec<u8>) -> Request<Body> {
-    Request::builder().method("POST").uri(uri)
+    Request::builder()
+        .method("POST")
+        .uri(uri)
         .header("Cookie", cookie(token))
-        .header("content-type", format!("multipart/form-data; boundary={boundary}"))
-        .body(Body::from(body)).unwrap()
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap()
 }
 
 fn req_delete(uri: &str, token: &str) -> Request<Body> {
-    Request::builder().method("DELETE").uri(uri)
-        .header("Cookie", cookie(token)).body(Body::empty()).unwrap()
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header("Cookie", cookie(token))
+        .body(Body::empty())
+        .unwrap()
 }
 
 async fn send(app: Router, req: Request<Body>) -> (StatusCode, Value) {
-    let resp   = app.oneshot(req).await.unwrap();
+    let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes  = http_body_util::BodyExt::collect(resp.into_body()).await.unwrap().to_bytes();
-    let json   = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let bytes = http_body_util::BodyExt::collect(resp.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
+    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json)
 }
 
@@ -136,7 +196,11 @@ fn build_harvest_zip() -> Vec<u8> {
         let opts = zip::write::SimpleFileOptions::default();
 
         zip.start_file("metadata.yaml", opts).unwrap();
-        write!(zip, "name: Charmed Juju\ndescription: Deploy Juju-based products").unwrap();
+        write!(
+            zip,
+            "name: Charmed Juju\ndescription: Deploy Juju-based products"
+        )
+        .unwrap();
 
         zip.start_file("design.md", opts).unwrap();
         write!(zip, "# 1. Introduction\n${{CUSTOMER}}").unwrap();
@@ -183,7 +247,11 @@ fn build_harvest_zip_no_design() -> Vec<u8> {
 fn multipart_body(boundary: &str, filename: &str, content: &[u8]) -> Vec<u8> {
     let mut body = Vec::new();
     write!(body, "--{boundary}\r\n").unwrap();
-    write!(body, "Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n").unwrap();
+    write!(
+        body,
+        "Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+    )
+    .unwrap();
     write!(body, "Content-Type: application/octet-stream\r\n\r\n").unwrap();
     body.extend_from_slice(content);
     write!(body, "\r\n--{boundary}--\r\n").unwrap();
@@ -197,12 +265,28 @@ async fn list_templates_returns_all_templates_globally() {
     let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = templates_app(Arc::clone(&db));
 
-    let _ = send(app.clone(), req_post_json("/templates", &tok, json!({
-        "name": "Template A", "description": "first", "content": "{}"
-    }))).await;
-    let _ = send(app.clone(), req_post_json("/templates", &tok, json!({
-        "name": "Template B", "description": "second", "content": "{}"
-    }))).await;
+    let _ = send(
+        app.clone(),
+        req_post_json(
+            "/templates",
+            &tok,
+            json!({
+                "name": "Template A", "description": "first", "content": "{}"
+            }),
+        ),
+    )
+    .await;
+    let _ = send(
+        app.clone(),
+        req_post_json(
+            "/templates",
+            &tok,
+            json!({
+                "name": "Template B", "description": "second", "content": "{}"
+            }),
+        ),
+    )
+    .await;
 
     let (status, list) = send(app, req_get("/templates", &tok)).await;
     assert_eq!(status, StatusCode::OK);
@@ -220,7 +304,11 @@ async fn upload_harvest_creates_template_with_skills_and_artifacts() {
     let boundary = "----testboundary";
     let body = multipart_body(boundary, "test.harvest", &zip_bytes);
 
-    let (status, body) = send(app.clone(), req_post_multipart("/templates/upload", &tok, boundary, body)).await;
+    let (status, body) = send(
+        app.clone(),
+        req_post_multipart("/templates/upload", &tok, boundary, body),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
     assert!(body["id"].is_string());
     assert_eq!(body["name"], "Charmed Juju");
@@ -250,7 +338,11 @@ async fn upload_harvest_rejects_missing_metadata_yaml() {
     let boundary = "----testboundary";
     let body = multipart_body(boundary, "bad.harvest", &zip_bytes);
 
-    let (status, _) = send(app, req_post_multipart("/templates/upload", &tok, boundary, body)).await;
+    let (status, _) = send(
+        app,
+        req_post_multipart("/templates/upload", &tok, boundary, body),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -265,7 +357,11 @@ async fn upload_harvest_rejects_missing_design_md() {
     let boundary = "----testboundary";
     let body = multipart_body(boundary, "bad.harvest", &zip_bytes);
 
-    let (status, _) = send(app, req_post_multipart("/templates/upload", &tok, boundary, body)).await;
+    let (status, _) = send(
+        app,
+        req_post_multipart("/templates/upload", &tok, boundary, body),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -280,7 +376,11 @@ async fn upload_harvest_rejects_non_zip_file() {
     let boundary = "----testboundary";
     let body = multipart_body(boundary, "fake.harvest", not_zip);
 
-    let (status, _) = send(app, req_post_multipart("/templates/upload", &tok, boundary, body)).await;
+    let (status, _) = send(
+        app,
+        req_post_multipart("/templates/upload", &tok, boundary, body),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -291,9 +391,17 @@ async fn delete_template_removes_it() {
     let (_, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = templates_app(Arc::clone(&db));
 
-    let (_, body) = send(app.clone(), req_post_json("/templates", &tok, json!({
-        "name": "To Delete", "description": "", "content": "{}"
-    }))).await;
+    let (_, body) = send(
+        app.clone(),
+        req_post_json(
+            "/templates",
+            &tok,
+            json!({
+                "name": "To Delete", "description": "", "content": "{}"
+            }),
+        ),
+    )
+    .await;
     let tid = body["id"].as_str().unwrap().to_string();
 
     let (status, _) = send(app.clone(), req_delete(&format!("/templates/{tid}"), &tok)).await;

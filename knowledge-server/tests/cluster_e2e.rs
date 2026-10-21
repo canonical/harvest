@@ -49,15 +49,24 @@ async fn chat_completions(State(mock): State<Arc<MockLlm>>, Json(body): Json<Val
     });
     Response::builder()
         .header("content-type", "text/event-stream")
-        .body(axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        .body(axum::body::Body::from_stream(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
         .unwrap()
 }
 
 async fn start_mock_llm() -> (String, Arc<MockLlm>) {
-    let mock = Arc::new(MockLlm { chunk_delay_ms: AtomicU64::new(5), chunks: AtomicUsize::new(5), requests: AtomicUsize::new(0) });
+    let mock = Arc::new(MockLlm {
+        chunk_delay_ms: AtomicU64::new(5),
+        chunks: AtomicUsize::new(5),
+        requests: AtomicUsize::new(0),
+    });
     let router = Router::new()
         .route("/chat/completions", post(chat_completions))
-        .route("/models", get(|| async { Json(json!({ "data": [{ "id": "mock" }] })) }))
+        .route(
+            "/models",
+            get(|| async { Json(json!({ "data": [{ "id": "mock" }] })) }),
+        )
         .with_state(Arc::clone(&mock));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -66,7 +75,11 @@ async fn start_mock_llm() -> (String, Arc<MockLlm>) {
 }
 
 fn free_port() -> u16 {
-    StdListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    StdListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 struct Node {
@@ -91,7 +104,9 @@ impl Node {
 
     fn terminate(&mut self) {
         if let Some(child) = &self.child {
-            let _ = Command::new("kill").args(["-TERM", &child.id().to_string()]).status();
+            let _ = Command::new("kill")
+                .args(["-TERM", &child.id().to_string()])
+                .status();
         }
     }
 
@@ -126,7 +141,8 @@ impl Drop for Node {
 fn start_node(name: &str, db_url: &str, llm_url: &str, dir: &std::path::Path) -> Node {
     let port = free_port();
     let internal_port = free_port();
-    let config = format!(r#"
+    let config = format!(
+        r#"
 [server]
 host = "127.0.0.1"
 port = {port}
@@ -159,7 +175,8 @@ api_key  = "mock-key"
 model    = "mock"
 id       = "mock"
 max_retries = 0
-"#);
+"#
+    );
     let config_path = dir.join(format!("{name}.toml"));
     let log_path = dir.join(format!("{name}.log"));
     std::fs::write(&config_path, config).unwrap();
@@ -172,7 +189,13 @@ max_retries = 0
         .stderr(Stdio::from(log))
         .spawn()
         .expect("starting knowledge-server");
-    Node { name: name.to_string(), child: Some(child), base: format!("http://127.0.0.1:{port}"), config_path, log_path }
+    Node {
+        name: name.to_string(),
+        child: Some(child),
+        base: format!("http://127.0.0.1:{port}"),
+        config_path,
+        log_path,
+    }
 }
 
 async fn wait_ready(http: &reqwest::Client, node: &Node) {
@@ -208,9 +231,19 @@ impl Cluster {
         let (llm_url, mock) = start_mock_llm().await;
         let dir = tempfile::tempdir().unwrap();
         let nodes: Vec<Node> = (0..count)
-            .map(|i| start_node(&format!("node-{}", (b'a' + i as u8) as char), &db_url, &llm_url, dir.path()))
+            .map(|i| {
+                start_node(
+                    &format!("node-{}", (b'a' + i as u8) as char),
+                    &db_url,
+                    &llm_url,
+                    dir.path(),
+                )
+            })
             .collect();
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(60)).build().unwrap();
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap();
         for node in &nodes {
             wait_ready(&http, node).await;
         }
@@ -219,32 +252,79 @@ impl Cluster {
             .json(&json!({ "email": "admin@example.com", "name": "Admin", "password": "correct-horse" }))
             .send().await.unwrap();
         assert_eq!(response.status(), 200, "register failed");
-        let cookie = response.headers().get("set-cookie").unwrap().to_str().unwrap().to_string();
-        let token = cookie.split(';').next().unwrap().trim_start_matches("token=").to_string();
+        let cookie = response
+            .headers()
+            .get("set-cookie")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        let token = cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .trim_start_matches("token=")
+            .to_string();
 
-        let group: Value = http.post(nodes[1 % count].url("/admin/groups")).bearer_auth(&token)
+        let group: Value = http
+            .post(nodes[1 % count].url("/admin/groups"))
+            .bearer_auth(&token)
             .json(&json!({ "name": "team", "description": "" }))
-            .send().await.unwrap().json().await.unwrap();
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         let group_id = group["id"].as_str().expect("group id").to_string();
-        let project: Value = http.post(nodes[2 % count].url("/projects")).bearer_auth(&token)
+        let project: Value = http
+            .post(nodes[2 % count].url("/projects"))
+            .bearer_auth(&token)
             .json(&json!({ "name": "ha", "group_id": group_id }))
-            .send().await.unwrap().json().await.unwrap();
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         let project_id = project["id"].as_str().expect("project id").to_string();
 
-        Self { _db: db, db_url, nodes, http, token, project_id, mock, _dir: dir }
+        Self {
+            _db: db,
+            db_url,
+            nodes,
+            http,
+            token,
+            project_id,
+            mock,
+            _dir: dir,
+        }
     }
 
     async fn new_conversation(&self, node: usize) -> String {
-        let conv: Value = self.http.post(self.nodes[node].url(&format!("/projects/{}/conversations", self.project_id)))
-            .bearer_auth(&self.token).json(&json!({})).send().await.unwrap().json().await.unwrap();
+        let conv: Value = self
+            .http
+            .post(self.nodes[node].url(&format!("/projects/{}/conversations", self.project_id)))
+            .bearer_auth(&self.token)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         conv["id"].as_str().unwrap().to_string()
     }
 
     async fn send(&self, node: usize, conv: &str, query: &str) -> reqwest::StatusCode {
-        self.http.post(self.nodes[node].url(&format!("/projects/{}/query/stream", self.project_id)))
+        self.http
+            .post(self.nodes[node].url(&format!("/projects/{}/query/stream", self.project_id)))
             .bearer_auth(&self.token)
             .json(&json!({ "query": query, "conversation_id": conv }))
-            .send().await.unwrap().status()
+            .send()
+            .await
+            .unwrap()
+            .status()
     }
 
     async fn events(&self, node: usize, conv: Option<&str>) -> mpsc::UnboundedReceiver<Value> {
@@ -261,7 +341,12 @@ impl Cluster {
 }
 
 async fn sse(http: &reqwest::Client, url: &str, token: &str) -> mpsc::UnboundedReceiver<Value> {
-    let response = reqwest::Client::new().get(url).bearer_auth(token).send().await.unwrap();
+    let response = reqwest::Client::new()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), 200, "subscribing to {url}");
     let _ = http;
     let (tx, rx) = mpsc::unbounded_channel();
@@ -287,7 +372,11 @@ async fn sse(http: &reqwest::Client, url: &str, token: &str) -> mpsc::UnboundedR
     rx
 }
 
-async fn wait_for(rx: &mut mpsc::UnboundedReceiver<Value>, timeout: Duration, predicate: impl Fn(&Value) -> bool) -> Vec<Value> {
+async fn wait_for(
+    rx: &mut mpsc::UnboundedReceiver<Value>,
+    timeout: Duration,
+    predicate: impl Fn(&Value) -> bool,
+) -> Vec<Value> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut seen = Vec::new();
     loop {
@@ -306,7 +395,8 @@ async fn wait_for(rx: &mut mpsc::UnboundedReceiver<Value>, timeout: Duration, pr
 }
 
 fn text_of(events: &[Value], conv: &str) -> String {
-    events.iter()
+    events
+        .iter()
         .filter(|e| e["conv_id"] == conv && e["type"] == "text_delta")
         .map(|e| e["text"].as_str().unwrap_or_default().to_string())
         .collect()
@@ -320,7 +410,15 @@ fn expected_answer(chunks: usize) -> String {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
 async fn three_nodes_serve_one_cluster() {
     let cluster = Cluster::start(3).await;
-    let nodes: Value = cluster.http.get(cluster.nodes[0].url("/version")).send().await.unwrap().json().await.unwrap();
+    let nodes: Value = cluster
+        .http
+        .get(cluster.nodes[0].url("/version"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(nodes["schema_version"], harvest_db::LATEST_SCHEMA_VERSION);
     let db = cluster.db().await;
     let alive = db.query("SELECT count(*) AS n FROM cluster_nodes WHERE heartbeat_at > now() - interval '2 seconds'", json!({})).await.unwrap();
@@ -335,26 +433,63 @@ async fn a_turn_started_on_one_node_streams_to_watchers_on_every_node() {
     let conv = cluster.new_conversation(1).await;
     let mut on_b = cluster.events(1, Some(&conv)).await;
     let mut on_c = cluster.events(2, Some(&conv)).await;
-    wait_for(&mut on_b, Duration::from_secs(10), |e| e["type"] == "presence").await;
-    wait_for(&mut on_c, Duration::from_secs(10), |e| e["type"] == "presence").await;
+    wait_for(&mut on_b, Duration::from_secs(10), |e| {
+        e["type"] == "presence"
+    })
+    .await;
+    wait_for(&mut on_c, Duration::from_secs(10), |e| {
+        e["type"] == "presence"
+    })
+    .await;
 
     assert_eq!(cluster.send(0, &conv, "hello cluster").await, 200);
 
     for rx in [&mut on_b, &mut on_c] {
-        let events = wait_for(rx, Duration::from_secs(30), |e| e["type"] == "done" && e["conv_id"] == conv).await;
-        assert!(events.iter().any(|e| e["type"] == "user_message" && e["query"] == "hello cluster"));
-        assert!(events.iter().any(|e| e["type"] == "lock" && e["conv_id"] == conv));
+        let events = wait_for(rx, Duration::from_secs(30), |e| {
+            e["type"] == "done" && e["conv_id"] == conv
+        })
+        .await;
+        assert!(events
+            .iter()
+            .any(|e| e["type"] == "user_message" && e["query"] == "hello cluster"));
+        assert!(events
+            .iter()
+            .any(|e| e["type"] == "lock" && e["conv_id"] == conv));
         assert_eq!(text_of(&events, &conv), expected_answer(8));
-        let seqs: Vec<u64> = events.iter().filter(|e| e["conv_id"] == conv).filter_map(|e| e["seq"].as_u64()).collect();
-        assert!(seqs.windows(2).all(|w| w[0] < w[1]), "events arrive in order: {seqs:?}");
-        wait_for(rx, Duration::from_secs(10), |e| e["type"] == "unlock" && e["conv_id"] == conv).await;
+        let seqs: Vec<u64> = events
+            .iter()
+            .filter(|e| e["conv_id"] == conv)
+            .filter_map(|e| e["seq"].as_u64())
+            .collect();
+        assert!(
+            seqs.windows(2).all(|w| w[0] < w[1]),
+            "events arrive in order: {seqs:?}"
+        );
+        wait_for(rx, Duration::from_secs(10), |e| {
+            e["type"] == "unlock" && e["conv_id"] == conv
+        })
+        .await;
     }
 
-    let saved: Value = cluster.http.get(cluster.nodes[2].url(&format!("/projects/{}/conversations/{conv}", cluster.project_id)))
-        .bearer_auth(&cluster.token).send().await.unwrap().json().await.unwrap();
+    let saved: Value = cluster
+        .http
+        .get(cluster.nodes[2].url(&format!(
+            "/projects/{}/conversations/{conv}",
+            cluster.project_id
+        )))
+        .bearer_auth(&cluster.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let messages = saved["messages"].as_array().unwrap();
     assert_eq!(messages.len(), 2);
-    assert_eq!(messages[1]["text"].as_str().unwrap().trim(), expected_answer(8).trim());
+    assert_eq!(
+        messages[1]["text"].as_str().unwrap().trim(),
+        expected_answer(8).trim()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -367,12 +502,26 @@ async fn a_conversation_lock_is_enforced_across_nodes() {
     let mut watch = cluster.events(2, Some(&conv)).await;
 
     assert_eq!(cluster.send(0, &conv, "first").await, 200);
-    wait_for(&mut watch, Duration::from_secs(10), |e| e["type"] == "text_delta").await;
-    assert_eq!(cluster.send(1, &conv, "second").await, 409, "another node must see the lock");
+    wait_for(&mut watch, Duration::from_secs(10), |e| {
+        e["type"] == "text_delta"
+    })
+    .await;
+    assert_eq!(
+        cluster.send(1, &conv, "second").await,
+        409,
+        "another node must see the lock"
+    );
     assert_eq!(cluster.send(2, &conv, "third").await, 409);
 
-    wait_for(&mut watch, Duration::from_secs(30), |e| e["type"] == "unlock" && e["conv_id"] == conv).await;
-    assert_eq!(cluster.send(1, &conv, "after unlock").await, 200, "the lock is released cluster-wide");
+    wait_for(&mut watch, Duration::from_secs(30), |e| {
+        e["type"] == "unlock" && e["conv_id"] == conv
+    })
+    .await;
+    assert_eq!(
+        cluster.send(1, &conv, "after unlock").await,
+        200,
+        "the lock is released cluster-wide"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -385,12 +534,27 @@ async fn a_watcher_joining_mid_turn_on_another_node_catches_up_without_gaps_or_d
     let mut early = cluster.events(0, Some(&conv)).await;
 
     assert_eq!(cluster.send(0, &conv, "long answer").await, 200);
-    wait_for(&mut early, Duration::from_secs(10), |e| e["type"] == "text_delta" && e["text"] == "chunk10 ").await;
+    wait_for(&mut early, Duration::from_secs(10), |e| {
+        e["type"] == "text_delta" && e["text"] == "chunk10 "
+    })
+    .await;
 
     let mut late = cluster.events(2, Some(&conv)).await;
-    let events = wait_for(&mut late, Duration::from_secs(30), |e| e["type"] == "done" && e["conv_id"] == conv).await;
-    assert!(events.iter().any(|e| e["type"] == "user_message" && e["query"] == "long answer"), "catch-up replays the question");
-    assert_eq!(text_of(&events, &conv), expected_answer(40), "catch-up plus live events form the exact answer");
+    let events = wait_for(&mut late, Duration::from_secs(30), |e| {
+        e["type"] == "done" && e["conv_id"] == conv
+    })
+    .await;
+    assert!(
+        events
+            .iter()
+            .any(|e| e["type"] == "user_message" && e["query"] == "long answer"),
+        "catch-up replays the question"
+    );
+    assert_eq!(
+        text_of(&events, &conv),
+        expected_answer(40),
+        "catch-up plus live events form the exact answer"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -399,15 +563,34 @@ async fn presence_is_shared_across_nodes() {
     let cluster = Cluster::start(2).await;
     let conv = cluster.new_conversation(0).await;
     let mut on_a = cluster.events(0, Some(&conv)).await;
-    wait_for(&mut on_a, Duration::from_secs(10), |e| e["type"] == "presence").await;
+    wait_for(&mut on_a, Duration::from_secs(10), |e| {
+        e["type"] == "presence"
+    })
+    .await;
     let mut on_b = cluster.events(1, None).await;
-    let presence = wait_for(&mut on_b, Duration::from_secs(10), |e| e["type"] == "presence").await;
-    let users = presence.last().unwrap()["users"].as_array().unwrap().clone();
+    let presence = wait_for(&mut on_b, Duration::from_secs(10), |e| {
+        e["type"] == "presence"
+    })
+    .await;
+    let users = presence.last().unwrap()["users"]
+        .as_array()
+        .unwrap()
+        .clone();
     assert_eq!(users.len(), 1, "presence lists each user once: {users:?}");
-    wait_for(&mut on_a, Duration::from_secs(10), |e| e["type"] == "user_join").await;
+    wait_for(&mut on_a, Duration::from_secs(10), |e| {
+        e["type"] == "user_join"
+    })
+    .await;
     let db = cluster.db().await;
-    let rows = db.query("SELECT DISTINCT node_id FROM project_presence", json!({})).await.unwrap();
-    assert_eq!(rows.len(), 2, "each node records its own watchers in shared presence");
+    let rows = db
+        .query("SELECT DISTINCT node_id FROM project_presence", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "each node records its own watchers in shared presence"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -420,19 +603,34 @@ async fn a_crashed_node_aborts_its_turn_and_releases_the_lock() {
     let mut watch = cluster.events(2, Some(&conv)).await;
 
     assert_eq!(cluster.send(0, &conv, "doomed").await, 200);
-    wait_for(&mut watch, Duration::from_secs(10), |e| e["type"] == "text_delta").await;
+    wait_for(&mut watch, Duration::from_secs(10), |e| {
+        e["type"] == "text_delta"
+    })
+    .await;
     let killed_at = Instant::now();
     cluster.nodes[0].kill();
 
-    wait_for(&mut watch, Duration::from_secs(15), |e| e["type"] == "turn_aborted" && e["conv_id"] == conv).await;
-    wait_for(&mut watch, Duration::from_secs(5), |e| e["type"] == "unlock" && e["conv_id"] == conv).await;
+    wait_for(&mut watch, Duration::from_secs(15), |e| {
+        e["type"] == "turn_aborted" && e["conv_id"] == conv
+    })
+    .await;
+    wait_for(&mut watch, Duration::from_secs(5), |e| {
+        e["type"] == "unlock" && e["conv_id"] == conv
+    })
+    .await;
     let detection = killed_at.elapsed();
-    assert!(detection < Duration::from_secs(10), "failure detected in {detection:?}");
+    assert!(
+        detection < Duration::from_secs(10),
+        "failure detected in {detection:?}"
+    );
 
     cluster.mock.chunks.store(3, Ordering::SeqCst);
     cluster.mock.chunk_delay_ms.store(5, Ordering::SeqCst);
     assert_eq!(cluster.send(1, &conv, "retry on a survivor").await, 200);
-    wait_for(&mut watch, Duration::from_secs(30), |e| e["type"] == "done" && e["conv_id"] == conv).await;
+    wait_for(&mut watch, Duration::from_secs(30), |e| {
+        e["type"] == "done" && e["conv_id"] == conv
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -441,37 +639,88 @@ async fn a_drained_node_fails_readiness_refuses_turns_and_exits_cleanly() {
     let mut cluster = Cluster::start(2).await;
     let conv = cluster.new_conversation(0).await;
     let mut watch = cluster.events(1, Some(&conv)).await;
-    wait_for(&mut watch, Duration::from_secs(10), |e| e["type"] == "presence").await;
+    wait_for(&mut watch, Duration::from_secs(10), |e| {
+        e["type"] == "presence"
+    })
+    .await;
 
     cluster.nodes[0].terminate();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let status = cluster.http.get(cluster.nodes[0].url("/health/ready")).send().await.map(|r| r.status().as_u16()).unwrap_or(0);
+        let status = cluster
+            .http
+            .get(cluster.nodes[0].url("/health/ready"))
+            .send()
+            .await
+            .map(|r| r.status().as_u16())
+            .unwrap_or(0);
         if status == 503 {
             break;
         }
-        assert!(Instant::now() < deadline, "readiness never reported draining");
+        assert!(
+            Instant::now() < deadline,
+            "readiness never reported draining"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert_eq!(cluster.send(0, &conv, "too late").await, 503);
-    assert!(cluster.nodes[0].wait_exit(Duration::from_secs(20)), "drained node must exit:\n{}", cluster.nodes[0].log());
+    assert!(
+        cluster.nodes[0].wait_exit(Duration::from_secs(20)),
+        "drained node must exit:\n{}",
+        cluster.nodes[0].log()
+    );
 
     let db = cluster.db().await;
-    let rows = db.query("SELECT count(*) AS n FROM cluster_nodes WHERE node_id LIKE 'node-a-%'", json!({})).await.unwrap();
+    let rows = db
+        .query(
+            "SELECT count(*) AS n FROM cluster_nodes WHERE node_id LIKE 'node-a-%'",
+            json!({}),
+        )
+        .await
+        .unwrap();
     assert_eq!(rows[0]["n"], 0, "a drained node deregisters itself");
 
     assert_eq!(cluster.send(1, &conv, "served by the survivor").await, 200);
-    wait_for(&mut watch, Duration::from_secs(30), |e| e["type"] == "done" && e["conv_id"] == conv).await;
+    wait_for(&mut watch, Duration::from_secs(30), |e| {
+        e["type"] == "done" && e["conv_id"] == conv
+    })
+    .await;
 }
 
-async fn connect_fake_agent(cluster: &Cluster, node: usize) -> (String, String, mpsc::UnboundedReceiver<Value>) {
+async fn connect_fake_agent(
+    cluster: &Cluster,
+    node: usize,
+) -> (String, String, mpsc::UnboundedReceiver<Value>) {
     let db = cluster.db().await;
-    let rows = db.query("SELECT install_token FROM projects WHERE id = $pid", json!({ "pid": cluster.project_id })).await.unwrap();
+    let rows = db
+        .query(
+            "SELECT install_token FROM projects WHERE id = $pid",
+            json!({ "pid": cluster.project_id }),
+        )
+        .await
+        .unwrap();
     let install_token = rows[0]["install_token"].as_str().unwrap().to_string();
-    let mut events = sse(&cluster.http, &cluster.nodes[node].url("/agent/events?hostname=fake-host"), &install_token).await;
-    let first = wait_for(&mut events, Duration::from_secs(10), |e| e["type"] == "registered").await;
-    let agent_token = first.last().unwrap()["agent_token"].as_str().unwrap().to_string();
-    let rows = db.query("SELECT id FROM machines WHERE project_id = $pid", json!({ "pid": cluster.project_id })).await.unwrap();
+    let mut events = sse(
+        &cluster.http,
+        &cluster.nodes[node].url("/agent/events?hostname=fake-host"),
+        &install_token,
+    )
+    .await;
+    let first = wait_for(&mut events, Duration::from_secs(10), |e| {
+        e["type"] == "registered"
+    })
+    .await;
+    let agent_token = first.last().unwrap()["agent_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let rows = db
+        .query(
+            "SELECT id FROM machines WHERE project_id = $pid",
+            json!({ "pid": cluster.project_id }),
+        )
+        .await
+        .unwrap();
     let agent_id = rows[0]["id"].as_str().unwrap().to_string();
     (agent_id, agent_token, events)
 }
@@ -482,14 +731,28 @@ async fn an_agent_connected_to_one_node_runs_commands_requested_on_another() {
     let cluster = Cluster::start(3).await;
     let (agent_id, agent_token, mut agent_events) = connect_fake_agent(&cluster, 0).await;
 
-    let agents: Value = cluster.http.get(cluster.nodes[1].url(&format!("/projects/{}/agents", cluster.project_id)))
-        .bearer_auth(&cluster.token).send().await.unwrap().json().await.unwrap();
-    assert_eq!(agents[0]["online"], true, "node B sees the agent connected to node A as online");
+    let agents: Value = cluster
+        .http
+        .get(cluster.nodes[1].url(&format!("/projects/{}/agents", cluster.project_id)))
+        .bearer_auth(&cluster.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        agents[0]["online"], true,
+        "node B sees the agent connected to node A as online"
+    );
 
     let http = cluster.http.clone();
     let result_url = cluster.nodes[2].url("/agent/results");
     let responder = tokio::spawn(async move {
-        let events = wait_for(&mut agent_events, Duration::from_secs(20), |e| e["type"] == "execute").await;
+        let events = wait_for(&mut agent_events, Duration::from_secs(20), |e| {
+            e["type"] == "execute"
+        })
+        .await;
         let execute = events.last().unwrap().clone();
         let status = http.post(result_url).bearer_auth(&agent_token)
             .json(&json!({ "request_id": execute["request_id"], "stdout": format!("ran: {}", execute["command"].as_str().unwrap()), "stderr": "", "exit_code": 0 }))
@@ -497,10 +760,20 @@ async fn an_agent_connected_to_one_node_runs_commands_requested_on_another() {
         assert_eq!(status, 200, "a result posted to a third node is accepted");
     });
 
-    let response: Value = cluster.http.post(cluster.nodes[1].url(&format!("/projects/{}/agents/{agent_id}/execute", cluster.project_id)))
+    let response: Value = cluster
+        .http
+        .post(cluster.nodes[1].url(&format!(
+            "/projects/{}/agents/{agent_id}/execute",
+            cluster.project_id
+        )))
         .bearer_auth(&cluster.token)
         .json(&json!({ "command": "uname -a", "timeout_secs": 15 }))
-        .send().await.unwrap().json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     responder.await.unwrap();
     assert_eq!(response["stdout"], "ran: uname -a");
     assert_eq!(response["exit_code"], 0);
@@ -513,24 +786,64 @@ async fn an_agent_reconnects_to_a_survivor_when_its_node_crashes() {
     let (agent_id, _token, _events) = connect_fake_agent(&cluster, 0).await;
     cluster.nodes[0].kill();
     tokio::time::sleep(Duration::from_secs(3)).await;
-    let agents: Value = cluster.http.get(cluster.nodes[1].url(&format!("/projects/{}/agents", cluster.project_id)))
-        .bearer_auth(&cluster.token).send().await.unwrap().json().await.unwrap();
-    assert_eq!(agents[0]["online"], false, "an agent on a dead node is reported offline");
+    let agents: Value = cluster
+        .http
+        .get(cluster.nodes[1].url(&format!("/projects/{}/agents", cluster.project_id)))
+        .bearer_auth(&cluster.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        agents[0]["online"], false,
+        "an agent on a dead node is reported offline"
+    );
 
     let db = cluster.db().await;
-    let rows = db.query("SELECT agent_token_hash FROM machines WHERE id = $id", json!({ "id": agent_id })).await.unwrap();
+    let rows = db
+        .query(
+            "SELECT agent_token_hash FROM machines WHERE id = $id",
+            json!({ "id": agent_id }),
+        )
+        .await
+        .unwrap();
     assert!(rows[0]["agent_token_hash"].as_str().is_some());
     let (_same_id, _token, _events) = {
         let (id, token, events) = connect_fake_agent_with_token(&cluster, 1, &_token).await;
         (id, token, events)
     };
-    let agents: Value = cluster.http.get(cluster.nodes[1].url(&format!("/projects/{}/agents", cluster.project_id)))
-        .bearer_auth(&cluster.token).send().await.unwrap().json().await.unwrap();
-    assert_eq!(agents[0]["online"], true, "the agent is back online through the surviving node");
+    let agents: Value = cluster
+        .http
+        .get(cluster.nodes[1].url(&format!("/projects/{}/agents", cluster.project_id)))
+        .bearer_auth(&cluster.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        agents[0]["online"], true,
+        "the agent is back online through the surviving node"
+    );
 }
 
-async fn connect_fake_agent_with_token(cluster: &Cluster, node: usize, token: &str) -> (String, String, mpsc::UnboundedReceiver<Value>) {
-    let mut events = sse(&cluster.http, &cluster.nodes[node].url("/agent/events?hostname=fake-host"), token).await;
-    wait_for(&mut events, Duration::from_secs(10), |e| e["type"] == "hello_ack").await;
+async fn connect_fake_agent_with_token(
+    cluster: &Cluster,
+    node: usize,
+    token: &str,
+) -> (String, String, mpsc::UnboundedReceiver<Value>) {
+    let mut events = sse(
+        &cluster.http,
+        &cluster.nodes[node].url("/agent/events?hostname=fake-host"),
+        token,
+    )
+    .await;
+    wait_for(&mut events, Duration::from_secs(10), |e| {
+        e["type"] == "hello_ack"
+    })
+    .await;
     (String::new(), token.to_string(), events)
 }
