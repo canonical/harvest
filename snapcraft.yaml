@@ -1,0 +1,172 @@
+name: harvest
+base: core24
+version: '0.10.0'
+summary: AI-powered code knowledge graph server and web interface
+description: |
+  Harvest exposes an AI-powered HTTP API and web interface for querying code
+  knowledge graphs stored in PostgreSQL.  Agents can connect to it to run
+  commands on remote machines.  Several server units can run active/active
+  against the same database.
+
+  Prerequisites
+  ─────────────
+  A reachable PostgreSQL 16 database with the pg_trgm and vector extensions
+  available (not bundled in this snap).
+
+  Quick start
+  ───────────
+  1. Set required credentials:
+       snap set harvest \
+         database.url=postgres://harvest:<pw>@<host>:5432/harvest \
+         llm.primary.provider=anthropic \
+         llm.primary.api-key=<llm-api-key> \
+         auth.jwt-secret=$(openssl rand -base64 32)
+
+  2. Start the services:
+       snap start --enable harvest.server
+       snap start --enable harvest.ui
+
+  3. Open http://localhost:3000 in your browser.
+     The first user to register becomes an admin.
+
+  Snap configuration keys
+  ───────────────────────
+  database.url                PostgreSQL URL; several hosts with
+                              target_session_attrs=read-write follow a
+                              primary failover   (required)
+  database.pool-size          Connection pool size         (default: 16)
+  database.ca-file            CA certificate for TLS to PostgreSQL
+  cluster.internal-listen     Node-to-node listen address
+  cluster.internal-url        Address other nodes use to reach this one
+  cluster.shared-secret       Secret shared by every node of the cluster
+  cluster.node-name           Name prefix for this node
+  config.managed              true when a charm writes server.toml itself
+  server.host / server.port   API address        (default: 127.0.0.1:8080)
+  ui.host / ui.port           Web UI address     (default: 127.0.0.1:3000)
+  ui.mode                     proxy (UI and API) or static (UI only)
+  ui.enable-docs / docs.dir   Documentation page and its directory
+  log.level                   error|warn|info|debug|trace  (default: warn)
+
+  llm.<name>.*                One block per provider; <name> is its stable id:
+    provider                  anthropic | gemini | openai-compatible
+    api-key, model, base-url  Credentials, model, endpoint
+    timeout-secs, max-retries Request limits         (default: 120, 3)
+    priority                  Lower = tried first on rate limits
+    expose-to-ui              false keeps a provider failover-only
+    display-name, models      Model picker label and model allowlist
+
+  agent.max-iterations        Agent iteration limit        (default: 20)
+  agent.compaction-threshold-chars, agent.compaction-keep-last
+  agents.public-url           Public URL for agent callbacks
+  auth.jwt-secret             JWT signing secret           (required)
+  auth.allow-local-login      Enable username/password login  (default: true)
+  auth.google.{client-id,client-secret,redirect-uri}
+  auth.oidc.{issuer-url,client-id,client-secret,redirect-uri,display-name}
+  lxd.endpoint, lxd.trust-token, lxd.client-cert, lxd.client-key,
+  lxd.ca-cert, lxd.insecure, lxd.project, lxd.image-alias,
+  lxd.image-server, lxd.profile
+                              LXD-managed agents (optional)
+
+  Harvester: write [[repositories]] blocks to
+  $SNAP_COMMON/repositories.toml, then run
+  harvest.ingest-code [-f <file>] [--force]
+
+grade: devel
+confinement: strict
+
+apps:
+  harvest:
+    command: bin/harvest
+    plugs:
+      - network
+
+  server:
+    command: bin/wrapper-server
+    daemon: simple
+    stop-timeout: 150s
+    stop-mode: sigterm
+    install-mode: disable
+    restart-condition: on-failure
+    plugs:
+      - network
+      - network-bind
+
+  ui:
+    command: bin/wrapper-ui
+    daemon: simple
+    install-mode: disable
+    restart-condition: on-failure
+    plugs:
+      - network
+      - network-bind
+
+  admin:
+    command: bin/wrapper-server
+    plugs:
+      - network
+
+  ingest-code:
+    command: bin/wrapper-ingest-code
+    plugs:
+      - network
+
+parts:
+  rust-binaries:
+    plugin: nil
+    source: .
+    build-packages:
+      - rustc
+      - cargo
+      - libssl-dev
+      - pkg-config
+    stage-packages:
+      - libssl3
+      - ca-certificates
+    override-build: |
+      rm -f rust-toolchain.toml
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+      export PATH="$HOME/.cargo/bin:$PATH"
+      cargo build --release -p knowledge-server -p harvest-cli -p agent -p knowledge-harvester
+      install -Dm755 target/release/knowledge-server \
+        "$SNAPCRAFT_PART_INSTALL/bin/knowledge-server"
+      install -Dm755 target/release/harvest \
+        "$SNAPCRAFT_PART_INSTALL/bin/harvest"
+      install -Dm755 target/release/harvest-agent \
+        "$SNAPCRAFT_PART_INSTALL/bin/harvest-agent"
+      install -Dm755 target/release/knowledge-harvester \
+        "$SNAPCRAFT_PART_INSTALL/bin/knowledge-harvester"
+
+  web-ui:
+    plugin: nil
+    source: web-ui/
+    build-snaps:
+      - node/20/stable
+    override-build: |
+      cd "$SNAPCRAFT_PART_SRC"
+      npm ci
+      npm run build
+      mkdir -p "$SNAPCRAFT_PART_INSTALL/share/harvest-ui"
+      cp -r dist/. "$SNAPCRAFT_PART_INSTALL/share/harvest-ui/"
+
+  caddy:
+    plugin: nil
+    build-packages:
+      - curl
+      - ca-certificates
+    override-build: |
+      CADDY_VERSION=2.11.4
+      CADDY_SHA512=8220d1f013b6f27510247b2360c9e0ca9f018feebd82515f07635318b34ff9777ccc8fd0b6e6f2486ce3a33fe389fbb7db12d05baa474f4587509fb4f5ebf1c9
+      curl -fsSL \
+        "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_amd64.tar.gz" \
+        -o caddy.tar.gz
+      printf '%s  caddy.tar.gz\n' "$CADDY_SHA512" | sha512sum -c
+      tar -xzf caddy.tar.gz caddy
+      install -Dm755 caddy "$SNAPCRAFT_PART_INSTALL/bin/caddy"
+
+  wrappers:
+    plugin: dump
+    source: snap/local/
+    organize:
+      wrapper-server:          bin/wrapper-server
+      wrapper-ui:              bin/wrapper-ui
+      wrapper-ingest-code:     bin/wrapper-ingest-code
