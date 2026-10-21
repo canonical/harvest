@@ -5,10 +5,10 @@ use collocate_remote::control::ExecOptions;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::agent::tool::Tool;
-use crate::llm::types::ToolDefinition;
 use super::client::{CollocateHandle, CreateContainerOpts};
 use super::sessions::{SessionContainer, SessionContainerRegistry};
+use crate::agent::tool::Tool;
+use crate::llm::types::ToolDefinition;
 
 const RUN_PREVIEW_CHARS: usize = 3000;
 const EXEC_PREVIEW_CHARS: usize = 3000;
@@ -27,11 +27,18 @@ fn required_str(params: &Value, key: &str) -> Result<String> {
 }
 
 fn optional_str(params: &Value, key: &str) -> Option<String> {
-    params[key].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    params[key]
+        .as_str()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 fn sanitize_name(name: &str, project_id: &str, conversation_id: &str) -> String {
-    let prefix = format!("hv-{}-{}-", &project_id[..project_id.len().min(8)], &conversation_id[..conversation_id.len().min(8)]);
+    let prefix = format!(
+        "hv-{}-{}-",
+        &project_id[..project_id.len().min(8)],
+        &conversation_id[..conversation_id.len().min(8)]
+    );
     let cleaned: String = name
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
@@ -98,7 +105,11 @@ impl Tool for CollocateRunTool {
         let script = optional_str(&params, "script");
         let command: Vec<String> = params["command"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         let argv: Vec<String> = if let Some(s) = &script {
             if !command.is_empty() {
@@ -125,7 +136,9 @@ impl Tool for CollocateRunTool {
             .unwrap_or(120)
             .min(MAX_EXEC_TIMEOUT_SECS);
 
-        let resolved_image = image.clone().unwrap_or_else(|| self.handle.config().default_image.clone());
+        let resolved_image = image
+            .clone()
+            .unwrap_or_else(|| self.handle.config().default_image.clone());
         let name = format!("hv-ephemeral-{}", Utc::now().timestamp_millis());
         let opts = CreateContainerOpts {
             image: Some(resolved_image.clone()),
@@ -138,13 +151,18 @@ impl Tool for CollocateRunTool {
 
         let id = self.handle.create_container(&name, opts).await?;
         let id_str = id.to_string();
-        self.handle.wait_ready(&id_str, std::time::Duration::from_secs(15)).await;
+        self.handle
+            .wait_ready(&id_str, std::time::Duration::from_secs(15))
+            .await;
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
         let exec_opts = ExecOptions {
             timeout_secs: Some(timeout_secs),
             ..ExecOptions::new()
         };
-        let result = self.handle.exec(&id_str, &argv_refs, &exec_opts, Vec::new()).await;
+        let result = self
+            .handle
+            .exec(&id_str, &argv_refs, &exec_opts, Vec::new())
+            .await;
         let _ = self.handle.rm_force(&id_str).await;
         let result = result?;
         Ok(serde_json::to_string_pretty(&json!({
@@ -239,11 +257,19 @@ impl Tool for CollocateCreateSessionTool {
         let image = optional_str(&params, "image");
         let command: Vec<String> = params["command"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         let env: Vec<(String, String)> = params["env"]
             .as_object()
-            .map(|o| o.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
             .unwrap_or_default();
         let workdir = optional_str(&params, "workdir");
         let user = optional_str(&params, "user");
@@ -270,7 +296,10 @@ impl Tool for CollocateCreateSessionTool {
             })
             .unwrap_or_default();
 
-        let count = self.registry.count_for_project_shared(&self.project_id).await;
+        let count = self
+            .registry
+            .count_for_project_shared(&self.project_id)
+            .await;
         if count >= self.handle.config().max_containers {
             anyhow::bail!(
                 "maximum {} collocate containers reached for this project",
@@ -279,7 +308,9 @@ impl Tool for CollocateCreateSessionTool {
         }
 
         let full_name = sanitize_name(&name, &self.project_id, &self.conversation_id);
-        let resolved_image = image.clone().unwrap_or_else(|| self.handle.config().default_image.clone());
+        let resolved_image = image
+            .clone()
+            .unwrap_or_else(|| self.handle.config().default_image.clone());
         let resolved_user = user.unwrap_or_else(|| self.handle.config().default_user.clone());
         let opts = CreateContainerOpts {
             image: Some(resolved_image.clone()),
@@ -296,7 +327,9 @@ impl Tool for CollocateCreateSessionTool {
         let id = self.handle.create_container(&full_name, opts).await?;
         let id_str = id.to_string();
 
-        self.handle.wait_ready(&id_str, std::time::Duration::from_secs(15)).await;
+        self.handle
+            .wait_ready(&id_str, std::time::Duration::from_secs(15))
+            .await;
 
         let containers = self.handle.list().await?;
         let info = containers
@@ -316,7 +349,8 @@ impl Tool for CollocateCreateSessionTool {
             address: address.clone(),
             published: published.clone(),
         };
-        self.registry.register_with_handle(session, Arc::new(self.handle.clone()));
+        self.registry
+            .register_with_handle(session, Arc::new(self.handle.clone()));
 
         Ok(serde_json::to_string_pretty(&json!({
             "container_id": id_str,
@@ -345,12 +379,13 @@ impl Tool for CollocateExecTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "collocate_exec".into(),
-            description: "Execute a command inside an existing session collocate container. \
+            description:
+                "Execute a command inside an existing session collocate container. \
                           Use collocate_create_session first to get a container_id. To run \
                           multiple sequential commands in one call, use the 'script' parameter \
                           or wrap them in a shell: [\"sh\", \"-c\", \"cmd1 && cmd2\"]. \
                           Minimize the number of exec calls. Returns stdout, stderr, and exit code."
-                .into(),
+                    .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -395,7 +430,11 @@ impl Tool for CollocateExecTool {
         let script = optional_str(&params, "script");
         let command: Vec<String> = params["command"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         let argv: Vec<String> = if let Some(s) = &script {
             if !command.is_empty() {
@@ -414,12 +453,17 @@ impl Tool for CollocateExecTool {
 
         let _ = self
             .registry
-            .verify_ownership_shared(&container_id, &self.project_id, &self.conversation_id).await
+            .verify_ownership_shared(&container_id, &self.project_id, &self.conversation_id)
+            .await
             .ok_or_else(|| anyhow!("container {container_id} not found in this conversation"))?;
 
         let env: Vec<(String, String)> = params["env"]
             .as_object()
-            .map(|o| o.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
             .unwrap_or_default();
         let workdir = optional_str(&params, "workdir");
         let user = optional_str(&params, "user");
@@ -439,7 +483,10 @@ impl Tool for CollocateExecTool {
         }
 
         let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-        let result = self.handle.exec(&container_id, &argv_refs, &opts, Vec::new()).await?;
+        let result = self
+            .handle
+            .exec(&container_id, &argv_refs, &opts, Vec::new())
+            .await?;
         Ok(serde_json::to_string_pretty(&json!({
             "stdout": result.stdout,
             "stderr": result.stderr,
@@ -489,7 +536,8 @@ impl Tool for CollocateDeleteSessionTool {
         let container_id = required_str(&params, "container_id")?;
         let _ = self
             .registry
-            .verify_ownership_shared(&container_id, &self.project_id, &self.conversation_id).await
+            .verify_ownership_shared(&container_id, &self.project_id, &self.conversation_id)
+            .await
             .ok_or_else(|| anyhow!("container {container_id} not found in this conversation"))?;
         self.handle.rm_force(&container_id).await?;
         self.registry.remove_entry(&container_id);
@@ -525,7 +573,10 @@ impl Tool for CollocateListContainersTool {
     }
 
     async fn execute(&self, _params: Value) -> Result<String> {
-        let containers = self.registry.list_for_session_shared(&self.project_id, &self.conversation_id).await;
+        let containers = self
+            .registry
+            .list_for_session_shared(&self.project_id, &self.conversation_id)
+            .await;
         let result: Vec<Value> = containers
             .iter()
             .map(|c| {
@@ -598,7 +649,8 @@ impl Tool for CollocateTransferFileTool {
 
         let _ = self
             .registry
-            .verify_ownership_shared(&container_id, &self.project_id, &self.conversation_id).await
+            .verify_ownership_shared(&container_id, &self.project_id, &self.conversation_id)
+            .await
             .ok_or_else(|| anyhow!("container {container_id} not found in this conversation"))?;
 
         match direction.as_str() {
@@ -612,7 +664,10 @@ impl Tool for CollocateTransferFileTool {
                 Ok(format!("Wrote {} bytes to {remote_path}", content.len()))
             }
             "from" => {
-                let data = self.handle.transfer_from(&container_id, &remote_path).await?;
+                let data = self
+                    .handle
+                    .transfer_from(&container_id, &remote_path)
+                    .await?;
                 let content = String::from_utf8_lossy(&data).into_owned();
                 Ok(content)
             }

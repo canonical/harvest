@@ -18,7 +18,7 @@ use tokio::{
     sync::mpsc,
 };
 
-use super::handlers::{err, db_or_err, require_project_access, MachineState};
+use super::handlers::{db_or_err, err, require_project_access, MachineState};
 use super::port_forwards;
 use crate::auth::jwt::Claims;
 use harvest_db::Db;
@@ -29,8 +29,15 @@ const PROXY_REQUEST_TIMEOUT_SECS: u64 = 30;
 fn is_hop_by_hop(name: &HeaderName) -> bool {
     matches!(
         name.as_str(),
-        "connection" | "keep-alive" | "proxy-authenticate" | "proxy-authorization"
-            | "te" | "trailer" | "trailers" | "transfer-encoding" | "upgrade"
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "trailers"
+            | "transfer-encoding"
+            | "upgrade"
     )
 }
 
@@ -39,21 +46,26 @@ fn api_error(status: StatusCode, msg: &str) -> Response {
 }
 
 async fn lookup_agent_project_id(db: &Db, agent_id: &str) -> Option<String> {
-    let rows = db.query(
-        "SELECT project_id FROM machines WHERE id = $aid",
-        json!({ "aid": agent_id }),
-    ).await.ok()?;
+    let rows = db
+        .query(
+            "SELECT project_id FROM machines WHERE id = $aid",
+            json!({ "aid": agent_id }),
+        )
+        .await
+        .ok()?;
 
-    rows.into_iter().next()?["project_id"].as_str().map(str::to_string)
+    rows.into_iter().next()?["project_id"]
+        .as_str()
+        .map(str::to_string)
 }
 
 type SendFut = Pin<Box<dyn Future<Output = Result<(), mpsc::error::SendError<Message>>> + Send>>;
 
 struct TunnelIo {
-    to_caller_rx:  mpsc::Receiver<Message>,
-    to_agent_tx:   mpsc::Sender<Message>,
-    read_buf:      Vec<u8>,
-    eof:           bool,
+    to_caller_rx: mpsc::Receiver<Message>,
+    to_agent_tx: mpsc::Sender<Message>,
+    read_buf: Vec<u8>,
+    eof: bool,
     pending_write: Option<SendFut>,
 }
 
@@ -70,7 +82,11 @@ impl TunnelIo {
 }
 
 impl AsyncRead for TunnelIo {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
 
         if !this.read_buf.is_empty() {
@@ -106,7 +122,11 @@ impl AsyncRead for TunnelIo {
 }
 
 impl AsyncWrite for TunnelIo {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
 
         loop {
@@ -115,7 +135,10 @@ impl AsyncWrite for TunnelIo {
                     Poll::Ready(Ok(())) => this.pending_write = None,
                     Poll::Ready(Err(_)) => {
                         this.pending_write = None;
-                        return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "tunnel closed")));
+                        return Poll::Ready(Err(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "tunnel closed",
+                        )));
                     }
                     Poll::Pending => return Poll::Pending,
                 }
@@ -130,7 +153,10 @@ impl AsyncWrite for TunnelIo {
 
         match fut.as_mut().poll(cx) {
             Poll::Ready(Ok(())) => Poll::Ready(Ok(buf.len())),
-            Poll::Ready(Err(_)) => Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "tunnel closed"))),
+            Poll::Ready(Err(_)) => Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "tunnel closed",
+            ))),
             Poll::Pending => {
                 this.pending_write = Some(fut);
                 Poll::Pending
@@ -155,7 +181,9 @@ fn build_outbound_request(req: Request, outbound_path: &str, port: u16) -> Resul
         path_and_query.push('?');
         path_and_query.push_str(q);
     }
-    let uri: Uri = path_and_query.parse().map_err(|e| format!("invalid outbound path: {e}"))?;
+    let uri: Uri = path_and_query
+        .parse()
+        .map_err(|e| format!("invalid outbound path: {e}"))?;
 
     let mut builder = Request::builder().method(parts.method).uri(uri);
     for (name, value) in parts.headers.iter() {
@@ -166,16 +194,18 @@ fn build_outbound_request(req: Request, outbound_path: &str, port: u16) -> Resul
     }
     builder = builder.header(HOST, format!("127.0.0.1:{port}"));
 
-    builder.body(body).map_err(|e| format!("failed to build request: {e}"))
+    builder
+        .body(body)
+        .map_err(|e| format!("failed to build request: {e}"))
 }
 
 async fn proxy_request_inner(
-    user:          Claims,
-    state:         Arc<MachineState>,
-    agent_id:      String,
-    route_name:    String,
+    user: Claims,
+    state: Arc<MachineState>,
+    agent_id: String,
+    route_name: String,
     outbound_path: String,
-    req:           Request,
+    req: Request,
 ) -> Response {
     let db = match db_or_err(&state) {
         Ok(n) => n,
@@ -193,18 +223,24 @@ async fn proxy_request_inner(
 
     let forward = match port_forwards::get_by_route(db, &agent_id, &route_name).await {
         Ok(Some(f)) => f,
-        Ok(None)    => return api_error(StatusCode::NOT_FOUND, "no such port forward"),
-        Err(_)      => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "server error"),
+        Ok(None) => return api_error(StatusCode::NOT_FOUND, "no such port forward"),
+        Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "server error"),
     };
 
     if req.headers().contains_key(axum::http::header::UPGRADE) {
-        return api_error(StatusCode::NOT_IMPLEMENTED, "websocket/upgrade forwarding is not supported");
+        return api_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "websocket/upgrade forwarding is not supported",
+        );
     }
 
     if !state.registry.is_local(&agent_id) {
         if !crate::cluster::peer::is_forwarded(req.headers()) {
             if let Some(directory) = state.registry.directory() {
-                if let (Some(peers), Some(url)) = (directory.peers().cloned(), directory.owner_url(&agent_id).await) {
+                if let (Some(peers), Some(url)) = (
+                    directory.peers().cloned(),
+                    directory.owner_url(&agent_id).await,
+                ) {
                     return peers.forward(&url, req).await;
                 }
             }
@@ -212,11 +248,14 @@ async fn proxy_request_inner(
         return api_error(StatusCode::BAD_GATEWAY, "agent not connected");
     }
 
-    let (session_id, mut to_caller_rx, to_agent_tx) =
-        match state.registry.open_tunnel_session(&agent_id, forward.port).await {
-            Ok(v)  => v,
-            Err(e) => return api_error(StatusCode::BAD_GATEWAY, &e),
-        };
+    let (session_id, mut to_caller_rx, to_agent_tx) = match state
+        .registry
+        .open_tunnel_session(&agent_id, forward.port)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => return api_error(StatusCode::BAD_GATEWAY, &e),
+    };
 
     let first = tokio::select! {
         msg = to_caller_rx.recv() => msg,
@@ -230,11 +269,14 @@ async fn proxy_request_inner(
 
     match first {
         Message::Text(text) => {
-            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+            let parsed: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
             match parsed["type"].as_str() {
                 Some("connected") => {}
                 Some("error") => {
-                    let msg = parsed["message"].as_str().unwrap_or("agent failed to connect to port");
+                    let msg = parsed["message"]
+                        .as_str()
+                        .unwrap_or("agent failed to connect to port");
                     return api_error(StatusCode::BAD_GATEWAY, msg);
                 }
                 _ => return api_error(StatusCode::BAD_GATEWAY, "unexpected tunnel handshake"),
@@ -247,15 +289,20 @@ async fn proxy_request_inner(
     let io = TokioIo::new(tunnel_io);
 
     let (mut send_request, connection) = match hyper::client::conn::http1::handshake(io).await {
-        Ok(v)  => v,
-        Err(_) => return api_error(StatusCode::BAD_GATEWAY, "failed to establish tunnel connection"),
+        Ok(v) => v,
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_GATEWAY,
+                "failed to establish tunnel connection",
+            )
+        }
     };
     tokio::spawn(async move {
         let _ = connection.await;
     });
 
     let outbound = match build_outbound_request(req, &outbound_path, forward.port) {
-        Ok(r)  => r,
+        Ok(r) => r,
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, &e),
     };
 
@@ -264,30 +311,38 @@ async fn proxy_request_inner(
             let (parts, incoming) = resp.into_parts();
             Response::from_parts(parts, Body::new(incoming))
         }
-        Err(_) => api_error(StatusCode::BAD_GATEWAY, "port forward target did not respond"),
+        Err(_) => api_error(
+            StatusCode::BAD_GATEWAY,
+            "port forward target did not respond",
+        ),
     }
 }
 
 async fn proxy_request(
-    user:          Claims,
-    state:         Arc<MachineState>,
-    agent_id:      String,
-    route_name:    String,
+    user: Claims,
+    state: Arc<MachineState>,
+    agent_id: String,
+    route_name: String,
     outbound_path: String,
-    req:           Request,
+    req: Request,
 ) -> Response {
     match tokio::time::timeout(
         Duration::from_secs(PROXY_REQUEST_TIMEOUT_SECS),
         proxy_request_inner(user, state, agent_id, route_name, outbound_path, req),
-    ).await {
+    )
+    .await
+    {
         Ok(resp) => resp,
-        Err(_)   => api_error(StatusCode::GATEWAY_TIMEOUT, "port forward request timed out"),
+        Err(_) => api_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "port forward request timed out",
+        ),
     }
 }
 
 pub async fn port_forward_proxy_handler(
     Extension(user): Extension<Claims>,
-    State(state):    State<Arc<MachineState>>,
+    State(state): State<Arc<MachineState>>,
     Path((agent_id, route_name)): Path<(String, String)>,
     req: Request,
 ) -> Response {
@@ -296,11 +351,19 @@ pub async fn port_forward_proxy_handler(
 
 pub async fn port_forward_proxy_handler_subpath(
     Extension(user): Extension<Claims>,
-    State(state):    State<Arc<MachineState>>,
+    State(state): State<Arc<MachineState>>,
     Path((agent_id, route_name, subpath)): Path<(String, String, String)>,
     req: Request,
 ) -> Response {
-    proxy_request(user, state, agent_id, route_name, format!("/{subpath}"), req).await
+    proxy_request(
+        user,
+        state,
+        agent_id,
+        route_name,
+        format!("/{subpath}"),
+        req,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -318,13 +381,21 @@ mod tests {
 
         let outbound = build_outbound_request(req, "/", 80).unwrap();
         let hosts: Vec<_> = outbound.headers().get_all(HOST).iter().collect();
-        assert_eq!(hosts.len(), 1, "expected exactly one Host header, got {hosts:?}");
+        assert_eq!(
+            hosts.len(),
+            1,
+            "expected exactly one Host header, got {hosts:?}"
+        );
         assert_eq!(hosts[0], "127.0.0.1:80");
     }
 
     #[test]
     fn build_outbound_request_sets_host_even_without_an_inbound_host_header() {
-        let req = Request::builder().method("GET").uri("/").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
         let outbound = build_outbound_request(req, "/", 8080).unwrap();
         assert_eq!(outbound.headers().get(HOST).unwrap(), "127.0.0.1:8080");
     }
@@ -340,8 +411,14 @@ mod tests {
             .unwrap();
 
         let outbound = build_outbound_request(req, "/", 8080).unwrap();
-        assert!(outbound.headers().get(axum::http::header::CONNECTION).is_none());
-        assert!(outbound.headers().get(axum::http::header::UPGRADE).is_none());
+        assert!(outbound
+            .headers()
+            .get(axum::http::header::CONNECTION)
+            .is_none());
+        assert!(outbound
+            .headers()
+            .get(axum::http::header::UPGRADE)
+            .is_none());
     }
 
     #[test]
@@ -359,7 +436,11 @@ mod tests {
 
     #[test]
     fn build_outbound_request_rewrites_path_and_preserves_query() {
-        let req = Request::builder().method("GET").uri("/ignored?a=1").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/ignored?a=1")
+            .body(Body::empty())
+            .unwrap();
         let outbound = build_outbound_request(req, "/foo/bar", 8080).unwrap();
         assert_eq!(outbound.uri().path(), "/foo/bar");
         assert_eq!(outbound.uri().query(), Some("a=1"));

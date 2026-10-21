@@ -20,9 +20,9 @@ pub struct SessionContainer {
 }
 
 struct SharedStore {
-    db:      Arc<Db>,
+    db: Arc<Db>,
     node_id: String,
-    handle:  Option<Arc<CollocateHandle>>,
+    handle: Option<Arc<CollocateHandle>>,
 }
 
 #[derive(Default)]
@@ -38,15 +38,24 @@ fn container_from_row(row: &Value) -> SessionContainer {
         id: row["container_id"].as_str().unwrap_or_default().to_string(),
         name: row["name"].as_str().unwrap_or_default().to_string(),
         project_id: row["project_id"].as_str().unwrap_or_default().to_string(),
-        conversation_id: row["conversation_id"].as_str().unwrap_or_default().to_string(),
-        created_at: row["created_at"].as_str()
+        conversation_id: row["conversation_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        created_at: row["created_at"]
+            .as_str()
             .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
             .map(|t| t.with_timezone(&Utc))
             .unwrap_or_else(Utc::now),
         persistent: row["persistent"].as_bool().unwrap_or(false),
         address: row["address"].as_str().map(str::to_string),
-        published: row["published"].as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        published: row["published"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default(),
     }
 }
@@ -57,11 +66,17 @@ impl SessionContainerRegistry {
     }
 
     pub fn attach_store(&self, db: Arc<Db>, node_id: String, handle: Option<Arc<CollocateHandle>>) {
-        let _ = self.store.set(SharedStore { db, node_id, handle });
+        let _ = self.store.set(SharedStore {
+            db,
+            node_id,
+            handle,
+        });
     }
 
     fn persist(&self, container: &SessionContainer) {
-        let Some(store) = self.store.get() else { return };
+        let Some(store) = self.store.get() else {
+            return;
+        };
         let db = Arc::clone(&store.db);
         let params = json!({
             "id": container.id, "name": container.name, "pid": container.project_id,
@@ -86,12 +101,19 @@ impl SessionContainerRegistry {
     }
 
     fn forget(&self, container_id: &str) {
-        let Some(store) = self.store.get() else { return };
+        let Some(store) = self.store.get() else {
+            return;
+        };
         let db = Arc::clone(&store.db);
         let id = container_id.to_string();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                let _ = db.execute("DELETE FROM collocate_sessions WHERE container_id = $id", json!({ "id": id })).await;
+                let _ = db
+                    .execute(
+                        "DELETE FROM collocate_sessions WHERE container_id = $id",
+                        json!({ "id": id }),
+                    )
+                    .await;
             });
         }
     }
@@ -101,11 +123,7 @@ impl SessionContainerRegistry {
         self.containers.insert(container.id.clone(), container);
     }
 
-    pub fn register_with_handle(
-        &self,
-        container: SessionContainer,
-        handle: Arc<CollocateHandle>,
-    ) {
+    pub fn register_with_handle(&self, container: SessionContainer, handle: Arc<CollocateHandle>) {
         self.persist(&container);
         self.handles.insert(container.id.clone(), handle);
         self.containers.insert(container.id.clone(), container);
@@ -134,7 +152,11 @@ impl SessionContainerRegistry {
         found.into_iter().next()
     }
 
-    pub async fn list_for_session_shared(&self, project_id: &str, conversation_id: &str) -> Vec<SessionContainer> {
+    pub async fn list_for_session_shared(
+        &self,
+        project_id: &str,
+        conversation_id: &str,
+    ) -> Vec<SessionContainer> {
         let mut containers = self.list_for_session(project_id, conversation_id);
         let shared = self.shared_rows(
             "SELECT container_id, name, project_id, conversation_id, persistent, address, published, created_at
@@ -150,11 +172,16 @@ impl SessionContainerRegistry {
     }
 
     pub async fn count_for_project_shared(&self, project_id: &str) -> usize {
-        let Some(store) = self.store.get() else { return self.count_for_project(project_id) };
-        let rows = store.db.query(
-            "SELECT count(*) AS n FROM collocate_sessions WHERE project_id = $pid",
-            json!({ "pid": project_id }),
-        ).await;
+        let Some(store) = self.store.get() else {
+            return self.count_for_project(project_id);
+        };
+        let rows = store
+            .db
+            .query(
+                "SELECT count(*) AS n FROM collocate_sessions WHERE project_id = $pid",
+                json!({ "pid": project_id }),
+            )
+            .await;
         match rows {
             Ok(rows) => rows.first().and_then(|r| r["n"].as_i64()).unwrap_or(0) as usize,
             Err(_) => self.count_for_project(project_id),
@@ -162,7 +189,9 @@ impl SessionContainerRegistry {
     }
 
     pub async fn reap_dead_nodes(&self, timeout_secs: f64) -> usize {
-        let Some(store) = self.store.get() else { return 0 };
+        let Some(store) = self.store.get() else {
+            return 0;
+        };
         let rows = store.db.query(
             "DELETE FROM collocate_sessions s
              WHERE s.persistent = false AND s.node_id <> $node AND NOT EXISTS (
@@ -201,7 +230,11 @@ impl SessionContainerRegistry {
         })
     }
 
-    pub fn list_for_session(&self, project_id: &str, conversation_id: &str) -> Vec<SessionContainer> {
+    pub fn list_for_session(
+        &self,
+        project_id: &str,
+        conversation_id: &str,
+    ) -> Vec<SessionContainer> {
         self.containers
             .iter()
             .filter(|e| {
@@ -236,9 +269,7 @@ impl SessionContainerRegistry {
             .iter()
             .filter(|e| {
                 let c = e.value();
-                c.project_id == project_id
-                    && c.conversation_id == conversation_id
-                    && !c.persistent
+                c.project_id == project_id && c.conversation_id == conversation_id && !c.persistent
             })
             .map(|e| e.clone())
             .collect();
@@ -301,7 +332,9 @@ impl Drop for SessionGuard {
         let project_id = self.project_id.clone();
         let conversation_id = self.conversation_id.clone();
         tokio::spawn(async move {
-            let removed = registry.cleanup_session(&project_id, &conversation_id).await;
+            let removed = registry
+                .cleanup_session(&project_id, &conversation_id)
+                .await;
             if !removed.is_empty() {
                 tracing::info!(
                     removed = removed.len(),

@@ -26,12 +26,20 @@ use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, Stream};
 use uuid::Uuid;
 
-use harvest_db::Db;
-use crate::{
-    artifacts::{bundle as tf_bundle, handlers::{require_artifact_access, ArtifactKind}},
-    auth::jwt::Claims, deployments, lxd::{Flavor, LxdClient},
+use super::{
+    hash_token, lxd_provision, port_forwards, ConnectedAgent, MachineRegistry, ResultBody,
+    ServerToAgent, TerraformAction, TerraformFlavor,
 };
-use super::{lxd_provision, port_forwards, ConnectedAgent, MachineRegistry, ResultBody, ServerToAgent, TerraformAction, TerraformFlavor, hash_token};
+use crate::{
+    artifacts::{
+        bundle as tf_bundle,
+        handlers::{require_artifact_access, ArtifactKind},
+    },
+    auth::jwt::Claims,
+    deployments,
+    lxd::{Flavor, LxdClient},
+};
+use harvest_db::Db;
 
 const SSE_KEEPALIVE_INTERVAL_SECS: u64 = 25;
 const DEFAULT_EXECUTE_TIMEOUT_SECS: u64 = 30;
@@ -43,17 +51,20 @@ const DEFAULT_CONSOLE_ROWS: u16 = 24;
 pub const WEBSOCKET_PING_INTERVAL: Duration = Duration::from_secs(20);
 
 fn ping_ticker() -> tokio::time::Interval {
-    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + WEBSOCKET_PING_INTERVAL, WEBSOCKET_PING_INTERVAL);
+    let mut ticker = tokio::time::interval_at(
+        tokio::time::Instant::now() + WEBSOCKET_PING_INTERVAL,
+        WEBSOCKET_PING_INTERVAL,
+    );
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker
 }
 
 pub struct MachineState {
-    pub registry:    Arc<MachineRegistry>,
-    pub db:       Option<Arc<Db>>,
+    pub registry: Arc<MachineRegistry>,
+    pub db: Option<Arc<Db>>,
     pub binary_path: Option<PathBuf>,
-    pub server_url:  String,
-    pub lxd:         Option<Arc<LxdClient>>,
+    pub server_url: String,
+    pub lxd: Option<Arc<LxdClient>>,
 }
 
 pub(super) type ApiError = (StatusCode, Json<Value>);
@@ -63,7 +74,10 @@ pub(super) fn err(status: StatusCode, msg: &str) -> ApiError {
 }
 
 pub(super) fn db_or_err(state: &MachineState) -> Result<&Arc<Db>, ApiError> {
-    state.db.as_ref().ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "database unavailable"))
+    state
+        .db
+        .as_ref()
+        .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "database unavailable"))
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -150,40 +164,65 @@ echo "Run 'uninstall-harvest-agent' to remove."
 
 pub fn machines_router(state: Arc<MachineState>) -> Router {
     Router::new()
-        .route("/agents/:project_id/install.sh", get(install_script_handler))
-        .route("/agents/binary/harvest-agent",   get(binary_handler))
-        .route("/agent/events",                  get(agent_events_handler))
-        .route("/agent/results",                 post(agent_results_handler))
-        .route("/agent/output",                  post(agent_output_handler))
-        .route("/agent/ping",                    post(agent_ping_handler))
-        .route("/agent/console/:session_id",     get(agent_console_claim_handler))
-        .route("/agent/tunnel/:session_id",      get(agent_tunnel_claim_handler))
+        .route(
+            "/agents/:project_id/install.sh",
+            get(install_script_handler),
+        )
+        .route("/agents/binary/harvest-agent", get(binary_handler))
+        .route("/agent/events", get(agent_events_handler))
+        .route("/agent/results", post(agent_results_handler))
+        .route("/agent/output", post(agent_output_handler))
+        .route("/agent/ping", post(agent_ping_handler))
+        .route(
+            "/agent/console/:session_id",
+            get(agent_console_claim_handler),
+        )
+        .route("/agent/tunnel/:session_id", get(agent_tunnel_claim_handler))
         .with_state(state)
 }
 
 pub fn machines_protected_router(state: Arc<MachineState>) -> Router {
     Router::new()
-        .route("/projects/:pid/agents",                      get(list_agents))
-        .route("/projects/:pid/agents/:aid",                 delete(delete_agent))
-        .route("/projects/:pid/agents/:aid/execute",         post(execute_command))
-        .route("/projects/:pid/agents/:aid/terraform",       post(run_terraform_command))
-        .route("/projects/:pid/agents/:aid/console",         get(agent_console_open_handler))
-        .route("/projects/:pid/agents/:aid/start",           post(start_agent))
-        .route("/projects/:pid/agents/:aid/stop",            post(stop_agent))
-        .route("/projects/:pid/agents/:aid/restart",         post(restart_agent))
-        .route("/projects/:pid/agents/rotate-install-token", post(rotate_install_token))
-        .route("/projects/:pid/agents/flavors",              get(list_flavors))
-        .route("/projects/:pid/agents/lxd",                  post(create_lxd_agent_handler))
-        .route("/projects/:pid/agents/:aid/port-forwards",
-               get(list_port_forwards).post(create_port_forward))
-        .route("/projects/:pid/agents/:aid/port-forwards/:fid",
-               put(update_port_forward).delete(delete_port_forward))
-        .route("/agents/:agent_id/:route_name",
-               axum::routing::any(super::proxy::port_forward_proxy_handler))
-        .route("/agents/:agent_id/:route_name/",
-               axum::routing::any(super::proxy::port_forward_proxy_handler))
-        .route("/agents/:agent_id/:route_name/*subpath",
-               axum::routing::any(super::proxy::port_forward_proxy_handler_subpath))
+        .route("/projects/:pid/agents", get(list_agents))
+        .route("/projects/:pid/agents/:aid", delete(delete_agent))
+        .route("/projects/:pid/agents/:aid/execute", post(execute_command))
+        .route(
+            "/projects/:pid/agents/:aid/terraform",
+            post(run_terraform_command),
+        )
+        .route(
+            "/projects/:pid/agents/:aid/console",
+            get(agent_console_open_handler),
+        )
+        .route("/projects/:pid/agents/:aid/start", post(start_agent))
+        .route("/projects/:pid/agents/:aid/stop", post(stop_agent))
+        .route("/projects/:pid/agents/:aid/restart", post(restart_agent))
+        .route(
+            "/projects/:pid/agents/rotate-install-token",
+            post(rotate_install_token),
+        )
+        .route("/projects/:pid/agents/flavors", get(list_flavors))
+        .route("/projects/:pid/agents/lxd", post(create_lxd_agent_handler))
+        .route(
+            "/projects/:pid/agents/:aid/port-forwards",
+            get(list_port_forwards).post(create_port_forward),
+        )
+        .route(
+            "/projects/:pid/agents/:aid/port-forwards/:fid",
+            put(update_port_forward).delete(delete_port_forward),
+        )
+        .route(
+            "/agents/:agent_id/:route_name",
+            axum::routing::any(super::proxy::port_forward_proxy_handler),
+        )
+        .route(
+            "/agents/:agent_id/:route_name/",
+            axum::routing::any(super::proxy::port_forward_proxy_handler),
+        )
+        .route(
+            "/agents/:agent_id/:route_name/*subpath",
+            axum::routing::any(super::proxy::port_forward_proxy_handler_subpath),
+        )
         .with_state(state)
 }
 
@@ -191,10 +230,12 @@ pub(crate) async fn get_or_create_install_token(
     db: &Db,
     project_id: &str,
 ) -> anyhow::Result<Option<String>> {
-    let rows = db.query(
-        "SELECT install_token FROM projects WHERE id = $pid",
-        json!({ "pid": project_id }),
-    ).await?;
+    let rows = db
+        .query(
+            "SELECT install_token FROM projects WHERE id = $pid",
+            json!({ "pid": project_id }),
+        )
+        .await?;
 
     let Some(first) = rows.into_iter().next() else {
         return Ok(None);
@@ -205,13 +246,18 @@ pub(crate) async fn get_or_create_install_token(
     }
 
     let tok = Uuid::new_v4().to_string();
-    let rows = db.query(
-        "UPDATE projects SET install_token = COALESCE(install_token, $tok)
+    let rows = db
+        .query(
+            "UPDATE projects SET install_token = COALESCE(install_token, $tok)
          WHERE id = $pid
          RETURNING install_token",
-        json!({ "pid": project_id, "tok": tok }),
-    ).await?;
-    Ok(rows.into_iter().next().and_then(|r| r["install_token"].as_str().map(String::from)))
+            json!({ "pid": project_id, "tok": tok }),
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .next()
+        .and_then(|r| r["install_token"].as_str().map(String::from)))
 }
 
 async fn install_script_handler(
@@ -225,35 +271,47 @@ async fn install_script_handler(
 
     let install_token = match get_or_create_install_token(db, &project_id).await {
         Ok(Some(tok)) => tok,
-        Ok(None)      => return err(StatusCode::NOT_FOUND, "project not found").into_response(),
-        Err(_)        => return err(StatusCode::INTERNAL_SERVER_ERROR, "server error").into_response(),
+        Ok(None) => return err(StatusCode::NOT_FOUND, "project not found").into_response(),
+        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "server error").into_response(),
     };
 
     let script = generate_install_script(&state.server_url, &install_token);
-    (StatusCode::OK, [(header::CONTENT_TYPE, "text/x-shellscript")], script).into_response()
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/x-shellscript")],
+        script,
+    )
+        .into_response()
 }
 
 async fn binary_handler(State(state): State<Arc<MachineState>>) -> impl IntoResponse {
     let path = match &state.binary_path {
         Some(p) => p.clone(),
-        None    => return err(StatusCode::NOT_FOUND, "binary not configured on this server").into_response(),
+        None => {
+            return err(
+                StatusCode::NOT_FOUND,
+                "binary not configured on this server",
+            )
+            .into_response()
+        }
     };
     match tokio::fs::read(&path).await {
         Ok(bytes) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/octet-stream")],
             bytes,
-        ).into_response(),
+        )
+            .into_response(),
         Err(_) => err(StatusCode::NOT_FOUND, "binary not found").into_response(),
     }
 }
 
 struct AgentGuard {
-    agent_id:      String,
-    index_hash:    String,
+    agent_id: String,
+    index_hash: String,
     connection_id: String,
-    sender:        mpsc::Sender<ServerToAgent>,
-    registry:      Arc<MachineRegistry>,
+    sender: mpsc::Sender<ServerToAgent>,
+    registry: Arc<MachineRegistry>,
 }
 
 impl Drop for AgentGuard {
@@ -270,7 +328,10 @@ impl Drop for AgentGuard {
             }
         }
 
-        if !self.registry.disconnect_if_current(&self.agent_id, &self.sender) {
+        if !self
+            .registry
+            .disconnect_if_current(&self.agent_id, &self.sender)
+        {
             tracing::info!(agent_id = %self.agent_id, "stale connection dropped, agent already reconnected");
             return;
         }
@@ -285,14 +346,20 @@ async fn authenticate_agent(registry: &MachineRegistry, headers: &HeaderMap) -> 
     registry.agent_for_token(&token).await
 }
 
-async fn peer_for_node(registry: &MachineRegistry, node_id: &str) -> Option<(Arc<crate::cluster::peer::PeerClient>, String)> {
+async fn peer_for_node(
+    registry: &MachineRegistry,
+    node_id: &str,
+) -> Option<(Arc<crate::cluster::peer::PeerClient>, String)> {
     let directory = registry.directory()?;
     let peers = directory.peers()?.clone();
     let url = directory.node_url(node_id).await?;
     Some((peers, url))
 }
 
-async fn peer_for_agent(registry: &MachineRegistry, agent_id: &str) -> Option<(Arc<crate::cluster::peer::PeerClient>, String)> {
+async fn peer_for_agent(
+    registry: &MachineRegistry,
+    agent_id: &str,
+) -> Option<(Arc<crate::cluster::peer::PeerClient>, String)> {
     let directory = registry.directory()?;
     let peers = directory.peers()?.clone();
     let url = directory.owner_url(agent_id).await?;
@@ -300,7 +367,7 @@ async fn peer_for_agent(registry: &MachineRegistry, agent_id: &str) -> Option<(A
 }
 
 struct GuardedStream<S: Unpin> {
-    inner:  S,
+    inner: S,
     _guard: AgentGuard,
 }
 
@@ -312,54 +379,67 @@ impl<S: Stream + Unpin> Stream for GuardedStream<S> {
 }
 
 async fn agent_events_handler(
-    State(state):  State<Arc<MachineState>>,
-    headers:       HeaderMap,
+    State(state): State<Arc<MachineState>>,
+    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let token = match extract_bearer_token(&headers) {
         Some(t) => t,
-        None    => return StatusCode::UNAUTHORIZED.into_response(),
+        None => return StatusCode::UNAUTHORIZED.into_response(),
     };
     let db = match &state.db {
         Some(n) => Arc::clone(n),
-        None    => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        None => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    let hostname = params.get("hostname").cloned().unwrap_or_else(|| "unknown".into());
+    let hostname = params
+        .get("hostname")
+        .cloned()
+        .unwrap_or_else(|| "unknown".into());
 
     let token_hash = hash_token(&token);
 
-    let machine = db.query(
-        "SELECT id, project_id FROM machines WHERE agent_token_hash = $h",
-        json!({ "h": token_hash }),
-    ).await.ok().and_then(|r| r.into_iter().next());
+    let machine = db
+        .query(
+            "SELECT id, project_id FROM machines WHERE agent_token_hash = $h",
+            json!({ "h": token_hash }),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.into_iter().next());
 
     let (agent_id, project_id, index_hash, first_event) = if let Some(row) = machine {
-        let id  = row["id"].as_str().unwrap_or("").to_string();
+        let id = row["id"].as_str().unwrap_or("").to_string();
         let pid = row["project_id"].as_str().unwrap_or("").to_string();
         let now = harvest_db::now_rfc3339();
-        let _ = db.query(
-            "UPDATE machines SET hostname = $h, last_seen = $now WHERE id = $id",
-            json!({ "id": id, "h": hostname, "now": now }),
-        ).await;
+        let _ = db
+            .query(
+                "UPDATE machines SET hostname = $h, last_seen = $now WHERE id = $id",
+                json!({ "id": id, "h": hostname, "now": now }),
+            )
+            .await;
         (id, pid, token_hash, ServerToAgent::HelloAck)
     } else {
-        let project = db.query(
-            "SELECT id FROM projects WHERE install_token = $tok",
-            json!({ "tok": token }),
-        ).await.ok().and_then(|r| r.into_iter().next());
+        let project = db
+            .query(
+                "SELECT id FROM projects WHERE install_token = $tok",
+                json!({ "tok": token }),
+            )
+            .await
+            .ok()
+            .and_then(|r| r.into_iter().next());
 
         let project_id = match project {
             Some(r) => r["id"].as_str().unwrap_or("").to_string(),
-            None    => {
+            None => {
                 tracing::warn!(hostname, "agent connected with unrecognised token");
                 return StatusCode::UNAUTHORIZED.into_response();
             }
         };
 
-        let aid        = Uuid::new_v4().to_string();
+        let aid = Uuid::new_v4().to_string();
         let perm_token = Uuid::new_v4().to_string();
-        let perm_hash  = hash_token(&perm_token);
-        let now        = harvest_db::now_rfc3339();
+        let perm_hash = hash_token(&perm_token);
+        let now = harvest_db::now_rfc3339();
 
         if db.query(
             "INSERT INTO machines (id, project_id, hostname, agent_token_hash, created_at, last_seen)
@@ -372,8 +452,9 @@ async fn agent_events_handler(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
 
-        let _ = db.query(
-            "WITH li AS (
+        let _ = db
+            .query(
+                "WITH li AS (
                  DELETE FROM lxd_pending_instances
                  WHERE project_id = $pid AND hostname = $h
                    AND EXISTS (SELECT 1 FROM machines WHERE id = $mid)
@@ -382,39 +463,67 @@ async fn agent_events_handler(
              UPDATE machines m
              SET provider = 'lxd', lxd_instance = li.hostname, description = li.description
              FROM li WHERE m.id = $mid",
-            json!({ "pid": project_id, "h": hostname, "mid": aid }),
-        ).await;
+                json!({ "pid": project_id, "h": hostname, "mid": aid }),
+            )
+            .await;
 
-        (aid, project_id, perm_hash, ServerToAgent::Registered { agent_token: perm_token })
+        (
+            aid,
+            project_id,
+            perm_hash,
+            ServerToAgent::Registered {
+                agent_token: perm_token,
+            },
+        )
     };
 
     let (command_sender, command_receiver) = mpsc::channel::<ServerToAgent>(64);
 
-    state.registry.agents.insert(agent_id.clone(), ConnectedAgent {
-        id:           agent_id.clone(),
-        project_id,
-        hostname:     hostname.clone(),
-        connected_at: chrono::Utc::now(),
-        sender:       command_sender.clone(),
-    });
-    state.registry.token_index.insert(index_hash.clone(), agent_id.clone());
+    state.registry.agents.insert(
+        agent_id.clone(),
+        ConnectedAgent {
+            id: agent_id.clone(),
+            project_id,
+            hostname: hostname.clone(),
+            connected_at: chrono::Utc::now(),
+            sender: command_sender.clone(),
+        },
+    );
+    state
+        .registry
+        .token_index
+        .insert(index_hash.clone(), agent_id.clone());
 
     let connection_id = Uuid::new_v4().to_string();
     if let Some(directory) = state.registry.directory() {
-        let project_id = state.registry.agents.get(&agent_id).map(|a| a.project_id.clone()).unwrap_or_default();
-        if let Err(e) = directory.register(&agent_id, &connection_id, &project_id, &hostname).await {
+        let project_id = state
+            .registry
+            .agents
+            .get(&agent_id)
+            .map(|a| a.project_id.clone())
+            .unwrap_or_default();
+        if let Err(e) = directory
+            .register(&agent_id, &connection_id, &project_id, &hostname)
+            .await
+        {
             tracing::warn!(error = %e, agent_id, "failed to register agent connection in the cluster directory");
         }
     }
 
     tracing::info!(agent_id, hostname, "agent connected via SSE");
 
-    let first_data  = serde_json::to_string(&first_event).unwrap_or_default();
-    let init_stream = tokio_stream::iter(vec![
-        Ok::<Event, Infallible>(Event::default().data(first_data)),
-    ]);
+    let first_data = serde_json::to_string(&first_event).unwrap_or_default();
+    let init_stream = tokio_stream::iter(vec![Ok::<Event, Infallible>(
+        Event::default().data(first_data),
+    )]);
 
-    let guard = AgentGuard { agent_id, index_hash, connection_id, sender: command_sender, registry: Arc::clone(&state.registry) };
+    let guard = AgentGuard {
+        agent_id,
+        index_hash,
+        connection_id,
+        sender: command_sender,
+        registry: Arc::clone(&state.registry),
+    };
     let command_stream = GuardedStream {
         inner: ReceiverStream::new(command_receiver).map(|msg| {
             let data = serde_json::to_string(&msg).unwrap_or_default();
@@ -440,8 +549,8 @@ async fn agent_events_handler(
 
 async fn agent_results_handler(
     State(state): State<Arc<MachineState>>,
-    headers:      HeaderMap,
-    Json(body):   Json<ResultBody>,
+    headers: HeaderMap,
+    Json(body): Json<ResultBody>,
 ) -> impl IntoResponse {
     let Some(agent_id) = authenticate_agent(&state.registry, &headers).await else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -454,7 +563,15 @@ async fn agent_results_handler(
     if !crate::cluster::peer::is_forwarded(&headers) {
         if let Some((peers, url)) = peer_for_agent(&state.registry, &agent_id).await {
             let payload = serde_json::to_value(&body).unwrap_or(Value::Null);
-            if let Err(e) = peers.post_json(&url, "/internal/agents/results", &payload, Duration::from_secs(10)).await {
+            if let Err(e) = peers
+                .post_json(
+                    &url,
+                    "/internal/agents/results",
+                    &payload,
+                    Duration::from_secs(10),
+                )
+                .await
+            {
                 tracing::warn!(error = %e, agent_id, "failed to forward agent result to its owning node");
             }
         }
@@ -466,27 +583,38 @@ async fn agent_results_handler(
 #[derive(serde::Deserialize)]
 struct AgentOutputBody {
     request_id: String,
-    stream:     String,
-    line:       String,
+    stream: String,
+    line: String,
 }
 
 async fn agent_output_handler(
     State(state): State<Arc<MachineState>>,
-    headers:      HeaderMap,
-    Json(body):   Json<AgentOutputBody>,
+    headers: HeaderMap,
+    Json(body): Json<AgentOutputBody>,
 ) -> impl IntoResponse {
     let Some(agent_id) = authenticate_agent(&state.registry, &headers).await else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    if state.registry.relay_output(&body.request_id, &body.stream, &body.line) {
+    if state
+        .registry
+        .relay_output(&body.request_id, &body.stream, &body.line)
+    {
         return StatusCode::OK.into_response();
     }
 
     if !crate::cluster::peer::is_forwarded(&headers) {
         if let Some((peers, url)) = peer_for_agent(&state.registry, &agent_id).await {
-            let payload = json!({ "request_id": body.request_id, "stream": body.stream, "line": body.line });
-            let _ = peers.post_json(&url, "/internal/agents/output", &payload, Duration::from_secs(10)).await;
+            let payload =
+                json!({ "request_id": body.request_id, "stream": body.stream, "line": body.line });
+            let _ = peers
+                .post_json(
+                    &url,
+                    "/internal/agents/output",
+                    &payload,
+                    Duration::from_secs(10),
+                )
+                .await;
         }
     }
 
@@ -495,7 +623,7 @@ async fn agent_output_handler(
 
 async fn agent_ping_handler(
     State(state): State<Arc<MachineState>>,
-    headers:      HeaderMap,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     let Some(agent_id) = authenticate_agent(&state.registry, &headers).await else {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -505,10 +633,12 @@ async fn agent_ping_handler(
         let db = Arc::clone(db);
         tokio::spawn(async move {
             let now = harvest_db::now_rfc3339();
-            let _ = db.query(
-                "UPDATE machines SET last_seen = $now WHERE id = $id",
-                json!({ "id": agent_id, "now": now }),
-            ).await;
+            let _ = db
+                .query(
+                    "UPDATE machines SET last_seen = $now WHERE id = $id",
+                    json!({ "id": agent_id, "now": now }),
+                )
+                .await;
         });
     }
 
@@ -516,19 +646,22 @@ async fn agent_ping_handler(
 }
 
 pub async fn list_agents(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let db = db_or_err(&state)?;
     require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
-    let db_machines = db.query(
-        "SELECT id, hostname, last_seen, created_at, provider, description
+    let db_machines = db
+        .query(
+            "SELECT id, hostname, last_seen, created_at, provider, description
          FROM machines WHERE project_id = $pid
          ORDER BY created_at ASC",
-        json!({ "pid": project_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "pid": project_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     let mut online_ids = std::collections::HashSet::new();
     for m in &db_machines {
@@ -539,44 +672,53 @@ pub async fn list_agents(
         }
     }
 
-    let result: Vec<Value> = db_machines.into_iter().map(|m| {
-        let id       = m["id"].as_str().unwrap_or("").to_string();
-        let online   = online_ids.contains(&id);
-        let provider = m["provider"].as_str().unwrap_or("manual").to_string();
-        json!({
-            "id":          id,
-            "hostname":    m["hostname"],
-            "online":      online,
-            "last_seen":   m["last_seen"],
-            "created_at":  m["created_at"],
-            "provider":    provider,
-            "description": m["description"],
+    let result: Vec<Value> = db_machines
+        .into_iter()
+        .map(|m| {
+            let id = m["id"].as_str().unwrap_or("").to_string();
+            let online = online_ids.contains(&id);
+            let provider = m["provider"].as_str().unwrap_or("manual").to_string();
+            json!({
+                "id":          id,
+                "hostname":    m["hostname"],
+                "online":      online,
+                "last_seen":   m["last_seen"],
+                "created_at":  m["created_at"],
+                "provider":    provider,
+                "description": m["description"],
+            })
         })
-    }).collect();
+        .collect();
 
     Ok(Json(result))
 }
 
 #[derive(serde::Deserialize)]
 pub struct ExecuteBody {
-    pub command:      String,
+    pub command: String,
     #[serde(default = "default_execute_timeout")]
     pub timeout_secs: u64,
 }
 
-fn default_execute_timeout() -> u64 { DEFAULT_EXECUTE_TIMEOUT_SECS }
+fn default_execute_timeout() -> u64 {
+    DEFAULT_EXECUTE_TIMEOUT_SECS
+}
 
 pub async fn execute_command(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path((project_id, agent_id)): Path<(String, String)>,
-    Json(body):       Json<ExecuteBody>,
+    Json(body): Json<ExecuteBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let db = db_or_err(&state)?;
     require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
     let timeout = body.timeout_secs.min(MAX_EXECUTE_TIMEOUT_SECS);
-    match state.registry.execute(&agent_id, body.command, timeout).await {
+    match state
+        .registry
+        .execute(&agent_id, body.command, timeout)
+        .await
+    {
         Ok(r) => Ok(Json(json!({
             "stdout":    r.stdout,
             "stderr":    r.stderr,
@@ -587,23 +729,25 @@ pub async fn execute_command(
 }
 
 const DEFAULT_TERRAFORM_TIMEOUT_SECS: u64 = 300;
-const MAX_TERRAFORM_TIMEOUT_SECS:     u64 = 1800;
+const MAX_TERRAFORM_TIMEOUT_SECS: u64 = 1800;
 
-fn default_terraform_timeout() -> u64 { DEFAULT_TERRAFORM_TIMEOUT_SECS }
+fn default_terraform_timeout() -> u64 {
+    DEFAULT_TERRAFORM_TIMEOUT_SECS
+}
 
 #[derive(serde::Deserialize)]
 pub struct RunTerraformBody {
     pub artifact_id: String,
-    pub action:      String,
+    pub action: String,
     #[serde(default = "default_terraform_timeout")]
     pub timeout_secs: u64,
 }
 
 pub async fn run_terraform_command(
     Extension(user): Extension<Claims>,
-    State(state):    State<Arc<MachineState>>,
+    State(state): State<Arc<MachineState>>,
     Path((project_id, agent_id)): Path<(String, String)>,
-    Json(body):      Json<RunTerraformBody>,
+    Json(body): Json<RunTerraformBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let db = db_or_err(&state)?;
     require_project_access(db, &user.sub, &user.role, &project_id).await?;
@@ -614,17 +758,28 @@ pub async fn run_terraform_command(
     }
 
     let flavor = match ArtifactKind::parse(artifact["kind"].as_str().unwrap_or("")) {
-        Some(ArtifactKind::Terraform)  => TerraformFlavor::Terraform,
+        Some(ArtifactKind::Terraform) => TerraformFlavor::Terraform,
         Some(ArtifactKind::Terragrunt) => TerraformFlavor::Terragrunt,
-        _ => return Err(err(StatusCode::BAD_REQUEST, "artifact is not a terraform or terragrunt artifact")),
+        _ => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "artifact is not a terraform or terragrunt artifact",
+            ))
+        }
     };
 
-    let action = TerraformAction::parse(&body.action)
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "action must be 'plan', 'apply', or 'destroy'"))?;
+    let action = TerraformAction::parse(&body.action).ok_or_else(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "action must be 'plan', 'apply', or 'destroy'",
+        )
+    })?;
 
     let live_content = artifact["content"].as_str().unwrap_or("");
-    let content = deployments::resolve_run_content(db, &project_id, &body.artifact_id, action, live_content)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let content =
+        deployments::resolve_run_content(db, &project_id, &body.artifact_id, action, live_content)
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     let files = tf_bundle::parse_bundle(&content)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
     let files_json = serde_json::to_string(&files)
@@ -632,22 +787,46 @@ pub async fn run_terraform_command(
 
     let timeout = body.timeout_secs.min(MAX_TERRAFORM_TIMEOUT_SECS);
     let artifact_id = body.artifact_id.clone();
-    let result = state.registry.execute_terraform(&agent_id, body.artifact_id, flavor, action, files, timeout, None).await;
+    let result = state
+        .registry
+        .execute_terraform(
+            &agent_id,
+            body.artifact_id,
+            flavor,
+            action,
+            files,
+            timeout,
+            None,
+        )
+        .await;
 
     let (exit_code, stdout, stderr) = match &result {
-        Ok(r)  => (Some(r.exit_code), r.stdout.clone(), r.stderr.clone()),
+        Ok(r) => (Some(r.exit_code), r.stdout.clone(), r.stderr.clone()),
         Err(e) => (None, String::new(), e.clone()),
     };
-    let success         = exit_code == Some(0);
-    let applied_content = (action == TerraformAction::Apply && success).then_some(files_json.as_str());
+    let success = exit_code == Some(0);
+    let applied_content =
+        (action == TerraformAction::Apply && success).then_some(files_json.as_str());
     let infra_state = deployments::record_run_and_update_state(
-        db, &project_id, &artifact_id, action, exit_code, &stdout, &stderr,
-        applied_content, "user", None,
-    ).await.ok().flatten();
+        db,
+        &project_id,
+        &artifact_id,
+        action,
+        exit_code,
+        &stdout,
+        &stderr,
+        applied_content,
+        "user",
+        None,
+    )
+    .await
+    .ok()
+    .flatten();
 
     match result {
         Ok(r) => {
-            let mut value = json!({ "stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code });
+            let mut value =
+                json!({ "stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code });
             if let Some(state) = infra_state {
                 value["infra_state"] = json!(state);
             }
@@ -665,8 +844,12 @@ pub struct ConsoleQuery {
     pub rows: u16,
 }
 
-fn default_console_cols() -> u16 { DEFAULT_CONSOLE_COLS }
-fn default_console_rows() -> u16 { DEFAULT_CONSOLE_ROWS }
+fn default_console_cols() -> u16 {
+    DEFAULT_CONSOLE_COLS
+}
+fn default_console_rows() -> u16 {
+    DEFAULT_CONSOLE_ROWS
+}
 
 async fn bridge_socket(
     socket: WebSocket,
@@ -704,11 +887,11 @@ async fn bridge_socket(
 }
 
 async fn pump_browser_console_socket(
-    socket:         WebSocket,
-    session_id:     String,
-    registry:       Arc<MachineRegistry>,
+    socket: WebSocket,
+    session_id: String,
+    registry: Arc<MachineRegistry>,
     mut to_browser_rx: mpsc::Receiver<Message>,
-    to_agent_tx:    mpsc::Sender<Message>,
+    to_agent_tx: mpsc::Sender<Message>,
 ) {
     let first = tokio::select! {
         msg = to_browser_rx.recv() => msg,
@@ -718,9 +901,11 @@ async fn pump_browser_console_socket(
     let Some(first) = first else {
         registry.expire_console_session(&session_id);
         let (mut ws_tx, _) = socket.split();
-        let _ = ws_tx.send(Message::Text(
-            r#"{"type":"error","message":"agent did not respond"}"#.to_string(),
-        )).await;
+        let _ = ws_tx
+            .send(Message::Text(
+                r#"{"type":"error","message":"agent did not respond"}"#.to_string(),
+            ))
+            .await;
         return;
     };
 
@@ -760,13 +945,13 @@ async fn pump_browser_console_socket(
 
 #[allow(clippy::too_many_arguments)]
 pub async fn agent_console_open_handler(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path((project_id, agent_id)): Path<(String, String)>,
-    Query(q):         Query<ConsoleQuery>,
-    headers:          HeaderMap,
-    uri:              axum::http::Uri,
-    ws:               WebSocketUpgrade,
+    Query(q): Query<ConsoleQuery>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+    ws: WebSocketUpgrade,
 ) -> Result<axum::response::Response, ApiError> {
     let db = db_or_err(&state)?;
     require_project_access(db, &user.sub, &user.role, &project_id).await?;
@@ -774,14 +959,24 @@ pub async fn agent_console_open_handler(
     if !state.registry.is_local(&agent_id) {
         if !crate::cluster::peer::is_forwarded(&headers) {
             if let Some((peers, url)) = peer_for_agent(&state.registry, &agent_id).await {
-                let path = uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| uri.path().to_string());
-                return Ok(peers.forward_websocket(&url, &path, &headers, ws, CONSOLE_MAX_MESSAGE_SIZE));
+                let path = uri
+                    .path_and_query()
+                    .map(|p| p.as_str().to_string())
+                    .unwrap_or_else(|| uri.path().to_string());
+                return Ok(peers.forward_websocket(
+                    &url,
+                    &path,
+                    &headers,
+                    ws,
+                    CONSOLE_MAX_MESSAGE_SIZE,
+                ));
             }
         }
         return Err(err(StatusCode::BAD_GATEWAY, "agent not connected"));
     }
 
-    let (session_id, to_browser_rx, to_agent_tx) = state.registry
+    let (session_id, to_browser_rx, to_agent_tx) = state
+        .registry
         .open_console_session(&agent_id, q.cols, q.rows)
         .await
         .map_err(|e| err(StatusCode::BAD_GATEWAY, &e))?;
@@ -792,7 +987,8 @@ pub async fn agent_console_open_handler(
     Ok(ws
         .max_message_size(CONSOLE_MAX_MESSAGE_SIZE)
         .on_upgrade(move |socket| async move {
-            pump_browser_console_socket(socket, session_id, registry, to_browser_rx, to_agent_tx).await;
+            pump_browser_console_socket(socket, session_id, registry, to_browser_rx, to_agent_tx)
+                .await;
         }))
 }
 
@@ -803,32 +999,46 @@ async fn forward_claim_to_owner(
     path: &str,
     ws: WebSocketUpgrade,
 ) -> Result<axum::response::Response, WebSocketUpgrade> {
-    let Some(owner) = super::session_owner(session_id) else { return Err(ws) };
+    let Some(owner) = super::session_owner(session_id) else {
+        return Err(ws);
+    };
     if owner == state.registry.node_id() || crate::cluster::peer::is_forwarded(headers) {
         return Err(ws);
     }
     match peer_for_node(&state.registry, owner).await {
-        Some((peers, url)) => Ok(peers.forward_websocket(&url, path, headers, ws, CONSOLE_MAX_MESSAGE_SIZE)),
+        Some((peers, url)) => {
+            Ok(peers.forward_websocket(&url, path, headers, ws, CONSOLE_MAX_MESSAGE_SIZE))
+        }
         None => Ok(StatusCode::NOT_FOUND.into_response()),
     }
 }
 
 pub async fn agent_console_claim_handler(
-    State(state):  State<Arc<MachineState>>,
-    headers:       HeaderMap,
+    State(state): State<Arc<MachineState>>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
-    ws:            WebSocketUpgrade,
+    ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let Some(agent_id) = authenticate_agent(&state.registry, &headers).await else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    let ws = match forward_claim_to_owner(&state, &session_id, &headers, &format!("/agent/console/{session_id}"), ws).await {
+    let ws = match forward_claim_to_owner(
+        &state,
+        &session_id,
+        &headers,
+        &format!("/agent/console/{session_id}"),
+        ws,
+    )
+    .await
+    {
         Ok(forwarded) => return forwarded,
         Err(ws) => ws,
     };
 
-    let Some((to_browser_tx, to_agent_rx)) = state.registry.claim_console_session(&session_id, &agent_id) else {
+    let Some((to_browser_tx, to_agent_rx)) =
+        state.registry.claim_console_session(&session_id, &agent_id)
+    else {
         return StatusCode::NOT_FOUND.into_response();
     };
 
@@ -842,21 +1052,31 @@ pub async fn agent_console_claim_handler(
 }
 
 pub async fn agent_tunnel_claim_handler(
-    State(state):  State<Arc<MachineState>>,
-    headers:       HeaderMap,
+    State(state): State<Arc<MachineState>>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
-    ws:            WebSocketUpgrade,
+    ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     let Some(agent_id) = authenticate_agent(&state.registry, &headers).await else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
 
-    let ws = match forward_claim_to_owner(&state, &session_id, &headers, &format!("/agent/tunnel/{session_id}"), ws).await {
+    let ws = match forward_claim_to_owner(
+        &state,
+        &session_id,
+        &headers,
+        &format!("/agent/tunnel/{session_id}"),
+        ws,
+    )
+    .await
+    {
         Ok(forwarded) => return forwarded,
         Err(ws) => ws,
     };
 
-    let Some((to_caller_tx, to_agent_rx)) = state.registry.claim_tunnel_session(&session_id, &agent_id) else {
+    let Some((to_caller_tx, to_agent_rx)) =
+        state.registry.claim_tunnel_session(&session_id, &agent_id)
+    else {
         return StatusCode::NOT_FOUND.into_response();
     };
 
@@ -880,10 +1100,10 @@ pub enum DeleteAgentError {
 impl std::fmt::Display for DeleteAgentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DeleteAgentError::NotFound       => write!(f, "agent not found"),
+            DeleteAgentError::NotFound => write!(f, "agent not found"),
             DeleteAgentError::LxdUnavailable => write!(f, "LXD is not configured on this server"),
-            DeleteAgentError::LxdFailed(e)   => write!(f, "failed to delete LXD container: {e}"),
-            DeleteAgentError::Db             => write!(f, "server error"),
+            DeleteAgentError::LxdFailed(e) => write!(f, "failed to delete LXD container: {e}"),
+            DeleteAgentError::Db => write!(f, "server error"),
         }
     }
 }
@@ -891,57 +1111,68 @@ impl std::fmt::Display for DeleteAgentError {
 impl std::error::Error for DeleteAgentError {}
 
 struct MachineLxdInfo {
-    provider:     String,
+    provider: String,
     lxd_instance: String,
 }
 
 async fn lookup_machine_lxd_info(
-    db:      &Db,
+    db: &Db,
     project_id: &str,
-    agent_id:   &str,
+    agent_id: &str,
 ) -> Result<Option<MachineLxdInfo>, ()> {
-    let rows = db.query(
-        "SELECT id, provider, lxd_instance FROM machines WHERE id = $aid AND project_id = $pid",
-        json!({ "aid": agent_id, "pid": project_id }),
-    ).await.map_err(|_| ())?;
+    let rows = db
+        .query(
+            "SELECT id, provider, lxd_instance FROM machines WHERE id = $aid AND project_id = $pid",
+            json!({ "aid": agent_id, "pid": project_id }),
+        )
+        .await
+        .map_err(|_| ())?;
 
     Ok(rows.into_iter().next().map(|m| MachineLxdInfo {
-        provider:     m["provider"].as_str().unwrap_or("manual").to_string(),
+        provider: m["provider"].as_str().unwrap_or("manual").to_string(),
         lxd_instance: m["lxd_instance"].as_str().unwrap_or_default().to_string(),
     }))
 }
 
 async fn lxd_instance_for_agent(
-    db:      &Db,
-    lxd:        Option<&Arc<LxdClient>>,
+    db: &Db,
+    lxd: Option<&Arc<LxdClient>>,
     project_id: &str,
-    agent_id:   &str,
+    agent_id: &str,
 ) -> Result<(Arc<LxdClient>, String), ApiError> {
-    let info = lookup_machine_lxd_info(db, project_id, agent_id).await
+    let info = lookup_machine_lxd_info(db, project_id, agent_id)
+        .await
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "agent not found"))?;
 
     if info.provider != "lxd" {
         return Err(err(StatusCode::BAD_REQUEST, "agent is not LXD-managed"));
     }
-    let lxd = lxd.ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "LXD is not configured on this server"))?;
+    let lxd = lxd.ok_or_else(|| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LXD is not configured on this server",
+        )
+    })?;
     Ok((Arc::clone(lxd), info.lxd_instance))
 }
 
 pub async fn delete_agent_core(
-    db:      &Db,
-    lxd:        Option<&Arc<LxdClient>>,
-    registry:   &MachineRegistry,
+    db: &Db,
+    lxd: Option<&Arc<LxdClient>>,
+    registry: &MachineRegistry,
     project_id: &str,
-    agent_id:   &str,
+    agent_id: &str,
 ) -> Result<(), DeleteAgentError> {
-    let machine = lookup_machine_lxd_info(db, project_id, agent_id).await
+    let machine = lookup_machine_lxd_info(db, project_id, agent_id)
+        .await
         .map_err(|_| DeleteAgentError::Db)?
         .ok_or(DeleteAgentError::NotFound)?;
 
     if machine.provider == "lxd" {
         let lxd = lxd.ok_or(DeleteAgentError::LxdUnavailable)?;
-        lxd.delete_instance(&machine.lxd_instance).await
+        lxd.delete_instance(&machine.lxd_instance)
+            .await
             .map_err(|e| DeleteAgentError::LxdFailed(e.to_string()))?;
     }
 
@@ -950,48 +1181,57 @@ pub async fn delete_agent_core(
     db.query(
         "DELETE FROM machines WHERE id = $aid AND project_id = $pid",
         json!({ "aid": agent_id, "pid": project_id }),
-    ).await.map_err(|_| DeleteAgentError::Db)?;
+    )
+    .await
+    .map_err(|_| DeleteAgentError::Db)?;
 
     Ok(())
 }
 
 pub async fn delete_agent(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path((project_id, agent_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let db = db_or_err(&state)?;
     require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
-    delete_agent_core(db, state.lxd.as_ref(), &state.registry, &project_id, &agent_id)
-        .await
-        .map_err(|e| match e {
-            DeleteAgentError::NotFound       => err(StatusCode::NOT_FOUND, &e.to_string()),
-            DeleteAgentError::LxdUnavailable => err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()),
-            DeleteAgentError::LxdFailed(_)   => err(StatusCode::BAD_GATEWAY, &e.to_string()),
-            DeleteAgentError::Db             => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
-        })?;
+    delete_agent_core(
+        db,
+        state.lxd.as_ref(),
+        &state.registry,
+        &project_id,
+        &agent_id,
+    )
+    .await
+    .map_err(|e| match e {
+        DeleteAgentError::NotFound => err(StatusCode::NOT_FOUND, &e.to_string()),
+        DeleteAgentError::LxdUnavailable => err(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()),
+        DeleteAgentError::LxdFailed(_) => err(StatusCode::BAD_GATEWAY, &e.to_string()),
+        DeleteAgentError::Db => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+    })?;
 
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn set_lxd_agent_state(
-    user:       &Claims,
-    state:      &MachineState,
+    user: &Claims,
+    state: &MachineState,
     project_id: &str,
-    agent_id:   &str,
-    action:     &str,
+    agent_id: &str,
+    action: &str,
 ) -> Result<(), ApiError> {
     let db = db_or_err(state)?;
     require_project_access(db, &user.sub, &user.role, project_id).await?;
 
-    let (lxd, lxd_instance) = lxd_instance_for_agent(db, state.lxd.as_ref(), project_id, agent_id).await?;
+    let (lxd, lxd_instance) =
+        lxd_instance_for_agent(db, state.lxd.as_ref(), project_id, agent_id).await?;
 
     let result = match action {
-        "start"   => lxd.start_instance(&lxd_instance).await,
-        "stop"    => lxd.stop_instance(&lxd_instance).await,
+        "start" => lxd.start_instance(&lxd_instance).await,
+        "stop" => lxd.stop_instance(&lxd_instance).await,
         "restart" => lxd.restart_instance(&lxd_instance).await,
-        _         => unreachable!("unknown lxd agent action: {action}"),
+        _ => unreachable!("unknown lxd agent action: {action}"),
     };
 
     result.map_err(|e| err(StatusCode::BAD_GATEWAY, &e.to_string()))?;
@@ -1005,8 +1245,8 @@ async fn set_lxd_agent_state(
 }
 
 pub async fn start_agent(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path((project_id, agent_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     set_lxd_agent_state(&user, &state, &project_id, &agent_id, "start").await?;
@@ -1014,8 +1254,8 @@ pub async fn start_agent(
 }
 
 pub async fn stop_agent(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path((project_id, agent_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     set_lxd_agent_state(&user, &state, &project_id, &agent_id, "stop").await?;
@@ -1023,8 +1263,8 @@ pub async fn stop_agent(
 }
 
 pub async fn restart_agent(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path((project_id, agent_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     set_lxd_agent_state(&user, &state, &project_id, &agent_id, "restart").await?;
@@ -1032,8 +1272,8 @@ pub async fn restart_agent(
 }
 
 pub async fn rotate_install_token(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let db = db_or_err(&state)?;
@@ -1043,21 +1283,26 @@ pub async fn rotate_install_token(
     db.query(
         "UPDATE projects SET install_token = $tok WHERE id = $pid",
         json!({ "pid": project_id, "tok": new_token }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    )
+    .await
+    .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     Ok(Json(json!({ "ok": true })))
 }
 
 pub async fn list_flavors(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let db = db_or_err(&state)?;
     require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
     if state.lxd.is_none() {
-        return Err(err(StatusCode::SERVICE_UNAVAILABLE, "LXD is not configured on this server"));
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "LXD is not configured on this server",
+        ));
     }
 
     let flavors: Vec<Value> = Flavor::all().iter().map(Flavor::to_json).collect();
@@ -1073,10 +1318,10 @@ pub struct CreateLxdAgentBody {
 }
 
 pub async fn create_lxd_agent_handler(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path(project_id): Path<String>,
-    Json(body):       Json<CreateLxdAgentBody>,
+    Json(body): Json<CreateLxdAgentBody>,
 ) -> axum::response::Response {
     let db = match db_or_err(&state) {
         Ok(n) => n,
@@ -1088,7 +1333,13 @@ pub async fn create_lxd_agent_handler(
 
     let lxd = match state.lxd.as_ref() {
         Some(l) => l,
-        None => return err(StatusCode::SERVICE_UNAVAILABLE, "LXD is not configured on this server").into_response(),
+        None => {
+            return err(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "LXD is not configured on this server",
+            )
+            .into_response()
+        }
     };
 
     if body.name.trim().is_empty() {
@@ -1109,14 +1360,26 @@ pub async fn create_lxd_agent_handler(
 
     tokio::spawn(async move {
         if let Err(e) = lxd_provision::create_lxd_agent(
-            &db, &lxd, &server_url, &project_id_task, &name, &description, flavor, tx,
-        ).await {
+            &db,
+            &lxd,
+            &server_url,
+            &project_id_task,
+            &name,
+            &description,
+            flavor,
+            tx,
+        )
+        .await
+        {
             tracing::error!(project_id = project_id_task, name, error = ?e, "failed to create LXD-managed agent");
         }
     });
 
-    let stream = ReceiverStream::new(rx).map(|data| Ok::<Event, Infallible>(Event::default().data(data)));
-    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    let stream =
+        ReceiverStream::new(rx).map(|data| Ok::<Event, Infallible>(Event::default().data(data)));
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response();
     response.headers_mut().insert(
         header::HeaderName::from_static("x-accel-buffering"),
         header::HeaderValue::from_static("no"),
@@ -1127,10 +1390,10 @@ pub async fn create_lxd_agent_handler(
 fn port_forward_error_to_api(e: port_forwards::PortForwardError) -> ApiError {
     use port_forwards::PortForwardError::*;
     match e {
-        Validation(msg)    => err(StatusCode::BAD_REQUEST, &msg),
+        Validation(msg) => err(StatusCode::BAD_REQUEST, &msg),
         DuplicateRouteName => err(StatusCode::CONFLICT, &e.to_string()),
-        NotFound           => err(StatusCode::NOT_FOUND, &e.to_string()),
-        Db                 => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
+        NotFound => err(StatusCode::NOT_FOUND, &e.to_string()),
+        Db => err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     }
 }
 
@@ -1147,8 +1410,8 @@ fn port_forward_json(state: &MachineState, f: &port_forwards::PortForward) -> Va
 }
 
 pub async fn list_port_forwards(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path((project_id, agent_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let db = db_or_err(&state)?;
@@ -1158,27 +1421,30 @@ pub async fn list_port_forwards(
         .await
         .map_err(port_forward_error_to_api)?;
 
-    let result: Vec<Value> = forwards.iter().map(|f| port_forward_json(&state, f)).collect();
+    let result: Vec<Value> = forwards
+        .iter()
+        .map(|f| port_forward_json(&state, f))
+        .collect();
     Ok(Json(result))
 }
 
 #[derive(serde::Deserialize)]
 pub struct CreatePortForwardBody {
-    pub port:       u64,
+    pub port: u64,
     pub route_name: String,
 }
 
 pub async fn create_port_forward(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path((project_id, agent_id)): Path<(String, String)>,
-    Json(body):       Json<CreatePortForwardBody>,
+    Json(body): Json<CreatePortForwardBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let db = db_or_err(&state)?;
     require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
-    let port = port_forwards::validate_port(body.port)
-        .map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
+    let port =
+        port_forwards::validate_port(body.port).map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
 
     let forward = port_forwards::create(db, &project_id, &agent_id, port, &body.route_name)
         .await
@@ -1189,34 +1455,43 @@ pub async fn create_port_forward(
 
 #[derive(serde::Deserialize)]
 pub struct UpdatePortForwardBody {
-    pub port:       Option<u64>,
+    pub port: Option<u64>,
     pub route_name: Option<String>,
 }
 
 pub async fn update_port_forward(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path((project_id, agent_id, forward_id)): Path<(String, String, String)>,
-    Json(body):       Json<UpdatePortForwardBody>,
+    Json(body): Json<UpdatePortForwardBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let db = db_or_err(&state)?;
     require_project_access(db, &user.sub, &user.role, &project_id).await?;
 
     let port = match body.port {
-        Some(p) => Some(port_forwards::validate_port(p).map_err(|e| err(StatusCode::BAD_REQUEST, &e))?),
-        None    => None,
+        Some(p) => {
+            Some(port_forwards::validate_port(p).map_err(|e| err(StatusCode::BAD_REQUEST, &e))?)
+        }
+        None => None,
     };
 
-    let forward = port_forwards::update(db, &project_id, &agent_id, &forward_id, port, body.route_name)
-        .await
-        .map_err(port_forward_error_to_api)?;
+    let forward = port_forwards::update(
+        db,
+        &project_id,
+        &agent_id,
+        &forward_id,
+        port,
+        body.route_name,
+    )
+    .await
+    .map_err(port_forward_error_to_api)?;
 
     Ok(Json(port_forward_json(&state, &forward)))
 }
 
 pub async fn delete_port_forward(
-    Extension(user):  Extension<Claims>,
-    State(state):     State<Arc<MachineState>>,
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<MachineState>>,
     Path((project_id, agent_id, forward_id)): Path<(String, String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     let db = db_or_err(&state)?;
@@ -1230,9 +1505,9 @@ pub async fn delete_port_forward(
 }
 
 pub(super) async fn require_project_access(
-    db:      &Db,
-    user_id:    &str,
-    user_role:  &str,
+    db: &Db,
+    user_id: &str,
+    user_role: &str,
     project_id: &str,
 ) -> Result<(), ApiError> {
     let rows = db.query(

@@ -11,10 +11,10 @@ const MAX_ROUTE_NAME_LEN: usize = 63;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct PortForward {
-    pub id:         String,
+    pub id: String,
     pub project_id: String,
-    pub agent_id:   String,
-    pub port:       u16,
+    pub agent_id: String,
+    pub port: u16,
     pub route_name: String,
     pub created_at: String,
     pub updated_at: String,
@@ -32,7 +32,10 @@ impl std::fmt::Display for PortForwardError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PortForwardError::Validation(msg) => write!(f, "{msg}"),
-            PortForwardError::DuplicateRouteName => write!(f, "a port forward with this route name already exists for this agent"),
+            PortForwardError::DuplicateRouteName => write!(
+                f,
+                "a port forward with this route name already exists for this agent"
+            ),
             PortForwardError::NotFound => write!(f, "port forward not found"),
             PortForwardError::Db => write!(f, "server error"),
         }
@@ -52,10 +55,14 @@ pub fn validate_route_name(name: &str) -> Result<String, String> {
         return Err("route_name is required".into());
     }
     if trimmed.len() > MAX_ROUTE_NAME_LEN {
-        return Err(format!("route_name must be {MAX_ROUTE_NAME_LEN} characters or fewer"));
+        return Err(format!(
+            "route_name must be {MAX_ROUTE_NAME_LEN} characters or fewer"
+        ));
     }
     if !route_name_pattern().is_match(trimmed) {
-        return Err("route_name may only contain letters, numbers, hyphens, and underscores".into());
+        return Err(
+            "route_name may only contain letters, numbers, hyphens, and underscores".into(),
+        );
     }
     if RESERVED_ROUTE_NAMES.contains(&trimmed.to_lowercase().as_str()) {
         return Err(format!("route_name '{trimmed}' is reserved"));
@@ -72,23 +79,24 @@ pub fn validate_port(port: u64) -> Result<u16, String> {
 
 fn row_to_port_forward(row: Value) -> PortForward {
     PortForward {
-        id:         row["id"].as_str().unwrap_or("").to_string(),
+        id: row["id"].as_str().unwrap_or("").to_string(),
         project_id: row["project_id"].as_str().unwrap_or("").to_string(),
-        agent_id:   row["agent_id"].as_str().unwrap_or("").to_string(),
-        port:       row["port"].as_u64().unwrap_or(0) as u16,
+        agent_id: row["agent_id"].as_str().unwrap_or("").to_string(),
+        port: row["port"].as_u64().unwrap_or(0) as u16,
         route_name: row["route_name"].as_str().unwrap_or("").to_string(),
         created_at: row["created_at"].as_str().unwrap_or("").to_string(),
         updated_at: row["updated_at"].as_str().unwrap_or("").to_string(),
     }
 }
 
-const SELECT_FIELDS: &str = "SELECT id, project_id, agent_id, port, route_name, created_at, updated_at \
+const SELECT_FIELDS: &str =
+    "SELECT id, project_id, agent_id, port, route_name, created_at, updated_at \
                              FROM port_forwards";
 
 pub async fn list_for_agent(
-    db:      &Db,
+    db: &Db,
     project_id: &str,
-    agent_id:   &str,
+    agent_id: &str,
 ) -> Result<Vec<PortForward>, PortForwardError> {
     let rows = db.query(
         &format!("{SELECT_FIELDS} WHERE agent_id = $aid AND project_id = $pid ORDER BY created_at ASC"),
@@ -99,51 +107,57 @@ pub async fn list_for_agent(
 }
 
 pub async fn get_by_id(
-    db:      &Db,
+    db: &Db,
     project_id: &str,
-    agent_id:   &str,
-    id:         &str,
+    agent_id: &str,
+    id: &str,
 ) -> Result<Option<PortForward>, PortForwardError> {
-    let rows = db.query(
-        &format!("{SELECT_FIELDS} WHERE id = $id AND agent_id = $aid AND project_id = $pid"),
-        json!({ "id": id, "aid": agent_id, "pid": project_id }),
-    ).await.map_err(|_| PortForwardError::Db)?;
+    let rows = db
+        .query(
+            &format!("{SELECT_FIELDS} WHERE id = $id AND agent_id = $aid AND project_id = $pid"),
+            json!({ "id": id, "aid": agent_id, "pid": project_id }),
+        )
+        .await
+        .map_err(|_| PortForwardError::Db)?;
 
     Ok(rows.into_iter().next().map(row_to_port_forward))
 }
 
 pub async fn get_by_route(
-    db:      &Db,
-    agent_id:   &str,
+    db: &Db,
+    agent_id: &str,
     route_name: &str,
 ) -> Result<Option<PortForward>, PortForwardError> {
-    let rows = db.query(
-        &format!("{SELECT_FIELDS} WHERE agent_id = $aid AND route_name = $rn"),
-        json!({ "aid": agent_id, "rn": route_name }),
-    ).await.map_err(|_| PortForwardError::Db)?;
+    let rows = db
+        .query(
+            &format!("{SELECT_FIELDS} WHERE agent_id = $aid AND route_name = $rn"),
+            json!({ "aid": agent_id, "rn": route_name }),
+        )
+        .await
+        .map_err(|_| PortForwardError::Db)?;
 
     Ok(rows.into_iter().next().map(row_to_port_forward))
 }
 
 async fn route_name_taken(
-    db:      &Db,
-    agent_id:   &str,
+    db: &Db,
+    agent_id: &str,
     route_name: &str,
     excluding_id: Option<&str>,
 ) -> Result<bool, PortForwardError> {
     let existing = get_by_route(db, agent_id, route_name).await?;
     Ok(match (existing, excluding_id) {
         (Some(f), Some(excl)) => f.id != excl,
-        (Some(_), None)       => true,
-        (None, _)             => false,
+        (Some(_), None) => true,
+        (None, _) => false,
     })
 }
 
 pub async fn create(
-    db:      &Db,
+    db: &Db,
     project_id: &str,
-    agent_id:   &str,
-    port:       u16,
+    agent_id: &str,
+    port: u16,
     route_name: &str,
 ) -> Result<PortForward, PortForwardError> {
     let route_name = validate_route_name(route_name).map_err(PortForwardError::Validation)?;
@@ -152,7 +166,7 @@ pub async fn create(
         return Err(PortForwardError::DuplicateRouteName);
     }
 
-    let id  = Uuid::new_v4().to_string();
+    let id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
 
     db.query(
@@ -169,25 +183,31 @@ pub async fn create(
     })?;
 
     Ok(PortForward {
-        id, project_id: project_id.to_string(), agent_id: agent_id.to_string(),
-        port, route_name, created_at: now.clone(), updated_at: now,
+        id,
+        project_id: project_id.to_string(),
+        agent_id: agent_id.to_string(),
+        port,
+        route_name,
+        created_at: now.clone(),
+        updated_at: now,
     })
 }
 
 pub async fn update(
-    db:          &Db,
-    project_id:     &str,
-    agent_id:       &str,
-    id:             &str,
-    new_port:       Option<u16>,
+    db: &Db,
+    project_id: &str,
+    agent_id: &str,
+    id: &str,
+    new_port: Option<u16>,
     new_route_name: Option<String>,
 ) -> Result<PortForward, PortForwardError> {
-    let existing = get_by_id(db, project_id, agent_id, id).await?
+    let existing = get_by_id(db, project_id, agent_id, id)
+        .await?
         .ok_or(PortForwardError::NotFound)?;
 
     let route_name = match new_route_name {
         Some(name) => validate_route_name(&name).map_err(PortForwardError::Validation)?,
-        None       => existing.route_name.clone(),
+        None => existing.route_name.clone(),
     };
     let port = new_port.unwrap_or(existing.port);
 
@@ -205,27 +225,37 @@ pub async fn update(
             "id": id, "aid": agent_id, "pid": project_id,
             "port": port as i64, "rn": route_name.clone(), "now": now,
         }),
-    ).await.map_err(|_| PortForwardError::Db)?;
+    )
+    .await
+    .map_err(|_| PortForwardError::Db)?;
 
     Ok(PortForward {
-        id: id.to_string(), project_id: project_id.to_string(), agent_id: agent_id.to_string(),
-        port, route_name, created_at: existing.created_at, updated_at: now,
+        id: id.to_string(),
+        project_id: project_id.to_string(),
+        agent_id: agent_id.to_string(),
+        port,
+        route_name,
+        created_at: existing.created_at,
+        updated_at: now,
     })
 }
 
 pub async fn delete(
-    db:      &Db,
+    db: &Db,
     project_id: &str,
-    agent_id:   &str,
-    id:         &str,
+    agent_id: &str,
+    id: &str,
 ) -> Result<(), PortForwardError> {
-    get_by_id(db, project_id, agent_id, id).await?
+    get_by_id(db, project_id, agent_id, id)
+        .await?
         .ok_or(PortForwardError::NotFound)?;
 
     db.query(
         "DELETE FROM port_forwards WHERE id = $id AND agent_id = $aid AND project_id = $pid",
         json!({ "id": id, "aid": agent_id, "pid": project_id }),
-    ).await.map_err(|_| PortForwardError::Db)?;
+    )
+    .await
+    .map_err(|_| PortForwardError::Db)?;
 
     Ok(())
 }
