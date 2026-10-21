@@ -9,9 +9,9 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use super::bundle;
 use crate::auth::jwt::Claims;
 use harvest_db::Db;
-use super::bundle;
 
 type ApiError = (StatusCode, Json<Value>);
 
@@ -36,22 +36,22 @@ pub enum ArtifactKind {
 impl ArtifactKind {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "markdown"   => Some(Self::Markdown),
-            "pdf"        => Some(Self::Pdf),
-            "terraform"  => Some(Self::Terraform),
+            "markdown" => Some(Self::Markdown),
+            "pdf" => Some(Self::Pdf),
+            "terraform" => Some(Self::Terraform),
             "terragrunt" => Some(Self::Terragrunt),
-            "bash"       => Some(Self::Bash),
-            _            => None,
+            "bash" => Some(Self::Bash),
+            _ => None,
         }
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Markdown   => "markdown",
-            Self::Pdf        => "pdf",
-            Self::Terraform  => "terraform",
+            Self::Markdown => "markdown",
+            Self::Pdf => "pdf",
+            Self::Terraform => "terraform",
             Self::Terragrunt => "terragrunt",
-            Self::Bash       => "bash",
+            Self::Bash => "bash",
         }
     }
 }
@@ -88,7 +88,11 @@ pub(crate) fn sanitize_filename(title: &str) -> String {
         .collect();
     let mut slug = words.join("-");
     slug.truncate(80);
-    if slug.is_empty() { "artifact".to_string() } else { slug }
+    if slug.is_empty() {
+        "artifact".to_string()
+    } else {
+        slug
+    }
 }
 
 pub async fn require_artifact_access(
@@ -108,7 +112,8 @@ pub async fn require_artifact_access(
         json!({ "aid": artifact_id, "uid": user_id, "role": user_role }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
-    rows.into_iter().next()
+    rows.into_iter()
+        .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))
 }
 
@@ -123,7 +128,7 @@ pub async fn create_artifact(
     let title = title.trim();
     anyhow::ensure!(!title.is_empty(), "title is required");
     validate_content_for_kind(kind, content).map_err(|e| anyhow::anyhow!(e))?;
-    let id  = Uuid::new_v4().to_string();
+    let id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
     db.query(
         "INSERT INTO artifacts (id, project_id, title, kind, content, created_by, created_at, updated_at)
@@ -145,21 +150,23 @@ pub async fn update_artifact(
     title: &str,
     content: &str,
 ) -> anyhow::Result<Value> {
-    let title = validate_update(existing_kind, kind, title, content).map_err(|e| anyhow::anyhow!(e))?;
+    let title =
+        validate_update(existing_kind, kind, title, content).map_err(|e| anyhow::anyhow!(e))?;
     let now = harvest_db::now_rfc3339();
     db.query(
         "UPDATE artifacts SET title = $title, content = $content, updated_at = $now
          WHERE id = $id
          RETURNING id",
         json!({ "id": artifact_id, "title": title, "content": content, "now": now }),
-    ).await?;
+    )
+    .await?;
     Ok(json!({ "id": artifact_id, "title": title, "kind": kind.as_str(), "updated_at": now }))
 }
 
 #[derive(serde::Deserialize)]
 pub struct UpdateArtifactBody {
-    pub title:   String,
-    pub kind:    String,
+    pub title: String,
+    pub kind: String,
     pub content: String,
 }
 
@@ -172,11 +179,22 @@ pub async fn update_artifact_route(
     let row = require_artifact_access(&state.db, &user.sub, &user.role, &artifact_id).await?;
     let existing_kind = ArtifactKind::parse(row["kind"].as_str().unwrap_or(""))
         .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let kind = ArtifactKind::parse(&body.kind)
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "kind must be 'markdown', 'pdf', 'terraform', 'terragrunt', or 'bash'"))?;
-    let result = update_artifact(&state.db, &artifact_id, existing_kind, kind, &body.title, &body.content)
-        .await
-        .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    let kind = ArtifactKind::parse(&body.kind).ok_or_else(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "kind must be 'markdown', 'pdf', 'terraform', 'terragrunt', or 'bash'",
+        )
+    })?;
+    let result = update_artifact(
+        &state.db,
+        &artifact_id,
+        existing_kind,
+        kind,
+        &body.title,
+        &body.content,
+    )
+    .await
+    .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
     Ok(Json(result))
 }
 
@@ -185,11 +203,13 @@ pub async fn get_artifact_in_project(
     project_id: &str,
     artifact_id: &str,
 ) -> anyhow::Result<Option<Value>> {
-    let rows = db.query(
-        "SELECT id, title, kind, content FROM artifacts
+    let rows = db
+        .query(
+            "SELECT id, title, kind, content FROM artifacts
          WHERE id = $aid AND project_id = $pid",
-        json!({ "pid": project_id, "aid": artifact_id }),
-    ).await?;
+            json!({ "pid": project_id, "aid": artifact_id }),
+        )
+        .await?;
     Ok(rows.into_iter().next())
 }
 
@@ -208,10 +228,14 @@ pub async fn delete_artifact(
     Path(artifact_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_artifact_access(&state.db, &user.sub, &user.role, &artifact_id).await?;
-    state.db.query(
-        "DELETE FROM artifacts WHERE id = $aid",
-        json!({ "aid": artifact_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    state
+        .db
+        .query(
+            "DELETE FROM artifacts WHERE id = $aid",
+            json!({ "aid": artifact_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -230,17 +254,24 @@ pub async fn download_artifact(
         Ok(row) => row,
         Err(e) => return e.into_response(),
     };
-    let title   = row["title"].as_str().unwrap_or("artifact");
-    let kind    = row["kind"].as_str().unwrap_or("markdown");
+    let title = row["title"].as_str().unwrap_or("artifact");
+    let kind = row["kind"].as_str().unwrap_or("markdown");
     let content = row["content"].as_str().unwrap_or("").to_string();
-    let slug    = sanitize_filename(title);
-    let as_pdf  = query.format.as_deref() == Some("pdf");
+    let slug = sanitize_filename(title);
+    let as_pdf = query.format.as_deref() == Some("pdf");
 
     if kind == "pdf" || (kind == "markdown" && as_pdf) {
-        match markdown2pdf::parse_into_bytes(content, markdown2pdf::config::ConfigSource::Default, None) {
+        match markdown2pdf::parse_into_bytes(
+            content,
+            markdown2pdf::config::ConfigSource::Default,
+            None,
+        ) {
             Ok(bytes) => Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, HeaderValue::from_static("application/pdf"))
+                .header(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/pdf"),
+                )
                 .header(
                     header::CONTENT_DISPOSITION,
                     HeaderValue::from_str(&format!("attachment; filename=\"{slug}.pdf\"")).unwrap(),
@@ -255,7 +286,10 @@ pub async fn download_artifact(
     } else if kind == "terraform" || kind == "terragrunt" {
         Response::builder()
             .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"))
+            .header(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            )
             .header(
                 header::CONTENT_DISPOSITION,
                 HeaderValue::from_str(&format!("attachment; filename=\"{slug}.json\"")).unwrap(),
@@ -265,7 +299,10 @@ pub async fn download_artifact(
     } else if kind == "bash" {
         Response::builder()
             .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, HeaderValue::from_static("text/x-shellscript; charset=utf-8"))
+            .header(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/x-shellscript; charset=utf-8"),
+            )
             .header(
                 header::CONTENT_DISPOSITION,
                 HeaderValue::from_str(&format!("attachment; filename=\"{slug}.sh\"")).unwrap(),
@@ -275,7 +312,10 @@ pub async fn download_artifact(
     } else {
         Response::builder()
             .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, HeaderValue::from_static("text/markdown; charset=utf-8"))
+            .header(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/markdown; charset=utf-8"),
+            )
             .header(
                 header::CONTENT_DISPOSITION,
                 HeaderValue::from_str(&format!("attachment; filename=\"{slug}.md\"")).unwrap(),
@@ -311,24 +351,41 @@ mod tests {
 
     #[test]
     fn artifact_kind_parses_known_values_only() {
-        assert_eq!(ArtifactKind::parse("markdown"), Some(ArtifactKind::Markdown));
+        assert_eq!(
+            ArtifactKind::parse("markdown"),
+            Some(ArtifactKind::Markdown)
+        );
         assert_eq!(ArtifactKind::parse("pdf"), Some(ArtifactKind::Pdf));
-        assert_eq!(ArtifactKind::parse("terraform"), Some(ArtifactKind::Terraform));
-        assert_eq!(ArtifactKind::parse("terragrunt"), Some(ArtifactKind::Terragrunt));
+        assert_eq!(
+            ArtifactKind::parse("terraform"),
+            Some(ArtifactKind::Terraform)
+        );
+        assert_eq!(
+            ArtifactKind::parse("terragrunt"),
+            Some(ArtifactKind::Terragrunt)
+        );
         assert_eq!(ArtifactKind::parse("bash"), Some(ArtifactKind::Bash));
         assert_eq!(ArtifactKind::parse("docx"), None);
     }
 
     #[test]
     fn artifact_kind_as_str_round_trips() {
-        for kind in [ArtifactKind::Markdown, ArtifactKind::Pdf, ArtifactKind::Terraform, ArtifactKind::Terragrunt, ArtifactKind::Bash] {
+        for kind in [
+            ArtifactKind::Markdown,
+            ArtifactKind::Pdf,
+            ArtifactKind::Terraform,
+            ArtifactKind::Terragrunt,
+            ArtifactKind::Bash,
+        ] {
             assert_eq!(ArtifactKind::parse(kind.as_str()), Some(kind));
         }
     }
 
     #[test]
     fn validate_content_for_kind_skips_validation_for_bash() {
-        assert!(validate_content_for_kind(ArtifactKind::Bash, "#!/usr/bin/env bash\necho hi").is_ok());
+        assert!(
+            validate_content_for_kind(ArtifactKind::Bash, "#!/usr/bin/env bash\necho hi").is_ok()
+        );
     }
 
     #[test]
@@ -349,36 +406,64 @@ mod tests {
 
     #[test]
     fn validate_content_for_kind_accepts_bundle_for_terragrunt() {
-        assert!(validate_content_for_kind(ArtifactKind::Terragrunt, r#"{"terragrunt.hcl":"..."}"#).is_ok());
+        assert!(
+            validate_content_for_kind(ArtifactKind::Terragrunt, r#"{"terragrunt.hcl":"..."}"#)
+                .is_ok()
+        );
     }
 
     #[test]
     fn validate_update_rejects_kind_change() {
-        let e = validate_update(ArtifactKind::Markdown, ArtifactKind::Pdf, "T", "content").unwrap_err();
+        let e =
+            validate_update(ArtifactKind::Markdown, ArtifactKind::Pdf, "T", "content").unwrap_err();
         assert!(e.contains("kind"));
     }
 
     #[test]
     fn validate_update_rejects_empty_title() {
-        let e = validate_update(ArtifactKind::Markdown, ArtifactKind::Markdown, "   ", "content").unwrap_err();
+        let e = validate_update(
+            ArtifactKind::Markdown,
+            ArtifactKind::Markdown,
+            "   ",
+            "content",
+        )
+        .unwrap_err();
         assert!(e.contains("title"));
     }
 
     #[test]
     fn validate_update_validates_terraform_bundle() {
-        let e = validate_update(ArtifactKind::Terraform, ArtifactKind::Terraform, "T", "not json").unwrap_err();
+        let e = validate_update(
+            ArtifactKind::Terraform,
+            ArtifactKind::Terraform,
+            "T",
+            "not json",
+        )
+        .unwrap_err();
         assert!(e.contains("JSON"));
     }
 
     #[test]
     fn validate_update_accepts_valid_terraform_bundle() {
-        let title = validate_update(ArtifactKind::Terraform, ArtifactKind::Terraform, "T", r#"{"main.tf":"..."}"#).unwrap();
+        let title = validate_update(
+            ArtifactKind::Terraform,
+            ArtifactKind::Terraform,
+            "T",
+            r#"{"main.tf":"..."}"#,
+        )
+        .unwrap();
         assert_eq!(title, "T");
     }
 
     #[test]
     fn validate_update_accepts_markdown_content_unchanged() {
-        let title = validate_update(ArtifactKind::Markdown, ArtifactKind::Markdown, "  T  ", "# hi").unwrap();
+        let title = validate_update(
+            ArtifactKind::Markdown,
+            ArtifactKind::Markdown,
+            "  T  ",
+            "# hi",
+        )
+        .unwrap();
         assert_eq!(title, "T");
     }
 
@@ -388,7 +473,8 @@ mod tests {
             "# Hello\nWorld".to_string(),
             markdown2pdf::config::ConfigSource::Default,
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(bytes.starts_with(b"%PDF-"));
     }
 }

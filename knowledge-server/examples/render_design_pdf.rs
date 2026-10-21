@@ -7,8 +7,12 @@ use std::fs;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let input = args.get(1).expect("usage: render_design_pdf <input.md> <output.pdf> [title]");
-    let output = args.get(2).expect("usage: render_design_pdf <input.md> <output.pdf> [title]");
+    let input = args
+        .get(1)
+        .expect("usage: render_design_pdf <input.md> <output.pdf> [title]");
+    let output = args
+        .get(2)
+        .expect("usage: render_design_pdf <input.md> <output.pdf> [title]");
     let title = args.get(3).cloned().unwrap_or_else(|| "Design".to_string());
 
     let markdown = fs::read_to_string(input).expect("failed to read input markdown");

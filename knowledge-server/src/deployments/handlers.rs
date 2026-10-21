@@ -17,23 +17,29 @@ use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
 use uuid::Uuid;
 
 use crate::agent::{Agent, AgentEvent};
-use crate::artifacts::{bundle, handlers::{create_artifact, get_artifact_in_project, sanitize_filename, update_artifact, ArtifactKind}};
+use crate::artifacts::{
+    bundle,
+    handlers::{
+        create_artifact, get_artifact_in_project, sanitize_filename, update_artifact, ArtifactKind,
+    },
+};
 use crate::auth::jwt::Claims;
 use crate::machines::{TerraformAction, TerraformFlavor};
-use harvest_db::Db;
 use crate::projects::handlers::{require_project_access, ProjectState};
+use harvest_db::Db;
 
 use super::{
     extract_json_block, load_deployment_context, needs_destroy_before_apply,
-    record_run_and_update_state, reset_infra_state_to_none, shape_deployment,
-    shape_execution_plan, shape_proposal, shape_proposals,
-    topological_sort, InfraState, StepAction, StepNode,
+    record_run_and_update_state, reset_infra_state_to_none, shape_deployment, shape_execution_plan,
+    shape_proposal, shape_proposals, topological_sort, InfraState, StepAction, StepNode,
 };
 
 const DEFAULT_RUN_TIMEOUT_SECS: u64 = 300;
-const MAX_RUN_TIMEOUT_SECS:     u64 = 1800;
+const MAX_RUN_TIMEOUT_SECS: u64 = 1800;
 
-fn default_run_timeout() -> u64 { DEFAULT_RUN_TIMEOUT_SECS }
+fn default_run_timeout() -> u64 {
+    DEFAULT_RUN_TIMEOUT_SECS
+}
 
 pub(crate) type ApiError = (StatusCode, Json<Value>);
 
@@ -47,15 +53,19 @@ pub async fn require_group_access(
     user_role: &str,
     group_id: &str,
 ) -> Result<Value, ApiError> {
-    let rows = db.query(
-        "SELECT g.id, g.name FROM groups g
+    let rows = db
+        .query(
+            "SELECT g.id, g.name FROM groups g
          WHERE g.id = $gid
            AND ($role = 'admin' OR EXISTS (
                  SELECT 1 FROM user_groups ug WHERE ug.user_id = $uid AND ug.group_id = g.id))",
-        json!({ "gid": group_id, "uid": user_id, "role": user_role }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "gid": group_id, "uid": user_id, "role": user_role }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
-    rows.into_iter().next()
+    rows.into_iter()
+        .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))
 }
 
@@ -63,11 +73,15 @@ pub async fn list_templates(
     Extension(_user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.db.query(
-        "SELECT id, name, description, created_by, created_at, updated_at
+    let rows = state
+        .db
+        .query(
+            "SELECT id, name, description, created_by, created_at, updated_at
           FROM product_templates ORDER BY name",
-        json!({}),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({}),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(rows))
 }
 
@@ -76,21 +90,27 @@ pub async fn get_template(
     State(state): State<Arc<ProjectState>>,
     Path(template_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.db.query(
-        "SELECT id, name, description, content, created_by, created_at, updated_at
+    let rows = state
+        .db
+        .query(
+            "SELECT id, name, description, content, created_by, created_at, updated_at
           FROM product_templates WHERE id = $tid",
-        json!({ "tid": template_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let row = rows.into_iter().next()
+            json!({ "tid": template_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let row = rows
+        .into_iter()
+        .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     Ok(Json(row))
 }
 
 #[derive(serde::Deserialize)]
 pub struct CreateTemplateBody {
-    pub name:        String,
+    pub name: String,
     pub description: String,
-    pub content:     String,
+    pub content: String,
 }
 
 pub async fn create_template(
@@ -102,7 +122,7 @@ pub async fn create_template(
     if name.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "name is required"));
     }
-    let id  = Uuid::new_v4().to_string();
+    let id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
     state.db.query(
         "INSERT INTO product_templates (id, name, description, content, created_by, created_at, updated_at)
@@ -113,14 +133,17 @@ pub async fn create_template(
             "content": body.content, "uid": user.sub, "now": now,
         }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": id, "name": name, "created_at": now }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "name": name, "created_at": now })),
+    ))
 }
 
 #[derive(serde::Deserialize)]
 pub struct UpdateTemplateBody {
-    pub name:        Option<String>,
+    pub name: Option<String>,
     pub description: Option<String>,
-    pub content:     Option<String>,
+    pub content: Option<String>,
 }
 
 pub async fn update_template(
@@ -134,10 +157,14 @@ pub async fn update_template(
             return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
         }
     }
-    let exists = state.db.query(
-        "SELECT 1 AS ok FROM product_templates WHERE id = $tid",
-        json!({ "tid": template_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let exists = state
+        .db
+        .query(
+            "SELECT 1 AS ok FROM product_templates WHERE id = $tid",
+            json!({ "tid": template_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if exists.is_empty() {
         return Err(err(StatusCode::NOT_FOUND, "not found"));
     }
@@ -156,8 +183,11 @@ pub async fn update_template(
                    updated_at  = $now
                WHERE id = $tid
                RETURNING id";
-    state.db.query(sql, params)
-        .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    state
+        .db
+        .query(sql, params)
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -166,10 +196,14 @@ pub async fn delete_template(
     State(state): State<Arc<ProjectState>>,
     Path(template_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.db.query(
-        "DELETE FROM product_templates WHERE id = $tid",
-        json!({ "tid": template_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    state
+        .db
+        .query(
+            "DELETE FROM product_templates WHERE id = $tid",
+            json!({ "tid": template_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -178,18 +212,28 @@ pub async fn download_template(
     State(state): State<Arc<ProjectState>>,
     Path(template_id): Path<String>,
 ) -> Result<Response, ApiError> {
-    let rows = state.db.query(
-        "SELECT name, description, content FROM product_templates WHERE id = $tid",
-        json!({ "tid": template_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let row = rows.into_iter().next()
+    let rows = state
+        .db
+        .query(
+            "SELECT name, description, content FROM product_templates WHERE id = $tid",
+            json!({ "tid": template_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let row = rows
+        .into_iter()
+        .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
 
     let name = row["name"].as_str().unwrap_or("template").to_string();
     let description = row["description"].as_str().unwrap_or("").to_string();
     let content_str = row["content"].as_str().unwrap_or("{}").to_string();
-    let content: Value = serde_json::from_str(&content_str)
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "invalid template content"))?;
+    let content: Value = serde_json::from_str(&content_str).map_err(|_| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid template content",
+        )
+    })?;
 
     let slug = sanitize_filename(&name);
     let filename = format!("{slug}.harvest");
@@ -200,17 +244,33 @@ pub async fn download_template(
         let opts = zip::write::SimpleFileOptions::default();
 
         let metadata = format!("name: {name}\ndescription: {description}\n");
-        zip.start_file("metadata.yaml", opts)
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+        zip.start_file("metadata.yaml", opts).map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("zip error: {e}"),
+            )
+        })?;
         use std::io::Write;
-        zip.write_all(metadata.as_bytes())
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+        zip.write_all(metadata.as_bytes()).map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("zip error: {e}"),
+            )
+        })?;
 
         if let Some(design) = content["design_template"].as_str() {
-            zip.start_file("design.md", opts)
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
-            zip.write_all(design.as_bytes())
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+            zip.start_file("design.md", opts).map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("zip error: {e}"),
+                )
+            })?;
+            zip.write_all(design.as_bytes()).map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("zip error: {e}"),
+                )
+            })?;
         }
 
         if let Some(skills) = content["skills"].as_array() {
@@ -219,11 +279,21 @@ pub async fn download_template(
                 let skill_desc = skill["description"].as_str().unwrap_or("");
                 let skill_content = skill["content"].as_str().unwrap_or("");
                 let path = format!("skills/{skill_name}.md");
-                zip.start_file(&path, opts)
-                    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
-                let full = format!("---\nname: {skill_name}\ndescription: {skill_desc}\n---\n{skill_content}");
-                zip.write_all(full.as_bytes())
-                    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+                zip.start_file(&path, opts).map_err(|e| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("zip error: {e}"),
+                    )
+                })?;
+                let full = format!(
+                    "---\nname: {skill_name}\ndescription: {skill_desc}\n---\n{skill_content}"
+                );
+                zip.write_all(full.as_bytes()).map_err(|e| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("zip error: {e}"),
+                    )
+                })?;
             }
         }
 
@@ -243,8 +313,15 @@ pub async fn download_template(
                 let path = format!("artifacts/{art_name}.{extension}");
 
                 let file_content = if kind == "terraform" || kind == "terragrunt" {
-                    if let Ok(bundle) = serde_json::from_str::<serde_json::Map<String, Value>>(art_content) {
-                        bundle.values().filter_map(|v| v.as_str()).next().unwrap_or("").to_string()
+                    if let Ok(bundle) =
+                        serde_json::from_str::<serde_json::Map<String, Value>>(art_content)
+                    {
+                        bundle
+                            .values()
+                            .filter_map(|v| v.as_str())
+                            .next()
+                            .unwrap_or("")
+                            .to_string()
                     } else {
                         art_content.to_string()
                     }
@@ -252,21 +329,36 @@ pub async fn download_template(
                     art_content.to_string()
                 };
 
-                zip.start_file(&path, opts)
-                    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
-                zip.write_all(file_content.as_bytes())
-                    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+                zip.start_file(&path, opts).map_err(|e| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("zip error: {e}"),
+                    )
+                })?;
+                zip.write_all(file_content.as_bytes()).map_err(|e| {
+                    err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("zip error: {e}"),
+                    )
+                })?;
             }
         }
 
-        zip.finish()
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &format!("zip error: {e}")))?;
+        zip.finish().map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("zip error: {e}"),
+            )
+        })?;
     }
 
     let bytes = buf.into_inner();
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, HeaderValue::from_static("application/zip"))
+        .header(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/zip"),
+        )
         .header(
             header::CONTENT_DISPOSITION,
             HeaderValue::from_str(&format!("attachment; filename=\"{filename}\"")).unwrap(),
@@ -282,28 +374,43 @@ pub async fn upload_template(
 ) -> Result<impl IntoResponse, ApiError> {
     let mut file_bytes: Option<Vec<u8>> = None;
 
-    while let Some(field) = multipart.next_field().await
+    while let Some(field) = multipart
+        .next_field()
+        .await
         .map_err(|e| err(StatusCode::BAD_REQUEST, &format!("multipart error: {e}")))?
     {
         if field.name() == Some("file") {
-            let bytes = field.bytes().await
-                .map_err(|e| err(StatusCode::BAD_REQUEST, &format!("failed to read file: {e}")))?;
+            let bytes = field.bytes().await.map_err(|e| {
+                err(
+                    StatusCode::BAD_REQUEST,
+                    &format!("failed to read file: {e}"),
+                )
+            })?;
             file_bytes = Some(bytes.to_vec());
         }
     }
 
-    let bytes = file_bytes
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "no file field in multipart request"))?;
+    let bytes = file_bytes.ok_or_else(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "no file field in multipart request",
+        )
+    })?;
 
     let parsed = super::harvest::parse_harvest_archive(&bytes)
         .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
 
     let name = parsed.name.clone();
     let description = parsed.description.clone();
-    let content = serde_json::to_string(&super::harvest::harvest_to_json(&parsed))
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "failed to serialize template content"))?;
+    let content =
+        serde_json::to_string(&super::harvest::harvest_to_json(&parsed)).map_err(|_| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to serialize template content",
+            )
+        })?;
 
-    let id  = Uuid::new_v4().to_string();
+    let id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
     state.db.query(
         "INSERT INTO product_templates (id, name, description, content, created_by, created_at, updated_at)
@@ -315,7 +422,10 @@ pub async fn upload_template(
         }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
-    Ok((StatusCode::CREATED, Json(json!({ "id": id, "name": name, "created_at": now }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "name": name, "created_at": now })),
+    ))
 }
 
 pub async fn list_deployments(
@@ -324,15 +434,19 @@ pub async fn list_deployments(
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let rows = state.db.query(
-        "SELECT d.id, d.name, d.environment_description, d.infra_state, d.created_by,
+    let rows = state
+        .db
+        .query(
+            "SELECT d.id, d.name, d.environment_description, d.infra_state, d.created_by,
                 d.created_at, d.updated_at, t.id AS template_id, t.name AS template_name
          FROM deployments d
          LEFT JOIN product_templates t ON t.id = d.template_id
          WHERE d.project_id = $pid
          ORDER BY d.updated_at DESC",
-        json!({ "pid": project_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "pid": project_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let shaped: Vec<Value> = rows.iter().map(shape_deployment).collect();
     Ok(Json(shaped))
 }
@@ -367,11 +481,16 @@ async fn fetch_deployment_detail(
     project_id: &str,
     deployment_id: &str,
 ) -> Result<Value, ApiError> {
-    let rows = db.query(
-        deployment_detail_sql(),
-        json!({ "pid": project_id, "did": deployment_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let row = rows.into_iter().next()
+    let rows = db
+        .query(
+            deployment_detail_sql(),
+            json!({ "pid": project_id, "did": deployment_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let row = rows
+        .into_iter()
+        .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     Ok(shape_deployment(&row))
 }
@@ -418,16 +537,18 @@ pub async fn get_project_deployment(
          LIMIT 1",
         json!({ "pid": project_id }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let row = rows.into_iter().next()
+    let row = rows
+        .into_iter()
+        .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "deployment not found"))?;
     Ok(Json(shape_deployment(&row)))
 }
 
 #[derive(serde::Deserialize)]
 pub struct CreateDeploymentBody {
-    pub name:                     String,
+    pub name: String,
     pub environment_description: String,
-    pub product_template_id:      Option<String>,
+    pub product_template_id: Option<String>,
 }
 
 pub async fn create_deployment(
@@ -442,25 +563,36 @@ pub async fn create_deployment(
         return Err(err(StatusCode::BAD_REQUEST, "name is required"));
     }
 
-    let existing = state.db.query(
-        "SELECT id FROM deployments WHERE project_id = $pid LIMIT 1",
-        json!({ "pid": project_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let existing = state
+        .db
+        .query(
+            "SELECT id FROM deployments WHERE project_id = $pid LIMIT 1",
+            json!({ "pid": project_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if !existing.is_empty() {
-        return Err(err(StatusCode::CONFLICT, "project already has a deployment"));
+        return Err(err(
+            StatusCode::CONFLICT,
+            "project already has a deployment",
+        ));
     }
 
     if let Some(template_id) = &body.product_template_id {
-        let exists = state.db.query(
-            "SELECT 1 AS ok FROM product_templates WHERE id = $tid",
-            json!({ "tid": template_id }),
-        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        let exists = state
+            .db
+            .query(
+                "SELECT 1 AS ok FROM product_templates WHERE id = $tid",
+                json!({ "tid": template_id }),
+            )
+            .await
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         if exists.is_empty() {
             return Err(err(StatusCode::BAD_REQUEST, "template not found"));
         }
     }
 
-    let id  = Uuid::new_v4().to_string();
+    let id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
 
     let sql = "INSERT INTO deployments (id, project_id, template_id, name, environment_description,
@@ -468,21 +600,28 @@ pub async fn create_deployment(
                VALUES ($id, $pid, $tid, $name, $env_desc, 'none', $uid, $now, $now)
                RETURNING id";
 
-    state.db.query(
-        sql,
-        json!({
-            "pid": project_id, "tid": body.product_template_id, "id": id,
-            "name": name, "env_desc": body.environment_description,
-            "uid": user.sub, "now": now,
-        }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    state
+        .db
+        .query(
+            sql,
+            json!({
+                "pid": project_id, "tid": body.product_template_id, "id": id,
+                "name": name, "env_desc": body.environment_description,
+                "uid": user.sub, "now": now,
+            }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
-    Ok((StatusCode::CREATED, Json(json!({ "id": id, "name": name, "created_at": now }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "name": name, "created_at": now })),
+    ))
 }
 
 #[derive(serde::Deserialize)]
 pub struct UpdateDeploymentBody {
-    pub name:                     Option<String>,
+    pub name: Option<String>,
     pub environment_description: Option<String>,
 }
 
@@ -498,10 +637,14 @@ pub async fn update_deployment(
             return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
         }
     }
-    let exists = state.db.query(
-        "SELECT 1 AS ok FROM deployments WHERE id = $did AND project_id = $pid",
-        json!({ "pid": project_id, "did": deployment_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let exists = state
+        .db
+        .query(
+            "SELECT 1 AS ok FROM deployments WHERE id = $did AND project_id = $pid",
+            json!({ "pid": project_id, "did": deployment_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if exists.is_empty() {
         return Err(err(StatusCode::NOT_FOUND, "not found"));
     }
@@ -518,8 +661,11 @@ pub async fn update_deployment(
                    updated_at              = $now
                WHERE id = $did AND project_id = $pid
                RETURNING id";
-    state.db.query(sql, params)
-        .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    state
+        .db
+        .query(sql, params)
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -529,10 +675,14 @@ pub async fn delete_deployment(
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    state.db.query(
-        "DELETE FROM deployments WHERE id = $did AND project_id = $pid",
-        json!({ "pid": project_id, "did": deployment_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    state
+        .db
+        .query(
+            "DELETE FROM deployments WHERE id = $did AND project_id = $pid",
+            json!({ "pid": project_id, "did": deployment_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -544,10 +694,10 @@ pub struct RunDeploymentBody {
 }
 
 pub(crate) struct RunnableBundle {
-    pub(crate) artifact_id:          String,
-    pub(crate) artifact_kind:        String,
-    pub(crate) artifact_content:     String,
-    pub(crate) infra_state:          InfraState,
+    pub(crate) artifact_id: String,
+    pub(crate) artifact_kind: String,
+    pub(crate) artifact_content: String,
+    pub(crate) infra_state: InfraState,
     pub(crate) last_applied_content: Option<String>,
 }
 
@@ -556,53 +706,85 @@ pub(crate) async fn load_runnable_bundle(
     project_id: &str,
     deployment_id: &str,
 ) -> Result<RunnableBundle, ApiError> {
-    let rows = db.query(
-        "SELECT d.infra_state, d.last_applied_content,
+    let rows = db
+        .query(
+            "SELECT d.infra_state, d.last_applied_content,
                 a.id AS artifact_id, a.kind AS artifact_kind, a.content AS artifact_content
          FROM deployments d
          LEFT JOIN artifacts a ON a.id = d.terraform_bundle_id
          WHERE d.id = $did AND d.project_id = $pid",
-        json!({ "pid": project_id, "did": deployment_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let row = rows.into_iter().next().ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
-    let artifact_id = row["artifact_id"].as_str().map(str::to_string)
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no terraform bundle linked"))?;
+            json!({ "pid": project_id, "did": deployment_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let row = rows
+        .into_iter()
+        .next()
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+    let artifact_id = row["artifact_id"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "deployment has no terraform bundle linked",
+            )
+        })?;
     Ok(RunnableBundle {
         artifact_id,
-        artifact_kind:        row["artifact_kind"].as_str().unwrap_or("").to_string(),
-        artifact_content:     row["artifact_content"].as_str().unwrap_or("").to_string(),
-        infra_state:          InfraState::parse(row["infra_state"].as_str().unwrap_or("none")).unwrap_or(InfraState::None),
+        artifact_kind: row["artifact_kind"].as_str().unwrap_or("").to_string(),
+        artifact_content: row["artifact_content"].as_str().unwrap_or("").to_string(),
+        infra_state: InfraState::parse(row["infra_state"].as_str().unwrap_or("none"))
+            .unwrap_or(InfraState::None),
         last_applied_content: row["last_applied_content"].as_str().map(str::to_string),
     })
 }
 
 pub(crate) fn flavor_for_kind(kind: &str) -> Result<TerraformFlavor, ApiError> {
     match ArtifactKind::parse(kind) {
-        Some(ArtifactKind::Terraform)  => Ok(TerraformFlavor::Terraform),
+        Some(ArtifactKind::Terraform) => Ok(TerraformFlavor::Terraform),
         Some(ArtifactKind::Terragrunt) => Ok(TerraformFlavor::Terragrunt),
-        _ => Err(err(StatusCode::BAD_REQUEST, "linked artifact is not a terraform or terragrunt bundle")),
+        _ => Err(err(
+            StatusCode::BAD_REQUEST,
+            "linked artifact is not a terraform or terragrunt bundle",
+        )),
     }
 }
 
-async fn require_agent_in_project(state: &ProjectState, agent_id: &str, project_id: &str) -> Result<(), ApiError> {
-    let belongs = state.agent_builder.registry.project_of(agent_id).await
+async fn require_agent_in_project(
+    state: &ProjectState,
+    agent_id: &str,
+    project_id: &str,
+) -> Result<(), ApiError> {
+    let belongs = state
+        .agent_builder
+        .registry
+        .project_of(agent_id)
+        .await
         .is_some_and(|p| p == project_id);
-    if belongs { Ok(()) } else { Err(err(StatusCode::NOT_FOUND, "agent not found in this project")) }
+    if belongs {
+        Ok(())
+    } else {
+        Err(err(
+            StatusCode::NOT_FOUND,
+            "agent not found in this project",
+        ))
+    }
 }
 
 fn spawn_output_relay(
-    state:         &ProjectState,
-    project_id:    &str,
+    state: &ProjectState,
+    project_id: &str,
     deployment_id: &str,
 ) -> tokio::sync::mpsc::Sender<Value> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Value>(256);
-    let live           = Arc::clone(&state.live);
-    let project_id     = project_id.to_string();
-    let deployment_id  = deployment_id.to_string();
+    let live = Arc::clone(&state.live);
+    let project_id = project_id.to_string();
+    let deployment_id = deployment_id.to_string();
 
     tokio::spawn(async move {
         while let Some(mut line) = rx.recv().await {
-            line["type"]          = json!("deployment_run_log");
+            line["type"] = json!("deployment_run_log");
             line["deployment_id"] = json!(deployment_id);
             live.broadcast(&project_id, line.to_string());
         }
@@ -612,14 +794,14 @@ fn spawn_output_relay(
 }
 
 fn spawn_progress_relay(
-    state:         &ProjectState,
-    project_id:    &str,
+    state: &ProjectState,
+    project_id: &str,
     deployment_id: &str,
 ) -> tokio::sync::mpsc::Sender<AgentEvent> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
-    let live           = Arc::clone(&state.live);
-    let project_id     = project_id.to_string();
-    let deployment_id  = deployment_id.to_string();
+    let live = Arc::clone(&state.live);
+    let project_id = project_id.to_string();
+    let deployment_id = deployment_id.to_string();
 
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
@@ -634,16 +816,16 @@ fn spawn_progress_relay(
 
 #[allow(clippy::too_many_arguments)]
 async fn execute_and_record(
-    state:         &ProjectState,
-    project_id:    &str,
+    state: &ProjectState,
+    project_id: &str,
     deployment_id: &str,
-    artifact_id:   &str,
-    flavor:        TerraformFlavor,
-    action:        TerraformAction,
-    content:       &str,
-    agent_id:      &str,
-    timeout:       u64,
-    reasoning:     Option<&str>,
+    artifact_id: &str,
+    flavor: TerraformFlavor,
+    action: TerraformAction,
+    content: &str,
+    agent_id: &str,
+    timeout: u64,
+    reasoning: Option<&str>,
 ) -> Result<Value, ApiError> {
     let files = bundle::parse_bundle(content).map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
     let files_json = serde_json::to_string(&files)
@@ -651,20 +833,41 @@ async fn execute_and_record(
 
     let output_tx = spawn_output_relay(state, project_id, deployment_id);
 
-    let result = state.agent_builder.registry
-        .execute_terraform(agent_id, artifact_id.to_string(), flavor, action, files, timeout, Some(output_tx))
+    let result = state
+        .agent_builder
+        .registry
+        .execute_terraform(
+            agent_id,
+            artifact_id.to_string(),
+            flavor,
+            action,
+            files,
+            timeout,
+            Some(output_tx),
+        )
         .await;
 
     let (exit_code, stdout, stderr) = match &result {
-        Ok(r)  => (Some(r.exit_code), r.stdout.clone(), r.stderr.clone()),
+        Ok(r) => (Some(r.exit_code), r.stdout.clone(), r.stderr.clone()),
         Err(e) => (None, String::new(), e.clone()),
     };
-    let success          = exit_code == Some(0);
-    let applied_content  = (action == TerraformAction::Apply && success).then_some(files_json.as_str());
+    let success = exit_code == Some(0);
+    let applied_content =
+        (action == TerraformAction::Apply && success).then_some(files_json.as_str());
     let infra_state = record_run_and_update_state(
-        &state.db, project_id, artifact_id, action, exit_code, &stdout, &stderr,
-        applied_content, "user", reasoning,
-    ).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        &state.db,
+        project_id,
+        artifact_id,
+        action,
+        exit_code,
+        &stdout,
+        &stderr,
+        applied_content,
+        "user",
+        reasoning,
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     match result {
         Ok(r) => {
@@ -684,11 +887,11 @@ async fn execute_and_record(
 }
 
 pub(crate) async fn deploy_deployment_core(
-    state:         &ProjectState,
-    project_id:    &str,
+    state: &ProjectState,
+    project_id: &str,
     deployment_id: &str,
-    agent_id:      &str,
-    timeout_secs:  u64,
+    agent_id: &str,
+    timeout_secs: u64,
 ) -> Result<Value, ApiError> {
     require_agent_in_project(state, agent_id, project_id).await?;
     let run = load_runnable_bundle(&state.db, project_id, deployment_id).await?;
@@ -696,18 +899,27 @@ pub(crate) async fn deploy_deployment_core(
     let timeout = timeout_secs.min(MAX_RUN_TIMEOUT_SECS);
 
     let result = execute_and_record(
-        state, project_id, deployment_id, &run.artifact_id, flavor, TerraformAction::Apply, &run.artifact_content,
-        agent_id, timeout, None,
-    ).await?;
+        state,
+        project_id,
+        deployment_id,
+        &run.artifact_id,
+        flavor,
+        TerraformAction::Apply,
+        &run.artifact_content,
+        agent_id,
+        timeout,
+        None,
+    )
+    .await?;
     Ok(json!({ "runs": [result] }))
 }
 
 pub(crate) async fn redeploy_deployment_core(
-    state:         &ProjectState,
-    project_id:    &str,
+    state: &ProjectState,
+    project_id: &str,
     deployment_id: &str,
-    agent_id:      &str,
-    timeout_secs:  u64,
+    agent_id: &str,
+    timeout_secs: u64,
 ) -> Result<Value, ApiError> {
     let run = load_runnable_bundle(&state.db, project_id, deployment_id).await?;
     let flavor = flavor_for_kind(&run.artifact_kind)?;
@@ -718,7 +930,8 @@ pub(crate) async fn redeploy_deployment_core(
 
     if needs_destroy_before_apply(run.infra_state) {
         let Some(snapshot) = run.last_applied_content.clone() else {
-            reset_infra_state_to_none(&state.db, project_id, deployment_id).await
+            reset_infra_state_to_none(&state.db, project_id, deployment_id)
+                .await
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
             return Err(err(
                 StatusCode::BAD_REQUEST,
@@ -726,9 +939,18 @@ pub(crate) async fn redeploy_deployment_core(
             ));
         };
         let destroy_result = execute_and_record(
-            state, project_id, deployment_id, &run.artifact_id, flavor, TerraformAction::Destroy, &snapshot,
-            agent_id, timeout, Some("auto-destroy: previous run left infrastructure in a broken state"),
-        ).await?;
+            state,
+            project_id,
+            deployment_id,
+            &run.artifact_id,
+            flavor,
+            TerraformAction::Destroy,
+            &snapshot,
+            agent_id,
+            timeout,
+            Some("auto-destroy: previous run left infrastructure in a broken state"),
+        )
+        .await?;
         let destroy_ok = destroy_result["exit_code"].as_i64() == Some(0);
         runs.push(destroy_result);
         if !destroy_ok {
@@ -743,20 +965,29 @@ pub(crate) async fn redeploy_deployment_core(
         "infra already clean — applying directly"
     };
     let apply_result = execute_and_record(
-        state, project_id, deployment_id, &run.artifact_id, flavor, TerraformAction::Apply, &run.artifact_content,
-        agent_id, timeout, Some(apply_reasoning),
-    ).await?;
+        state,
+        project_id,
+        deployment_id,
+        &run.artifact_id,
+        flavor,
+        TerraformAction::Apply,
+        &run.artifact_content,
+        agent_id,
+        timeout,
+        Some(apply_reasoning),
+    )
+    .await?;
     runs.push(apply_result);
 
     Ok(json!({ "runs": runs }))
 }
 
 pub(crate) async fn destroy_deployment_core(
-    state:         &ProjectState,
-    project_id:    &str,
+    state: &ProjectState,
+    project_id: &str,
     deployment_id: &str,
-    agent_id:      &str,
-    timeout_secs:  u64,
+    agent_id: &str,
+    timeout_secs: u64,
 ) -> Result<Value, ApiError> {
     require_agent_in_project(state, agent_id, project_id).await?;
     let run = load_runnable_bundle(&state.db, project_id, deployment_id).await?;
@@ -764,7 +995,8 @@ pub(crate) async fn destroy_deployment_core(
         return Err(err(StatusCode::BAD_REQUEST, "nothing to destroy"));
     }
     let Some(snapshot) = run.last_applied_content.clone() else {
-        reset_infra_state_to_none(&state.db, project_id, deployment_id).await
+        reset_infra_state_to_none(&state.db, project_id, deployment_id)
+            .await
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -775,9 +1007,18 @@ pub(crate) async fn destroy_deployment_core(
     let timeout = timeout_secs.min(MAX_RUN_TIMEOUT_SECS);
 
     let result = execute_and_record(
-        state, project_id, deployment_id, &run.artifact_id, flavor, TerraformAction::Destroy, &snapshot,
-        agent_id, timeout, None,
-    ).await?;
+        state,
+        project_id,
+        deployment_id,
+        &run.artifact_id,
+        flavor,
+        TerraformAction::Destroy,
+        &snapshot,
+        agent_id,
+        timeout,
+        None,
+    )
+    .await?;
     Ok(json!({ "runs": [result] }))
 }
 
@@ -788,7 +1029,14 @@ pub async fn deploy_deployment(
     Json(body): Json<RunDeploymentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let value = deploy_deployment_core(&state, &project_id, &deployment_id, &body.agent_id, body.timeout_secs).await?;
+    let value = deploy_deployment_core(
+        &state,
+        &project_id,
+        &deployment_id,
+        &body.agent_id,
+        body.timeout_secs,
+    )
+    .await?;
     Ok(Json(value))
 }
 
@@ -800,7 +1048,14 @@ pub async fn redeploy_deployment(
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     require_agent_in_project(&state, &body.agent_id, &project_id).await?;
-    let value = redeploy_deployment_core(&state, &project_id, &deployment_id, &body.agent_id, body.timeout_secs).await?;
+    let value = redeploy_deployment_core(
+        &state,
+        &project_id,
+        &deployment_id,
+        &body.agent_id,
+        body.timeout_secs,
+    )
+    .await?;
     Ok(Json(value))
 }
 
@@ -811,7 +1066,14 @@ pub async fn destroy_deployment(
     Json(body): Json<RunDeploymentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let value = destroy_deployment_core(&state, &project_id, &deployment_id, &body.agent_id, body.timeout_secs).await?;
+    let value = destroy_deployment_core(
+        &state,
+        &project_id,
+        &deployment_id,
+        &body.agent_id,
+        body.timeout_secs,
+    )
+    .await?;
     Ok(Json(value))
 }
 
@@ -821,80 +1083,125 @@ pub async fn list_deployment_runs(
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let rows = state.db.query(
-        "SELECT r.id, r.action, r.status, r.exit_code, r.stdout_preview, r.stderr_preview,
+    let rows = state
+        .db
+        .query(
+            "SELECT r.id, r.action, r.status, r.exit_code, r.stdout_preview, r.stderr_preview,
                 r.initiated_by, r.reasoning, r.created_at
          FROM deployment_runs r
          JOIN deployments d ON d.id = r.deployment_id
          WHERE d.id = $did AND d.project_id = $pid
          ORDER BY r.created_at DESC",
-        json!({ "pid": project_id, "did": deployment_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "pid": project_id, "did": deployment_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(rows))
 }
 
 async fn build_deployment_agent(
-    state:         &ProjectState,
-    project_id:    &str,
-    group_id:      &str,
+    state: &ProjectState,
+    project_id: &str,
+    group_id: &str,
     deployment_id: &str,
-    user_sub:      &str,
+    user_sub: &str,
 ) -> Result<Arc<Agent>, ApiError> {
     let ctx = load_deployment_context(&state.db, project_id, deployment_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let user_llm = crate::api::resolve_user_llm(
-        &state.llm, &state.llm_configs, &state.user_key_store, user_sub,
-    ).await;
-    Ok(if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-        state.agent_builder.build_for_deployment(project_id.to_string(), group_id.to_string(), &ctx)
-    } else {
-        state.agent_builder.build_for_deployment_with_llm(project_id.to_string(), group_id.to_string(), &ctx, user_llm)
-    })
+        &state.llm,
+        &state.llm_configs,
+        &state.user_key_store,
+        user_sub,
+    )
+    .await;
+    Ok(
+        if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
+            state.agent_builder.build_for_deployment(
+                project_id.to_string(),
+                group_id.to_string(),
+                &ctx,
+            )
+        } else {
+            state.agent_builder.build_for_deployment_with_llm(
+                project_id.to_string(),
+                group_id.to_string(),
+                &ctx,
+                user_llm,
+            )
+        },
+    )
 }
 
 async fn build_deployment_agent_text_only(
-    state:         &ProjectState,
-    project_id:    &str,
+    state: &ProjectState,
+    project_id: &str,
     deployment_id: &str,
-    user_sub:      &str,
+    user_sub: &str,
 ) -> Result<Arc<Agent>, ApiError> {
     let ctx = load_deployment_context(&state.db, project_id, deployment_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let user_llm = crate::api::resolve_user_llm(
-        &state.llm, &state.llm_configs, &state.user_key_store, user_sub,
-    ).await;
-    Ok(if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-        state.agent_builder.build_for_deployment_text_only(&ctx)
-    } else {
-        state.agent_builder.build_for_deployment_text_only_with_llm(&ctx, user_llm)
-    })
+        &state.llm,
+        &state.llm_configs,
+        &state.user_key_store,
+        user_sub,
+    )
+    .await;
+    Ok(
+        if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
+            state.agent_builder.build_for_deployment_text_only(&ctx)
+        } else {
+            state
+                .agent_builder
+                .build_for_deployment_text_only_with_llm(&ctx, user_llm)
+        },
+    )
 }
 
 async fn build_deployment_agent_design(
-    state:         &ProjectState,
-    project_id:    &str,
+    state: &ProjectState,
+    project_id: &str,
     deployment_id: &str,
-    user_sub:      &str,
+    user_sub: &str,
 ) -> Result<Arc<Agent>, ApiError> {
     let ctx = load_deployment_context(&state.db, project_id, deployment_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let user_llm = crate::api::resolve_user_llm(
-        &state.llm, &state.llm_configs, &state.user_key_store, user_sub,
-    ).await;
-    Ok(if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-        state.agent_builder.build_for_deployment_design(project_id.to_string(), &ctx)
-    } else {
-        state.agent_builder.build_for_deployment_design_with_llm(project_id.to_string(), &ctx, user_llm)
-    })
+        &state.llm,
+        &state.llm_configs,
+        &state.user_key_store,
+        user_sub,
+    )
+    .await;
+    Ok(
+        if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
+            state
+                .agent_builder
+                .build_for_deployment_design(project_id.to_string(), &ctx)
+        } else {
+            state.agent_builder.build_for_deployment_design_with_llm(
+                project_id.to_string(),
+                &ctx,
+                user_llm,
+            )
+        },
+    )
 }
 
 fn generation_failed(response_text: &str) -> ApiError {
     err(
         StatusCode::UNPROCESSABLE_ENTITY,
-        &format!("could not parse a structured response: {}", response_text.chars().take(500).collect::<String>()),
+        &format!(
+            "could not parse a structured response: {}",
+            response_text.chars().take(500).collect::<String>()
+        ),
     )
 }
 
@@ -905,7 +1212,8 @@ pub async fn generate_environment_questions(
 ) -> Result<impl IntoResponse, ApiError> {
     let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
+    let agent =
+        build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
     let prompt = "List 4 to 8 short, concrete questions a field engineer should answer about the \
                   customer's environment before designing this deployment, based on the product \
@@ -913,7 +1221,9 @@ pub async fn generate_environment_questions(
                   ```json fenced array of objects shaped like {\"id\": \"short-slug\", \"text\": \"the question\"}. \
                   Do not call any tools.";
 
-    let response = agent.query(prompt, &[], &[], None).await
+    let response = agent
+        .query(prompt, &[], &[], None)
+        .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let questions = extract_json_block(&response.answer)
@@ -929,89 +1239,127 @@ pub async fn generate_design(
     Path((project_id, deployment_id)): Path<(String, String)>,
     body: Json<GenerateDesignBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (agent, prompt) = prepare_design_generation(&state, &user, &project_id, &deployment_id, &body).await?;
+    let (agent, prompt) =
+        prepare_design_generation(&state, &user, &project_id, &deployment_id, &body).await?;
 
-    let response = agent.query(&prompt, &[], &[], None).await
+    let response = agent
+        .query(&prompt, &[], &[], None)
+        .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
-    let artifact_id = save_design_doc(&state.db, &project_id, &deployment_id, &response.answer).await
+    let artifact_id = save_design_doc(&state.db, &project_id, &deployment_id, &response.answer)
+        .await
         .map_err(|message| err(StatusCode::INTERNAL_SERVER_ERROR, &message))?;
 
     let turn_id = uuid::Uuid::new_v4().to_string();
     crate::cost::record_deployment_turn(
-        &state.db, &state.pricing, crate::cost::CostScope::Design, &turn_id, &user.sub,
-        &project_id, &deployment_id, None, Some(&artifact_id),
-        response.provider_used.as_ref(), &response.usage, response.llm_call_count, response.duration_ms,
-    ).await;
+        &state.db,
+        &state.pricing,
+        crate::cost::CostScope::Design,
+        &turn_id,
+        &user.sub,
+        &project_id,
+        &deployment_id,
+        None,
+        Some(&artifact_id),
+        response.provider_used.as_ref(),
+        &response.usage,
+        response.llm_call_count,
+        response.duration_ms,
+    )
+    .await;
 
     let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
 }
 
 async fn prepare_design_generation(
-    state:         &ProjectState,
-    user:          &Claims,
-    project_id:    &str,
+    state: &ProjectState,
+    user: &Claims,
+    project_id: &str,
     deployment_id: &str,
-    body:          &GenerateDesignBody,
+    body: &GenerateDesignBody,
 ) -> Result<(Arc<Agent>, String), ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
 
     if let Some(template_id) = &body.product_template_id {
-        let exists = state.db.query(
-            "SELECT 1 AS ok FROM product_templates WHERE id = $tid",
-            json!({ "tid": template_id }),
-        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        let exists = state
+            .db
+            .query(
+                "SELECT 1 AS ok FROM product_templates WHERE id = $tid",
+                json!({ "tid": template_id }),
+            )
+            .await
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         if exists.is_empty() {
             return Err(err(StatusCode::BAD_REQUEST, "template not found"));
         }
-        state.db.query(
-            "UPDATE deployments SET template_id = $tid
+        state
+            .db
+            .query(
+                "UPDATE deployments SET template_id = $tid
              WHERE id = $did AND EXISTS (SELECT 1 FROM product_templates WHERE id = $tid)",
-            json!({ "did": deployment_id, "tid": template_id }),
-        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+                json!({ "did": deployment_id, "tid": template_id }),
+            )
+            .await
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     }
 
     let selected_artifacts = if body.artifact_ids.is_empty() {
         Vec::new()
     } else {
-        let artifacts = state.db.query(
-            "SELECT id, title, kind, content FROM artifacts
+        let artifacts = state
+            .db
+            .query(
+                "SELECT id, title, kind, content FROM artifacts
              WHERE project_id = $pid AND id = ANY($ids)
              ORDER BY title",
-            json!({ "pid": project_id, "ids": body.artifact_ids }),
-        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-        state.db.query(
-            "INSERT INTO deployment_context_artifacts (deployment_id, artifact_id)
+                json!({ "pid": project_id, "ids": body.artifact_ids }),
+            )
+            .await
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        state
+            .db
+            .query(
+                "INSERT INTO deployment_context_artifacts (deployment_id, artifact_id)
                     SELECT d.id, a.id
                     FROM deployments d JOIN artifacts a ON a.project_id = d.project_id
                     WHERE d.id = $did AND d.project_id = $pid AND a.id = ANY($ids)
                     ON CONFLICT DO NOTHING",
-            json!({ "pid": project_id, "did": deployment_id, "ids": body.artifact_ids }),
-        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+                json!({ "pid": project_id, "did": deployment_id, "ids": body.artifact_ids }),
+            )
+            .await
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         artifacts
     };
 
     let ctx = load_deployment_context(&state.db, project_id, deployment_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     let agent = build_deployment_agent_design(state, project_id, deployment_id, &user.sub).await?;
 
     let mut prompt = String::from(match &ctx.product_template_design {
-        Some(_) => "Write the deployment design document in Markdown, following the Design \
+        Some(_) => {
+            "Write the deployment design document in Markdown, following the Design \
                     Document Template in your context exactly, based on the product template \
-                    and customer environment you were given.",
-        None => "Write a deployment design document in Markdown, based on the product template \
+                    and customer environment you were given."
+        }
+        None => {
+            "Write a deployment design document in Markdown, based on the product template \
                  and customer environment you were given. Cover the architecture, key \
-                 configuration choices, and how it fits the customer's environment.",
+                 configuration choices, and how it fits the customer's environment."
+        }
     });
     if !selected_artifacts.is_empty() {
-        prompt.push_str("\n\n## Selected context artifacts\n\nThe field engineer selected the \
+        prompt.push_str(
+            "\n\n## Selected context artifacts\n\nThe field engineer selected the \
                          following project artifacts as relevant context. Read and use them to \
-                         inform the design.\n\n");
+                         inform the design.\n\n",
+        );
         for a in &selected_artifacts {
             let title = a["title"].as_str().unwrap_or("(untitled)");
-            let kind  = a["kind"].as_str().unwrap_or("markdown");
+            let kind = a["kind"].as_str().unwrap_or("markdown");
             let content = a["content"].as_str().unwrap_or("");
             prompt.push_str(&format!("### {title} ({kind})\n\n{content}\n\n"));
         }
@@ -1032,7 +1380,8 @@ async fn prepare_design_generation(
                          - If the context specifies workload counts or types, reflect them in the \
                            sizing and architecture sections.\n");
     }
-    prompt.push_str("\n\n## Research\n\nYou may call list_skills, load_skill, and codebase \
+    prompt.push_str(
+        "\n\n## Research\n\nYou may call list_skills, load_skill, and codebase \
                      search tools (list_repositories, search_symbols, get_symbol_source, \
                      get_file_symbols, find_callers, find_callees, get_imports, \
                      compare_symbol_across_versions) to research how the software works before \
@@ -1041,10 +1390,13 @@ async fn prepare_design_generation(
                      signatures, or skill guide text in the document. The design document is a \
                      high-level engineering document written in your own words.\n\n\
                      Do all tool research first. Once you have what you need, write the complete \
-                     design document as your final text response.");
-    prompt.push_str("\n\nRespond with the complete design document itself, in Markdown, and \
+                     design document as your final text response.",
+    );
+    prompt.push_str(
+        "\n\nRespond with the complete design document itself, in Markdown, and \
                      nothing else — no preamble, no meta-commentary, no questions back to the \
-                     user. Your entire response is saved verbatim as the design document.");
+                     user. Your entire response is saved verbatim as the design document.",
+    );
 
     Ok((agent, prompt))
 }
@@ -1055,22 +1407,40 @@ pub async fn generate_design_stream(
     Path((project_id, deployment_id)): Path<(String, String)>,
     body: Json<GenerateDesignBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (agent, prompt) = prepare_design_generation(&state, &user, &project_id, &deployment_id, &body).await?;
+    let (agent, prompt) =
+        prepare_design_generation(&state, &user, &project_id, &deployment_id, &body).await?;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
-    let db          = Arc::clone(&state.db);
-    let project_id_bg  = project_id.clone();
+    let db = Arc::clone(&state.db);
+    let project_id_bg = project_id.clone();
     let deployment_id_bg = deployment_id.clone();
-    let pricing        = Arc::clone(&state.pricing);
-    let user_id_bg     = user.sub.clone();
+    let pricing = Arc::clone(&state.pricing);
+    let user_id_bg = user.sub.clone();
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         tokio::spawn(async move {
-            agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
+            agent
+                .query_streaming(&prompt, &[], &[], None, agent_tx)
+                .await;
         });
         while let Some(event) = agent_rx.recv().await {
-            if let AgentEvent::Done { answer, provider_used, duration_ms, usage, llm_call_count, .. } = &event {
-                let artifact_id = match save_design_doc(&db, &project_id_bg, &deployment_id_bg, answer).await {
+            if let AgentEvent::Done {
+                answer,
+                provider_used,
+                duration_ms,
+                usage,
+                llm_call_count,
+                ..
+            } = &event
+            {
+                let artifact_id = match save_design_doc(
+                    &db,
+                    &project_id_bg,
+                    &deployment_id_bg,
+                    answer,
+                )
+                .await
+                {
                     Ok(id) => id,
                     Err(message) => {
                         tracing::warn!(
@@ -1083,10 +1453,21 @@ pub async fn generate_design_stream(
                 };
                 let turn_id = uuid::Uuid::new_v4().to_string();
                 crate::cost::record_deployment_turn(
-                    &db, &pricing, crate::cost::CostScope::Design, &turn_id, &user_id_bg,
-                    &project_id_bg, &deployment_id_bg, None, Some(&artifact_id),
-                    provider_used.as_ref(), usage, *llm_call_count, *duration_ms,
-                ).await;
+                    &db,
+                    &pricing,
+                    crate::cost::CostScope::Design,
+                    &turn_id,
+                    &user_id_bg,
+                    &project_id_bg,
+                    &deployment_id_bg,
+                    None,
+                    Some(&artifact_id),
+                    provider_used.as_ref(),
+                    usage,
+                    *llm_call_count,
+                    *duration_ms,
+                )
+                .await;
             }
             let _ = tx.send(event).await;
         }
@@ -1097,7 +1478,9 @@ pub async fn generate_design_stream(
         Ok::<Event, Infallible>(Event::default().data(data))
     });
 
-    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response();
     response.headers_mut().insert(
         HeaderName::from_static("x-accel-buffering"),
         HeaderValue::from_static("no"),
@@ -1106,10 +1489,10 @@ pub async fn generate_design_stream(
 }
 
 async fn save_design_doc(
-    db:         &Arc<Db>,
-    project_id:    &str,
+    db: &Arc<Db>,
+    project_id: &str,
     deployment_id: &str,
-    answer:        &str,
+    answer: &str,
 ) -> Result<String, String> {
     let content = format!("{}\n", answer.trim());
     if content.trim().is_empty()
@@ -1133,13 +1516,26 @@ async fn save_design_doc(
         );
     }
 
-    let deployment = fetch_deployment_detail(db, project_id, deployment_id).await
+    let deployment = fetch_deployment_detail(db, project_id, deployment_id)
+        .await
         .map_err(|_| "could not load the deployment".to_string())?;
-    let title = format!("{} Design", deployment["name"].as_str().unwrap_or("Deployment"));
+    let title = format!(
+        "{} Design",
+        deployment["name"].as_str().unwrap_or("Deployment")
+    );
 
-    let created = create_artifact(db, project_id, ArtifactKind::Markdown, &title, &content, "assistant").await
-        .map_err(|e| format!("failed to save the design document: {e}"))?;
-    let artifact_id = created["id"].as_str()
+    let created = create_artifact(
+        db,
+        project_id,
+        ArtifactKind::Markdown,
+        &title,
+        &content,
+        "assistant",
+    )
+    .await
+    .map_err(|e| format!("failed to save the design document: {e}"))?;
+    let artifact_id = created["id"]
+        .as_str()
         .ok_or_else(|| "artifact creation returned no id".to_string())?
         .to_string();
 
@@ -1148,10 +1544,14 @@ async fn save_design_doc(
          WHERE id = $did AND project_id = $pid
            AND EXISTS (SELECT 1 FROM artifacts WHERE id = $aid AND project_id = $pid)",
         json!({ "pid": project_id, "did": deployment_id, "aid": artifact_id }),
-    ).await.map_err(|e| format!("failed to link the design document: {e}"))?;
+    )
+    .await
+    .map_err(|e| format!("failed to link the design document: {e}"))?;
 
     crate::deployments::design_cache::schedule_regeneration(
-        Arc::clone(db), project_id.to_string(), deployment_id.to_string(),
+        Arc::clone(db),
+        project_id.to_string(),
+        deployment_id.to_string(),
     );
     Ok(artifact_id)
 }
@@ -1171,13 +1571,19 @@ pub async fn generate_design_decisions(
 ) -> Result<impl IntoResponse, ApiError> {
     let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
+    let agent =
+        build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
     let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
-    let design_doc_id = deployment["design_doc"]["id"].as_str()
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?;
+    let design_doc_id = deployment["design_doc"]["id"].as_str().ok_or_else(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "deployment has no design document yet",
+        )
+    })?;
     let design = get_artifact_in_project(&state.db, &project_id, design_doc_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "design document not found"))?;
     let design_content = design["content"].as_str().unwrap_or_default();
 
@@ -1190,7 +1596,9 @@ pub async fn generate_design_decisions(
          Do not call any tools."
     );
 
-    let response = agent.query(&prompt, &[], &[], None).await
+    let response = agent
+        .query(&prompt, &[], &[], None)
+        .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let decisions = extract_json_block(&response.answer)
@@ -1203,13 +1611,13 @@ pub async fn generate_design_decisions(
 #[derive(serde::Deserialize)]
 pub struct DesignDecisionAnswer {
     pub question: String,
-    pub answer:   String,
+    pub answer: String,
 }
 
 #[derive(serde::Deserialize)]
 pub struct ReviseDesignBody {
     #[serde(default)]
-    pub decisions:    Vec<DesignDecisionAnswer>,
+    pub decisions: Vec<DesignDecisionAnswer>,
     pub instructions: Option<String>,
 }
 
@@ -1220,18 +1628,30 @@ pub async fn revise_design(
     Json(body): Json<ReviseDesignBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.decisions.is_empty() && body.instructions.as_deref().unwrap_or("").trim().is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "decisions or instructions are required"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "decisions or instructions are required",
+        ));
     }
     let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
+    let agent =
+        build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
     let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
-    let design_doc_id = deployment["design_doc"]["id"].as_str()
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?
+    let design_doc_id = deployment["design_doc"]["id"]
+        .as_str()
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "deployment has no design document yet",
+            )
+        })?
         .to_string();
 
-    let decisions_text = body.decisions.iter()
+    let decisions_text = body
+        .decisions
+        .iter()
         .map(|d| format!("- {}: {}", d.question, d.answer))
         .collect::<Vec<_>>()
         .join("\n");
@@ -1246,7 +1666,9 @@ pub async fn revise_design(
          other tools."
     );
 
-    agent.query(&prompt, &[], &[], None).await
+    agent
+        .query(&prompt, &[], &[], None)
+        .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
@@ -1261,11 +1683,11 @@ pub struct ProposeDesignChangeBody {
 }
 
 async fn prepare_design_change_proposal(
-    state:         &ProjectState,
-    user:          &Claims,
-    project_id:    &str,
+    state: &ProjectState,
+    user: &Claims,
+    project_id: &str,
     deployment_id: &str,
-    body:          &ProposeDesignChangeBody,
+    body: &ProposeDesignChangeBody,
 ) -> Result<(Arc<Agent>, String), ApiError> {
     let explanation = body.explanation.trim();
     if explanation.is_empty() {
@@ -1273,26 +1695,38 @@ async fn prepare_design_change_proposal(
     }
 
     require_project_access(&state.db, &user.sub, &user.role, project_id).await?;
-    let agent = build_deployment_agent_text_only(state, project_id, deployment_id, &user.sub).await?;
+    let agent =
+        build_deployment_agent_text_only(state, project_id, deployment_id, &user.sub).await?;
 
     let deployment = fetch_deployment_detail(&state.db, project_id, deployment_id).await?;
-    let design_doc_id = deployment["design_doc"]["id"].as_str()
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?
+    let design_doc_id = deployment["design_doc"]["id"]
+        .as_str()
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "deployment has no design document yet",
+            )
+        })?
         .to_string();
     let design = get_artifact_in_project(&state.db, project_id, &design_doc_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "design document not found"))?;
     let current_content = design["content"].as_str().unwrap_or_default().to_string();
 
     let selected_artifacts = if body.artifact_ids.is_empty() {
         Vec::new()
     } else {
-        state.db.query(
-            "SELECT id, title, kind, content FROM artifacts
+        state
+            .db
+            .query(
+                "SELECT id, title, kind, content FROM artifacts
              WHERE project_id = $pid AND id = ANY($ids)
              ORDER BY title",
-            json!({ "pid": project_id, "ids": body.artifact_ids }),
-        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
+                json!({ "pid": project_id, "ids": body.artifact_ids }),
+            )
+            .await
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?
     };
 
     let mut prompt = format!(
@@ -1300,10 +1734,12 @@ async fn prepare_design_change_proposal(
          The field engineer requested the following change:\n\n{explanation}\n\n"
     );
     if !selected_artifacts.is_empty() {
-        prompt.push_str("## Additional context artifacts\n\nRead and use these to inform the change.\n\n");
+        prompt.push_str(
+            "## Additional context artifacts\n\nRead and use these to inform the change.\n\n",
+        );
         for a in &selected_artifacts {
             let title = a["title"].as_str().unwrap_or("(untitled)");
-            let kind  = a["kind"].as_str().unwrap_or("markdown");
+            let kind = a["kind"].as_str().unwrap_or("markdown");
             let content = a["content"].as_str().unwrap_or("");
             prompt.push_str(&format!("### {title} ({kind})\n\n{content}\n\n"));
         }
@@ -1313,7 +1749,7 @@ async fn prepare_design_change_proposal(
          Respond with ONLY the full revised document text — no commentary, explanation, or \
          surrounding code fences. Do not call generate_artifact, link_deployment_artifact, or any \
          other tool for this request — the change will only be applied after the user reviews and \
-         approves it."
+         approves it.",
     );
 
     Ok((agent, prompt))
@@ -1325,27 +1761,48 @@ pub async fn propose_design_change_stream(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<ProposeDesignChangeBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (agent, prompt) = prepare_design_change_proposal(&state, &user, &project_id, &deployment_id, &body).await?;
+    let (agent, prompt) =
+        prepare_design_change_proposal(&state, &user, &project_id, &deployment_id, &body).await?;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
-    let db          = Arc::clone(&state.db);
-    let pricing        = Arc::clone(&state.pricing);
-    let project_id_bg  = project_id.clone();
+    let db = Arc::clone(&state.db);
+    let pricing = Arc::clone(&state.pricing);
+    let project_id_bg = project_id.clone();
     let deployment_id_bg = deployment_id.clone();
-    let user_id_bg     = user.sub.clone();
+    let user_id_bg = user.sub.clone();
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         tokio::spawn(async move {
-            agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
+            agent
+                .query_streaming(&prompt, &[], &[], None, agent_tx)
+                .await;
         });
         while let Some(event) = agent_rx.recv().await {
-            if let AgentEvent::Done { provider_used, duration_ms, usage, llm_call_count, .. } = &event {
+            if let AgentEvent::Done {
+                provider_used,
+                duration_ms,
+                usage,
+                llm_call_count,
+                ..
+            } = &event
+            {
                 let turn_id = uuid::Uuid::new_v4().to_string();
                 crate::cost::record_deployment_turn(
-                    &db, &pricing, crate::cost::CostScope::Proposal, &turn_id, &user_id_bg,
-                    &project_id_bg, &deployment_id_bg, None, None,
-                    provider_used.as_ref(), usage, *llm_call_count, *duration_ms,
-                ).await;
+                    &db,
+                    &pricing,
+                    crate::cost::CostScope::Proposal,
+                    &turn_id,
+                    &user_id_bg,
+                    &project_id_bg,
+                    &deployment_id_bg,
+                    None,
+                    None,
+                    provider_used.as_ref(),
+                    usage,
+                    *llm_call_count,
+                    *duration_ms,
+                )
+                .await;
             }
             let _ = tx.send(event).await;
         }
@@ -1356,7 +1813,9 @@ pub async fn propose_design_change_stream(
         Ok::<Event, Infallible>(Event::default().data(data))
     });
 
-    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response();
     response.headers_mut().insert(
         HeaderName::from_static("x-accel-buffering"),
         HeaderValue::from_static("no"),
@@ -1378,22 +1837,41 @@ pub async fn get_design_pdf(
 ) -> Result<Response, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
-    let design_title = deployment["design_doc"]["title"].as_str().unwrap_or("Design").to_string();
+    let design_title = deployment["design_doc"]["title"]
+        .as_str()
+        .unwrap_or("Design")
+        .to_string();
 
-    let resolved = super::design_cache::resolve_for_serving(state.db.clone(), project_id.clone(), deployment_id.clone())
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let resolved = super::design_cache::resolve_for_serving(
+        state.db.clone(),
+        project_id.clone(),
+        deployment_id.clone(),
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     match resolved {
-        super::design_cache::ResolvedPdf::NoDesignDoc => Err(err(StatusCode::BAD_REQUEST, "deployment has no design document yet")),
-        super::design_cache::ResolvedPdf::Failed(msg) => Err(err(StatusCode::INTERNAL_SERVER_ERROR, &msg)),
-        super::design_cache::ResolvedPdf::Pending => {
-            Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))
-                .header(HeaderName::from_static("retry-after"), HeaderValue::from_static("2"))
-                .body(Body::from(json!({ "error": "design document preview is still being generated" }).to_string()))
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
+        super::design_cache::ResolvedPdf::NoDesignDoc => Err(err(
+            StatusCode::BAD_REQUEST,
+            "deployment has no design document yet",
+        )),
+        super::design_cache::ResolvedPdf::Failed(msg) => {
+            Err(err(StatusCode::INTERNAL_SERVER_ERROR, &msg))
         }
+        super::design_cache::ResolvedPdf::Pending => Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
+            .header(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            )
+            .header(
+                HeaderName::from_static("retry-after"),
+                HeaderValue::from_static("2"),
+            )
+            .body(Body::from(
+                json!({ "error": "design document preview is still being generated" }).to_string(),
+            ))
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())),
         super::design_cache::ResolvedPdf::Bytes { data, stale } => {
             let slug = sanitize_filename(&design_title);
             let disposition = if query.download {
@@ -1405,9 +1883,18 @@ pub async fn get_design_pdf(
 
             Response::builder()
                 .status(StatusCode::OK)
-                .header(header::CONTENT_TYPE, HeaderValue::from_static("application/pdf"))
-                .header(header::CONTENT_DISPOSITION, HeaderValue::from_str(&disposition).unwrap())
-                .header(HeaderName::from_static("x-design-pdf-status"), HeaderValue::from_static(status_header))
+                .header(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/pdf"),
+                )
+                .header(
+                    header::CONTENT_DISPOSITION,
+                    HeaderValue::from_str(&disposition).unwrap(),
+                )
+                .header(
+                    HeaderName::from_static("x-design-pdf-status"),
+                    HeaderValue::from_static(status_header),
+                )
                 .body(Body::from(data))
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))
         }
@@ -1416,7 +1903,7 @@ pub async fn get_design_pdf(
 
 #[derive(serde::Deserialize)]
 pub struct UpdateDesignContentBody {
-    pub title:   String,
+    pub title: String,
     pub content: String,
 }
 
@@ -1428,15 +1915,32 @@ pub async fn update_design_content(
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
-    let design_doc_id = deployment["design_doc"]["id"].as_str()
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?
+    let design_doc_id = deployment["design_doc"]["id"]
+        .as_str()
+        .ok_or_else(|| {
+            err(
+                StatusCode::BAD_REQUEST,
+                "deployment has no design document yet",
+            )
+        })?
         .to_string();
 
     crate::artifacts::handlers::update_artifact(
-        &state.db, &design_doc_id, ArtifactKind::Markdown, ArtifactKind::Markdown, &body.title, &body.content,
-    ).await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+        &state.db,
+        &design_doc_id,
+        ArtifactKind::Markdown,
+        ArtifactKind::Markdown,
+        &body.title,
+        &body.content,
+    )
+    .await
+    .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
 
-    super::design_cache::schedule_regeneration(state.db.clone(), project_id.clone(), deployment_id.clone());
+    super::design_cache::schedule_regeneration(
+        state.db.clone(),
+        project_id.clone(),
+        deployment_id.clone(),
+    );
 
     let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
@@ -1447,18 +1951,32 @@ pub async fn generate_provision(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (agent, prompt) = prepare_provision_generation(&state, &user, &project_id, &deployment_id).await?;
+    let (agent, prompt) =
+        prepare_provision_generation(&state, &user, &project_id, &deployment_id).await?;
 
     let progress_tx = spawn_progress_relay(&state, &project_id, &deployment_id);
-    let response = agent.query_with_progress(&prompt, &[], &[], None, progress_tx).await
+    let response = agent
+        .query_with_progress(&prompt, &[], &[], None, progress_tx)
+        .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let turn_id = uuid::Uuid::new_v4().to_string();
     crate::cost::record_deployment_turn(
-        &state.db, &state.pricing, crate::cost::CostScope::Provision, &turn_id, &user.sub,
-        &project_id, &deployment_id, None, None,
-        response.provider_used.as_ref(), &response.usage, response.llm_call_count, response.duration_ms,
-    ).await;
+        &state.db,
+        &state.pricing,
+        crate::cost::CostScope::Provision,
+        &turn_id,
+        &user.sub,
+        &project_id,
+        &deployment_id,
+        None,
+        None,
+        response.provider_used.as_ref(),
+        &response.usage,
+        response.llm_call_count,
+        response.duration_ms,
+    )
+    .await;
 
     let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     Ok(Json(deployment))
@@ -1469,27 +1987,48 @@ pub async fn generate_provision_stream(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (agent, prompt) = prepare_provision_generation(&state, &user, &project_id, &deployment_id).await?;
+    let (agent, prompt) =
+        prepare_provision_generation(&state, &user, &project_id, &deployment_id).await?;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
-    let db          = Arc::clone(&state.db);
-    let pricing        = Arc::clone(&state.pricing);
-    let project_id_bg  = project_id.clone();
+    let db = Arc::clone(&state.db);
+    let pricing = Arc::clone(&state.pricing);
+    let project_id_bg = project_id.clone();
     let deployment_id_bg = deployment_id.clone();
-    let user_id_bg     = user.sub.clone();
+    let user_id_bg = user.sub.clone();
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         tokio::spawn(async move {
-            agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
+            agent
+                .query_streaming(&prompt, &[], &[], None, agent_tx)
+                .await;
         });
         while let Some(event) = agent_rx.recv().await {
-            if let AgentEvent::Done { provider_used, duration_ms, usage, llm_call_count, .. } = &event {
+            if let AgentEvent::Done {
+                provider_used,
+                duration_ms,
+                usage,
+                llm_call_count,
+                ..
+            } = &event
+            {
                 let turn_id = uuid::Uuid::new_v4().to_string();
                 crate::cost::record_deployment_turn(
-                    &db, &pricing, crate::cost::CostScope::Provision, &turn_id, &user_id_bg,
-                    &project_id_bg, &deployment_id_bg, None, None,
-                    provider_used.as_ref(), usage, *llm_call_count, *duration_ms,
-                ).await;
+                    &db,
+                    &pricing,
+                    crate::cost::CostScope::Provision,
+                    &turn_id,
+                    &user_id_bg,
+                    &project_id_bg,
+                    &deployment_id_bg,
+                    None,
+                    None,
+                    provider_used.as_ref(),
+                    usage,
+                    *llm_call_count,
+                    *duration_ms,
+                )
+                .await;
             }
             let _ = tx.send(event).await;
         }
@@ -1500,7 +2039,9 @@ pub async fn generate_provision_stream(
         Ok::<Event, Infallible>(Event::default().data(data))
     });
 
-    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response();
     response.headers_mut().insert(
         HeaderName::from_static("x-accel-buffering"),
         HeaderValue::from_static("no"),
@@ -1509,46 +2050,60 @@ pub async fn generate_provision_stream(
 }
 
 async fn prepare_provision_generation(
-    state:         &ProjectState,
-    user:          &Claims,
-    project_id:    &str,
+    state: &ProjectState,
+    user: &Claims,
+    project_id: &str,
     deployment_id: &str,
 ) -> Result<(Arc<Agent>, String), ApiError> {
     let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
+    let agent =
+        build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
     let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
-    let design_doc_id = deployment["design_doc"]["id"].as_str()
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "deployment has no design document yet"))?;
+    let design_doc_id = deployment["design_doc"]["id"].as_str().ok_or_else(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "deployment has no design document yet",
+        )
+    })?;
     let design = get_artifact_in_project(&state.db, &project_id, design_doc_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "design document not found"))?;
     let design_content = design["content"].as_str().unwrap_or_default();
 
-    let context_artifact_rows = state.db.query(
-        "SELECT a.title, a.kind, a.content
+    let context_artifact_rows = state
+        .db
+        .query(
+            "SELECT a.title, a.kind, a.content
          FROM deployment_context_artifacts dca
          JOIN deployments d ON d.id = dca.deployment_id
          JOIN artifacts a   ON a.id = dca.artifact_id
          WHERE d.id = $did AND d.project_id = $pid
          ORDER BY a.title",
-        json!({ "pid": project_id, "did": deployment_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "pid": project_id, "did": deployment_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     let mut context_artifact_section = String::new();
-    let has_context_artifacts = context_artifact_rows.iter().any(|r| r.get("title").and_then(|v| v.as_str()).is_some());
+    let has_context_artifacts = context_artifact_rows
+        .iter()
+        .any(|r| r.get("title").and_then(|v| v.as_str()).is_some());
     if has_context_artifacts {
         context_artifact_section.push_str(
             "\n\n## Context artifacts\n\nThe following artifacts were used to inform the design. \
              Use them to customize the Terraform and bash scripts — do not leave generic template \
-             defaults where the customer has provided specific values:\n\n"
+             defaults where the customer has provided specific values:\n\n",
         );
         for a in &context_artifact_rows {
             let title = a["title"].as_str().unwrap_or("(untitled)");
-            let kind  = a["kind"].as_str().unwrap_or("markdown");
+            let kind = a["kind"].as_str().unwrap_or("markdown");
             let content = a["content"].as_str().unwrap_or("");
-            if title == "(untitled)" && content.is_empty() { continue; }
+            if title == "(untitled)" && content.is_empty() {
+                continue;
+            }
             context_artifact_section.push_str(&format!("### {title} ({kind})\n\n{content}\n\n"));
         }
     }
@@ -1611,9 +2166,9 @@ async fn prepare_provision_generation(
 
 #[derive(serde::Deserialize)]
 pub struct ProposeProvisionChangeBody {
-    pub instructions:  Option<String>,
+    pub instructions: Option<String>,
     pub error_context: Option<String>,
-    pub artifact_id:   Option<String>,
+    pub artifact_id: Option<String>,
 }
 
 pub async fn propose_provision_change(
@@ -1622,20 +2177,34 @@ pub async fn propose_provision_change(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<ProposeProvisionChangeBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (agent, prompt) = prepare_provision_proposal(&state, &user, &project_id, &deployment_id, &body).await?;
+    let (agent, prompt) =
+        prepare_provision_proposal(&state, &user, &project_id, &deployment_id, &body).await?;
 
-    let response = agent.query(&prompt, &[], &[], None).await
+    let response = agent
+        .query(&prompt, &[], &[], None)
+        .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let turn_id = uuid::Uuid::new_v4().to_string();
     crate::cost::record_deployment_turn(
-        &state.db, &state.pricing, crate::cost::CostScope::Proposal, &turn_id, &user.sub,
-        &project_id, &deployment_id, None, body.artifact_id.as_deref(),
-        response.provider_used.as_ref(), &response.usage, response.llm_call_count, response.duration_ms,
-    ).await;
+        &state.db,
+        &state.pricing,
+        crate::cost::CostScope::Proposal,
+        &turn_id,
+        &user.sub,
+        &project_id,
+        &deployment_id,
+        None,
+        body.artifact_id.as_deref(),
+        response.provider_used.as_ref(),
+        &response.usage,
+        response.llm_call_count,
+        response.duration_ms,
+    )
+    .await;
 
-    let proposed_files = extract_json_block(&response.answer)
-        .ok_or_else(|| generation_failed(&response.answer))?;
+    let proposed_files =
+        extract_json_block(&response.answer).ok_or_else(|| generation_failed(&response.answer))?;
 
     let explanation = match response.answer.find("```json") {
         Some(pos) => response.answer[..pos].trim().to_string(),
@@ -1655,28 +2224,49 @@ pub async fn propose_provision_change_stream(
     Path((project_id, deployment_id)): Path<(String, String)>,
     Json(body): Json<ProposeProvisionChangeBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let (agent, prompt) = prepare_provision_proposal(&state, &user, &project_id, &deployment_id, &body).await?;
+    let (agent, prompt) =
+        prepare_provision_proposal(&state, &user, &project_id, &deployment_id, &body).await?;
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
-    let db          = Arc::clone(&state.db);
-    let pricing        = Arc::clone(&state.pricing);
-    let project_id_bg  = project_id.clone();
+    let db = Arc::clone(&state.db);
+    let pricing = Arc::clone(&state.pricing);
+    let project_id_bg = project_id.clone();
     let deployment_id_bg = deployment_id.clone();
-    let user_id_bg     = user.sub.clone();
+    let user_id_bg = user.sub.clone();
     let artifact_id_bg = body.artifact_id.clone();
     tokio::spawn(async move {
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         tokio::spawn(async move {
-            agent.query_streaming(&prompt, &[], &[], None, agent_tx).await;
+            agent
+                .query_streaming(&prompt, &[], &[], None, agent_tx)
+                .await;
         });
         while let Some(event) = agent_rx.recv().await {
-            if let AgentEvent::Done { provider_used, duration_ms, usage, llm_call_count, .. } = &event {
+            if let AgentEvent::Done {
+                provider_used,
+                duration_ms,
+                usage,
+                llm_call_count,
+                ..
+            } = &event
+            {
                 let turn_id = uuid::Uuid::new_v4().to_string();
                 crate::cost::record_deployment_turn(
-                    &db, &pricing, crate::cost::CostScope::Proposal, &turn_id, &user_id_bg,
-                    &project_id_bg, &deployment_id_bg, None, artifact_id_bg.as_deref(),
-                    provider_used.as_ref(), usage, *llm_call_count, *duration_ms,
-                ).await;
+                    &db,
+                    &pricing,
+                    crate::cost::CostScope::Proposal,
+                    &turn_id,
+                    &user_id_bg,
+                    &project_id_bg,
+                    &deployment_id_bg,
+                    None,
+                    artifact_id_bg.as_deref(),
+                    provider_used.as_ref(),
+                    usage,
+                    *llm_call_count,
+                    *duration_ms,
+                )
+                .await;
             }
             let _ = tx.send(event).await;
         }
@@ -1687,7 +2277,9 @@ pub async fn propose_provision_change_stream(
         Ok::<Event, Infallible>(Event::default().data(data))
     });
 
-    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    let mut response = Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response();
     response.headers_mut().insert(
         HeaderName::from_static("x-accel-buffering"),
         HeaderValue::from_static("no"),
@@ -1702,15 +2294,29 @@ async fn prepare_provision_proposal(
     deployment_id: &str,
     body: &ProposeProvisionChangeBody,
 ) -> Result<(Arc<Agent>, String), ApiError> {
-    let instructions  = body.instructions.as_deref().unwrap_or("").trim().to_string();
-    let error_context = body.error_context.as_deref().unwrap_or("").trim().to_string();
+    let instructions = body
+        .instructions
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let error_context = body
+        .error_context
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if instructions.is_empty() && error_context.is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "instructions or error_context are required"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "instructions or error_context are required",
+        ));
     }
 
     let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent = build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
+    let agent =
+        build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
 
     let error_section = if error_context.is_empty() {
         String::new()
@@ -1727,7 +2333,8 @@ async fn prepare_provision_proposal(
 
     if !artifact_id.is_empty() {
         let artifact = get_artifact_in_project(&state.db, &project_id, artifact_id)
-            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "artifact not found in this project"))?;
         let kind_str = artifact["kind"].as_str().unwrap_or_default();
         let kind = ArtifactKind::parse(kind_str)
@@ -1737,9 +2344,8 @@ async fn prepare_provision_proposal(
             let title = artifact["title"].as_str().unwrap_or_default().to_string();
             let deploy_content = artifact["content"].as_str().unwrap_or_default().to_string();
 
-            let (deploy_title, destroy_title, destroy_content) = find_bash_pair(
-                &state.db, &project_id, &deployment_id, artifact_id, &title,
-            ).await?;
+            let (deploy_title, destroy_title, destroy_content) =
+                find_bash_pair(&state.db, &project_id, &deployment_id, artifact_id, &title).await?;
 
             let destroy_section = match &destroy_content {
                 Some(c) => format!(
@@ -1778,9 +2384,13 @@ async fn prepare_provision_proposal(
 
     if let Some(bundle_id) = deployment["terraform_bundle"]["id"].as_str() {
         let bundle_artifact = get_artifact_in_project(&state.db, &project_id, bundle_id)
-            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "terraform bundle not found"))?;
-        let bundle_content = bundle_artifact["content"].as_str().unwrap_or_default().to_string();
+        let bundle_content = bundle_artifact["content"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&bundle_content) {
             if let Some(map) = obj.as_object() {
                 for (path, content) in map {
@@ -1790,13 +2400,19 @@ async fn prepare_provision_proposal(
         }
     }
 
-    let deploy_rows = fetch_execution_plan_rows(&state.db, &project_id, &deployment_id, "deploy").await?;
-    let destroy_rows = fetch_execution_plan_rows(&state.db, &project_id, &deployment_id, "destroy").await?;
+    let deploy_rows =
+        fetch_execution_plan_rows(&state.db, &project_id, &deployment_id, "deploy").await?;
+    let destroy_rows =
+        fetch_execution_plan_rows(&state.db, &project_id, &deployment_id, "destroy").await?;
     for rows in [&deploy_rows, &destroy_rows] {
         for row in rows {
-            if let (Some(aid), Some(kind)) = (row["artifact_id"].as_str(), row["artifact_kind"].as_str()) {
+            if let (Some(aid), Some(kind)) =
+                (row["artifact_id"].as_str(), row["artifact_kind"].as_str())
+            {
                 if kind == "bash" {
-                    if let Ok(Some(artifact)) = get_artifact_in_project(&state.db, &project_id, aid).await {
+                    if let Ok(Some(artifact)) =
+                        get_artifact_in_project(&state.db, &project_id, aid).await
+                    {
                         let title = artifact["title"].as_str().unwrap_or_default().to_string();
                         let content = artifact["content"].as_str().unwrap_or_default().to_string();
                         all_files.insert(title, content);
@@ -1830,20 +2446,17 @@ async fn prepare_provision_proposal(
 }
 
 async fn find_bash_pair(
-    db:         &Db,
-    project_id:    &str,
+    db: &Db,
+    project_id: &str,
     deployment_id: &str,
-    artifact_id:   &str,
-    title:         &str,
+    artifact_id: &str,
+    title: &str,
 ) -> Result<(String, String, Option<String>), ApiError> {
     let pair_name = extract_bash_pair_name(title);
     let is_deploy = title.starts_with("deploy-");
 
     let (deploy_title, destroy_title) = if let Some(ref name) = pair_name {
-        (
-            format!("deploy-{}", name),
-            format!("destroy-{}", name),
-        )
+        (format!("deploy-{}", name), format!("destroy-{}", name))
     } else {
         return Ok((title.to_string(), title.to_string(), None));
     };
@@ -1859,14 +2472,17 @@ async fn find_bash_pair(
         ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         find_matching_bash(&rows, &destroy_title, artifact_id)
     } else {
-        let rows = db.query(
-            "SELECT a.id, a.title, a.content
+        let rows = db
+            .query(
+                "SELECT a.id, a.title, a.content
              FROM execution_steps s
              JOIN deployments d ON d.id = s.deployment_id
              LEFT JOIN artifacts a ON a.id = s.artifact_id AND a.kind = 'bash'
              WHERE d.id = $did AND d.project_id = $pid AND s.phase = 'deploy' AND s.action = 'run'",
-            json!({ "pid": project_id, "did": deployment_id }),
-        ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+                json!({ "pid": project_id, "did": deployment_id }),
+            )
+            .await
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         find_matching_bash(&rows, &deploy_title, artifact_id)
     };
 
@@ -1914,7 +2530,8 @@ pub async fn apply_provision_change(
 
     if !artifact_id.is_empty() {
         let artifact = get_artifact_in_project(&state.db, &project_id, artifact_id)
-            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "artifact not found in this project"))?;
         let kind_str = artifact["kind"].as_str().unwrap_or_default();
         let kind = ArtifactKind::parse(kind_str)
@@ -1935,44 +2552,104 @@ pub async fn apply_provision_change(
             let destroy_content = body.files.get(&destroy_title).cloned();
 
             if let Some(ref content) = deploy_content {
-                let deploy_artifact_id = if is_deploy { artifact_id.to_string() } else {
-                    find_bash_artifact_id(&state.db, &project_id, &deployment_id, &deploy_title, artifact_id).await?
+                let deploy_artifact_id = if is_deploy {
+                    artifact_id.to_string()
+                } else {
+                    find_bash_artifact_id(
+                        &state.db,
+                        &project_id,
+                        &deployment_id,
+                        &deploy_title,
+                        artifact_id,
+                    )
+                    .await?
                 };
                 if !deploy_artifact_id.is_empty() {
-                    update_artifact(&state.db, &deploy_artifact_id, ArtifactKind::Bash, ArtifactKind::Bash, &deploy_title, content)
-                        .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+                    update_artifact(
+                        &state.db,
+                        &deploy_artifact_id,
+                        ArtifactKind::Bash,
+                        ArtifactKind::Bash,
+                        &deploy_title,
+                        content,
+                    )
+                    .await
+                    .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
                 }
             }
 
             if let Some(ref content) = destroy_content {
-                let destroy_artifact_id = if !is_deploy { artifact_id.to_string() } else {
-                    find_bash_artifact_id(&state.db, &project_id, &deployment_id, &destroy_title, artifact_id).await?
+                let destroy_artifact_id = if !is_deploy {
+                    artifact_id.to_string()
+                } else {
+                    find_bash_artifact_id(
+                        &state.db,
+                        &project_id,
+                        &deployment_id,
+                        &destroy_title,
+                        artifact_id,
+                    )
+                    .await?
                 };
                 if destroy_artifact_id.is_empty() {
-                    let created = create_artifact(&state.db, &project_id, ArtifactKind::Bash, &destroy_title, content, "user")
-                        .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
-                    link_bash_to_deployment(&state.db, &deployment_id, created["id"].as_str().unwrap_or_default(), "destroy").await?;
+                    let created = create_artifact(
+                        &state.db,
+                        &project_id,
+                        ArtifactKind::Bash,
+                        &destroy_title,
+                        content,
+                        "user",
+                    )
+                    .await
+                    .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+                    link_bash_to_deployment(
+                        &state.db,
+                        &deployment_id,
+                        created["id"].as_str().unwrap_or_default(),
+                        "destroy",
+                    )
+                    .await?;
                 } else {
-                    update_artifact(&state.db, &destroy_artifact_id, ArtifactKind::Bash, ArtifactKind::Bash, &destroy_title, content)
-                        .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+                    update_artifact(
+                        &state.db,
+                        &destroy_artifact_id,
+                        ArtifactKind::Bash,
+                        ArtifactKind::Bash,
+                        &destroy_title,
+                        content,
+                    )
+                    .await
+                    .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
                 }
             }
 
-            let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
+            let deployment =
+                fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
             return Ok(Json(deployment));
         }
     }
 
     let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
 
-    let mut bundle_files: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
-    let mut bash_files: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut bundle_files: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let mut bash_files: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
 
     for (key, value) in &body.files {
         let lower = key.to_lowercase();
-        if lower.ends_with(".tf") || lower.ends_with(".hcl") || lower.ends_with(".json") || lower.ends_with(".yaml") || lower.ends_with(".yml") {
+        if lower.ends_with(".tf")
+            || lower.ends_with(".hcl")
+            || lower.ends_with(".json")
+            || lower.ends_with(".yaml")
+            || lower.ends_with(".yml")
+        {
             bundle_files.insert(key.clone(), value.clone());
-        } else if lower.ends_with(".sh") || lower.ends_with(".bash") || lower.starts_with("deploy-") || lower.starts_with("destroy-") {
+        } else if lower.ends_with(".sh")
+            || lower.ends_with(".bash")
+            || lower.starts_with("deploy-")
+            || lower.starts_with("destroy-")
+        {
             bash_files.insert(key.clone(), value.clone());
         } else {
             bundle_files.insert(key.clone(), value.clone());
@@ -1982,28 +2659,59 @@ pub async fn apply_provision_change(
     if !bundle_files.is_empty() {
         if let Some(bundle_id) = deployment["terraform_bundle"]["id"].as_str() {
             let existing = get_artifact_in_project(&state.db, &project_id, bundle_id)
-                .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+                .await
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
                 .ok_or_else(|| err(StatusCode::NOT_FOUND, "terraform bundle not found"))?;
             let kind = ArtifactKind::parse(existing["kind"].as_str().unwrap_or(""))
                 .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
             let title = existing["title"].as_str().unwrap_or("Infrastructure");
             let content = serde_json::to_string(&bundle_files)
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-            crate::artifacts::handlers::update_artifact(&state.db, bundle_id, kind, kind, title, &content)
-                .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+            crate::artifacts::handlers::update_artifact(
+                &state.db, bundle_id, kind, kind, title, &content,
+            )
+            .await
+            .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
         }
     }
 
     for (title, content) in &bash_files {
-        let phase = if title.to_lowercase().starts_with("destroy-") { "destroy" } else { "deploy" };
-        let existing_id = find_bash_artifact_id(&state.db, &project_id, &deployment_id, title, "").await?;
-        if existing_id.is_empty() {
-            let created = create_artifact(&state.db, &project_id, ArtifactKind::Bash, title, content, "user")
-                .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
-            link_bash_to_deployment(&state.db, &deployment_id, created["id"].as_str().unwrap_or_default(), phase).await?;
+        let phase = if title.to_lowercase().starts_with("destroy-") {
+            "destroy"
         } else {
-            update_artifact(&state.db, &existing_id, ArtifactKind::Bash, ArtifactKind::Bash, title, content)
-                .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+            "deploy"
+        };
+        let existing_id =
+            find_bash_artifact_id(&state.db, &project_id, &deployment_id, title, "").await?;
+        if existing_id.is_empty() {
+            let created = create_artifact(
+                &state.db,
+                &project_id,
+                ArtifactKind::Bash,
+                title,
+                content,
+                "user",
+            )
+            .await
+            .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+            link_bash_to_deployment(
+                &state.db,
+                &deployment_id,
+                created["id"].as_str().unwrap_or_default(),
+                phase,
+            )
+            .await?;
+        } else {
+            update_artifact(
+                &state.db,
+                &existing_id,
+                ArtifactKind::Bash,
+                ArtifactKind::Bash,
+                title,
+                content,
+            )
+            .await
+            .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
         }
     }
 
@@ -2012,22 +2720,29 @@ pub async fn apply_provision_change(
 }
 
 async fn find_bash_artifact_id(
-    db:         &Db,
-    project_id:    &str,
+    db: &Db,
+    project_id: &str,
     deployment_id: &str,
-    target_title:  &str,
-    exclude_id:    &str,
+    target_title: &str,
+    exclude_id: &str,
 ) -> Result<String, ApiError> {
-    let phase = if target_title.starts_with("destroy-") { "destroy" } else { "deploy" };
+    let phase = if target_title.starts_with("destroy-") {
+        "destroy"
+    } else {
+        "deploy"
+    };
     let action = if phase == "destroy" { "destroy" } else { "run" };
-    let rows = db.query(
-        "SELECT a.id, a.title
+    let rows = db
+        .query(
+            "SELECT a.id, a.title
          FROM execution_steps s
          JOIN deployments d ON d.id = s.deployment_id
          LEFT JOIN artifacts a ON a.id = s.artifact_id AND a.kind = 'bash'
          WHERE d.id = $did AND d.project_id = $pid AND s.phase = $phase AND s.action = $action",
-        json!({ "pid": project_id, "did": deployment_id, "phase": phase, "action": action }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "pid": project_id, "did": deployment_id, "phase": phase, "action": action }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     for row in &rows {
         let id = row["id"].as_str().unwrap_or_default();
         let title = row["title"].as_str().unwrap_or_default();
@@ -2039,10 +2754,10 @@ async fn find_bash_artifact_id(
 }
 
 async fn link_bash_to_deployment(
-    db:         &Db,
+    db: &Db,
     deployment_id: &str,
-    artifact_id:   &str,
-    phase:         &str,
+    artifact_id: &str,
+    phase: &str,
 ) -> Result<(), ApiError> {
     let step_id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
@@ -2056,15 +2771,16 @@ async fn link_bash_to_deployment(
 }
 
 pub(crate) async fn add_context_artifact_core(
-    db:         &Db,
-    project_id:    &str,
-    deployment_id:  &str,
-    title:         &str,
-    kind:          ArtifactKind,
-    content:       &str,
+    db: &Db,
+    project_id: &str,
+    deployment_id: &str,
+    title: &str,
+    kind: ArtifactKind,
+    content: &str,
 ) -> Result<Value, ApiError> {
     let created = create_artifact(db, project_id, kind, title, content, "user")
-        .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+        .await
+        .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
     let artifact_id = created["id"].as_str().unwrap_or_default().to_string();
     db.query(
         "INSERT INTO deployment_context_artifacts (deployment_id, artifact_id)
@@ -2072,19 +2788,22 @@ pub(crate) async fn add_context_artifact_core(
                 WHERE d.id = $did AND d.project_id = $pid AND a.id = $aid
                 ON CONFLICT DO NOTHING",
         json!({ "pid": project_id, "did": deployment_id, "aid": artifact_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    )
+    .await
+    .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let deployment = fetch_deployment_detail(db, project_id, deployment_id).await?;
     Ok(deployment)
 }
 
 pub(crate) async fn link_context_artifact_core(
-    db:         &Db,
-    project_id:    &str,
+    db: &Db,
+    project_id: &str,
     deployment_id: &str,
-    artifact_id:   &str,
+    artifact_id: &str,
 ) -> Result<Value, ApiError> {
     let artifact = get_artifact_in_project(db, project_id, artifact_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "artifact not found in this project"))?;
     let aid = artifact["id"].as_str().unwrap_or_default().to_string();
     db.query(
@@ -2093,35 +2812,43 @@ pub(crate) async fn link_context_artifact_core(
                 WHERE d.id = $did AND d.project_id = $pid AND a.id = $aid
                 ON CONFLICT DO NOTHING",
         json!({ "pid": project_id, "did": deployment_id, "aid": aid }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    )
+    .await
+    .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let deployment = fetch_deployment_detail(db, project_id, deployment_id).await?;
     Ok(deployment)
 }
 
 pub(crate) async fn remove_context_artifact_core(
-    db:         &Db,
-    project_id:    &str,
+    db: &Db,
+    project_id: &str,
     deployment_id: &str,
-    artifact_id:   &str,
+    artifact_id: &str,
 ) -> Result<(), ApiError> {
-    let rows = db.query(
-        "DELETE FROM deployment_context_artifacts dca
+    let rows = db
+        .query(
+            "DELETE FROM deployment_context_artifacts dca
          USING deployments d
          WHERE dca.deployment_id = d.id AND d.id = $did AND d.project_id = $pid
            AND dca.artifact_id = $aid
          RETURNING 1 AS ok",
-        json!({ "pid": project_id, "did": deployment_id, "aid": artifact_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "pid": project_id, "did": deployment_id, "aid": artifact_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if rows.is_empty() {
-        return Err(err(StatusCode::NOT_FOUND, "context artifact not linked to this deployment"));
+        return Err(err(
+            StatusCode::NOT_FOUND,
+            "context artifact not linked to this deployment",
+        ));
     }
     Ok(())
 }
 
 #[derive(serde::Deserialize)]
 pub struct AddContextArtifactBody {
-    pub title:   String,
-    pub kind:    String,
+    pub title: String,
+    pub kind: String,
     pub content: String,
 }
 
@@ -2136,11 +2863,21 @@ pub async fn add_context_artifact(
     if title.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "title is required"));
     }
-    let kind = ArtifactKind::parse(&body.kind)
-        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "kind must be 'markdown', 'pdf', 'terraform', 'terragrunt', or 'bash'"))?;
+    let kind = ArtifactKind::parse(&body.kind).ok_or_else(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            "kind must be 'markdown', 'pdf', 'terraform', 'terragrunt', or 'bash'",
+        )
+    })?;
     let deployment = add_context_artifact_core(
-        &state.db, &project_id, &deployment_id, title, kind, &body.content,
-    ).await?;
+        &state.db,
+        &project_id,
+        &deployment_id,
+        title,
+        kind,
+        &body.content,
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(deployment)))
 }
 
@@ -2156,9 +2893,9 @@ pub async fn link_context_artifact(
     Json(body): Json<LinkContextArtifactBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let deployment = link_context_artifact_core(
-        &state.db, &project_id, &deployment_id, &body.artifact_id,
-    ).await?;
+    let deployment =
+        link_context_artifact_core(&state.db, &project_id, &deployment_id, &body.artifact_id)
+            .await?;
     Ok(Json(deployment))
 }
 
@@ -2174,20 +2911,21 @@ pub async fn remove_context_artifact(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn propose_artifact_change_core(
-    db:           &Db,
-    project_id:      &str,
-    deployment_id:   &str,
-    artifact_id:     &str,
-    source:          &str,
-    explanation:     &str,
+    db: &Db,
+    project_id: &str,
+    deployment_id: &str,
+    artifact_id: &str,
+    source: &str,
+    explanation: &str,
     current_content: &str,
     proposed_content: &str,
 ) -> Result<Value, ApiError> {
     let artifact = get_artifact_in_project(db, project_id, artifact_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "artifact not found in this project"))?;
     let kind = artifact["kind"].as_str().unwrap_or("").to_string();
-    let id  = Uuid::new_v4().to_string();
+    let id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
     db.query(
         "INSERT INTO proposals (id, deployment_id, target_artifact_id, source, explanation,
@@ -2201,21 +2939,25 @@ pub(crate) async fn propose_artifact_change_core(
             "source": source, "explanation": explanation,
             "current_content": current_content, "proposed_content": proposed_content, "now": now,
         }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    )
+    .await
+    .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let rows = db.query(
         "SELECT p.id, p.source, p.explanation, p.current_content, p.proposed_content, p.status, p.created_at,
                 $aid::text AS target_artifact_id, $kind::text AS target_artifact_kind
          FROM proposals p WHERE p.deployment_id = $did AND p.id = $id",
         json!({ "did": deployment_id, "id": id, "aid": artifact_id, "kind": kind }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let row = rows.into_iter().next()
+    let row = rows
+        .into_iter()
+        .next()
         .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(shape_proposal(&row))
 }
 
 pub(crate) async fn list_proposals_core(
-    db:         &Db,
-    project_id:    &str,
+    db: &Db,
+    project_id: &str,
     deployment_id: &str,
     status_filter: Option<&str>,
 ) -> Result<Value, ApiError> {
@@ -2241,28 +2983,35 @@ pub(crate) async fn list_proposals_core(
             json!({ "pid": project_id, "did": deployment_id }),
         ),
     };
-    let rows = db.query(sql, params)
-        .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let rows = db
+        .query(sql, params)
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(shape_proposals(&rows))
 }
 
 pub(crate) async fn approve_proposal_core(
-    db:         Arc<Db>,
-    project_id:    &str,
+    db: Arc<Db>,
+    project_id: &str,
     deployment_id: &str,
-    proposal_id:   &str,
+    proposal_id: &str,
     edited_content: Option<&str>,
 ) -> Result<Value, ApiError> {
-    let rows = db.query(
-        "SELECT p.status, p.proposed_content,
+    let rows = db
+        .query(
+            "SELECT p.status, p.proposed_content,
                 a.id AS artifact_id, a.kind AS artifact_kind, a.title AS artifact_title
          FROM proposals p
          JOIN deployments d ON d.id = p.deployment_id
          JOIN artifacts a   ON a.id = p.target_artifact_id
          WHERE d.id = $did AND d.project_id = $pid AND p.id = $propid",
-        json!({ "pid": project_id, "did": deployment_id, "propid": proposal_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let row = rows.into_iter().next()
+            json!({ "pid": project_id, "did": deployment_id, "propid": proposal_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let row = rows
+        .into_iter()
+        .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "proposal not found"))?;
     let status = row["status"].as_str().unwrap_or("");
     if status != "pending" {
@@ -2270,16 +3019,39 @@ pub(crate) async fn approve_proposal_core(
     }
     let artifact_id = row["artifact_id"].as_str().unwrap_or_default().to_string();
     let artifact_kind_str = row["artifact_kind"].as_str().unwrap_or("").to_string();
-    let artifact_title = row["artifact_title"].as_str().unwrap_or("Artifact").to_string();
-    let kind = ArtifactKind::parse(&artifact_kind_str)
-        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "target artifact has unknown kind"))?;
-    let new_content = edited_content
-        .map(str::to_string)
-        .unwrap_or_else(|| row["proposed_content"].as_str().unwrap_or_default().to_string());
-    crate::artifacts::handlers::update_artifact(&db, &artifact_id, kind, kind, &artifact_title, &new_content)
-        .await.map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    let artifact_title = row["artifact_title"]
+        .as_str()
+        .unwrap_or("Artifact")
+        .to_string();
+    let kind = ArtifactKind::parse(&artifact_kind_str).ok_or_else(|| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "target artifact has unknown kind",
+        )
+    })?;
+    let new_content = edited_content.map(str::to_string).unwrap_or_else(|| {
+        row["proposed_content"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    });
+    crate::artifacts::handlers::update_artifact(
+        &db,
+        &artifact_id,
+        kind,
+        kind,
+        &artifact_title,
+        &new_content,
+    )
+    .await
+    .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
     if kind == ArtifactKind::Markdown {
-        let _ = super::design_cache::on_artifact_changed(db.clone(), project_id.to_string(), artifact_id.clone()).await;
+        let _ = super::design_cache::on_artifact_changed(
+            db.clone(),
+            project_id.to_string(),
+            artifact_id.clone(),
+        )
+        .await;
     }
     let now = harvest_db::now_rfc3339();
     db.query(
@@ -2295,19 +3067,22 @@ pub(crate) async fn approve_proposal_core(
 }
 
 pub(crate) async fn discard_proposal_core(
-    db:         &Db,
-    project_id:    &str,
+    db: &Db,
+    project_id: &str,
     deployment_id: &str,
-    proposal_id:   &str,
+    proposal_id: &str,
 ) -> Result<(), ApiError> {
-    let rows = db.query(
-        "UPDATE proposals p SET status = 'discarded'
+    let rows = db
+        .query(
+            "UPDATE proposals p SET status = 'discarded'
          FROM deployments d
          WHERE p.deployment_id = d.id AND d.id = $did AND d.project_id = $pid
            AND p.id = $propid AND p.status = 'pending'
          RETURNING 1 AS ok",
-        json!({ "pid": project_id, "did": deployment_id, "propid": proposal_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "pid": project_id, "did": deployment_id, "propid": proposal_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if rows.is_empty() {
         return Err(err(StatusCode::NOT_FOUND, "pending proposal not found"));
     }
@@ -2316,10 +3091,10 @@ pub(crate) async fn discard_proposal_core(
 
 #[derive(serde::Deserialize)]
 pub struct ProposeChangeBody {
-    pub artifact_id:      String,
-    pub source:           Option<String>,
-    pub explanation:      String,
-    pub current_content:  String,
+    pub artifact_id: String,
+    pub source: Option<String>,
+    pub explanation: String,
+    pub current_content: String,
     pub proposed_content: String,
 }
 
@@ -2339,9 +3114,16 @@ pub async fn propose_artifact_change(
     let source = body.source.as_deref().unwrap_or("agent").trim();
     let source = if source.is_empty() { "agent" } else { source };
     let proposal = propose_artifact_change_core(
-        &state.db, &project_id, &deployment_id, &body.artifact_id,
-        source, &body.explanation, &body.current_content, &body.proposed_content,
-    ).await?;
+        &state.db,
+        &project_id,
+        &deployment_id,
+        &body.artifact_id,
+        source,
+        &body.explanation,
+        &body.current_content,
+        &body.proposed_content,
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(proposal)))
 }
 
@@ -2368,9 +3150,13 @@ pub async fn approve_proposal(
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let result = approve_proposal_core(
-        state.db.clone(), &project_id, &deployment_id, &proposal_id,
+        state.db.clone(),
+        &project_id,
+        &deployment_id,
+        &proposal_id,
         body.edited_content.as_deref(),
-    ).await?;
+    )
+    .await?;
     Ok(Json(result))
 }
 
@@ -2387,61 +3173,85 @@ pub async fn discard_proposal(
 #[derive(Clone, serde::Deserialize)]
 pub struct ParsedStepInput {
     pub artifact_id: String,
-    pub action:      String,
-    pub label:       String,
-    pub depends_on:  Vec<usize>,
+    pub action: String,
+    pub label: String,
+    pub depends_on: Vec<usize>,
 }
 
 pub(crate) async fn set_execution_plan_core(
-    db:         &Db,
-    project_id:    &str,
+    db: &Db,
+    project_id: &str,
     deployment_id: &str,
-    deploy_steps:  &[ParsedStepInput],
+    deploy_steps: &[ParsedStepInput],
     destroy_steps: &[ParsedStepInput],
 ) -> Result<(), ApiError> {
     for step in deploy_steps.iter().chain(destroy_steps.iter()) {
         let artifact = get_artifact_in_project(db, project_id, &step.artifact_id)
-            .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-            .ok_or_else(|| err(StatusCode::NOT_FOUND, &format!("artifact {} not found in this project", step.artifact_id)))?;
+            .await
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .ok_or_else(|| {
+                err(
+                    StatusCode::NOT_FOUND,
+                    &format!("artifact {} not found in this project", step.artifact_id),
+                )
+            })?;
         let kind_str = artifact["kind"].as_str().unwrap_or("");
         if !crate::agent::deployment_tools::action_valid_for_kind(
             ArtifactKind::parse(kind_str).unwrap_or(ArtifactKind::Markdown),
             &step.action,
         ) {
-            return Err(err(StatusCode::BAD_REQUEST, &format!(
-                "action '{}' is not valid for artifact {} of kind '{}'",
-                step.action, step.artifact_id, kind_str,
-            )));
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "action '{}' is not valid for artifact {} of kind '{}'",
+                    step.action, step.artifact_id, kind_str,
+                ),
+            ));
         }
     }
 
     let coverage_plan = crate::agent::deployment_tools::ParsedExecutionPlan {
-        deploy_steps:  deploy_steps.iter().map(|s| crate::agent::deployment_tools::ParsedStep {
-            artifact_id: s.artifact_id.clone(),
-            action:      s.action.clone(),
-            label:       s.label.clone(),
-            depends_on:  s.depends_on.clone(),
-        }).collect(),
-        destroy_steps: destroy_steps.iter().map(|s| crate::agent::deployment_tools::ParsedStep {
-            artifact_id: s.artifact_id.clone(),
-            action:      s.action.clone(),
-            label:       s.label.clone(),
-            depends_on:  s.depends_on.clone(),
-        }).collect(),
+        deploy_steps: deploy_steps
+            .iter()
+            .map(|s| crate::agent::deployment_tools::ParsedStep {
+                artifact_id: s.artifact_id.clone(),
+                action: s.action.clone(),
+                label: s.label.clone(),
+                depends_on: s.depends_on.clone(),
+            })
+            .collect(),
+        destroy_steps: destroy_steps
+            .iter()
+            .map(|s| crate::agent::deployment_tools::ParsedStep {
+                artifact_id: s.artifact_id.clone(),
+                action: s.action.clone(),
+                label: s.label.clone(),
+                depends_on: s.depends_on.clone(),
+            })
+            .collect(),
     };
     crate::agent::deployment_tools::validate_destroy_coverage(&coverage_plan)
         .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
 
-    let tx = db.begin().await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let tx = db
+        .begin()
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     tx.query(
         "DELETE FROM execution_steps s USING deployments d
          WHERE s.deployment_id = d.id AND d.id = $did AND d.project_id = $pid",
         json!({ "pid": project_id, "did": deployment_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    )
+    .await
+    .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     let now = harvest_db::now_rfc3339();
-    let deploy_ids: Vec<String> = (0..deploy_steps.len()).map(|_| Uuid::new_v4().to_string()).collect();
-    let destroy_ids: Vec<String> = (0..destroy_steps.len()).map(|_| Uuid::new_v4().to_string()).collect();
+    let deploy_ids: Vec<String> = (0..deploy_steps.len())
+        .map(|_| Uuid::new_v4().to_string())
+        .collect();
+    let destroy_ids: Vec<String> = (0..destroy_steps.len())
+        .map(|_| Uuid::new_v4().to_string())
+        .collect();
 
     for (i, step) in deploy_steps.iter().enumerate() {
         let step_id = &deploy_ids[i];
@@ -2479,7 +3289,9 @@ pub(crate) async fn set_execution_plan_core(
                  VALUES ($target_id, $dep_id)
                  ON CONFLICT DO NOTHING",
                 json!({ "dep_id": &deploy_ids[dep], "target_id": &deploy_ids[i] }),
-            ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            )
+            .await
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         }
     }
     for (i, step) in destroy_steps.iter().enumerate() {
@@ -2489,22 +3301,27 @@ pub(crate) async fn set_execution_plan_core(
                  VALUES ($target_id, $dep_id)
                  ON CONFLICT DO NOTHING",
                 json!({ "dep_id": &destroy_ids[dep], "target_id": &destroy_ids[i] }),
-            ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            )
+            .await
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
         }
     }
 
-    tx.commit().await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    tx.commit()
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(())
 }
 
 async fn fetch_execution_plan_rows(
-    db:         &Db,
-    project_id:    &str,
+    db: &Db,
+    project_id: &str,
     deployment_id: &str,
-    phase:         &str,
+    phase: &str,
 ) -> Result<Vec<Value>, ApiError> {
-    let rows = db.query(
-        "SELECT s.id, s.action, s.phase, s.label, s.step_index,
+    let rows = db
+        .query(
+            "SELECT s.id, s.action, s.phase, s.label, s.step_index,
                 a.id AS artifact_id, a.kind AS artifact_kind, a.title AS artifact_title,
                 COALESCE(array_agg(dep.depends_on_id ORDER BY dep.depends_on_id)
                              FILTER (WHERE dep.depends_on_id IS NOT NULL), '{}') AS depends_on
@@ -2515,17 +3332,19 @@ async fn fetch_execution_plan_rows(
          WHERE d.id = $did AND d.project_id = $pid AND s.phase = $phase
          GROUP BY s.id, a.id
          ORDER BY s.step_index",
-        json!({ "pid": project_id, "did": deployment_id, "phase": phase }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "pid": project_id, "did": deployment_id, "phase": phase }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(rows)
 }
 
 pub(crate) async fn get_execution_plan_core(
-    db:         &Db,
-    project_id:    &str,
+    db: &Db,
+    project_id: &str,
     deployment_id: &str,
 ) -> Result<Value, ApiError> {
-    let deploy_rows  = fetch_execution_plan_rows(db, project_id, deployment_id, "deploy").await?;
+    let deploy_rows = fetch_execution_plan_rows(db, project_id, deployment_id, "deploy").await?;
     let destroy_rows = fetch_execution_plan_rows(db, project_id, deployment_id, "destroy").await?;
     Ok(json!({
         "deploy_steps":  shape_execution_plan(&deploy_rows),
@@ -2545,7 +3364,7 @@ pub async fn get_execution_plan(
 
 #[derive(serde::Deserialize)]
 pub struct SetExecutionPlanBody {
-    pub deploy_steps:  Vec<ParsedStepInput>,
+    pub deploy_steps: Vec<ParsedStepInput>,
     pub destroy_steps: Vec<ParsedStepInput>,
 }
 
@@ -2556,23 +3375,37 @@ pub async fn set_execution_plan(
     Json(body): Json<SetExecutionPlanBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let deploy_nodes: Vec<StepNode> = body.deploy_steps.iter()
+    let deploy_nodes: Vec<StepNode> = body
+        .deploy_steps
+        .iter()
         .map(|s| StepNode {
-            id:         s.artifact_id.clone(),
-            depends_on: s.depends_on.iter()
-                .map(|&idx| body.deploy_steps.get(idx)
-                    .map(|x| x.artifact_id.clone())
-                    .unwrap_or_default())
+            id: s.artifact_id.clone(),
+            depends_on: s
+                .depends_on
+                .iter()
+                .map(|&idx| {
+                    body.deploy_steps
+                        .get(idx)
+                        .map(|x| x.artifact_id.clone())
+                        .unwrap_or_default()
+                })
                 .collect(),
         })
         .collect();
-    let destroy_nodes: Vec<StepNode> = body.destroy_steps.iter()
+    let destroy_nodes: Vec<StepNode> = body
+        .destroy_steps
+        .iter()
         .map(|s| StepNode {
-            id:         s.artifact_id.clone(),
-            depends_on: s.depends_on.iter()
-                .map(|&idx| body.destroy_steps.get(idx)
-                    .map(|x| x.artifact_id.clone())
-                    .unwrap_or_default())
+            id: s.artifact_id.clone(),
+            depends_on: s
+                .depends_on
+                .iter()
+                .map(|&idx| {
+                    body.destroy_steps
+                        .get(idx)
+                        .map(|x| x.artifact_id.clone())
+                        .unwrap_or_default()
+                })
                 .collect(),
         })
         .collect();
@@ -2580,9 +3413,13 @@ pub async fn set_execution_plan(
     topological_sort(&destroy_nodes).map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
 
     set_execution_plan_core(
-        &state.db, &project_id, &deployment_id,
-        &body.deploy_steps, &body.destroy_steps,
-    ).await?;
+        &state.db,
+        &project_id,
+        &deployment_id,
+        &body.deploy_steps,
+        &body.destroy_steps,
+    )
+    .await?;
     let plan = get_execution_plan_core(&state.db, &project_id, &deployment_id).await?;
     Ok((StatusCode::CREATED, Json(plan)))
 }
@@ -2596,15 +3433,15 @@ fn dag_preview(s: &str, max_chars: usize) -> String {
 
 #[allow(clippy::too_many_arguments)]
 async fn record_dag_step_run(
-    db:         &Db,
-    project_id:    &str,
+    db: &Db,
+    project_id: &str,
     deployment_id: &str,
-    step_id:       &str,
-    artifact_id:   &str,
-    action:        &str,
-    exit_code:     Option<i32>,
-    stdout:        &str,
-    stderr:        &str,
+    step_id: &str,
+    artifact_id: &str,
+    action: &str,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
 ) -> anyhow::Result<()> {
     let now = harvest_db::now_rfc3339();
     let rid = uuid::Uuid::new_v4().to_string();
@@ -2628,21 +3465,25 @@ async fn record_dag_step_run(
 }
 
 async fn execute_dag_step(
-    state:         &ProjectState,
-    project_id:    &str,
+    state: &ProjectState,
+    project_id: &str,
     deployment_id: &str,
-    step:          &Value,
-    agent_id:      &str,
-    timeout:       u64,
+    step: &Value,
+    agent_id: &str,
+    timeout: u64,
 ) -> Result<Value, ApiError> {
-    let step_id    = step["id"].as_str().unwrap_or_default().to_string();
+    let step_id = step["id"].as_str().unwrap_or_default().to_string();
     let action_str = step["action"].as_str().unwrap_or_default().to_string();
     let artifact_id = step["artifact_id"].as_str().unwrap_or_default().to_string();
-    let artifact_kind_str = step["artifact_kind"].as_str().unwrap_or_default().to_string();
-    let label      = step["label"].as_str().unwrap_or_default().to_string();
+    let artifact_kind_str = step["artifact_kind"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let label = step["label"].as_str().unwrap_or_default().to_string();
 
     let artifact = get_artifact_in_project(&state.db, project_id, &artifact_id)
-        .await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "artifact not found"))?;
     let content = artifact["content"].as_str().unwrap_or_default().to_string();
 
@@ -2650,7 +3491,9 @@ async fn execute_dag_step(
 
     let (exit_code, stdout, stderr) = match artifact_kind_str.as_str() {
         "bash" => {
-            let result = state.agent_builder.registry
+            let result = state
+                .agent_builder
+                .registry
                 .execute(agent_id, content, timeout)
                 .await;
             match &result {
@@ -2660,31 +3503,60 @@ async fn execute_dag_step(
         }
         "terraform" | "terragrunt" => {
             let flavor = match artifact_kind_str.as_str() {
-                "terraform"  => TerraformFlavor::Terraform,
+                "terraform" => TerraformFlavor::Terraform,
                 "terragrunt" => TerraformFlavor::Terragrunt,
-                _            => unreachable!(),
+                _ => unreachable!(),
             };
             let action = StepAction::parse(&action_str)
                 .and_then(|a| a.to_terraform_action())
-                .ok_or_else(|| err(StatusCode::BAD_REQUEST, &format!("invalid action '{}' for terraform", action_str)))?;
-            let files = bundle::parse_bundle(&content)
-                .map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
-            let result = state.agent_builder.registry
-                .execute_terraform(agent_id, artifact_id.clone(), flavor, action, files, timeout, Some(output_tx))
+                .ok_or_else(|| {
+                    err(
+                        StatusCode::BAD_REQUEST,
+                        &format!("invalid action '{}' for terraform", action_str),
+                    )
+                })?;
+            let files =
+                bundle::parse_bundle(&content).map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
+            let result = state
+                .agent_builder
+                .registry
+                .execute_terraform(
+                    agent_id,
+                    artifact_id.clone(),
+                    flavor,
+                    action,
+                    files,
+                    timeout,
+                    Some(output_tx),
+                )
                 .await;
             match &result {
                 Ok(r) => (Some(r.exit_code), r.stdout.clone(), r.stderr.clone()),
                 Err(e) => (None, String::new(), e.clone()),
             }
         }
-        _ => return Err(err(StatusCode::BAD_REQUEST, &format!("cannot execute artifact of kind '{}'", artifact_kind_str))),
+        _ => {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                &format!("cannot execute artifact of kind '{}'", artifact_kind_str),
+            ))
+        }
     };
 
     let success = exit_code == Some(0);
     record_dag_step_run(
-        &state.db, project_id, deployment_id, &step_id, &artifact_id,
-        &action_str, exit_code, &stdout, &stderr,
-    ).await.map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        &state.db,
+        project_id,
+        deployment_id,
+        &step_id,
+        &artifact_id,
+        &action_str,
+        exit_code,
+        &stdout,
+        &stderr,
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
 
     let mut value = json!({
         "step_id": step_id,
@@ -2700,43 +3572,58 @@ async fn execute_dag_step(
 }
 
 pub(crate) async fn run_dag_core(
-    state:         &ProjectState,
-    project_id:    &str,
+    state: &ProjectState,
+    project_id: &str,
     deployment_id: &str,
-    agent_id:      &str,
-    timeout_secs:  u64,
+    agent_id: &str,
+    timeout_secs: u64,
 ) -> Result<Value, ApiError> {
     require_agent_in_project(state, agent_id, project_id).await?;
     let rows = fetch_execution_plan_rows(&state.db, project_id, deployment_id, "deploy").await?;
     if rows.is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "no deploy steps configured — set an execution plan first"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "no deploy steps configured — set an execution plan first",
+        ));
     }
 
-    let step_map: HashMap<String, &Value> = rows.iter()
+    let step_map: HashMap<String, &Value> = rows
+        .iter()
         .map(|r| (r["id"].as_str().unwrap_or_default().to_string(), r))
         .collect();
-    let step_nodes: Vec<StepNode> = rows.iter()
+    let step_nodes: Vec<StepNode> = rows
+        .iter()
         .map(|r| {
             let id = r["id"].as_str().unwrap_or_default().to_string();
-            let deps: Vec<String> = r.get("depends_on")
+            let deps: Vec<String> = r
+                .get("depends_on")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter()
-                    .filter_map(|d| d.as_str().map(String::from))
-                    .collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|d| d.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
-            StepNode { id, depends_on: deps }
+            StepNode {
+                id,
+                depends_on: deps,
+            }
         })
         .collect();
-    let order = topological_sort(&step_nodes).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+    let order =
+        topological_sort(&step_nodes).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
 
     let timeout = timeout_secs.min(MAX_RUN_TIMEOUT_SECS);
     let mut runs = Vec::new();
     let mut all_success = true;
 
     for step_id in &order {
-        let step = step_map.get(step_id).copied()
+        let step = step_map
+            .get(step_id)
+            .copied()
             .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "step not found"))?;
-        let result = execute_dag_step(state, project_id, deployment_id, step, agent_id, timeout).await?;
+        let result =
+            execute_dag_step(state, project_id, deployment_id, step, agent_id, timeout).await?;
         let success = result["success"].as_bool().unwrap_or(false);
         runs.push(result);
         if !success {
@@ -2746,7 +3633,11 @@ pub(crate) async fn run_dag_core(
     }
 
     let now = harvest_db::now_rfc3339();
-    let new_state = if all_success { InfraState::Up } else { InfraState::Broken };
+    let new_state = if all_success {
+        InfraState::Up
+    } else {
+        InfraState::Broken
+    };
     state.db.query(
         "UPDATE deployments SET infra_state = $new_state, updated_at = $now
          WHERE id = $did AND project_id = $pid",
@@ -2763,48 +3654,70 @@ pub async fn run_dag(
     Json(body): Json<RunDeploymentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let value = run_dag_core(&state, &project_id, &deployment_id, &body.agent_id, body.timeout_secs).await?;
+    let value = run_dag_core(
+        &state,
+        &project_id,
+        &deployment_id,
+        &body.agent_id,
+        body.timeout_secs,
+    )
+    .await?;
     Ok(Json(value))
 }
 
 pub(crate) async fn run_destroy_dag_core(
-    state:         &ProjectState,
-    project_id:    &str,
+    state: &ProjectState,
+    project_id: &str,
     deployment_id: &str,
-    agent_id:      &str,
-    timeout_secs:  u64,
+    agent_id: &str,
+    timeout_secs: u64,
 ) -> Result<Value, ApiError> {
     require_agent_in_project(state, agent_id, project_id).await?;
     let rows = fetch_execution_plan_rows(&state.db, project_id, deployment_id, "destroy").await?;
     if rows.is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "no destroy steps configured — set an execution plan first"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "no destroy steps configured — set an execution plan first",
+        ));
     }
 
-    let step_map: HashMap<String, &Value> = rows.iter()
+    let step_map: HashMap<String, &Value> = rows
+        .iter()
         .map(|r| (r["id"].as_str().unwrap_or_default().to_string(), r))
         .collect();
-    let step_nodes: Vec<StepNode> = rows.iter()
+    let step_nodes: Vec<StepNode> = rows
+        .iter()
         .map(|r| {
             let id = r["id"].as_str().unwrap_or_default().to_string();
-            let deps: Vec<String> = r.get("depends_on")
+            let deps: Vec<String> = r
+                .get("depends_on")
                 .and_then(|v| v.as_array())
-                .map(|arr| arr.iter()
-                    .filter_map(|d| d.as_str().map(String::from))
-                    .collect())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|d| d.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
-            StepNode { id, depends_on: deps }
+            StepNode {
+                id,
+                depends_on: deps,
+            }
         })
         .collect();
-    let order = topological_sort(&step_nodes).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+    let order =
+        topological_sort(&step_nodes).map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
 
     let timeout = timeout_secs.min(MAX_RUN_TIMEOUT_SECS);
     let mut runs = Vec::new();
     let mut all_success = true;
 
     for step_id in &order {
-        let step = step_map.get(step_id).copied()
+        let step = step_map
+            .get(step_id)
+            .copied()
             .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "step not found"))?;
-        let result = execute_dag_step(state, project_id, deployment_id, step, agent_id, timeout).await?;
+        let result =
+            execute_dag_step(state, project_id, deployment_id, step, agent_id, timeout).await?;
         let success = result["success"].as_bool().unwrap_or(false);
         runs.push(result);
         if !success {
@@ -2814,7 +3727,11 @@ pub(crate) async fn run_destroy_dag_core(
     }
 
     let now = harvest_db::now_rfc3339();
-    let new_state = if all_success { InfraState::Destroyed } else { InfraState::DestroyFailed };
+    let new_state = if all_success {
+        InfraState::Destroyed
+    } else {
+        InfraState::DestroyFailed
+    };
     state.db.query(
         "UPDATE deployments SET infra_state = $new_state, updated_at = $now
          WHERE id = $did AND project_id = $pid",
@@ -2831,6 +3748,13 @@ pub async fn run_destroy_dag(
     Json(body): Json<RunDeploymentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let value = run_destroy_dag_core(&state, &project_id, &deployment_id, &body.agent_id, body.timeout_secs).await?;
+    let value = run_destroy_dag_core(
+        &state,
+        &project_id,
+        &deployment_id,
+        &body.agent_id,
+        body.timeout_secs,
+    )
+    .await?;
     Ok(Json(value))
 }

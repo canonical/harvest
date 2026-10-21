@@ -65,49 +65,140 @@ fn default_pricing_for(kind: &str, model: &str) -> Option<ModelPricing> {
     let k = kind.to_lowercase();
     if k.contains("anthropic") || m.contains("claude") {
         if m.contains("sonnet-4") || m.contains("sonnet-4-6") || m.contains("claude-sonnet-4") {
-            return Some(ModelPricing { input_per_1k: 3000, cache_read_per_1k: 300, cache_creation_per_1k: 3750, output_per_1k: 15000, reasoning_per_1k: 0 });
+            return Some(ModelPricing {
+                input_per_1k: 3000,
+                cache_read_per_1k: 300,
+                cache_creation_per_1k: 3750,
+                output_per_1k: 15000,
+                reasoning_per_1k: 0,
+            });
         }
         if m.contains("opus") {
-            return Some(ModelPricing { input_per_1k: 15000, cache_read_per_1k: 1500, cache_creation_per_1k: 18750, output_per_1k: 75000, reasoning_per_1k: 0 });
+            return Some(ModelPricing {
+                input_per_1k: 15000,
+                cache_read_per_1k: 1500,
+                cache_creation_per_1k: 18750,
+                output_per_1k: 75000,
+                reasoning_per_1k: 0,
+            });
         }
         if m.contains("haiku") {
-            return Some(ModelPricing { input_per_1k: 100, cache_read_per_1k: 10, cache_creation_per_1k: 125, output_per_1k: 500, reasoning_per_1k: 0 });
+            return Some(ModelPricing {
+                input_per_1k: 100,
+                cache_read_per_1k: 10,
+                cache_creation_per_1k: 125,
+                output_per_1k: 500,
+                reasoning_per_1k: 0,
+            });
         }
-        return Some(ModelPricing { input_per_1k: 3000, cache_read_per_1k: 300, cache_creation_per_1k: 3750, output_per_1k: 15000, reasoning_per_1k: 0 });
+        return Some(ModelPricing {
+            input_per_1k: 3000,
+            cache_read_per_1k: 300,
+            cache_creation_per_1k: 3750,
+            output_per_1k: 15000,
+            reasoning_per_1k: 0,
+        });
     }
     if k.contains("gemini") || m.contains("gemini") {
         if m.contains("2.5-pro") || m.contains("3") {
-            return Some(ModelPricing { input_per_1k: 1250, cache_read_per_1k: 312, cache_creation_per_1k: 0, output_per_1k: 5000, reasoning_per_1k: 5000 });
+            return Some(ModelPricing {
+                input_per_1k: 1250,
+                cache_read_per_1k: 312,
+                cache_creation_per_1k: 0,
+                output_per_1k: 5000,
+                reasoning_per_1k: 5000,
+            });
         }
         if m.contains("flash") {
-            return Some(ModelPricing { input_per_1k: 300, cache_read_per_1k: 75, cache_creation_per_1k: 0, output_per_1k: 2500, reasoning_per_1k: 2500 });
+            return Some(ModelPricing {
+                input_per_1k: 300,
+                cache_read_per_1k: 75,
+                cache_creation_per_1k: 0,
+                output_per_1k: 2500,
+                reasoning_per_1k: 2500,
+            });
         }
-        return Some(ModelPricing { input_per_1k: 1250, cache_read_per_1k: 312, cache_creation_per_1k: 0, output_per_1k: 5000, reasoning_per_1k: 5000 });
+        return Some(ModelPricing {
+            input_per_1k: 1250,
+            cache_read_per_1k: 312,
+            cache_creation_per_1k: 0,
+            output_per_1k: 5000,
+            reasoning_per_1k: 5000,
+        });
     }
     if k.contains("openai") || m.contains("gpt") {
         if m.contains("gpt-4o") {
-            return Some(ModelPricing { input_per_1k: 2500, cache_read_per_1k: 1250, cache_creation_per_1k: 0, output_per_1k: 10000, reasoning_per_1k: 10000 });
+            return Some(ModelPricing {
+                input_per_1k: 2500,
+                cache_read_per_1k: 1250,
+                cache_creation_per_1k: 0,
+                output_per_1k: 10000,
+                reasoning_per_1k: 10000,
+            });
         }
         if m.contains("gpt-4") {
-            return Some(ModelPricing { input_per_1k: 30000, cache_read_per_1k: 1500, cache_creation_per_1k: 0, output_per_1k: 60000, reasoning_per_1k: 0 });
+            return Some(ModelPricing {
+                input_per_1k: 30000,
+                cache_read_per_1k: 1500,
+                cache_creation_per_1k: 0,
+                output_per_1k: 60000,
+                reasoning_per_1k: 0,
+            });
         }
         if m.contains("o1") || m.contains("o3") || m.contains("o4") {
-            return Some(ModelPricing { input_per_1k: 15000, cache_read_per_1k: 7500, cache_creation_per_1k: 0, output_per_1k: 60000, reasoning_per_1k: 60000 });
+            return Some(ModelPricing {
+                input_per_1k: 15000,
+                cache_read_per_1k: 7500,
+                cache_creation_per_1k: 0,
+                output_per_1k: 60000,
+                reasoning_per_1k: 60000,
+            });
         }
     }
     if m.contains("kimi") || m.contains("k3") {
-        return Some(ModelPricing { input_per_1k: 600, cache_read_per_1k: 60, cache_creation_per_1k: 0, output_per_1k: 2200, reasoning_per_1k: 0 });
+        return Some(ModelPricing {
+            input_per_1k: 600,
+            cache_read_per_1k: 60,
+            cache_creation_per_1k: 0,
+            output_per_1k: 2200,
+            reasoning_per_1k: 0,
+        });
     }
     if m.contains("deepseek") {
-        return Some(ModelPricing { input_per_1k: 270, cache_read_per_1k: 27, cache_creation_per_1k: 0, output_per_1k: 1100, reasoning_per_1k: 0 });
+        return Some(ModelPricing {
+            input_per_1k: 270,
+            cache_read_per_1k: 27,
+            cache_creation_per_1k: 0,
+            output_per_1k: 1100,
+            reasoning_per_1k: 0,
+        });
     }
     if m.contains("llama") || m.contains("mistral") || m.contains("ministral") {
-        return Some(ModelPricing { input_per_1k: 200, cache_read_per_1k: 20, cache_creation_per_1k: 0, output_per_1k: 600, reasoning_per_1k: 0 });
+        return Some(ModelPricing {
+            input_per_1k: 200,
+            cache_read_per_1k: 20,
+            cache_creation_per_1k: 0,
+            output_per_1k: 600,
+            reasoning_per_1k: 0,
+        });
     }
-    if m.contains("jev") || m.contains("kev") || m.contains("systemone") || m.contains("system-one") {
-        return Some(ModelPricing { input_per_1k: 42, cache_read_per_1k: 0, cache_creation_per_1k: 0, output_per_1k: 0, reasoning_per_1k: 0 });
+    if m.contains("jev") || m.contains("kev") || m.contains("systemone") || m.contains("system-one")
+    {
+        return Some(ModelPricing {
+            input_per_1k: 42,
+            cache_read_per_1k: 0,
+            cache_creation_per_1k: 0,
+            output_per_1k: 0,
+            reasoning_per_1k: 0,
+        });
     }
-    Some(ModelPricing { input_per_1k: 1000, cache_read_per_1k: 100, cache_creation_per_1k: 0, output_per_1k: 3000, reasoning_per_1k: 0 })
+    Some(ModelPricing {
+        input_per_1k: 1000,
+        cache_read_per_1k: 100,
+        cache_creation_per_1k: 0,
+        output_per_1k: 3000,
+        reasoning_per_1k: 0,
+    })
 }
 
 #[derive(Clone, Default)]
@@ -120,7 +211,10 @@ impl PricingTable {
         let mut entries = HashMap::new();
         for c in configs {
             if let Some(pc) = c.pricing() {
-                entries.insert((c.kind().to_string(), c.model().to_string()), pc.to_pricing());
+                entries.insert(
+                    (c.kind().to_string(), c.model().to_string()),
+                    pc.to_pricing(),
+                );
             } else if let Some(dp) = default_pricing_for(c.kind(), c.model()) {
                 entries.insert((c.kind().to_string(), c.model().to_string()), dp);
             }
@@ -238,7 +332,9 @@ pub fn build_turn_record(
     artifact_id: Option<&str>,
 ) -> Option<LlmCallRecord> {
     let used = used?;
-    if llm_call_count == 0 { return None; }
+    if llm_call_count == 0 {
+        return None;
+    }
     let cost_microusd = pricing.price_call(usage, &used.kind, &used.model);
     Some(LlmCallRecord {
         id: uuid::Uuid::new_v4().to_string(),
@@ -305,7 +401,8 @@ pub async fn record_llm_call(db: &Db, record: &LlmCallRecord) -> Result<()> {
              $succeeded, $created_at
          )",
         params,
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -334,8 +431,19 @@ pub async fn record_deployment_turn(
     duration_ms: u64,
 ) {
     if let Some(record) = build_turn_record(
-        scope, turn_id, user_id, provider_used, usage, llm_call_count, pricing,
-        duration_ms, Some(project_id), None, Some(deployment_id), proposal_id, artifact_id,
+        scope,
+        turn_id,
+        user_id,
+        provider_used,
+        usage,
+        llm_call_count,
+        pricing,
+        duration_ms,
+        Some(project_id),
+        None,
+        Some(deployment_id),
+        proposal_id,
+        artifact_id,
     ) {
         let _ = record_llm_call(db, &record).await;
     }
@@ -362,14 +470,19 @@ fn row_to_summary(row: &Value) -> CostSummary {
 }
 
 pub async fn project_cost_summary(db: &Db, project_id: &str) -> Result<CostSummary> {
-    let rows = db.query(
-        &format!("SELECT {COST_COLUMNS} FROM llm_calls WHERE project_id = $pid"),
-        json!({ "pid": project_id }),
-    ).await?;
+    let rows = db
+        .query(
+            &format!("SELECT {COST_COLUMNS} FROM llm_calls WHERE project_id = $pid"),
+            json!({ "pid": project_id }),
+        )
+        .await?;
     Ok(rows.first().map(|r| row_to_summary(r)).unwrap_or_default())
 }
 
-pub async fn project_cost_by_scope(db: &Db, project_id: &str) -> Result<HashMap<String, CostSummary>> {
+pub async fn project_cost_by_scope(
+    db: &Db,
+    project_id: &str,
+) -> Result<HashMap<String, CostSummary>> {
     let rows = db.query(
         &format!("SELECT scope, {COST_COLUMNS} FROM llm_calls WHERE project_id = $pid GROUP BY scope"),
         json!({ "pid": project_id }),
@@ -383,25 +496,36 @@ pub async fn project_cost_by_scope(db: &Db, project_id: &str) -> Result<HashMap<
 }
 
 pub async fn conversation_cost_summary(db: &Db, conversation_id: &str) -> Result<CostSummary> {
-    let rows = db.query(
-        &format!("SELECT {COST_COLUMNS} FROM llm_calls WHERE conversation_id = $cid"),
-        json!({ "cid": conversation_id }),
-    ).await?;
+    let rows = db
+        .query(
+            &format!("SELECT {COST_COLUMNS} FROM llm_calls WHERE conversation_id = $cid"),
+            json!({ "cid": conversation_id }),
+        )
+        .await?;
     Ok(rows.first().map(|r| row_to_summary(r)).unwrap_or_default())
 }
 
-pub async fn conversation_cost_by_turn(db: &Db, conversation_id: &str) -> Result<Vec<(String, CostSummary)>> {
+pub async fn conversation_cost_by_turn(
+    db: &Db,
+    conversation_id: &str,
+) -> Result<Vec<(String, CostSummary)>> {
     let rows = db.query(
         &format!("SELECT turn_id, {COST_COLUMNS} FROM llm_calls WHERE conversation_id = $cid GROUP BY turn_id ORDER BY min(created_at)"),
         json!({ "cid": conversation_id }),
     ).await?;
-    Ok(rows.iter().map(|r| {
-        let turn_id = r["turn_id"].as_str().unwrap_or("").to_string();
-        (turn_id, row_to_summary(r))
-    }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let turn_id = r["turn_id"].as_str().unwrap_or("").to_string();
+            (turn_id, row_to_summary(r))
+        })
+        .collect())
 }
 
-pub async fn deployment_cost_summary(db: &Db, deployment_id: &str) -> Result<HashMap<String, CostSummary>> {
+pub async fn deployment_cost_summary(
+    db: &Db,
+    deployment_id: &str,
+) -> Result<HashMap<String, CostSummary>> {
     let rows = db.query(
         &format!("SELECT scope, {COST_COLUMNS} FROM llm_calls WHERE deployment_id = $did GROUP BY scope"),
         json!({ "did": deployment_id }),
@@ -414,16 +538,22 @@ pub async fn deployment_cost_summary(db: &Db, deployment_id: &str) -> Result<Has
     Ok(map)
 }
 
-pub async fn project_cost_by_model(db: &Db, project_id: &str) -> Result<Vec<(String, String, CostSummary)>> {
+pub async fn project_cost_by_model(
+    db: &Db,
+    project_id: &str,
+) -> Result<Vec<(String, String, CostSummary)>> {
     let rows = db.query(
         &format!("SELECT kind, model, {COST_COLUMNS} FROM llm_calls WHERE project_id = $pid GROUP BY kind, model ORDER BY total_cost DESC"),
         json!({ "pid": project_id }),
     ).await?;
-    Ok(rows.iter().map(|r| {
-        let kind = r["kind"].as_str().unwrap_or("").to_string();
-        let model = r["model"].as_str().unwrap_or("").to_string();
-        (kind, model, row_to_summary(r))
-    }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let kind = r["kind"].as_str().unwrap_or("").to_string();
+            let model = r["model"].as_str().unwrap_or("").to_string();
+            (kind, model, row_to_summary(r))
+        })
+        .collect())
 }
 
 pub async fn project_cost_by_user(db: &Db, project_id: &str) -> Result<Vec<(String, CostSummary)>> {
@@ -431,13 +561,20 @@ pub async fn project_cost_by_user(db: &Db, project_id: &str) -> Result<Vec<(Stri
         &format!("SELECT user_id, {COST_COLUMNS} FROM llm_calls WHERE project_id = $pid GROUP BY user_id ORDER BY total_cost DESC"),
         json!({ "pid": project_id }),
     ).await?;
-    Ok(rows.iter().map(|r| {
-        let user_id = r["user_id"].as_str().unwrap_or("").to_string();
-        (user_id, row_to_summary(r))
-    }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let user_id = r["user_id"].as_str().unwrap_or("").to_string();
+            (user_id, row_to_summary(r))
+        })
+        .collect())
 }
 
-pub async fn deployment_llm_calls(db: &Db, deployment_id: &str, limit: usize) -> Result<Vec<Value>> {
+pub async fn deployment_llm_calls(
+    db: &Db,
+    deployment_id: &str,
+    limit: usize,
+) -> Result<Vec<Value>> {
     let rows = db.query(
         "SELECT id, scope, turn_id, model, kind, input_tokens, output_tokens, cache_read_tokens,
                 cache_creation_tokens, reasoning_tokens, cost_microusd, duration_ms,
@@ -465,11 +602,14 @@ mod tests {
     }
 
     fn gemini_config_no_pricing() -> LlmProviderConfig {
-        toml::from_str(r#"
+        toml::from_str(
+            r#"
             provider = "gemini"
             model = "gemini-flash"
             api_key = "k"
-        "#).unwrap()
+        "#,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -486,14 +626,23 @@ mod tests {
         let configs = vec![anthropic_config_with_pricing(), gemini_config_no_pricing()];
         let table = PricingTable::from_configs(&configs);
         assert!(table.lookup("anthropic", "claude-sonnet-4-6").is_some());
-        assert!(table.lookup("gemini", "gemini-flash").is_some(), "gemini-flash should get default pricing");
+        assert!(
+            table.lookup("gemini", "gemini-flash").is_some(),
+            "gemini-flash should get default pricing"
+        );
     }
 
     #[test]
     fn pricing_table_prices_known_model() {
         let configs = vec![anthropic_config_with_pricing()];
         let table = PricingTable::from_configs(&configs);
-        let usage = Usage { input_tokens: 1000, output_tokens: 500, cache_read_tokens: 200, cache_creation_tokens: 100, reasoning_tokens: 50 };
+        let usage = Usage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 200,
+            cache_creation_tokens: 100,
+            reasoning_tokens: 50,
+        };
         let cost = table.price_call(&usage, "anthropic", "claude-sonnet-4-6");
         assert!(cost > 0);
         let expected = (1000 * 3000 + 500 * 15000 + 200 * 300 + 100 * 3750 + 50 * 15000) / 1000;
@@ -504,35 +653,59 @@ mod tests {
     fn default_pricing_for_gemini_flash() {
         let configs = vec![gemini_config_no_pricing()];
         let table = PricingTable::from_configs(&configs);
-        let usage = Usage { input_tokens: 1000, output_tokens: 500, cache_read_tokens: 0, cache_creation_tokens: 0, reasoning_tokens: 0 };
+        let usage = Usage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+        };
         let cost = table.price_call(&usage, "gemini", "gemini-flash");
         assert!(cost > 0, "gemini-flash should have default pricing");
     }
 
     #[test]
     fn default_pricing_for_unknown_model() {
-        let cfg: LlmProviderConfig = toml::from_str(r#"
+        let cfg: LlmProviderConfig = toml::from_str(
+            r#"
             provider = "openai-compatible"
             base_url = "https://example.com"
             model = "some-unknown-model"
             api_key = "k"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let table = PricingTable::from_configs(&vec![cfg]);
-        let usage = Usage { input_tokens: 1000, output_tokens: 500, cache_read_tokens: 0, cache_creation_tokens: 0, reasoning_tokens: 0 };
+        let usage = Usage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+        };
         let cost = table.price_call(&usage, "openai-compatible", "some-unknown-model");
         assert!(cost > 0, "unknown models should get fallback pricing");
     }
 
     #[test]
     fn default_pricing_for_kimi() {
-        let cfg: LlmProviderConfig = toml::from_str(r#"
+        let cfg: LlmProviderConfig = toml::from_str(
+            r#"
             provider = "openai-compatible"
             base_url = "https://openrouter.ai/api/v1"
             model = "moonshotai/kimi-k3"
             api_key = "k"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let table = PricingTable::from_configs(&vec![cfg]);
-        let usage = Usage { input_tokens: 1000, output_tokens: 500, cache_read_tokens: 0, cache_creation_tokens: 0, reasoning_tokens: 0 };
+        let usage = Usage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+        };
         let cost = table.price_call(&usage, "openai-compatible", "moonshotai/kimi-k3");
         assert!(cost > 0, "kimi-k3 should get default pricing");
     }
@@ -540,7 +713,13 @@ mod tests {
     #[test]
     fn pricing_table_unknown_model_gets_fallback_pricing() {
         let table = PricingTable::from_configs(&[]);
-        let usage = Usage { input_tokens: 1000, output_tokens: 500, cache_read_tokens: 0, cache_creation_tokens: 0, reasoning_tokens: 0 };
+        let usage = Usage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+        };
         assert!(table.price_call(&usage, "unknown", "unknown-model") > 0);
     }
 
@@ -548,11 +727,33 @@ mod tests {
     fn build_record_computes_cost_from_pricing() {
         let configs = vec![anthropic_config_with_pricing()];
         let table = PricingTable::from_configs(&configs);
-        let used = UsedProvider { provider_id: "anthropic-0".into(), kind: "anthropic".into(), model: "claude-sonnet-4-6".into() };
-        let usage = Usage { input_tokens: 1000, output_tokens: 500, cache_read_tokens: 0, cache_creation_tokens: 0, reasoning_tokens: 0 };
+        let used = UsedProvider {
+            provider_id: "anthropic-0".into(),
+            kind: "anthropic".into(),
+            model: "claude-sonnet-4-6".into(),
+        };
+        let usage = Usage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+        };
         let record = build_record(
-            CostScope::Chat, "turn-1", "user-1", &used, usage.clone(), &table, 1200, Some(0), true,
-            Some("proj-1"), Some("conv-1"), None, None, None,
+            CostScope::Chat,
+            "turn-1",
+            "user-1",
+            &used,
+            usage.clone(),
+            &table,
+            1200,
+            Some(0),
+            true,
+            Some("proj-1"),
+            Some("conv-1"),
+            None,
+            None,
+            None,
         );
         assert_eq!(record.cost_microusd, (1000 * 3000 + 500 * 15000) / 1000);
         assert_eq!(record.scope, CostScope::Chat);
@@ -564,11 +765,33 @@ mod tests {
     #[test]
     fn build_record_unknown_model_gets_fallback_cost() {
         let table = PricingTable::from_configs(&[]);
-        let used = UsedProvider { provider_id: "x".into(), kind: "unknown".into(), model: "m".into() };
-        let usage = Usage { input_tokens: 1000, output_tokens: 500, cache_read_tokens: 0, cache_creation_tokens: 0, reasoning_tokens: 0 };
+        let used = UsedProvider {
+            provider_id: "x".into(),
+            kind: "unknown".into(),
+            model: "m".into(),
+        };
+        let usage = Usage {
+            input_tokens: 1000,
+            output_tokens: 500,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            reasoning_tokens: 0,
+        };
         let record = build_record(
-            CostScope::Design, "turn-1", "user-1", &used, usage, &table, 100, None, true,
-            None, None, Some("dep-1"), None, Some("art-1"),
+            CostScope::Design,
+            "turn-1",
+            "user-1",
+            &used,
+            usage,
+            &table,
+            100,
+            None,
+            true,
+            None,
+            None,
+            Some("dep-1"),
+            None,
+            Some("art-1"),
         );
         assert!(record.cost_microusd > 0, "should get fallback pricing");
         assert_eq!(record.deployment_id.as_deref(), Some("dep-1"));
@@ -577,8 +800,24 @@ mod tests {
 
     #[test]
     fn cost_summary_add_accumulates() {
-        let mut a = CostSummary { total_microusd: 100, total_calls: 2, total_input_tokens: 10, total_output_tokens: 5, total_cache_read_tokens: 0, total_cache_creation_tokens: 0, total_reasoning_tokens: 0 };
-        let b = CostSummary { total_microusd: 200, total_calls: 3, total_input_tokens: 20, total_output_tokens: 10, total_cache_read_tokens: 0, total_cache_creation_tokens: 0, total_reasoning_tokens: 0 };
+        let mut a = CostSummary {
+            total_microusd: 100,
+            total_calls: 2,
+            total_input_tokens: 10,
+            total_output_tokens: 5,
+            total_cache_read_tokens: 0,
+            total_cache_creation_tokens: 0,
+            total_reasoning_tokens: 0,
+        };
+        let b = CostSummary {
+            total_microusd: 200,
+            total_calls: 3,
+            total_input_tokens: 20,
+            total_output_tokens: 10,
+            total_cache_read_tokens: 0,
+            total_cache_creation_tokens: 0,
+            total_reasoning_tokens: 0,
+        };
         a.add(&b);
         assert_eq!(a.total_microusd, 300);
         assert_eq!(a.total_calls, 5);
@@ -587,7 +826,13 @@ mod tests {
 
     #[test]
     fn cost_summary_from_usage_and_cost() {
-        let usage = Usage { input_tokens: 100, output_tokens: 50, cache_read_tokens: 10, cache_creation_tokens: 5, reasoning_tokens: 2 };
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 10,
+            cache_creation_tokens: 5,
+            reasoning_tokens: 2,
+        };
         let s = CostSummary::from_usage_and_cost(&usage, 42100, 3);
         assert_eq!(s.total_microusd, 42100);
         assert_eq!(s.total_calls, 3);
@@ -597,7 +842,10 @@ mod tests {
 
     #[test]
     fn cost_summary_formatted_cost() {
-        let s = CostSummary { total_microusd: 42100, ..Default::default() };
+        let s = CostSummary {
+            total_microusd: 42100,
+            ..Default::default()
+        };
         assert_eq!(s.formatted_cost(), "$0.042100");
     }
 
