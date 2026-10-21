@@ -172,9 +172,15 @@ impl LlmProviderConfig {
 
     pub fn user_provided_key(&self) -> bool {
         match self {
-            Self::Anthropic { user_provided_key, .. } => *user_provided_key,
-            Self::Gemini { user_provided_key, .. } => *user_provided_key,
-            Self::OpenAiCompat { user_provided_key, .. } => *user_provided_key,
+            Self::Anthropic {
+                user_provided_key, ..
+            } => *user_provided_key,
+            Self::Gemini {
+                user_provided_key, ..
+            } => *user_provided_key,
+            Self::OpenAiCompat {
+                user_provided_key, ..
+            } => *user_provided_key,
         }
     }
 
@@ -264,7 +270,10 @@ pub struct Config {
 
 impl std::fmt::Debug for LlmProviderConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LlmProviderConfig").field("kind", &self.kind()).field("id", &self.id()).finish()
+        f.debug_struct("LlmProviderConfig")
+            .field("kind", &self.kind())
+            .field("id", &self.id())
+            .finish()
     }
 }
 
@@ -282,12 +291,15 @@ mod tests {
 
     #[test]
     fn parses_minimal_config() {
-        let cfg: Config = toml::from_str(r#"
+        let cfg: Config = toml::from_str(
+            r#"
             [harvest]
             base_url = "http://localhost:8080"
             email = "qa@example.com"
             password = "secret"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(cfg.harvest.base_url, "http://localhost:8080");
         assert_eq!(cfg.harvest.email, "qa@example.com");
         assert!(cfg.harvest.group_id.is_none());
@@ -296,12 +308,15 @@ mod tests {
 
     #[test]
     fn exploration_defaults_applied_when_section_missing() {
-        let cfg: Config = toml::from_str(r#"
+        let cfg: Config = toml::from_str(
+            r#"
             [harvest]
             base_url = "http://localhost:8080"
             email = "qa@example.com"
             password = "secret"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(cfg.exploration.max_iterations, 40);
         assert!(cfg.exploration.allow_infra);
         assert_eq!(cfg.exploration.output_dir, "./squall-reports");
@@ -309,7 +324,8 @@ mod tests {
 
     #[test]
     fn exploration_section_overrides_defaults() {
-        let cfg: Config = toml::from_str(r#"
+        let cfg: Config = toml::from_str(
+            r#"
             [harvest]
             base_url = "http://localhost:8080"
             email = "qa@example.com"
@@ -319,7 +335,9 @@ mod tests {
             max_iterations = 5
             allow_infra = false
             output_dir = "/tmp/out"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(cfg.exploration.max_iterations, 5);
         assert!(!cfg.exploration.allow_infra);
         assert_eq!(cfg.exploration.output_dir, "/tmp/out");
@@ -327,7 +345,8 @@ mod tests {
 
     #[test]
     fn parses_llm_provider_list() {
-        let cfg: Config = toml::from_str(r#"
+        let cfg: Config = toml::from_str(
+            r#"
             [harvest]
             base_url = "http://localhost:8080"
             email = "qa@example.com"
@@ -345,7 +364,9 @@ mod tests {
             model = "google/gemini-3.5-flash"
             api_key = "k2"
             priority = 2
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(cfg.llm.len(), 2);
         assert_eq!(cfg.llm[0].kind(), "anthropic");
         assert_eq!(cfg.llm[0].model(), "claude-sonnet-4-6");
@@ -355,11 +376,14 @@ mod tests {
 
     #[test]
     fn llm_provider_defaults_are_applied() {
-        let cfg: LlmProviderConfig = toml::from_str(r#"
+        let cfg: LlmProviderConfig = toml::from_str(
+            r#"
             provider = "anthropic"
             model = "m"
             api_key = "k"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(cfg.priority(), 0);
         assert_eq!(cfg.timeout_secs(), 120);
         assert_eq!(cfg.max_retries(), 3);
@@ -372,12 +396,16 @@ mod tests {
     fn from_file_reads_and_parses_toml() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("squall.toml");
-        std::fs::write(&path, r#"
+        std::fs::write(
+            &path,
+            r#"
             [harvest]
             base_url = "http://localhost:9000"
             email = "a@b.com"
             password = "p"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         let cfg = Config::from_file(&path).unwrap();
         assert_eq!(cfg.harvest.base_url, "http://localhost:9000");
     }

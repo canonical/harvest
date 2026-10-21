@@ -32,7 +32,8 @@ impl Client {
     }
 
     fn auth_header(&self) -> HeaderValue {
-        HeaderValue::from_str(&format!("Bearer {}", self.token)).expect("token must be a valid header value")
+        HeaderValue::from_str(&format!("Bearer {}", self.token))
+            .expect("token must be a valid header value")
     }
 
     pub async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -45,7 +46,11 @@ impl Client {
         Self::json_or_err("GET", path, resp).await
     }
 
-    pub async fn post_json<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+    pub async fn post_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
         let resp = self
             .http
             .post(self.url(path))
@@ -56,7 +61,11 @@ impl Client {
         Self::json_or_err("POST", path, resp).await
     }
 
-    pub async fn put_json<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+    pub async fn put_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
         let resp = self
             .http
             .put(self.url(path))
@@ -82,14 +91,20 @@ impl Client {
         Ok(())
     }
 
-    async fn json_or_err<T: DeserializeOwned>(method: &str, path: &str, resp: reqwest::Response) -> Result<T> {
+    async fn json_or_err<T: DeserializeOwned>(
+        method: &str,
+        path: &str,
+        resp: reqwest::Response,
+    ) -> Result<T> {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("{method} {path} -> {status}: {body}"));
         }
         let text = resp.text().await?;
-        serde_json::from_str(&text).map_err(|e| anyhow!("{method} {path} -> failed to parse response as JSON: {e}; body: {text}"))
+        serde_json::from_str(&text).map_err(|e| {
+            anyhow!("{method} {path} -> failed to parse response as JSON: {e}; body: {text}")
+        })
     }
 }
 
@@ -102,7 +117,9 @@ fn extract_token_cookie(set_cookie: &str) -> Option<String> {
 }
 
 pub async fn login(base_url: &str, email: &str, password: &str) -> Result<String> {
-    let http = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?;
     let base_url = base_url.trim_end_matches('/');
     let resp = http
         .post(format!("{base_url}/auth/login"))
@@ -121,7 +138,8 @@ pub async fn login(base_url: &str, email: &str, password: &str) -> Result<String
         .to_str()
         .map_err(|e| anyhow!("login response Set-Cookie header was not valid text: {e}"))?
         .to_string();
-    extract_token_cookie(&cookie).ok_or_else(|| anyhow!("login response Set-Cookie header had no token value"))
+    extract_token_cookie(&cookie)
+        .ok_or_else(|| anyhow!("login response Set-Cookie header had no token value"))
 }
 
 #[cfg(test)]
@@ -151,7 +169,10 @@ mod tests {
     #[test]
     fn extract_token_cookie_reads_value_before_first_semicolon() {
         let cookie = "token=abc.def.ghi; HttpOnly; SameSite=Lax; Path=/";
-        assert_eq!(extract_token_cookie(cookie), Some("abc.def.ghi".to_string()));
+        assert_eq!(
+            extract_token_cookie(cookie),
+            Some("abc.def.ghi".to_string())
+        );
     }
 
     #[test]
@@ -164,7 +185,9 @@ mod tests {
     async fn get_json_sends_bearer_token_and_parses_body() {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
-            when.method(GET).path("/projects").header("authorization", "Bearer tok123");
+            when.method(GET)
+                .path("/projects")
+                .header("authorization", "Bearer tok123");
             then.status(200).json_body(json!([{"id": "p1"}]));
         });
         let client = Client::new(server.base_url(), "tok123").unwrap();
@@ -177,11 +200,16 @@ mod tests {
     async fn post_json_sends_body_and_parses_response() {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
-            when.method(POST).path("/projects").json_body(json!({"name": "n"}));
+            when.method(POST)
+                .path("/projects")
+                .json_body(json!({"name": "n"}));
             then.status(201).json_body(json!({"id": "p1"}));
         });
         let client = Client::new(server.base_url(), "tok").unwrap();
-        let created: serde_json::Value = client.post_json("/projects", &json!({"name": "n"})).await.unwrap();
+        let created: serde_json::Value = client
+            .post_json("/projects", &json!({"name": "n"}))
+            .await
+            .unwrap();
         mock.assert();
         assert_eq!(created["id"], "p1");
     }
@@ -194,7 +222,10 @@ mod tests {
             then.status(404).json_body(json!({"error": "not found"}));
         });
         let client = Client::new(server.base_url(), "tok").unwrap();
-        let err = client.get_json::<serde_json::Value>("/projects/missing").await.unwrap_err();
+        let err = client
+            .get_json::<serde_json::Value>("/projects/missing")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("404"));
         assert!(err.to_string().contains("not found"));
     }
@@ -207,7 +238,10 @@ mod tests {
             then.status(500).body("agent crashed unexpectedly");
         });
         let client = Client::new(server.base_url(), "tok").unwrap();
-        let err = client.post_json::<_, serde_json::Value>("/projects/p1/query", &json!({})).await.unwrap_err();
+        let err = client
+            .post_json::<_, serde_json::Value>("/projects/p1/query", &json!({}))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("agent crashed unexpectedly"));
     }
 
@@ -226,12 +260,19 @@ mod tests {
     async fn login_extracts_token_from_set_cookie_header() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/auth/login").json_body(json!({"email": "a@b.com", "password": "secret"}));
+            when.method(POST)
+                .path("/auth/login")
+                .json_body(json!({"email": "a@b.com", "password": "secret"}));
             then.status(200)
-                .header("set-cookie", "token=xyz.abc.123; HttpOnly; SameSite=Lax; Path=/")
+                .header(
+                    "set-cookie",
+                    "token=xyz.abc.123; HttpOnly; SameSite=Lax; Path=/",
+                )
                 .json_body(json!({"ok": true}));
         });
-        let token = login(&server.base_url(), "a@b.com", "secret").await.unwrap();
+        let token = login(&server.base_url(), "a@b.com", "secret")
+            .await
+            .unwrap();
         assert_eq!(token, "xyz.abc.123");
     }
 
@@ -240,9 +281,12 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/auth/login");
-            then.status(401).json_body(json!({"error": "invalid credentials"}));
+            then.status(401)
+                .json_body(json!({"error": "invalid credentials"}));
         });
-        let err = login(&server.base_url(), "a@b.com", "wrong").await.unwrap_err();
+        let err = login(&server.base_url(), "a@b.com", "wrong")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("invalid credentials"));
     }
 
@@ -253,7 +297,9 @@ mod tests {
             when.method(POST).path("/auth/login");
             then.status(200).json_body(json!({"ok": true}));
         });
-        let err = login(&server.base_url(), "a@b.com", "secret").await.unwrap_err();
+        let err = login(&server.base_url(), "a@b.com", "secret")
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("Set-Cookie"));
     }
 }

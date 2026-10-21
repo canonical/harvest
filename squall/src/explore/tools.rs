@@ -43,7 +43,12 @@ impl HarvestTool {
         }
         names
             .into_iter()
-            .map(|name| Arc::new(HarvestTool { client: client.clone(), name }) as Arc<dyn ExplorationTool>)
+            .map(|name| {
+                Arc::new(HarvestTool {
+                    client: client.clone(),
+                    name,
+                }) as Arc<dyn ExplorationTool>
+            })
             .collect()
     }
 }
@@ -203,7 +208,11 @@ impl ExplorationTool for HarvestTool {
             ),
             other => unreachable!("unknown harvest tool: {other}"),
         };
-        ToolDefinition { name: self.name.to_string(), description: description.to_string(), parameters }
+        ToolDefinition {
+            name: self.name.to_string(),
+            description: description.to_string(),
+            parameters,
+        }
     }
 
     async fn execute(&self, mut params: Value) -> Result<String> {
@@ -213,7 +222,11 @@ impl ExplorationTool for HarvestTool {
                 let name: String = require(&mut params, "name")?;
                 let description: Option<String> = field(&mut params, "description")?;
                 let group_id: String = require(&mut params, "group_id")?;
-                pretty(self.client.create_project(&name, description.as_deref(), &group_id).await?)
+                pretty(
+                    self.client
+                        .create_project(&name, description.as_deref(), &group_id)
+                        .await?,
+                )
             }
             "get_project" => {
                 let project_id: String = require(&mut params, "project_id")?;
@@ -222,13 +235,20 @@ impl ExplorationTool for HarvestTool {
             "create_conversation" => {
                 let project_id: String = require(&mut params, "project_id")?;
                 let title: Option<String> = field(&mut params, "title")?;
-                pretty(self.client.create_conversation(&project_id, title.as_deref()).await?)
+                pretty(
+                    self.client
+                        .create_conversation(&project_id, title.as_deref())
+                        .await?,
+                )
             }
             "send_chat_message" => {
                 let project_id: String = require(&mut params, "project_id")?;
                 let query: String = require(&mut params, "query")?;
                 let conversation_id: Option<String> = field(&mut params, "conversation_id")?;
-                let resp = self.client.send_chat_message(&project_id, &query, conversation_id.as_deref()).await?;
+                let resp = self
+                    .client
+                    .send_chat_message(&project_id, &query, conversation_id.as_deref())
+                    .await?;
                 pretty(serde_json::to_value(resp)?)
             }
             "create_artifact" => {
@@ -236,14 +256,22 @@ impl ExplorationTool for HarvestTool {
                 let title: String = require(&mut params, "title")?;
                 let kind: String = require(&mut params, "kind")?;
                 let content: Value = require(&mut params, "content")?;
-                pretty(self.client.create_artifact(&project_id, &title, &kind, &content).await?)
+                pretty(
+                    self.client
+                        .create_artifact(&project_id, &title, &kind, &content)
+                        .await?,
+                )
             }
             "update_artifact" => {
                 let artifact_id: String = require(&mut params, "artifact_id")?;
                 let title: String = require(&mut params, "title")?;
                 let kind: String = require(&mut params, "kind")?;
                 let content: Value = require(&mut params, "content")?;
-                pretty(self.client.update_artifact(&artifact_id, &title, &kind, &content).await?)
+                pretty(
+                    self.client
+                        .update_artifact(&artifact_id, &title, &kind, &content)
+                        .await?,
+                )
             }
             "get_artifact" => {
                 let artifact_id: String = require(&mut params, "artifact_id")?;
@@ -257,8 +285,16 @@ impl ExplorationTool for HarvestTool {
                 let project_id: String = require(&mut params, "project_id")?;
                 let deployment_id: String = require(&mut params, "deployment_id")?;
                 let artifact_ids: Vec<String> = field(&mut params, "artifact_ids")?;
-                let ids = if artifact_ids.is_empty() { None } else { Some(artifact_ids.as_slice()) };
-                pretty(self.client.generate_design(&project_id, &deployment_id, ids).await?)
+                let ids = if artifact_ids.is_empty() {
+                    None
+                } else {
+                    Some(artifact_ids.as_slice())
+                };
+                pretty(
+                    self.client
+                        .generate_design(&project_id, &deployment_id, ids)
+                        .await?,
+                )
             }
             "add_context_artifact" => {
                 let project_id: String = require(&mut params, "project_id")?;
@@ -266,12 +302,20 @@ impl ExplorationTool for HarvestTool {
                 let title: String = require(&mut params, "title")?;
                 let kind: String = require(&mut params, "kind")?;
                 let content: Value = require(&mut params, "content")?;
-                pretty(self.client.add_context_artifact(&project_id, &deployment_id, &title, &kind, &content).await?)
+                pretty(
+                    self.client
+                        .add_context_artifact(&project_id, &deployment_id, &title, &kind, &content)
+                        .await?,
+                )
             }
             "list_deployment_runs" => {
                 let project_id: String = require(&mut params, "project_id")?;
                 let deployment_id: String = require(&mut params, "deployment_id")?;
-                pretty(json!(self.client.list_deployment_runs(&project_id, &deployment_id).await?))
+                pretty(json!(
+                    self.client
+                        .list_deployment_runs(&project_id, &deployment_id)
+                        .await?
+                ))
             }
             "deploy" => {
                 let project_id: String = require(&mut params, "project_id")?;
@@ -299,7 +343,10 @@ mod tests {
     use httpmock::prelude::*;
 
     fn tool(server: &MockServer, name: &'static str) -> HarvestTool {
-        HarvestTool { client: Arc::new(Client::new(server.base_url(), "tok").unwrap()), name }
+        HarvestTool {
+            client: Arc::new(Client::new(server.base_url(), "tok").unwrap()),
+            name,
+        }
     }
 
     #[test]
@@ -330,7 +377,8 @@ mod tests {
     fn create_project_definition_requires_name_and_group_id() {
         let server = MockServer::start();
         let def = tool(&server, "create_project").definition();
-        let required: Vec<String> = serde_json::from_value(def.parameters["required"].clone()).unwrap();
+        let required: Vec<String> =
+            serde_json::from_value(def.parameters["required"].clone()).unwrap();
         assert_eq!(required, vec!["name", "group_id"]);
     }
 
@@ -338,7 +386,9 @@ mod tests {
     async fn create_project_execute_calls_client_and_returns_pretty_json() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/projects").json_body(json!({"name": "n", "group_id": "g1"}));
+            when.method(POST)
+                .path("/projects")
+                .json_body(json!({"name": "n", "group_id": "g1"}));
             then.status(201).json_body(json!({"id": "p1", "name": "n"}));
         });
         let result = tool(&server, "create_project")
@@ -352,7 +402,10 @@ mod tests {
     #[tokio::test]
     async fn create_project_execute_fails_without_required_params() {
         let server = MockServer::start();
-        let err = tool(&server, "create_project").execute(json!({"name": "n"})).await.unwrap_err();
+        let err = tool(&server, "create_project")
+            .execute(json!({"name": "n"}))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("group_id"));
     }
 
@@ -360,7 +413,9 @@ mod tests {
     async fn send_chat_message_execute_returns_query_response_json() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method(POST).path("/projects/p1/query").json_body(json!({"query": "hi"}));
+            when.method(POST)
+                .path("/projects/p1/query")
+                .json_body(json!({"query": "hi"}));
             then.status(200).json_body(json!({"answer": "hello there"}));
         });
         let result = tool(&server, "send_chat_message")
@@ -378,7 +433,8 @@ mod tests {
             when.method(POST)
                 .path("/projects/p1/deployments/d1/design/generate")
                 .json_body(json!({}));
-            then.status(200).json_body(json!({"design_doc": {"id": "a1"}}));
+            then.status(200)
+                .json_body(json!({"design_doc": {"id": "a1"}}));
         });
         tool(&server, "generate_design")
             .execute(json!({"project_id": "p1", "deployment_id": "d1"}))
@@ -394,7 +450,10 @@ mod tests {
             when.method(POST).path("/projects/p1/deployments/d1/deploy");
             then.status(200).json_body(json!({"ok": true}));
         });
-        tool(&server, "deploy").execute(json!({"project_id": "p1", "deployment_id": "d1"})).await.unwrap();
+        tool(&server, "deploy")
+            .execute(json!({"project_id": "p1", "deployment_id": "d1"}))
+            .await
+            .unwrap();
         mock.assert();
     }
 
@@ -405,7 +464,10 @@ mod tests {
             when.method(GET).path("/projects/missing");
             then.status(404).json_body(json!({"error": "not found"}));
         });
-        let err = tool(&server, "get_project").execute(json!({"project_id": "missing"})).await.unwrap_err();
+        let err = tool(&server, "get_project")
+            .execute(json!({"project_id": "missing"}))
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("404"));
     }
 }
