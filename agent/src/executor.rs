@@ -16,7 +16,7 @@ pub struct CommandResult {
 #[derive(Debug, Clone)]
 pub struct OutputLine {
     pub stderr: bool,
-    pub line:   String,
+    pub line: String,
 }
 
 pub async fn run_command(command: &str, timeout_secs: u64) -> Result<CommandResult, String> {
@@ -26,9 +26,9 @@ pub async fn run_command(command: &str, timeout_secs: u64) -> Result<CommandResu
 /// Runs `command`, forwarding each line of stdout/stderr to `on_line` as it's produced
 /// (in addition to accumulating the full output for the final result, same as `run_command`).
 pub async fn run_command_streaming(
-    command:      &str,
+    command: &str,
     timeout_secs: u64,
-    on_line:      Option<mpsc::UnboundedSender<OutputLine>>,
+    on_line: Option<mpsc::UnboundedSender<OutputLine>>,
 ) -> Result<CommandResult, String> {
     let fut = async {
         let mut child = Command::new("bash")
@@ -76,11 +76,14 @@ pub async fn run_command_streaming(
             }
         }
 
-        let status = child.wait().await.map_err(|e| format!("wait failed: {e}"))?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| format!("wait failed: {e}"))?;
 
         Ok(CommandResult {
-            stdout:    stdout_buf,
-            stderr:    stderr_buf,
+            stdout: stdout_buf,
+            stderr: stderr_buf,
             exit_code: status.code().unwrap_or(-1),
         })
     };

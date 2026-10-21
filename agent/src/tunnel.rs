@@ -11,16 +11,20 @@ fn tunnel_ws_url(server_url: &str, session_id: &str) -> String {
 }
 
 pub async fn run_tunnel_session(
-    server_url:  &str,
+    server_url: &str,
     agent_token: &str,
-    session_id:  &str,
-    port:        u16,
+    session_id: &str,
+    port: u16,
 ) -> Result<()> {
     let url = tunnel_ws_url(server_url, session_id);
-    let mut request = url.into_client_request().context("building tunnel request")?;
+    let mut request = url
+        .into_client_request()
+        .context("building tunnel request")?;
     request.headers_mut().insert(
         "Authorization",
-        format!("Bearer {agent_token}").parse().context("invalid agent token header")?,
+        format!("Bearer {agent_token}")
+            .parse()
+            .context("invalid agent token header")?,
     );
 
     let (ws_stream, _) = tokio_tungstenite::connect_async(request)
@@ -32,13 +36,21 @@ pub async fn run_tunnel_session(
         Ok(stream) => stream,
         Err(e) => {
             let message = e.to_string().replace('"', "'");
-            let _ = ws_tx.send(Message::text(format!(r#"{{"type":"error","message":"{message}"}}"#))).await;
+            let _ = ws_tx
+                .send(Message::text(format!(
+                    r#"{{"type":"error","message":"{message}"}}"#
+                )))
+                .await;
             let _ = ws_tx.close().await;
             return Ok(());
         }
     };
 
-    if ws_tx.send(Message::text(r#"{"type":"connected"}"#)).await.is_err() {
+    if ws_tx
+        .send(Message::text(r#"{"type":"connected"}"#))
+        .await
+        .is_err()
+    {
         return Ok(());
     }
 
@@ -50,7 +62,11 @@ pub async fn run_tunnel_session(
             match tcp_read.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if ws_tx.send(Message::binary(buf[..n].to_vec())).await.is_err() {
+                    if ws_tx
+                        .send(Message::binary(buf[..n].to_vec()))
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                 }
