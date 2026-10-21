@@ -1,3 +1,3 @@
 pub mod handlers;
-pub mod title_generation;
 pub mod summary;
+pub mod title_generation;

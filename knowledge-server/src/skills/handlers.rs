@@ -19,12 +19,16 @@ fn err(status: StatusCode, msg: &str) -> ApiError {
 pub async fn list_global_skills(
     State(state): State<Arc<SkillStore>>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.db.query(
-        "SELECT id, name, description, created_at, updated_at
+    let rows = state
+        .db
+        .query(
+            "SELECT id, name, description, created_at, updated_at
          FROM skills WHERE project_id IS NULL
          ORDER BY name",
-        json!({}),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({}),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(rows))
 }
 
@@ -32,30 +36,44 @@ pub async fn get_global_skill(
     State(state): State<Arc<SkillStore>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.db.query(
-        "SELECT id, name, description, content, created_at, updated_at
+    let rows = state
+        .db
+        .query(
+            "SELECT id, name, description, content, created_at, updated_at
          FROM skills WHERE id = $id AND project_id IS NULL",
-        json!({ "id": id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let row = rows.into_iter().next()
+            json!({ "id": id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let row = rows
+        .into_iter()
+        .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
     Ok(Json(row))
 }
 
 #[derive(serde::Deserialize)]
 pub struct CreateGlobalSkillBody {
-    pub name:        String,
+    pub name: String,
     pub description: String,
-    pub content:     String,
+    pub content: String,
 }
 
-async fn global_name_taken(state: &SkillStore, name: &str, exclude_id: &str) -> Result<bool, ApiError> {
-    let rows = state.db.query(
-        "SELECT id FROM skills
+async fn global_name_taken(
+    state: &SkillStore,
+    name: &str,
+    exclude_id: &str,
+) -> Result<bool, ApiError> {
+    let rows = state
+        .db
+        .query(
+            "SELECT id FROM skills
          WHERE name = $name AND project_id IS NULL AND id <> $exclude_id
          LIMIT 1",
-        json!({ "name": name, "exclude_id": exclude_id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "name": name, "exclude_id": exclude_id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(!rows.is_empty())
 }
 
@@ -68,9 +86,12 @@ pub async fn create_global_skill(
         return Err(err(StatusCode::BAD_REQUEST, "name is required"));
     }
     if global_name_taken(&state, &name, "").await? {
-        return Err(err(StatusCode::CONFLICT, "a global skill with this name already exists"));
+        return Err(err(
+            StatusCode::CONFLICT,
+            "a global skill with this name already exists",
+        ));
     }
-    let id  = Uuid::new_v4().to_string();
+    let id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
     state.db.query(
         "INSERT INTO skills (id, project_id, name, description, content, created_by, created_at, updated_at)
@@ -80,14 +101,17 @@ pub async fn create_global_skill(
             "content": body.content, "now": now,
         }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    Ok((StatusCode::CREATED, Json(json!({ "id": id, "name": name, "created_at": now }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "name": name, "created_at": now })),
+    ))
 }
 
 #[derive(serde::Deserialize)]
 pub struct UpdateGlobalSkillBody {
-    pub name:        Option<String>,
+    pub name: Option<String>,
     pub description: Option<String>,
-    pub content:     Option<String>,
+    pub content: Option<String>,
 }
 
 pub async fn update_global_skill(
@@ -100,13 +124,20 @@ pub async fn update_global_skill(
             return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
         }
         if global_name_taken(&state, name.trim(), &id).await? {
-            return Err(err(StatusCode::CONFLICT, "a global skill with this name already exists"));
+            return Err(err(
+                StatusCode::CONFLICT,
+                "a global skill with this name already exists",
+            ));
         }
     }
-    let exists = state.db.query(
-        "SELECT 1 AS ok FROM skills WHERE id = $id AND project_id IS NULL",
-        json!({ "id": id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let exists = state
+        .db
+        .query(
+            "SELECT 1 AS ok FROM skills WHERE id = $id AND project_id IS NULL",
+            json!({ "id": id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     if exists.is_empty() {
         return Err(err(StatusCode::NOT_FOUND, "not found"));
     }
@@ -125,8 +156,11 @@ pub async fn update_global_skill(
                    updated_at  = $now
                WHERE id = $id AND project_id IS NULL
                RETURNING id";
-    state.db.query(sql, params)
-        .await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    state
+        .db
+        .query(sql, params)
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -134,9 +168,13 @@ pub async fn delete_global_skill(
     State(state): State<Arc<SkillStore>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.db.query(
-        "DELETE FROM skills WHERE id = $id AND project_id IS NULL",
-        json!({ "id": id }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    state
+        .db
+        .query(
+            "DELETE FROM skills WHERE id = $id AND project_id IS NULL",
+            json!({ "id": id }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(StatusCode::NO_CONTENT)
 }

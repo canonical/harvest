@@ -44,11 +44,18 @@ pub async fn get_current(
     State(state): State<Arc<ChatLayoutState>>,
     Query(params): Query<ProjectScopeParams>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.db.query(
-        "SELECT tree, updated_at FROM chat_layouts
+    let rows = state
+        .db
+        .query(
+            "SELECT tree, updated_at FROM chat_layouts
          WHERE user_id = $uid AND kind = 'current' AND project_id = $pid",
-        json!({ "uid": user.sub, "pid": scope_id(params.project_id) }),
-    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: db query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
+            json!({ "uid": user.sub, "pid": scope_id(params.project_id) }),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "chat_layouts: db query failed");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
+        })?;
 
     let Some(row) = rows.into_iter().next() else {
         return Ok(Json(Value::Null));
@@ -71,8 +78,8 @@ pub async fn put_current(
     Query(params): Query<ProjectScopeParams>,
     Json(body): Json<SaveCurrentBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let now       = harvest_db::now_rfc3339();
-    let id        = Uuid::new_v4().to_string();
+    let now = harvest_db::now_rfc3339();
+    let id = Uuid::new_v4().to_string();
     let tree_json = serde_json::to_string(&body.tree)
         .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid tree"))?;
 
@@ -96,19 +103,31 @@ pub async fn list_named(
     State(state): State<Arc<ChatLayoutState>>,
     Query(params): Query<ProjectScopeParams>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.db.query(
-        "SELECT id, name, tree, updated_at FROM chat_layouts
+    let rows = state
+        .db
+        .query(
+            "SELECT id, name, tree, updated_at FROM chat_layouts
          WHERE user_id = $uid AND kind = 'named' AND project_id = $pid
          ORDER BY updated_at DESC",
-        json!({ "uid": user.sub, "pid": scope_id(params.project_id) }),
-    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: db query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
+            json!({ "uid": user.sub, "pid": scope_id(params.project_id) }),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "chat_layouts: db query failed");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
+        })?;
 
-    let layouts: Vec<Value> = rows.iter().map(|row| json!({
-        "id": row.get("id"),
-        "name": row.get("name"),
-        "tree": parse_tree(row),
-        "updated_at": row.get("updated_at"),
-    })).collect();
+    let layouts: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "id": row.get("id"),
+                "name": row.get("name"),
+                "tree": parse_tree(row),
+                "updated_at": row.get("updated_at"),
+            })
+        })
+        .collect();
 
     Ok(Json(layouts))
 }
@@ -125,8 +144,8 @@ pub async fn create_named(
     State(state): State<Arc<ChatLayoutState>>,
     Json(body): Json<CreateNamedBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let id        = Uuid::new_v4().to_string();
-    let now       = harvest_db::now_rfc3339();
+    let id = Uuid::new_v4().to_string();
+    let now = harvest_db::now_rfc3339();
     let tree_json = serde_json::to_string(&body.tree)
         .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid tree"))?;
 
@@ -140,7 +159,10 @@ pub async fn create_named(
         }),
     ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: db query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
 
-    Ok((StatusCode::CREATED, Json(json!({ "id": id, "name": body.name, "created_at": now }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "id": id, "name": body.name, "created_at": now })),
+    ))
 }
 
 pub async fn get_named(
@@ -148,13 +170,22 @@ pub async fn get_named(
     State(state): State<Arc<ChatLayoutState>>,
     Path(layout_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let rows = state.db.query(
-        "SELECT id, name, tree, created_at, updated_at FROM chat_layouts
+    let rows = state
+        .db
+        .query(
+            "SELECT id, name, tree, created_at, updated_at FROM chat_layouts
          WHERE id = $lid AND user_id = $uid AND kind = 'named'",
-        json!({ "uid": user.sub, "lid": layout_id }),
-    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: db query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
+            json!({ "uid": user.sub, "lid": layout_id }),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "chat_layouts: db query failed");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
+        })?;
 
-    let row = rows.into_iter().next()
+    let row = rows
+        .into_iter()
+        .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
 
     Ok(Json(json!({
@@ -178,7 +209,7 @@ pub async fn update_named(
     Path(layout_id): Path<String>,
     Json(body): Json<UpdateNamedBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let now       = harvest_db::now_rfc3339();
+    let now = harvest_db::now_rfc3339();
     let tree_json = serde_json::to_string(&body.tree)
         .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid tree"))?;
 
@@ -197,10 +228,17 @@ pub async fn delete_named(
     State(state): State<Arc<ChatLayoutState>>,
     Path(layout_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state.db.query(
-        "DELETE FROM chat_layouts WHERE id = $lid AND user_id = $uid AND kind = 'named'",
-        json!({ "uid": user.sub, "lid": layout_id }),
-    ).await.map_err(|e| { tracing::error!(error = %e, "chat_layouts: db query failed"); err(StatusCode::INTERNAL_SERVER_ERROR, "server error") })?;
+    state
+        .db
+        .query(
+            "DELETE FROM chat_layouts WHERE id = $lid AND user_id = $uid AND kind = 'named'",
+            json!({ "uid": user.sub, "lid": layout_id }),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "chat_layouts: db query failed");
+            err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
+        })?;
 
     Ok(Json(json!({ "ok": true })))
 }
