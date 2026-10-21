@@ -125,7 +125,13 @@
               @click="loadConversation(conv.id)"
               @keydown.enter.prevent="loadConversation(conv.id)"
             >
-              <span class="conv-item__title">{{ conv.title }}</span>
+              <div class="conv-item__body">
+                <span class="conv-item__title">{{ conv.title }}</span>
+                <span v-if="conv.origin_type === 'api'" class="conv-item__meta">
+                  API · {{ conv.origin_api_key_name || 'Unknown key' }}<template v-if="conv.origin_api_key_revoked_at"> (revoked)</template>
+                </span>
+                <span v-if="conv.origin_type === 'api' && conv.origin_tracking_id" class="conv-item__tracking">tracking: {{ conv.origin_tracking_id }}</span>
+              </div>
               <button
                 v-if="canDeleteConv(conv)"
                 class="conv-item__delete"

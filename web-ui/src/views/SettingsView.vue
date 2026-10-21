@@ -22,6 +22,56 @@
 
     <section class="settings-section">
       <div class="settings-section__heading">
+        <h3>API keys</h3>
+        <p class="settings-section__description">Create API keys for external applications. New keys are shown only once.</p>
+      </div>
+
+      <div class="settings-api-actions">
+        <button class="p-button--positive is-dense" type="button" @click="openCreateApiKey">Create API key</button>
+      </div>
+
+      <div v-if="apiKeysLoading" class="settings-loading">
+        <LoadingSpinner text="Loading API keys..." />
+      </div>
+
+      <div v-else-if="!apiKeys.length" class="settings-empty">
+        <p>No API keys yet.</p>
+        <span>Create one to allow external applications to call the Harvest chat API.</span>
+      </div>
+
+      <div v-else class="settings-providers">
+        <div
+          v-for="key in apiKeys"
+          :key="key.id"
+          class="provider-card"
+          :class="{ 'provider-card--active': !key.revoked_at }"
+        >
+          <div class="provider-card__body">
+            <div class="provider-card__header">
+              <span class="provider-card__name">{{ key.name }}</span>
+              <span v-if="key.revoked_at" class="provider-status provider-status--unset">Revoked</span>
+              <span v-else class="provider-status provider-status--set">Active</span>
+            </div>
+            <div class="provider-card__meta">
+              <span class="provider-card__kind">{{ key.key_prefix }}</span>
+              <span>Created {{ formatDate(key.created_at) }}</span>
+              <span v-if="key.last_used_at">Last used {{ formatDate(key.last_used_at) }}</span>
+            </div>
+          </div>
+          <div class="provider-card__actions">
+            <button class="provider-icon-btn" type="button" title="Rename key" aria-label="Rename key" @click="openRenameApiKey(key)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            </button>
+            <button class="provider-icon-btn provider-icon-btn--danger" type="button" title="Revoke key" aria-label="Revoke key" :disabled="!!key.revoked_at || revokingApiKeyId === key.id" @click="revokeKey(key)">
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <div class="settings-section__heading">
         <h3>LLM API keys</h3>
         <p class="settings-section__description">Configure API keys for LLM providers that require user-provided credentials.</p>
       </div>
@@ -123,6 +173,42 @@
         </div>
       </div>
     </div>
+
+    <div v-if="creatingApiKey" class="modal" @click.self="closeCreateApiKey">
+      <div class="modal-content">
+        <button class="modal-close" type="button" @click="closeCreateApiKey">✕</button>
+        <h3>Create API key</h3>
+        <div class="form-group">
+          <label for="api-key-name-input">Name</label>
+          <input id="api-key-name-input" v-model="apiKeyNameInput" type="text" placeholder="e.g. Zapier Production" autocomplete="off" />
+        </div>
+        <p v-if="apiKeyCreateError" class="auth-error">{{ apiKeyCreateError }}</p>
+        <div v-if="createdApiKeySecret" class="api-key-secret">
+          <p>Copy this key now. You will not be able to see it again.</p>
+          <textarea readonly rows="3" :value="createdApiKeySecret" />
+        </div>
+        <div class="modal-actions">
+          <button class="p-button--base is-dense" type="button" @click="closeCreateApiKey">{{ createdApiKeySecret ? 'Done' : 'Cancel' }}</button>
+          <button v-if="!createdApiKeySecret" class="p-button--positive is-dense" type="button" :disabled="!apiKeyNameInput.trim() || creatingApiKeyPending" @click="submitCreateApiKey">{{ creatingApiKeyPending ? 'Creating...' : 'Create' }}</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="renamingApiKey" class="modal" @click.self="closeRenameApiKey">
+      <div class="modal-content">
+        <button class="modal-close" type="button" @click="closeRenameApiKey">✕</button>
+        <h3>Rename API key</h3>
+        <div class="form-group">
+          <label for="rename-api-key-input">Name</label>
+          <input id="rename-api-key-input" v-model="renameApiKeyInput" type="text" autocomplete="off" />
+        </div>
+        <p v-if="renameApiKeyError" class="auth-error">{{ renameApiKeyError }}</p>
+        <div class="modal-actions">
+          <button class="p-button--base is-dense" type="button" @click="closeRenameApiKey">Cancel</button>
+          <button class="p-button--positive is-dense" type="button" :disabled="!renameApiKeyInput.trim() || renamingApiKeyPending" @click="submitRenameApiKey">{{ renamingApiKeyPending ? 'Saving...' : 'Save' }}</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -130,7 +216,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useLlmStore } from '../stores/llm.js';
 import { useAuthStore } from '../stores/auth.js';
-import { setLlmUserKey, deleteLlmUserKey } from '../lib/api.js';
+import { setLlmUserKey, deleteLlmUserKey, fetchApiKeys, createApiKey, renameApiKey, revokeApiKey } from '../lib/api.js';
 import LoadingSpinner from '../components/deployment/LoadingSpinner.vue';
 
 const llm = useLlmStore();
@@ -143,6 +229,18 @@ const editError = ref('');
 const saving = ref(false);
 const deleting = ref(null);
 const loading = ref(true);
+const apiKeys = ref([]);
+const apiKeysLoading = ref(true);
+const creatingApiKey = ref(false);
+const creatingApiKeyPending = ref(false);
+const apiKeyNameInput = ref('');
+const apiKeyCreateError = ref('');
+const createdApiKeySecret = ref('');
+const renamingApiKey = ref(null);
+const renamingApiKeyInput = ref('');
+const renameApiKeyPending = ref(false);
+const renameApiKeyError = ref('');
+const revokingApiKeyId = ref(null);
 
 const initials = computed(() => {
   const name = auth.user?.name || '';
@@ -210,10 +308,104 @@ async function removeKey(provider) {
   }
 }
 
+function openCreateApiKey() {
+  creatingApiKey.value = true;
+  creatingApiKeyPending.value = false;
+  apiKeyNameInput.value = '';
+  apiKeyCreateError.value = '';
+  createdApiKeySecret.value = '';
+}
+
+function closeCreateApiKey() {
+  creatingApiKey.value = false;
+  creatingApiKeyPending.value = false;
+  apiKeyNameInput.value = '';
+  apiKeyCreateError.value = '';
+  createdApiKeySecret.value = '';
+}
+
+async function loadApiKeys() {
+  apiKeysLoading.value = true;
+  try {
+    const data = await fetchApiKeys();
+    apiKeys.value = data.keys || [];
+  } catch {
+    apiKeys.value = [];
+  } finally {
+    apiKeysLoading.value = false;
+  }
+}
+
+async function submitCreateApiKey() {
+  const name = apiKeyNameInput.value.trim();
+  if (!name) return;
+  creatingApiKeyPending.value = true;
+  apiKeyCreateError.value = '';
+  try {
+    const created = await createApiKey(name);
+    createdApiKeySecret.value = created.api_key || '';
+    await loadApiKeys();
+  } catch (e) {
+    apiKeyCreateError.value = e.message;
+  } finally {
+    creatingApiKeyPending.value = false;
+  }
+}
+
+function openRenameApiKey(key) {
+  renamingApiKey.value = key;
+  renamingApiKeyInput.value = key.name || '';
+  renameApiKeyError.value = '';
+  renameApiKeyPending.value = false;
+}
+
+function closeRenameApiKey() {
+  renamingApiKey.value = null;
+  renamingApiKeyInput.value = '';
+  renameApiKeyError.value = '';
+  renameApiKeyPending.value = false;
+}
+
+async function submitRenameApiKey() {
+  if (!renamingApiKey.value) return;
+  const name = renamingApiKeyInput.value.trim();
+  if (!name) return;
+  renameApiKeyPending.value = true;
+  renameApiKeyError.value = '';
+  try {
+    await renameApiKey(renamingApiKey.value.id, name);
+    await loadApiKeys();
+    closeRenameApiKey();
+  } catch (e) {
+    renameApiKeyError.value = e.message;
+  } finally {
+    renameApiKeyPending.value = false;
+  }
+}
+
+async function revokeKey(key) {
+  if (!key || key.revoked_at) return;
+  revokingApiKeyId.value = key.id;
+  try {
+    await revokeApiKey(key.id);
+    await loadApiKeys();
+  } catch (e) {
+    apiKeyCreateError.value = e.message;
+  } finally {
+    revokingApiKeyId.value = null;
+  }
+}
+
 onMounted(async () => {
-  await llm.loadUserKeys();
-  providers.value = llm.userKeyProviders;
-  loading.value = false;
+  try {
+    await llm.loadUserKeys();
+    providers.value = llm.userKeyProviders;
+  } catch {
+    providers.value = [];
+  } finally {
+    loading.value = false;
+  }
+  await loadApiKeys();
 });
 </script>
 
@@ -469,6 +661,31 @@ onMounted(async () => {
   color: #c7162b;
   border-color: #c7162b;
   background: rgba(199, 22, 43, 0.08);
+}
+
+.settings-api-actions {
+  margin-bottom: 1rem;
+}
+
+.api-key-secret {
+  margin-top: 0.75rem;
+}
+
+.api-key-secret p {
+  margin: 0 0 0.5rem;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+.api-key-secret textarea {
+  width: 100%;
+  resize: none;
+  padding: 0.625rem;
+  border: 1px solid var(--border-color);
+  border-radius: 2px;
+  background: var(--bg-surface-alt);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
 }
 
 .modal-actions {
