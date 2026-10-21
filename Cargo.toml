@@ -4,6 +4,7 @@ members = [
     "knowledge-harvester",
     "knowledge-server",
     "agent",
+    "harvest-cli",
     "tui",
     "squall",
 ]
