@@ -1,4 +1,3 @@
-
 use std::sync::Arc;
 
 use harvest_db::test_support::TestDb;
@@ -34,7 +33,13 @@ async fn seed() -> Seeded {
         .and_then(|r| r["id"].as_i64())
         .expect("version id");
 
-    let files = ["pkg/base.py", "pkg/naive.py", "pkg/active.py", "pkg/stale.py", "pkg/external.py"];
+    let files = [
+        "pkg/base.py",
+        "pkg/naive.py",
+        "pkg/active.py",
+        "pkg/stale.py",
+        "pkg/external.py",
+    ];
     let mut file_ids = Vec::new();
     for path in files {
         let id: i64 = db
@@ -56,11 +61,36 @@ async fn seed() -> Seeded {
         "class ActiveDriver(RootDriver):\n    SUPPORTS_ACTIVE_ACTIVE = True\n    OTHER_FLAG = 1\n";
 
     let classes = [
-        ("RootDriver", file_ids[0], base_source.to_string(), Vec::<String>::new()),
-        ("NaiveDriver", file_ids[1], naive_source.to_string(), vec!["RootDriver".to_string()]),
-        ("ActiveDriver", file_ids[2], active_source.to_string(), vec!["RootDriver".to_string()]),
-        ("StaleDriver", file_ids[3], "class StaleDriver(base.RootDriver):\n    pass\n".to_string(), Vec::new()),
-        ("ExternalDriver", file_ids[4], "class ExternalDriver(lib.RemoteDriver):\n    pass\n".to_string(), vec!["RemoteDriver".to_string()]),
+        (
+            "RootDriver",
+            file_ids[0],
+            base_source.to_string(),
+            Vec::<String>::new(),
+        ),
+        (
+            "NaiveDriver",
+            file_ids[1],
+            naive_source.to_string(),
+            vec!["RootDriver".to_string()],
+        ),
+        (
+            "ActiveDriver",
+            file_ids[2],
+            active_source.to_string(),
+            vec!["RootDriver".to_string()],
+        ),
+        (
+            "StaleDriver",
+            file_ids[3],
+            "class StaleDriver(base.RootDriver):\n    pass\n".to_string(),
+            Vec::new(),
+        ),
+        (
+            "ExternalDriver",
+            file_ids[4],
+            "class ExternalDriver(lib.RemoteDriver):\n    pass\n".to_string(),
+            vec!["RemoteDriver".to_string()],
+        ),
     ];
 
     for (name, file_id, source, bases) in classes {
@@ -158,7 +188,12 @@ async fn reports_undeclared_capability_rather_than_guessing() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn reports_missing_classes_instead_of_silence() {
     let seeded = seed().await;
-    let rows = run_matrix(&seeded.db, &["ActiveDriver", "NoSuchDriver"], "SUPPORTS_ACTIVE_ACTIVE").await;
+    let rows = run_matrix(
+        &seeded.db,
+        &["ActiveDriver", "NoSuchDriver"],
+        "SUPPORTS_ACTIVE_ACTIVE",
+    )
+    .await;
 
     let warning = rows
         .iter()
@@ -183,7 +218,10 @@ async fn matrix_supports_multiple_capabilities() {
         .expect("tool should succeed");
     let rows: Vec<Value> = serde_json::from_str(&out).unwrap();
 
-    assert_eq!(row_for(&rows, "ActiveDriver")["capability"], "SUPPORTS_ACTIVE_ACTIVE");
+    assert_eq!(
+        row_for(&rows, "ActiveDriver")["capability"],
+        "SUPPORTS_ACTIVE_ACTIVE"
+    );
     let other = rows
         .iter()
         .find(|r| r["capability"] == "OTHER_FLAG")
@@ -204,7 +242,10 @@ async fn rejects_capability_names_that_are_not_identifiers() {
             "capability": "SUPPORTS_X = 1; DROP TABLE symbols",
         }))
         .await;
-    assert!(result.is_err(), "non-identifier capability must be rejected");
+    assert!(
+        result.is_err(),
+        "non-identifier capability must be rejected"
+    );
 }
 
 #[tokio::test]
@@ -257,14 +298,22 @@ async fn cycles_in_bases_terminate() {
         .expect("cyclic bases must not hang or error");
     let rows: Vec<Value> = serde_json::from_str(&out).unwrap();
     assert_eq!(row_for(&rows, "A")["value"], Value::Null);
-    assert!(rows.iter().all(|r| r["warning"].is_null()), "a cycle is not a missing parent: {rows:?}");
+    assert!(
+        rows.iter().all(|r| r["warning"].is_null()),
+        "a cycle is not a missing parent: {rows:?}"
+    );
 }
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn warns_when_declared_bases_were_not_recorded() {
     let seeded = seed().await;
-    let rows = run_matrix(&seeded.db, &["StaleDriver", "NaiveDriver"], "SUPPORTS_ACTIVE_ACTIVE").await;
+    let rows = run_matrix(
+        &seeded.db,
+        &["StaleDriver", "NaiveDriver"],
+        "SUPPORTS_ACTIVE_ACTIVE",
+    )
+    .await;
 
     assert_eq!(row_for(&rows, "StaleDriver")["value"], Value::Null);
     let warning = rows
@@ -291,8 +340,16 @@ async fn warns_when_a_parent_is_not_in_the_repository() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn complete_hierarchies_carry_no_inheritance_warning() {
     let seeded = seed().await;
-    let rows = run_matrix(&seeded.db, &["ActiveDriver", "NaiveDriver", "RootDriver"], "SUPPORTS_ACTIVE_ACTIVE").await;
-    assert!(rows.iter().all(|r| r["warning"].is_null()), "unexpected warning in {rows:?}");
+    let rows = run_matrix(
+        &seeded.db,
+        &["ActiveDriver", "NaiveDriver", "RootDriver"],
+        "SUPPORTS_ACTIVE_ACTIVE",
+    )
+    .await;
+    assert!(
+        rows.iter().all(|r| r["warning"].is_null()),
+        "unexpected warning in {rows:?}"
+    );
 }
 
 #[tokio::test]
@@ -305,5 +362,8 @@ async fn no_inheritance_warning_when_the_class_declares_the_value_itself() {
     ).await.unwrap();
     let rows = run_matrix(&seeded.db, &["StaleDriver"], "SUPPORTS_ACTIVE_ACTIVE").await;
     assert_eq!(row_for(&rows, "StaleDriver")["value"], "True");
-    assert!(rows.iter().all(|r| r["warning"].is_null()), "the value does not depend on the missing bases: {rows:?}");
+    assert!(
+        rows.iter().all(|r| r["warning"].is_null()),
+        "the value does not depend on the missing bases: {rows:?}"
+    );
 }

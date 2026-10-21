@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 
 use knowledge_server::{
-    agent::{Agent, tool::Tool},
+    agent::{tool::Tool, Agent},
     api::{
         docs::{handle_get_index, handle_get_page},
         query::{handle_query, handle_query_stream},
@@ -27,12 +27,10 @@ use knowledge_server::{
     },
     auth::jwt::Claims,
     llm::{
-        LlmProvider,
         types::{LlmResponse, Message, ModelInfo, ToolDefinition, Usage},
+        LlmProvider,
     },
-
 };
-
 
 struct FixedTextLlm(String);
 
@@ -44,12 +42,28 @@ impl FixedTextLlm {
 
 #[async_trait]
 impl LlmProvider for FixedTextLlm {
-    fn id(&self) -> &str { "fixed-text" }
-    fn kind(&self) -> &str { "mock" }
-    fn default_model(&self) -> &str { "mock-model" }
-    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> { Ok(vec![]) }
-    async fn chat_with(&self, _model: Option<&str>, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
-        Ok(LlmResponse::Message { text: self.0.clone(), usage: Usage::default() })
+    fn id(&self) -> &str {
+        "fixed-text"
+    }
+    fn kind(&self) -> &str {
+        "mock"
+    }
+    fn default_model(&self) -> &str {
+        "mock-model"
+    }
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_with(
+        &self,
+        _model: Option<&str>,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+    ) -> Result<LlmResponse> {
+        Ok(LlmResponse::Message {
+            text: self.0.clone(),
+            usage: Usage::default(),
+        })
     }
 }
 
@@ -57,19 +71,42 @@ struct ErrorLlm;
 
 #[async_trait]
 impl LlmProvider for ErrorLlm {
-    fn id(&self) -> &str { "error" }
-    fn kind(&self) -> &str { "mock" }
-    fn default_model(&self) -> &str { "mock-model" }
-    async fn list_models(&self) -> Result<Vec<ModelInfo>> { Ok(vec![]) }
-    async fn chat_with(&self, _model: Option<&str>, _messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
+    fn id(&self) -> &str {
+        "error"
+    }
+    fn kind(&self) -> &str {
+        "mock"
+    }
+    fn default_model(&self) -> &str {
+        "mock-model"
+    }
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_with(
+        &self,
+        _model: Option<&str>,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+    ) -> Result<LlmResponse> {
         Err(anyhow::anyhow!("simulated LLM failure"))
     }
 }
 
-
 fn query_app(agent: Arc<Agent>) -> Router {
     let llm = Arc::clone(agent.llm());
-    let qs = Arc::new(QueryState { agent, db: None, llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6, pricing: Arc::new(knowledge_server::cost::PricingTable::default()), semantic: None });
+    let qs = Arc::new(QueryState {
+        agent,
+        db: None,
+        llm,
+        llm_configs: Arc::new(vec![]),
+        user_key_store: None,
+        max_iterations: 5,
+        compaction_threshold_chars: usize::MAX,
+        compaction_keep_last: 6,
+        pricing: Arc::new(knowledge_server::cost::PricingTable::default()),
+        semantic: None,
+    });
     Router::new()
         .route("/query", post(handle_query))
         .route("/query/stream", post(handle_query_stream))
@@ -81,11 +118,11 @@ fn query_app(agent: Arc<Agent>) -> Router {
 
 fn test_claims() -> Claims {
     Claims {
-        sub:   "test-user-id".into(),
+        sub: "test-user-id".into(),
         email: "test@example.com".into(),
-        name:  "Test User".into(),
-        role:  "user".into(),
-        exp:   i64::MAX,
+        name: "Test User".into(),
+        role: "user".into(),
+        exp: i64::MAX,
     }
 }
 
@@ -108,7 +145,6 @@ fn make_agent(text: &str) -> Arc<Agent> {
 fn make_error_agent() -> Arc<Agent> {
     Arc::new(Agent::new(Arc::new(ErrorLlm), vec![], 5))
 }
-
 
 async fn body_json(resp: axum::response::Response) -> Value {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -139,7 +175,6 @@ fn get_req(uri: &str) -> Request<Body> {
         .unwrap()
 }
 
-
 #[tokio::test]
 async fn health_returns_200() {
     let app = query_app(make_agent("irrelevant"));
@@ -154,7 +189,6 @@ async fn health_body_is_ok_json() {
     let json = body_json(resp).await;
     assert_eq!(json["status"], "ok");
 }
-
 
 #[tokio::test]
 async fn query_valid_request_returns_200() {
@@ -174,7 +208,10 @@ async fn query_response_contains_answer_field() {
 async fn query_response_contains_tool_calls_made_field() {
     let app = query_app(make_agent("done"));
     let (_, body) = body_status_json(app, post_query(json!({ "query": "hi" }))).await;
-    assert!(body.get("tool_calls_made").is_some(), "missing tool_calls_made field");
+    assert!(
+        body.get("tool_calls_made").is_some(),
+        "missing tool_calls_made field"
+    );
     assert_eq!(body["tool_calls_made"], 0);
 }
 
@@ -209,7 +246,6 @@ async fn query_with_optional_repositories_field_returns_200() {
     let (status, _) = body_status_json(app, req).await;
     assert_eq!(status, StatusCode::OK);
 }
-
 
 #[tokio::test]
 async fn query_missing_query_field_returns_422() {
@@ -267,7 +303,6 @@ async fn query_agent_error_returns_500() {
     assert!(!body["answer"].as_str().unwrap().is_empty());
 }
 
-
 #[tokio::test]
 async fn tool_description_returns_200_with_description_field() {
     let app = query_app(make_agent("irrelevant"));
@@ -275,11 +310,16 @@ async fn tool_description_returns_200_with_description_field() {
         .method("POST")
         .uri("/tool-description")
         .header("content-type", "application/json")
-        .body(Body::from(r#"{"name":"search_symbols","input":{"query":"authenticate"}}"#))
+        .body(Body::from(
+            r#"{"name":"search_symbols","input":{"query":"authenticate"}}"#,
+        ))
         .unwrap();
     let (status, body) = body_status_json(app, req).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(body.get("description").is_some(), "missing description field");
+    assert!(
+        body.get("description").is_some(),
+        "missing description field"
+    );
 }
 
 #[tokio::test]
@@ -308,7 +348,6 @@ async fn tool_description_missing_name_returns_4xx() {
     assert!(resp.status().is_client_error());
 }
 
-
 fn post_query_stream(body: Value) -> Request<Body> {
     Request::builder()
         .method("POST")
@@ -330,20 +369,34 @@ fn parse_sse_events(body: &str) -> Vec<Value> {
 #[tokio::test]
 async fn stream_returns_200_with_event_stream_content_type() {
     let app = query_app(make_agent("all done"));
-    let resp = app.oneshot(post_query_stream(json!({ "query": "hi" }))).await.unwrap();
+    let resp = app
+        .oneshot(post_query_stream(json!({ "query": "hi" })))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/event-stream"), "content-type: {ct}");
 }
 
 #[tokio::test]
 async fn stream_emits_done_event_with_answer() {
     let app = query_app(make_agent("the answer is 42"));
-    let resp = app.oneshot(post_query_stream(json!({ "query": "what is the answer?" }))).await.unwrap();
+    let resp = app
+        .oneshot(post_query_stream(json!({ "query": "what is the answer?" })))
+        .await
+        .unwrap();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body = std::str::from_utf8(&bytes).unwrap();
     let events = parse_sse_events(body);
-    let done = events.iter().find(|e| e["type"] == "done").expect("expected a done event");
+    let done = events
+        .iter()
+        .find(|e| e["type"] == "done")
+        .expect("expected a done event");
     assert_eq!(done["answer"], "the answer is 42");
 }
 
@@ -351,11 +404,17 @@ async fn stream_emits_done_event_with_answer() {
 async fn stream_done_event_contains_sources_and_tool_count() {
     let answer = "See [repo:v1:src/lib.rs:10] here.";
     let app = query_app(make_agent(answer));
-    let resp = app.oneshot(post_query_stream(json!({ "query": "q" }))).await.unwrap();
+    let resp = app
+        .oneshot(post_query_stream(json!({ "query": "q" })))
+        .await
+        .unwrap();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body = std::str::from_utf8(&bytes).unwrap();
     let events = parse_sse_events(body);
-    let done = events.iter().find(|e| e["type"] == "done").expect("expected done");
+    let done = events
+        .iter()
+        .find(|e| e["type"] == "done")
+        .expect("expected done");
     assert!(done["sources"].as_array().unwrap().len() >= 1);
     assert_eq!(done["tool_calls_made"], 0);
 }
@@ -363,17 +422,30 @@ async fn stream_done_event_contains_sources_and_tool_count() {
 #[tokio::test]
 async fn stream_missing_query_field_returns_422() {
     let app = query_app(make_agent("irrelevant"));
-    let resp = app.oneshot(post_query_stream(json!({ "not_query": "oops" }))).await.unwrap();
+    let resp = app
+        .oneshot(post_query_stream(json!({ "not_query": "oops" })))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
 }
-
 
 use harvest_db::test_support::TestDb;
 use knowledge_server::conversations::handlers as conv_handlers;
 
 fn query_app_with_db(agent: Arc<Agent>, db: Arc<Db>) -> Router {
     let llm = Arc::clone(agent.llm());
-    let qs = Arc::new(QueryState { agent, db: Some(Arc::clone(&db)), llm, llm_configs: Arc::new(vec![]), user_key_store: None, max_iterations: 5, compaction_threshold_chars: usize::MAX, compaction_keep_last: 6, pricing: Arc::new(knowledge_server::cost::PricingTable::default()), semantic: None });
+    let qs = Arc::new(QueryState {
+        agent,
+        db: Some(Arc::clone(&db)),
+        llm,
+        llm_configs: Arc::new(vec![]),
+        user_key_store: None,
+        max_iterations: 5,
+        compaction_threshold_chars: usize::MAX,
+        compaction_keep_last: 6,
+        pricing: Arc::new(knowledge_server::cost::PricingTable::default()),
+        semantic: None,
+    });
     let query_router = Router::new()
         .route("/query/stream", post(handle_query_stream))
         .with_state(qs);
@@ -384,7 +456,9 @@ fn query_app_with_db(agent: Arc<Agent>, db: Arc<Db>) -> Router {
         .route("/conversations/:id", get(conv_handlers::get))
         .with_state(conv_state);
 
-    query_router.merge(conv_router).layer(axum::Extension(test_claims()))
+    query_router
+        .merge(conv_router)
+        .layer(axum::Extension(test_claims()))
 }
 
 fn post_conv(body: Value) -> Request<Body> {
@@ -405,7 +479,9 @@ async fn seed_one_repo(db: &Db) {
          INSERT INTO versions (repository_id, tag, timestamp, ingested)
          SELECT id, 'v1.0', 1000, true FROM r",
         json!({}),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -451,11 +527,13 @@ async fn repositories_returns_versions_for_repo() {
     );
 }
 
-
 fn docs_app(docs_dir: PathBuf) -> Router {
     Router::new()
         .route("/docs/:repo/:version", get(handle_get_index))
-        .route("/docs/:repo/:version/:section/*filename", get(handle_get_page))
+        .route(
+            "/docs/:repo/:version/:section/*filename",
+            get(handle_get_page),
+        )
         .with_state(Arc::new(docs_dir))
 }
 
@@ -468,7 +546,10 @@ async fn body_text(resp: axum::response::Response) -> String {
 async fn docs_index_missing_repo_returns_404() {
     let dir = tempfile::tempdir().unwrap();
     let app = docs_app(dir.path().to_path_buf());
-    let resp = app.oneshot(get_req("/docs/missing-repo/v1.0")).await.unwrap();
+    let resp = app
+        .oneshot(get_req("/docs/missing-repo/v1.0"))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
@@ -487,7 +568,11 @@ async fn docs_index_returns_sections_json() {
             "reference": [{"filename": "api.md", "title": "API Reference"}]
         }
     });
-    std::fs::write(path.join("index.json"), serde_json::to_string(&index).unwrap()).unwrap();
+    std::fs::write(
+        path.join("index.json"),
+        serde_json::to_string(&index).unwrap(),
+    )
+    .unwrap();
 
     let app = docs_app(dir.path().to_path_buf());
     let (status, body) = body_status_json(app, get_req("/docs/testrepo/v1.0")).await;
@@ -506,7 +591,11 @@ async fn docs_index_different_repo_version_returns_404() {
     let path = dir.path().join("testrepo").join("v1.0");
     std::fs::create_dir_all(&path).unwrap();
     let index = json!({"repo":"testrepo","version":"v1.0","sections":{"tutorials":[],"how-to-guides":[],"explanations":[],"reference":[]}});
-    std::fs::write(path.join("index.json"), serde_json::to_string(&index).unwrap()).unwrap();
+    std::fs::write(
+        path.join("index.json"),
+        serde_json::to_string(&index).unwrap(),
+    )
+    .unwrap();
 
     let app = docs_app(dir.path().to_path_buf());
     let resp = app.oneshot(get_req("/docs/testrepo/v2.0")).await.unwrap();
@@ -518,7 +607,11 @@ async fn docs_page_returns_markdown_content() {
     let dir = tempfile::tempdir().unwrap();
     let section_path = dir.path().join("testrepo").join("v1.0").join("tutorials");
     std::fs::create_dir_all(&section_path).unwrap();
-    std::fs::write(section_path.join("getting-started.md"), "# Getting Started\n\nHello!").unwrap();
+    std::fs::write(
+        section_path.join("getting-started.md"),
+        "# Getting Started\n\nHello!",
+    )
+    .unwrap();
 
     let app = docs_app(dir.path().to_path_buf());
     let resp = app
@@ -526,7 +619,12 @@ async fn docs_page_returns_markdown_content() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/markdown"), "content-type: {ct}");
     let body = body_text(resp).await;
     assert!(body.contains("# Getting Started"));
@@ -562,7 +660,9 @@ async fn docs_page_path_traversal_returns_400() {
     let dir = tempfile::tempdir().unwrap();
     let app = docs_app(dir.path().to_path_buf());
     let resp = app
-        .oneshot(get_req("/docs/testrepo/v1.0/tutorials/..%2F..%2Fetc%2Fpasswd"))
+        .oneshot(get_req(
+            "/docs/testrepo/v1.0/tutorials/..%2F..%2Fetc%2Fpasswd",
+        ))
         .await
         .unwrap();
     assert!(
@@ -577,7 +677,11 @@ async fn docs_page_reference_section_works() {
     let dir = tempfile::tempdir().unwrap();
     let section_path = dir.path().join("myrepo").join("v2.0").join("reference");
     std::fs::create_dir_all(&section_path).unwrap();
-    std::fs::write(section_path.join("api.md"), "# API Reference\n\nEndpoints here.").unwrap();
+    std::fs::write(
+        section_path.join("api.md"),
+        "# API Reference\n\nEndpoints here.",
+    )
+    .unwrap();
 
     let app = docs_app(dir.path().to_path_buf());
     let resp = app
@@ -627,7 +731,9 @@ async fn global_chat_second_turn_preserves_first_turns_chain_and_sources() {
     db.execute(
         "INSERT INTO users (id, provider, created_at) VALUES ('test-user-id', 'local', now())",
         json!({}),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     let agent = make_agent("see [myrepo:v1.0:src/lib.rs:42]");
     let app = query_app_with_db(agent, Arc::clone(&db));
@@ -636,19 +742,27 @@ async fn global_chat_second_turn_preserves_first_turns_chain_and_sources() {
     assert_eq!(status, StatusCode::CREATED);
     let cid = conv["id"].as_str().unwrap().to_string();
 
-    let resp = app.clone().oneshot(post_query_stream(json!({
-        "query": "first question", "conversation_id": cid,
-    }))).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_query_stream(json!({
+            "query": "first question", "conversation_id": cid,
+        })))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes  = resp.into_body().collect().await.unwrap().to_bytes();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let events = parse_sse_events(&String::from_utf8_lossy(&bytes));
     assert!(events.iter().any(|e| e["type"] == "done"));
 
-    let resp = app.clone().oneshot(post_query_stream(json!({
-        "query": "second question", "conversation_id": cid,
-    }))).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(post_query_stream(json!({
+            "query": "second question", "conversation_id": cid,
+        })))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes  = resp.into_body().collect().await.unwrap().to_bytes();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let events = parse_sse_events(&String::from_utf8_lossy(&bytes));
     assert!(events.iter().any(|e| e["type"] == "done"));
 
