@@ -3,29 +3,37 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use super::tool::Tool;
 use crate::artifacts::handlers::{
-    create_artifact, get_artifact_in_project, update_artifact, validate_content_for_kind, ArtifactKind,
+    create_artifact, get_artifact_in_project, update_artifact, validate_content_for_kind,
+    ArtifactKind,
 };
 use crate::llm::types::ToolDefinition;
 use harvest_db::Db;
-use super::tool::Tool;
 
-fn validate_artifact_params(params: &Value) -> Result<(String, ArtifactKind, String, Option<String>)> {
-    let title = params["title"].as_str()
+fn validate_artifact_params(
+    params: &Value,
+) -> Result<(String, ArtifactKind, String, Option<String>)> {
+    let title = params["title"]
+        .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("title is required"))?
         .to_string();
-    let kind_str = params["kind"].as_str()
+    let kind_str = params["kind"]
+        .as_str()
         .ok_or_else(|| anyhow!("kind is required"))?;
-    let kind = ArtifactKind::parse(kind_str)
-        .ok_or_else(|| anyhow!("kind must be 'markdown', 'pdf', 'terraform', 'terragrunt', or 'bash'"))?;
-    let content = params["content"].as_str()
+    let kind = ArtifactKind::parse(kind_str).ok_or_else(|| {
+        anyhow!("kind must be 'markdown', 'pdf', 'terraform', 'terragrunt', or 'bash'")
+    })?;
+    let content = params["content"]
+        .as_str()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("content is required"))?
         .to_string();
     validate_content_for_kind(kind, &content).map_err(|e| anyhow!(e))?;
-    let artifact_id = params["artifact_id"].as_str()
+    let artifact_id = params["artifact_id"]
+        .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from);
@@ -33,7 +41,7 @@ fn validate_artifact_params(params: &Value) -> Result<(String, ArtifactKind, Str
 }
 
 pub struct GenerateArtifactTool {
-    pub db:      Arc<Db>,
+    pub db: Arc<Db>,
     pub project_id: String,
     pub server_url: String,
 }
@@ -43,14 +51,15 @@ impl Tool for GenerateArtifactTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "generate_artifact".into(),
-            description: "Create a shareable document, bash script, or Terraform/Terragrunt module \
+            description:
+                "Create a shareable document, bash script, or Terraform/Terragrunt module \
                           and save it as a project artifact the user can view, download, and (for \
                           terraform/terragrunt/bash) run on a connected agent. Use this when the \
                           user asks for a report, document, script, or infrastructure module to \
                           keep, share, or deploy, rather than just replying in chat. Pass \
                           artifact_id to revise an existing artifact in place instead of \
                           creating a new one."
-                .into(),
+                    .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -95,17 +104,34 @@ impl Tool for GenerateArtifactTool {
                 .ok_or_else(|| anyhow!("artifact {existing_id} not found in this project"))?;
             let existing_kind = ArtifactKind::parse(existing["kind"].as_str().unwrap_or(""))
                 .ok_or_else(|| anyhow!("artifact {existing_id} has an unknown kind"))?;
-            update_artifact(&self.db, &existing_id, existing_kind, kind, &title, &content).await?
+            update_artifact(
+                &self.db,
+                &existing_id,
+                existing_kind,
+                kind,
+                &title,
+                &content,
+            )
+            .await?
         } else {
             create_artifact(
-                &self.db, &self.project_id, kind, &title, &content, "assistant",
-            ).await?
+                &self.db,
+                &self.project_id,
+                kind,
+                &title,
+                &content,
+                "assistant",
+            )
+            .await?
         };
         let id = created["id"].as_str().unwrap_or_default();
         if kind == ArtifactKind::Markdown {
             let _ = crate::deployments::design_cache::on_artifact_changed(
-                self.db.clone(), self.project_id.clone(), id.to_string(),
-            ).await;
+                self.db.clone(),
+                self.project_id.clone(),
+                id.to_string(),
+            )
+            .await;
         }
         Ok(serde_json::to_string(&json!({
             "id":    id,
@@ -117,13 +143,14 @@ impl Tool for GenerateArtifactTool {
 
     fn preview(&self, result: &str) -> String {
         let parsed: Value = serde_json::from_str(result).unwrap_or(Value::Null);
-        let id    = parsed["id"].as_str().unwrap_or_default();
+        let id = parsed["id"].as_str().unwrap_or_default();
         let title = parsed["title"].as_str().unwrap_or("artifact");
         serde_json::to_string(&json!({
             "__type": "link",
             "href":   format!("#/artifacts/{id}"),
             "label":  format!("Open {title}"),
-        })).unwrap_or_else(|_| result.to_string())
+        }))
+        .unwrap_or_else(|_| result.to_string())
     }
 }
 
@@ -133,7 +160,8 @@ mod tests {
 
     #[test]
     fn validate_params_requires_title() {
-        let err = validate_artifact_params(&json!({ "kind": "markdown", "content": "hi" })).unwrap_err();
+        let err =
+            validate_artifact_params(&json!({ "kind": "markdown", "content": "hi" })).unwrap_err();
         assert!(err.to_string().contains("title"));
     }
 
@@ -141,7 +169,8 @@ mod tests {
     fn validate_params_requires_known_kind() {
         let err = validate_artifact_params(&json!({
             "title": "Report", "kind": "docx", "content": "hi"
-        })).unwrap_err();
+        }))
+        .unwrap_err();
         assert!(err.to_string().contains("kind"));
     }
 
@@ -149,7 +178,8 @@ mod tests {
     fn validate_params_requires_content() {
         let err = validate_artifact_params(&json!({
             "title": "Report", "kind": "markdown", "content": ""
-        })).unwrap_err();
+        }))
+        .unwrap_err();
         assert!(err.to_string().contains("content"));
     }
 
@@ -157,7 +187,8 @@ mod tests {
     fn validate_params_accepts_valid_input() {
         let (title, kind, content, artifact_id) = validate_artifact_params(&json!({
             "title": "Report", "kind": "pdf", "content": "# Report"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(title, "Report");
         assert_eq!(kind, ArtifactKind::Pdf);
         assert_eq!(content, "# Report");
@@ -168,7 +199,8 @@ mod tests {
     fn validate_params_accepts_terraform_kind_with_valid_bundle() {
         let (_, kind, _, _) = validate_artifact_params(&json!({
             "title": "Infra", "kind": "terraform", "content": r#"{"main.tf": "..."}"#
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(kind, ArtifactKind::Terraform);
     }
 
@@ -176,7 +208,8 @@ mod tests {
     fn validate_params_rejects_terraform_kind_with_non_bundle_content() {
         let err = validate_artifact_params(&json!({
             "title": "Infra", "kind": "terraform", "content": "# just markdown"
-        })).unwrap_err();
+        }))
+        .unwrap_err();
         assert!(err.to_string().contains("JSON"));
     }
 
@@ -184,7 +217,8 @@ mod tests {
     fn validate_params_passes_through_artifact_id() {
         let (_, _, _, artifact_id) = validate_artifact_params(&json!({
             "title": "Report", "kind": "markdown", "content": "hi", "artifact_id": "art-1"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(artifact_id, Some("art-1".to_string()));
     }
 }

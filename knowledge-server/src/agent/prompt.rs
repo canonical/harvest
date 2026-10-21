@@ -33,7 +33,8 @@ pub fn system_prompt(collocate_enabled: bool) -> String {
 pub fn system_prompt_with_sections(collocate_enabled: bool, flags: PromptSectionFlags) -> String {
     let mut sections = Vec::new();
 
-    sections.push(r#"You are a code analysis assistant. You have access to a PostgreSQL knowledge
+    sections.push(
+        r#"You are a code analysis assistant. You have access to a PostgreSQL knowledge
 graph containing the parsed structure of one or more versioned software
 repositories. It stores repositories, versions, files, symbols (classes and
 functions), inheritance edges, and call edges. You query it with the structured
@@ -61,9 +62,12 @@ start directly with the answer — never with a description of what you did, wha
 you found, or what you are about to explain. Do not begin with phrases like
 "I am examining", "Let me look at", "I will investigate", "Based on my
 research", or "After looking at the code". Start with the substantive claim or
-finding itself."#.to_string());
+finding itself."#
+            .to_string(),
+    );
 
-    sections.push(r#"## Answering Across Variants
+    sections.push(
+        r#"## Answering Across Variants
 
 When a question asks whether something is supported or how something behaves
 across multiple components, drivers, modules, or variants, and the answer
@@ -71,9 +75,12 @@ varies between them, state the variation explicitly up front in your first
 sentence — do not lead with a blanket yes or no. For each variant, state what
 you found. If any variant lacks a capability the question asks about, state
 what happens when that capability is required (an error, a crash, a fallback,
-or silent unsupported behavior)."#.to_string());
+or silent unsupported behavior)."#
+            .to_string(),
+    );
 
-    sections.push(r#"## Locating a Capability's Gating Declaration
+    sections.push(
+        r#"## Locating a Capability's Gating Declaration
 
 When asked whether something supports a capability, the method that implements
 the capability is not enough on its own. Investigate in this order:
@@ -103,10 +110,13 @@ single call, with every claim anchored to a class, a file, and a line. Use
 `get_capability_matrix` on its own when you only need inherited capability
 values, `search_symbols` to locate a declaration, and `read_sources` to batch
 through several files. Reading class bodies one at a time costs more round trips
-than any of these."#.to_string());
+than any of these."#
+            .to_string(),
+    );
 
     if flags.mermaid {
-        sections.push(r#"## Mermaid diagrams
+        sections.push(
+            r#"## Mermaid diagrams
 
 The UI renders fenced ```mermaid code blocks as visual diagrams. Add one only
 when it shows something the prose cannot show as clearly — a call chain, a
@@ -121,18 +131,24 @@ list, a lookup, a yes/no answer, or a short explanation.
   for type hierarchies, state diagrams for state transitions, ER diagrams for
   data models.
 - **Keep it readable.** At most ~8 nodes per diagram; if a topic needs more,
-  split it into several diagrams."#.to_string());
+  split it into several diagrams."#
+                .to_string(),
+        );
     }
 
-    sections.push(r#"## Context Reuse
+    sections.push(
+        r#"## Context Reuse
 
 Before calling any tool, check whether the conversation history already contains
 the answer. If the user is asking a clarifying question about something you just
 discussed, or a follow-up that can be answered from prior tool results in this
 conversation, answer directly from context. Tool calls are for discovering new
-information, not repeating work you already did."#.to_string());
+information, not repeating work you already did."#
+            .to_string(),
+    );
 
-    sections.push(r#"## Parallel Research
+    sections.push(
+        r#"## Parallel Research
 
 Call `propose_parallel_research` instead of continuing to investigate directly
 as soon as you recognize that the remaining work splits into 2-6 leads that are
@@ -151,9 +167,12 @@ Concrete signals that a question is this shape:
 Do not call it for anything that is one continuous chain of reasoning (tracing a
 single call path, debugging one specific function, a narrow factual lookup) —
 splitting those produces a worse answer. When unsure, investigate normally
-instead."#.to_string());
+instead."#
+            .to_string(),
+    );
 
-    sections.push(r#"## Listing Every Implementation
+    sections.push(
+        r#"## Listing Every Implementation
 
 When asked to list all implementations of something — drivers, plugins,
 backends, handlers — enumerate them completely instead of sampling search
@@ -178,9 +197,12 @@ compact table or one line per entry, grouped by file or vendor, with one
 file-level citation per row. When asked for all of something, never answer
 with a sample, "for example", or "includes".
 Never present a partial list as complete: if the list may be incomplete, say
-why (for example a stale index) and what is missing."#.to_string());
+why (for example a stale index) and what is missing."#
+            .to_string(),
+    );
 
-    sections.push(r#"## Knowledge Graph Schema
+    sections.push(
+        r#"## Knowledge Graph Schema
 
 Read-only views, for `run_sql` when it is offered:
 
@@ -200,17 +222,23 @@ Read-only views, for `run_sql` when it is offered:
                       src_file, src_name, dst_id, dst_label, dst_file, dst_name
 
 Filter every query on `repo` and `version`. A class's source starts at its
-`class` line; its decorators are in the `decorators` column."#.to_string());
+`class` line; its decorators are in the `decorators` column."#
+            .to_string(),
+    );
 
-    sections.push(r#"## When NOT to Call Tools
+    sections.push(
+        r#"## When NOT to Call Tools
 
 Do not call any tools for simple greetings ("hi", "hello", "hey"),
 conversational messages, meta-questions about your capabilities, or any
 message that does not ask about specific code. Respond directly in plain
-text without invoking `list_repositories` or any other tool."#.to_string());
+text without invoking `list_repositories` or any other tool."#
+            .to_string(),
+    );
 
     if flags.workflow {
-        sections.push(r#"## Workflow
+        sections.push(
+            r#"## Workflow
 
 When the user asks about code, follow this approach:
 1. Start with `list_repositories` to understand what is available.
@@ -220,11 +248,14 @@ When the user asks about code, follow this approach:
 4. Trace call graphs with `find_callers` / `find_callees`, and class
    hierarchies with `find_subclasses`.
 5. Use `run_sql`, when it is offered, for questions the other tools cannot
-   express (e.g. counts, multi-hop joins, cross-version comparisons)."#.to_string());
+   express (e.g. counts, multi-hop joins, cross-version comparisons)."#
+                .to_string(),
+        );
     }
 
     if flags.cross_repo {
-        sections.push(r#"## Cross-Repository Questions
+        sections.push(
+            r#"## Cross-Repository Questions
 
 When a question involves how two or more repositories relate to each other
 (e.g., "how does X communicate with Y", "what protocol does X use to talk
@@ -232,30 +263,39 @@ to Y"), search BOTH repositories:
 1. List repositories to confirm both are available.
 2. Search for relevant symbols in EACH repository by name.
 3. Retrieve source from both sides to understand the protocol or interface.
-4. Cite sources from both repositories in your answer."#.to_string());
+4. Cite sources from both repositories in your answer."#
+                .to_string(),
+        );
     }
 
-    sections.push(r#"## External Dependencies
+    sections.push(
+        r#"## External Dependencies
 
 The knowledge graph only contains symbols from the ingested repositories.
 If a question involves an external dependency (a library, framework, or
 package not in the repository list), state clearly that the dependency is
 not ingested and cite the repository code that imports or uses it. Do not
 attempt to find the external dependency's source — cite the import site
-instead."#.to_string());
+instead."#
+            .to_string(),
+    );
 
     if flags.test_infra {
-        sections.push(r#"## Finding Test Infrastructure
+        sections.push(
+            r#"## Finding Test Infrastructure
 
 When asked about testing, search for test-related patterns:
 1. Search for symbols named "test", "Test", "mock", "Mock", "fixture", "Fake", "Stub".
 2. Search for files matching patterns like `*test*`, `*spec*`, `conftest`.
 3. List test directories with `search_symbols` using an empty `query` and a
-   `path_prefix` such as `tests/`, to find test base classes."#.to_string());
+   `path_prefix` such as `tests/`, to find test base classes."#
+                .to_string(),
+        );
     }
 
     if flags.citations {
-        sections.push(r#"## Citation Rules
+        sections.push(
+            r#"## Citation Rules
 
 Every factual claim about specific code **must** include an inline citation:
   [repo-name:vX.Y.Z:path/to/file.ext:LINE_NUMBER]
@@ -273,7 +313,9 @@ If a claim is about a file as a whole (e.g. summarizing what a module does)
 rather than one specific location, omit the line number instead of guessing
 one: [repo-name:vX.Y.Z:path/to/file.ext]. Never invent a citation or a line
 number. If you are uncertain about a location, express that uncertainty in
-text rather than guessing."#.to_string());
+text rather than guessing."#
+                .to_string(),
+        );
     }
 
     let collocate = collocate_prompt_section(collocate_enabled);
@@ -284,7 +326,8 @@ text rather than guessing."#.to_string());
     sections.push(ask_user_guidance().to_string());
 
     if flags.mermaid {
-        sections.push(r#"## Inline Graph Snippets
+        sections.push(
+            r#"## Inline Graph Snippets
 
 When an answer would benefit from a visual overview of how a few symbols relate
 to each other, include a fenced code block with language tag `harvest-graph`.
@@ -317,7 +360,9 @@ Format (JSON inside the fence):
 ```
 
 Valid `kind` values: function, method, class, struct, trait, interface, enum, module, impl, type.
-Valid `relation` values: calls, uses, inherits, implements, contains, embeds."#.to_string());
+Valid `relation` values: calls, uses, inherits, implements, contains, embeds."#
+                .to_string(),
+        );
     }
 
     sections.join("\n\n")
@@ -434,7 +479,9 @@ call `collocate_delete_session` when done to free resources immediately.
     }
 }
 
-fn deployment_context_sections(ctx: &crate::deployments::DeploymentContext) -> (String, String, String) {
+fn deployment_context_sections(
+    ctx: &crate::deployments::DeploymentContext,
+) -> (String, String, String) {
     let template_section = match (&ctx.product_template_name, &ctx.product_template_content) {
         (Some(name), Some(content)) if !content.trim().is_empty() => format!(
             "## Product Template: {name}\n\nThis deployment is based on the following reusable \
@@ -469,8 +516,15 @@ fn deployment_context_sections(ctx: &crate::deployments::DeploymentContext) -> (
     let prior_section = if ctx.prior_deployments.is_empty() {
         String::new()
     } else {
-        let bullets = ctx.prior_deployments.iter()
-            .map(|p| format!("- **{}** ({}): {}", p.name, p.infra_state, p.environment_description))
+        let bullets = ctx
+            .prior_deployments
+            .iter()
+            .map(|p| {
+                format!(
+                    "- **{}** ({}): {}",
+                    p.name, p.infra_state, p.environment_description
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         format!("\n\n## Prior Deployments of This Product\n\n{bullets}")
@@ -480,7 +534,8 @@ fn deployment_context_sections(ctx: &crate::deployments::DeploymentContext) -> (
 }
 
 pub fn deployment_system_prompt(ctx: &crate::deployments::DeploymentContext) -> String {
-    let (template_section, design_template_section, prior_section) = deployment_context_sections(ctx);
+    let (template_section, design_template_section, prior_section) =
+        deployment_context_sections(ctx);
 
     format!(
         r#"You are a field engineer's assistant inside Harvest, helping deploy stable, versioned
@@ -615,17 +670,29 @@ mod tests {
     #[test]
     fn system_prompt_presents_evidence_pack_as_the_first_choice() {
         let p = system_prompt(false);
-        assert!(p.contains("get_evidence_pack"), "prompt should mention get_evidence_pack");
+        assert!(
+            p.contains("get_evidence_pack"),
+            "prompt should mention get_evidence_pack"
+        );
         let idx = p.find("get_evidence_pack").unwrap();
         let matrix = p.find("get_capability_matrix").unwrap();
-        assert!(idx < matrix, "the evidence pack should be preferred over the matrix alone");
+        assert!(
+            idx < matrix,
+            "the evidence pack should be preferred over the matrix alone"
+        );
     }
 
     #[test]
     fn system_prompt_encourages_batching_over_one_file_at_a_time() {
         let p = system_prompt(false);
-        assert!(p.contains("read_sources"), "prompt should mention read_sources");
-        assert!(p.contains("search_symbols"), "prompt should mention search_symbols");
+        assert!(
+            p.contains("read_sources"),
+            "prompt should mention read_sources"
+        );
+        assert!(
+            p.contains("search_symbols"),
+            "prompt should mention search_symbols"
+        );
     }
 
     #[test]
@@ -637,9 +704,16 @@ mod tests {
 
     #[test]
     fn system_prompt_has_no_neo4j_era_tools_or_schema() {
-        let prompt = system_prompt_with_sections(false, PromptSectionFlags {
-            citations: true, mermaid: true, workflow: true, cross_repo: true, test_infra: true,
-        });
+        let prompt = system_prompt_with_sections(
+            false,
+            PromptSectionFlags {
+                citations: true,
+                mermaid: true,
+                workflow: true,
+                cross_repo: true,
+                test_infra: true,
+            },
+        );
         assert!(!prompt.contains("run_cypher"));
         assert!(!prompt.contains("MATCH ("));
         assert!(!prompt.contains("HAS_VERSION"));
@@ -649,9 +723,16 @@ mod tests {
 
     #[test]
     fn system_prompt_does_not_ask_for_diagrams_everywhere() {
-        let prompt = system_prompt_with_sections(false, PromptSectionFlags {
-            citations: true, mermaid: true, workflow: true, cross_repo: true, test_infra: true,
-        });
+        let prompt = system_prompt_with_sections(
+            false,
+            PromptSectionFlags {
+                citations: true,
+                mermaid: true,
+                workflow: true,
+                cross_repo: true,
+                test_infra: true,
+            },
+        );
         assert!(!prompt.contains("as often as possible"));
         assert!(prompt.contains("Do not add a diagram to a\nlist"));
     }
@@ -659,7 +740,10 @@ mod tests {
     #[test]
     fn system_prompt_explains_how_to_list_every_implementation() {
         let prompt = system_prompt(false);
-        let section = prompt.split("## Listing Every Implementation").nth(1).expect("section missing");
+        let section = prompt
+            .split("## Listing Every Implementation")
+            .nth(1)
+            .expect("section missing");
         assert!(section.contains("find_subclasses"));
         assert!(section.contains("path_prefix"));
         assert!(section.contains("Never present a partial list as complete"));
@@ -668,7 +752,10 @@ mod tests {
     #[test]
     fn system_prompt_prefers_registration_decorators_and_full_counts() {
         let prompt = system_prompt(false);
-        let section = prompt.split("## Listing Every Implementation").nth(1).expect("section missing");
+        let section = prompt
+            .split("## Listing Every Implementation")
+            .nth(1)
+            .expect("section missing");
         assert!(section.contains("`decorator`"));
         assert!(section.contains("broader ancestor"));
         assert!(section.contains("exact count"));
@@ -805,7 +892,10 @@ mod tests {
         let prompt = deployment_system_prompt(&base_ctx());
         assert!(prompt.contains("Prefer tall over wide"));
         assert!(prompt.contains("rankdir=TB"));
-        assert!(!prompt.contains("rankdir=LR;\n"), "example should no longer default to a wide layout");
+        assert!(
+            !prompt.contains("rankdir=LR;\n"),
+            "example should no longer default to a wide layout"
+        );
     }
 
     #[test]
@@ -877,5 +967,4 @@ mod tests {
         let prompt = system_prompt(false);
         assert!(!prompt.contains("## Collocate Containers"));
     }
-
 }

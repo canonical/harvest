@@ -3,9 +3,9 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use super::tool::Tool;
 use crate::llm::types::ToolDefinition;
 use crate::machines::MachineRegistry;
-use super::tool::Tool;
 
 const LIST_AGENTS_PREVIEW_CHARS: usize = 500;
 const RUN_COMMAND_PREVIEW_CHARS: usize = 2000;
@@ -13,7 +13,7 @@ const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 30;
 const MAX_COMMAND_TIMEOUT_SECS: u64 = 300;
 
 pub struct ListAgentsTool {
-    pub registry:   Arc<MachineRegistry>,
+    pub registry: Arc<MachineRegistry>,
     pub project_id: String,
 }
 
@@ -44,7 +44,7 @@ impl Tool for ListAgentsTool {
 }
 
 pub struct RunCommandTool {
-    pub registry:   Arc<MachineRegistry>,
+    pub registry: Arc<MachineRegistry>,
     pub project_id: String,
 }
 
@@ -91,7 +91,8 @@ impl Tool for RunCommandTool {
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
             .min(MAX_COMMAND_TIMEOUT_SECS);
 
-        let belongs = self.registry
+        let belongs = self
+            .registry
             .agents
             .get(agent_id)
             .map(|a| a.project_id == self.project_id)
@@ -101,7 +102,11 @@ impl Tool for RunCommandTool {
             anyhow::bail!("agent {agent_id} not found in this project");
         }
 
-        match self.registry.execute(agent_id, command.to_string(), timeout_secs).await {
+        match self
+            .registry
+            .execute(agent_id, command.to_string(), timeout_secs)
+            .await
+        {
             Ok(r) => Ok(serde_json::to_string_pretty(&json!({
                 "stdout":    r.stdout,
                 "stderr":    r.stderr,
@@ -116,29 +121,75 @@ impl Tool for RunCommandTool {
     }
 }
 
-const READONLY_FORBIDDEN_SUBSTRINGS: &[&str] = &[
-    ";", "&&", "||", "|", "`", "$(", ">", "<", "sudo",
-];
+const READONLY_FORBIDDEN_SUBSTRINGS: &[&str] = &[";", "&&", "||", "|", "`", "$(", ">", "<", "sudo"];
 
 const CURL_FORBIDDEN_SUBSTRINGS: &[&str] = &[
-    " -d ", " -d'", " -d\"", "--data", "--upload-file", "--form", " -f ",
-    "-x post", "-x put", "-x delete", "-x patch", "--request",
+    " -d ",
+    " -d'",
+    " -d\"",
+    "--data",
+    "--upload-file",
+    "--form",
+    " -f ",
+    "-x post",
+    "-x put",
+    "-x delete",
+    "-x patch",
+    "--request",
 ];
 
 const READONLY_ALLOWED_PREFIXES: &[&str] = &[
-    "cat ", "tail ", "head ", "less ", "grep ", "egrep ", "fgrep ",
+    "cat ",
+    "tail ",
+    "head ",
+    "less ",
+    "grep ",
+    "egrep ",
+    "fgrep ",
     "journalctl",
-    "systemctl status", "systemctl is-active", "systemctl is-enabled",
-    "systemctl is-failed", "systemctl list-units", "systemctl show",
-    "ps", "top -bn1", "df", "du", "free", "uptime", "ls",
-    "id", "whoami", "hostname", "uname",
-    "curl", "ping -c", "ss", "netstat",
-    "nslookup", "dig", "host ",
-    "snap list", "snap services", "snap info",
-    "juju status", "juju show-unit", "juju show-application", "juju show-model", "juju debug-log",
-    "lxc list", "lxc info", "lxc network list", "lxc storage list", "lxc config show",
-    "docker ps", "docker logs", "docker inspect",
-    "kubectl get", "kubectl describe", "kubectl logs",
+    "systemctl status",
+    "systemctl is-active",
+    "systemctl is-enabled",
+    "systemctl is-failed",
+    "systemctl list-units",
+    "systemctl show",
+    "ps",
+    "top -bn1",
+    "df",
+    "du",
+    "free",
+    "uptime",
+    "ls",
+    "id",
+    "whoami",
+    "hostname",
+    "uname",
+    "curl",
+    "ping -c",
+    "ss",
+    "netstat",
+    "nslookup",
+    "dig",
+    "host ",
+    "snap list",
+    "snap services",
+    "snap info",
+    "juju status",
+    "juju show-unit",
+    "juju show-application",
+    "juju show-model",
+    "juju debug-log",
+    "lxc list",
+    "lxc info",
+    "lxc network list",
+    "lxc storage list",
+    "lxc config show",
+    "docker ps",
+    "docker logs",
+    "docker inspect",
+    "kubectl get",
+    "kubectl describe",
+    "kubectl logs",
 ];
 
 fn is_allowed_nc(lower: &str) -> bool {
@@ -153,7 +204,10 @@ fn validate_readonly_command(command: &str) -> Result<()> {
         anyhow::bail!("command is required");
     }
     let lower = trimmed.to_lowercase();
-    if READONLY_FORBIDDEN_SUBSTRINGS.iter().any(|s| lower.contains(s)) {
+    if READONLY_FORBIDDEN_SUBSTRINGS
+        .iter()
+        .any(|s| lower.contains(s))
+    {
         anyhow::bail!(
             "command contains syntax that isn't allowed in this read-only chat \
              (no chaining, redirection, or sudo)"
@@ -162,7 +216,10 @@ fn validate_readonly_command(command: &str) -> Result<()> {
     if lower.starts_with("curl") && CURL_FORBIDDEN_SUBSTRINGS.iter().any(|s| lower.contains(s)) {
         anyhow::bail!("curl may not use mutating flags (-d/--data, --upload-file, --form, -X/--request) in this read-only chat");
     }
-    let allowed = READONLY_ALLOWED_PREFIXES.iter().any(|p| lower.starts_with(p)) || is_allowed_nc(&lower);
+    let allowed = READONLY_ALLOWED_PREFIXES
+        .iter()
+        .any(|p| lower.starts_with(p))
+        || is_allowed_nc(&lower);
     if !allowed {
         anyhow::bail!("command is not on the read-only diagnostic allowlist for this chat");
     }
@@ -170,7 +227,7 @@ fn validate_readonly_command(command: &str) -> Result<()> {
 }
 
 pub struct RunReadOnlyCommandTool {
-    pub registry:   Arc<MachineRegistry>,
+    pub registry: Arc<MachineRegistry>,
     pub project_id: String,
 }
 
@@ -222,7 +279,8 @@ impl Tool for RunReadOnlyCommandTool {
             .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECS)
             .min(MAX_COMMAND_TIMEOUT_SECS);
 
-        let belongs = self.registry
+        let belongs = self
+            .registry
             .agents
             .get(agent_id)
             .map(|a| a.project_id == self.project_id)
@@ -232,7 +290,11 @@ impl Tool for RunReadOnlyCommandTool {
             anyhow::bail!("agent {agent_id} not found in this project");
         }
 
-        match self.registry.execute(agent_id, command.to_string(), timeout_secs).await {
+        match self
+            .registry
+            .execute(agent_id, command.to_string(), timeout_secs)
+            .await
+        {
             Ok(r) => Ok(serde_json::to_string_pretty(&json!({
                 "stdout":    r.stdout,
                 "stderr":    r.stderr,
@@ -258,7 +320,7 @@ mod tests {
     #[tokio::test]
     async fn list_agents_empty_project() {
         let tool = ListAgentsTool {
-            registry:   make_registry(),
+            registry: make_registry(),
             project_id: "proj-1".into(),
         };
         let result = tool.execute(json!({})).await.unwrap();
@@ -269,13 +331,15 @@ mod tests {
     #[tokio::test]
     async fn run_command_unknown_agent_returns_error() {
         let tool = RunCommandTool {
-            registry:   make_registry(),
+            registry: make_registry(),
             project_id: "proj-1".into(),
         };
-        let result = tool.execute(json!({
-            "agent_id": "nonexistent",
-            "command":  "echo hi"
-        })).await;
+        let result = tool
+            .execute(json!({
+                "agent_id": "nonexistent",
+                "command":  "echo hi"
+            }))
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -283,40 +347,51 @@ mod tests {
     #[tokio::test]
     async fn run_command_cross_project_agent_rejected() {
         use crate::machines::{ConnectedAgent, ServerToAgent};
-        use tokio::sync::mpsc;
         use chrono::Utc;
+        use tokio::sync::mpsc;
 
         let registry = make_registry();
         let (tx, _rx) = mpsc::channel::<ServerToAgent>(8);
 
-        registry.agents.insert("agent-x".into(), ConnectedAgent {
-            id:           "agent-x".into(),
-            project_id:   "proj-2".into(),
-            hostname:     "other-host".into(),
-            connected_at: Utc::now(),
-            sender:       tx,
-        });
+        registry.agents.insert(
+            "agent-x".into(),
+            ConnectedAgent {
+                id: "agent-x".into(),
+                project_id: "proj-2".into(),
+                hostname: "other-host".into(),
+                connected_at: Utc::now(),
+                sender: tx,
+            },
+        );
 
         let tool = RunCommandTool {
-            registry:   Arc::clone(&registry),
+            registry: Arc::clone(&registry),
             project_id: "proj-1".into(),
         };
-        let result = tool.execute(json!({
-            "agent_id": "agent-x",
-            "command":  "echo pwned"
-        })).await;
+        let result = tool
+            .execute(json!({
+                "agent_id": "agent-x",
+                "command":  "echo pwned"
+            }))
+            .await;
         assert!(result.is_err(), "cross-project execution must be rejected");
     }
 
     #[test]
     fn list_agents_definition_has_correct_name() {
-        let tool = ListAgentsTool { registry: make_registry(), project_id: "p".into() };
+        let tool = ListAgentsTool {
+            registry: make_registry(),
+            project_id: "p".into(),
+        };
         assert_eq!(tool.definition().name, "list_agents");
     }
 
     #[test]
     fn run_command_definition_has_correct_name() {
-        let tool = RunCommandTool { registry: make_registry(), project_id: "p".into() };
+        let tool = RunCommandTool {
+            registry: make_registry(),
+            project_id: "p".into(),
+        };
         assert_eq!(tool.definition().name, "run_command");
     }
 
@@ -329,14 +404,25 @@ mod tests {
             "systemctl status landscape-server",
             "systemctl is-active postgresql",
         ] {
-            assert!(validate_readonly_command(cmd).is_ok(), "expected {cmd:?} to be allowed");
+            assert!(
+                validate_readonly_command(cmd).is_ok(),
+                "expected {cmd:?} to be allowed"
+            );
         }
     }
 
     #[test]
     fn validate_readonly_command_accepts_connectivity_checks() {
-        for cmd in ["curl -sS http://localhost:8080/health", "curl -I https://example.com", "ping -c 3 10.0.0.1", "nc -zv 10.0.0.1 5432"] {
-            assert!(validate_readonly_command(cmd).is_ok(), "expected {cmd:?} to be allowed");
+        for cmd in [
+            "curl -sS http://localhost:8080/health",
+            "curl -I https://example.com",
+            "ping -c 3 10.0.0.1",
+            "nc -zv 10.0.0.1 5432",
+        ] {
+            assert!(
+                validate_readonly_command(cmd).is_ok(),
+                "expected {cmd:?} to be allowed"
+            );
         }
     }
 
@@ -351,7 +437,10 @@ mod tests {
             "cat `whoami`",
             "sudo systemctl restart landscape-server",
         ] {
-            assert!(validate_readonly_command(cmd).is_err(), "expected {cmd:?} to be rejected");
+            assert!(
+                validate_readonly_command(cmd).is_err(),
+                "expected {cmd:?} to be rejected"
+            );
         }
     }
 
@@ -367,7 +456,10 @@ mod tests {
             "rm -rf /var/lib/postgresql",
             "lxc launch ubuntu:22.04 test",
         ] {
-            assert!(validate_readonly_command(cmd).is_err(), "expected {cmd:?} to be rejected");
+            assert!(
+                validate_readonly_command(cmd).is_err(),
+                "expected {cmd:?} to be rejected"
+            );
         }
     }
 
@@ -379,7 +471,10 @@ mod tests {
             "curl -d 'a=1' http://localhost/api",
             "curl --upload-file file.tf http://localhost/upload",
         ] {
-            assert!(validate_readonly_command(cmd).is_err(), "expected {cmd:?} to be rejected");
+            assert!(
+                validate_readonly_command(cmd).is_err(),
+                "expected {cmd:?} to be rejected"
+            );
         }
     }
 
@@ -395,28 +490,44 @@ mod tests {
 
     #[tokio::test]
     async fn run_readonly_command_rejects_mutating_command_before_dispatch() {
-        let tool = RunReadOnlyCommandTool { registry: make_registry(), project_id: "p".into() };
-        let result = tool.execute(json!({
-            "agent_id": "nonexistent",
-            "command":  "systemctl restart landscape-server",
-        })).await;
+        let tool = RunReadOnlyCommandTool {
+            registry: make_registry(),
+            project_id: "p".into(),
+        };
+        let result = tool
+            .execute(json!({
+                "agent_id": "nonexistent",
+                "command":  "systemctl restart landscape-server",
+            }))
+            .await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("read-only") || err.contains("allowlist"), "unexpected error: {err}");
+        assert!(
+            err.contains("read-only") || err.contains("allowlist"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
     async fn run_readonly_command_unknown_agent_returns_error() {
-        let tool = RunReadOnlyCommandTool { registry: make_registry(), project_id: "p".into() };
-        let result = tool.execute(json!({
-            "agent_id": "nonexistent",
-            "command":  "systemctl status foo",
-        })).await;
+        let tool = RunReadOnlyCommandTool {
+            registry: make_registry(),
+            project_id: "p".into(),
+        };
+        let result = tool
+            .execute(json!({
+                "agent_id": "nonexistent",
+                "command":  "systemctl status foo",
+            }))
+            .await;
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
     #[test]
     fn run_readonly_command_definition_has_correct_name() {
-        let tool = RunReadOnlyCommandTool { registry: make_registry(), project_id: "p".into() };
+        let tool = RunReadOnlyCommandTool {
+            registry: make_registry(),
+            project_id: "p".into(),
+        };
         assert_eq!(tool.definition().name, "run_command");
     }
 }
