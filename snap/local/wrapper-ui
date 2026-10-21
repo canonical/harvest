@@ -27,7 +27,7 @@ fi
 
 API_BLOCK=""
 if [ "$UI_MODE" != "static" ]; then
-  API_BLOCK="	@api path_regexp ^/(auth|admin|conversations|groups|projects|query|repositories|graph|health|version|metrics|tool-description|docs|skills|agents|agent|llm|artifacts|templates|chat-layouts|machines)(/|\$)
+  API_BLOCK="	@api path_regexp ^/(auth|admin|api-keys|conversations|groups|projects|query|repositories|graph|health|version|metrics|tool-description|docs|skills|agents|agent|llm|artifacts|templates|chat-layouts|machines|v1)(/|\$)
 
 	handle @api {
 		reverse_proxy ${SERVER_HOST}:${SERVER_PORT} {
