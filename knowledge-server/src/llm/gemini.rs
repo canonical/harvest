@@ -7,7 +7,10 @@ use tokio::sync::mpsc;
 
 use super::{
     retry,
-    types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role, StreamEvent, ToolCall, ToolDefinition, Usage},
+    types::{
+        ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role,
+        StreamEvent, ToolCall, ToolDefinition, Usage,
+    },
     LlmProvider,
 };
 
@@ -46,12 +49,25 @@ pub struct GeminiProvider {
 }
 
 impl GeminiProvider {
-    pub fn new(model: String, api_key: String, timeout_secs: u64, max_retries: u32, meta: ProviderMeta) -> Self {
+    pub fn new(
+        model: String,
+        api_key: String,
+        timeout_secs: u64,
+        max_retries: u32,
+        meta: ProviderMeta,
+    ) -> Self {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .expect("failed to build HTTP client");
-        Self { model, api_key, client, base_url: API_BASE.to_string(), max_retries, meta }
+        Self {
+            model,
+            api_key,
+            client,
+            base_url: API_BASE.to_string(),
+            max_retries,
+            meta,
+        }
     }
 
     pub fn with_base_url(mut self, url: impl Into<String>) -> Self {
@@ -60,11 +76,17 @@ impl GeminiProvider {
     }
 
     fn endpoint_url(&self, model: &str) -> String {
-        format!("{}/{}:generateContent?key={}", self.base_url, model, self.api_key)
+        format!(
+            "{}/{}:generateContent?key={}",
+            self.base_url, model, self.api_key
+        )
     }
 
     fn stream_endpoint_url(&self, model: &str) -> String {
-        format!("{}/{}:streamGenerateContent?alt=sse&key={}", self.base_url, model, self.api_key)
+        format!(
+            "{}/{}:streamGenerateContent?alt=sse&key={}",
+            self.base_url, model, self.api_key
+        )
     }
 
     fn models_url(&self) -> String {
@@ -80,28 +102,37 @@ pub fn build_embedding_body(model: &str, inputs: &[String]) -> Result<Value> {
     if inputs.is_empty() {
         bail!("embedding batch is empty");
     }
-    let requests: Vec<Value> = inputs.iter().map(|text| {
-        json!({
-            "model": format!("models/{model}"),
-            "content": { "parts": [{ "text": text }] },
+    let requests: Vec<Value> = inputs
+        .iter()
+        .map(|text| {
+            json!({
+                "model": format!("models/{model}"),
+                "content": { "parts": [{ "text": text }] },
+            })
         })
-    }).collect();
+        .collect();
     Ok(json!({ "requests": requests }))
 }
 
 pub fn parse_embeddings(json: &Value) -> Result<Vec<Vec<f32>>> {
-    let items = json["embeddings"].as_array()
+    let items = json["embeddings"]
+        .as_array()
         .ok_or_else(|| anyhow!("embedding response has no embeddings array: {json}"))?;
     if items.is_empty() {
         bail!("embedding response contained no vectors");
     }
     let mut out = Vec::with_capacity(items.len());
     for item in items {
-        let values = item["values"].as_array()
+        let values = item["values"]
+            .as_array()
             .ok_or_else(|| anyhow!("embedding entry has no values: {item}"))?;
         let mut vec = Vec::with_capacity(values.len());
         for v in values {
-            vec.push(v.as_f64().ok_or_else(|| anyhow!("embedding value is not a number: {v}"))? as f32);
+            vec.push(
+                v.as_f64()
+                    .ok_or_else(|| anyhow!("embedding value is not a number: {v}"))?
+                    as f32,
+            );
         }
         if vec.is_empty() {
             bail!("embedding entry was an empty vector");
@@ -126,7 +157,8 @@ pub fn with_dimensions(mut body: Value, dimensions: Option<usize>) -> Result<Val
             if d == 0 {
                 bail!("embedding dimensions must be greater than zero");
             }
-            let requests = body["requests"].as_array_mut()
+            let requests = body["requests"]
+                .as_array_mut()
                 .ok_or_else(|| anyhow!("embedding body has no requests array"))?;
             for req in requests.iter_mut() {
                 req["outputDimensionality"] = json!(d);
@@ -160,18 +192,25 @@ impl GeminiProvider {
                 inputs.len()
             );
         }
-        let body = with_dimensions(build_embedding_body(model, inputs)?, Some(dimensions.unwrap_or(DEFAULT_EMBEDDING_DIMENSIONS)))?;
+        let body = with_dimensions(
+            build_embedding_body(model, inputs)?,
+            Some(dimensions.unwrap_or(DEFAULT_EMBEDDING_DIMENSIONS)),
+        )?;
         let url = embedding_endpoint(&self.base_url, model);
         let response = retry::send_with_retry(
             self.max_retries,
             OVERLOAD_STATUS_CODES,
             "Gemini embeddings",
             || self.client.post(&url).json(&body).send(),
-        ).await?;
+        )
+        .await?;
         let status = response.status();
         let body_text = response.text().await?;
-        let json: Value = serde_json::from_str(&body_text)
-            .map_err(|e| anyhow!("Gemini embedding API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+        let json: Value = serde_json::from_str(&body_text).map_err(|e| {
+            anyhow!(
+                "Gemini embedding API returned non-JSON (status {status}): {e}\nbody: {body_text}"
+            )
+        })?;
         if !status.is_success() {
             bail!("Gemini embedding API error {status}: {json}");
         }
@@ -179,7 +218,10 @@ impl GeminiProvider {
         let first = vecs[0].len();
         for v in &vecs {
             if v.len() != first {
-                bail!("embedding dimensions are inconsistent: expected {first}, received {}", v.len());
+                bail!(
+                    "embedding dimensions are inconsistent: expected {first}, received {}",
+                    v.len()
+                );
             }
         }
         Ok(vecs)
@@ -188,57 +230,100 @@ impl GeminiProvider {
 
 #[async_trait]
 impl LlmProvider for GeminiProvider {
-    fn id(&self) -> &str { &self.meta.id }
-    fn kind(&self) -> &str { "gemini" }
-    fn default_model(&self) -> &str { &self.model }
-    fn expose_to_ui(&self) -> bool { self.meta.expose_to_ui }
-    fn user_provided_key(&self) -> bool { self.meta.user_provided_key }
-    fn name(&self) -> Option<&str> { self.meta.name.as_deref() }
-    fn configured_models(&self) -> Option<&[String]> { self.meta.models.as_deref() }
+    fn id(&self) -> &str {
+        &self.meta.id
+    }
+    fn kind(&self) -> &str {
+        "gemini"
+    }
+    fn default_model(&self) -> &str {
+        &self.model
+    }
+    fn expose_to_ui(&self) -> bool {
+        self.meta.expose_to_ui
+    }
+    fn user_provided_key(&self) -> bool {
+        self.meta.user_provided_key
+    }
+    fn name(&self) -> Option<&str> {
+        self.meta.name.as_deref()
+    }
+    fn configured_models(&self) -> Option<&[String]> {
+        self.meta.models.as_deref()
+    }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        let fallback = vec![ModelInfo { id: self.model.clone(), display_name: None }];
-        let Ok(response) = self.client.get(self.models_url()).send().await else { return Ok(fallback) };
+        let fallback = vec![ModelInfo {
+            id: self.model.clone(),
+            display_name: None,
+        }];
+        let Ok(response) = self.client.get(self.models_url()).send().await else {
+            return Ok(fallback);
+        };
         if !response.status().is_success() {
             return Ok(fallback);
         }
-        let Ok(json) = response.json::<Value>().await else { return Ok(fallback) };
-        let Some(models) = json["models"].as_array() else { return Ok(fallback) };
-        let parsed: Vec<ModelInfo> = models.iter()
+        let Ok(json) = response.json::<Value>().await else {
+            return Ok(fallback);
+        };
+        let Some(models) = json["models"].as_array() else {
+            return Ok(fallback);
+        };
+        let parsed: Vec<ModelInfo> = models
+            .iter()
             .filter(|m| {
-                m["supportedGenerationMethods"].as_array()
-                    .map(|methods| methods.iter().any(|v| v.as_str() == Some("generateContent")))
+                m["supportedGenerationMethods"]
+                    .as_array()
+                    .map(|methods| {
+                        methods
+                            .iter()
+                            .any(|v| v.as_str() == Some("generateContent"))
+                    })
                     .unwrap_or(false)
             })
             .filter(|m| {
-                m["name"].as_str()
+                m["name"]
+                    .as_str()
                     .map(|name| is_chat_model(name.strip_prefix("models/").unwrap_or(name)))
                     .unwrap_or(false)
             })
-            .filter_map(|m| m["name"].as_str().map(|name| ModelInfo {
-                id: name.strip_prefix("models/").unwrap_or(name).to_string(),
-                display_name: m["displayName"].as_str().map(str::to_string),
-            }))
+            .filter_map(|m| {
+                m["name"].as_str().map(|name| ModelInfo {
+                    id: name.strip_prefix("models/").unwrap_or(name).to_string(),
+                    display_name: m["displayName"].as_str().map(str::to_string),
+                })
+            })
             .collect();
-        if parsed.is_empty() { Ok(fallback) } else { Ok(parsed) }
+        if parsed.is_empty() {
+            Ok(fallback)
+        } else {
+            Ok(parsed)
+        }
     }
 
-    async fn chat_with(&self, model: Option<&str>, messages: &[Message], tools: &[ToolDefinition]) -> Result<LlmResponse> {
+    async fn chat_with(
+        &self,
+        model: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<LlmResponse> {
         let resolved_model = model.unwrap_or(&self.model);
         let body = build_body(resolved_model, messages, tools);
         let url = self.endpoint_url(resolved_model);
 
-        let response = retry::send_with_retry(
-            self.max_retries,
-            OVERLOAD_STATUS_CODES,
-            "Gemini",
-            || self.client.post(&url).json(&body).send(),
-        ).await?;
+        let response =
+            retry::send_with_retry(self.max_retries, OVERLOAD_STATUS_CODES, "Gemini", || {
+                self.client.post(&url).json(&body).send()
+            })
+            .await?;
 
         let status = response.status();
         let body_text = response.text().await?;
-        let json: Value = serde_json::from_str(&body_text)
-            .map_err(|e| anyhow::anyhow!("Gemini API returned non-JSON (status {status}): {e}\nbody: {body_text}"))?;
+        let json: Value = serde_json::from_str(&body_text).map_err(|e| {
+            anyhow::anyhow!(
+                "Gemini API returned non-JSON (status {status}): {e}\nbody: {body_text}"
+            )
+        })?;
 
         if !status.is_success() {
             bail!("Gemini API error {status}: {json}");
@@ -270,12 +355,11 @@ impl GeminiProvider {
         let body = build_body(resolved_model, messages, tools);
         let url = self.stream_endpoint_url(resolved_model);
 
-        let response = retry::send_with_retry(
-            self.max_retries,
-            OVERLOAD_STATUS_CODES,
-            "Gemini",
-            || self.client.post(&url).json(&body).send(),
-        ).await?;
+        let response =
+            retry::send_with_retry(self.max_retries, OVERLOAD_STATUS_CODES, "Gemini", || {
+                self.client.post(&url).json(&body).send()
+            })
+            .await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -305,8 +389,17 @@ impl GeminiProvider {
                     .map(|l| l[5..].trim().to_string());
 
                 let Some(data) = data_line else { continue };
-                let Ok(json) = serde_json::from_str::<Value>(&data) else { continue };
-                process_stream_event(&json, &mut saw_tool_call, &mut finish_reason, &mut usage, &tx).await?;
+                let Ok(json) = serde_json::from_str::<Value>(&data) else {
+                    continue;
+                };
+                process_stream_event(
+                    &json,
+                    &mut saw_tool_call,
+                    &mut finish_reason,
+                    &mut usage,
+                    &tx,
+                )
+                .await?;
             }
         }
 
@@ -381,14 +474,16 @@ async fn process_stream_event(
         });
     }
 
-    let Some(parts) = candidate["content"]["parts"].as_array() else { return Ok(()) };
+    let Some(parts) = candidate["content"]["parts"].as_array() else {
+        return Ok(());
+    };
     for part in parts {
         if let Some(fc) = part.get("functionCall") {
             let name = fc["name"].as_str().unwrap_or("").to_string();
             let call = ToolCall {
-                id:                name.clone(),
+                id: name.clone(),
                 name,
-                input:             fc["args"].clone(),
+                input: fc["args"].clone(),
                 thought_signature: part["thoughtSignature"].as_str().map(str::to_string),
             };
             *saw_tool_call = true;
@@ -396,12 +491,24 @@ async fn process_stream_event(
             continue;
         }
 
-        let Some(text) = part["text"].as_str() else { continue };
-        if text.is_empty() { continue; }
+        let Some(text) = part["text"].as_str() else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
         if part["thought"].as_bool().unwrap_or(false) {
-            let _ = tx.send(StreamEvent::ThinkingDelta { text: text.to_string() }).await;
+            let _ = tx
+                .send(StreamEvent::ThinkingDelta {
+                    text: text.to_string(),
+                })
+                .await;
         } else {
-            let _ = tx.send(StreamEvent::TextDelta { text: text.to_string() }).await;
+            let _ = tx
+                .send(StreamEvent::TextDelta {
+                    text: text.to_string(),
+                })
+                .await;
         }
     }
 
@@ -411,38 +518,54 @@ async fn process_stream_event(
 fn to_gemini_message(msg: &Message) -> Value {
     let role = match msg.role {
         Role::User | Role::Tool => "user",
-        Role::Assistant         => "model",
-        Role::System            => unreachable!("system filtered before calling to_gemini_message"),
+        Role::Assistant => "model",
+        Role::System => unreachable!("system filtered before calling to_gemini_message"),
     };
 
     match &msg.content {
         MessageContent::Text(t) => json!({ "role": role, "parts": [{ "text": t }] }),
         MessageContent::Parts(parts) => {
-            let gemini_parts: Vec<Value> = parts.iter().map(|p| match p {
-                ContentPart::Text { text, thought_signature } => {
-                    let mut part = json!({ "text": text });
-                    if let Some(sig) = thought_signature {
-                        part["thoughtSignature"] = json!(sig);
+            let gemini_parts: Vec<Value> = parts
+                .iter()
+                .map(|p| match p {
+                    ContentPart::Text {
+                        text,
+                        thought_signature,
+                    } => {
+                        let mut part = json!({ "text": text });
+                        if let Some(sig) = thought_signature {
+                            part["thoughtSignature"] = json!(sig);
+                        }
+                        part
                     }
-                    part
-                }
-                ContentPart::ToolUse { name, input, thought_signature, .. } => {
-                    let mut part = json!({ "functionCall": { "name": name, "args": input } });
-                    if let Some(sig) = thought_signature {
-                        part["thoughtSignature"] = json!(sig);
+                    ContentPart::ToolUse {
+                        name,
+                        input,
+                        thought_signature,
+                        ..
+                    } => {
+                        let mut part = json!({ "functionCall": { "name": name, "args": input } });
+                        if let Some(sig) = thought_signature {
+                            part["thoughtSignature"] = json!(sig);
+                        }
+                        part
                     }
-                    part
-                }
-                ContentPart::ToolResult { tool_use_id, content, .. } =>
-                    json!({ "functionResponse": {
+                    ContentPart::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } => json!({ "functionResponse": {
                         "name": tool_use_id,
                         "response": { "result": content }
                     }}),
-                ContentPart::Image { media_type, data } =>
-                    json!({ "inlineData": { "mimeType": media_type, "data": data } }),
-                ContentPart::Document { media_type, data } =>
-                    json!({ "inlineData": { "mimeType": media_type, "data": data } }),
-            }).collect();
+                    ContentPart::Image { media_type, data } => {
+                        json!({ "inlineData": { "mimeType": media_type, "data": data } })
+                    }
+                    ContentPart::Document { media_type, data } => {
+                        json!({ "inlineData": { "mimeType": media_type, "data": data } })
+                    }
+                })
+                .collect();
             json!({ "role": role, "parts": gemini_parts })
         }
     }
@@ -470,11 +593,11 @@ fn usage_from_gemini(json: &Value) -> Usage {
         return Usage::default();
     }
     Usage {
-        input_tokens:         u["promptTokenCount"].as_u64().unwrap_or(0),
-        output_tokens:        u["candidatesTokenCount"].as_u64().unwrap_or(0),
-        cache_read_tokens:    u["cachedContentTokenCount"].as_u64().unwrap_or(0),
+        input_tokens: u["promptTokenCount"].as_u64().unwrap_or(0),
+        output_tokens: u["candidatesTokenCount"].as_u64().unwrap_or(0),
+        cache_read_tokens: u["cachedContentTokenCount"].as_u64().unwrap_or(0),
         cache_creation_tokens: 0,
-        reasoning_tokens:     u["thoughtsTokenCount"].as_u64().unwrap_or(0),
+        reasoning_tokens: u["thoughtsTokenCount"].as_u64().unwrap_or(0),
     }
 }
 
@@ -489,30 +612,40 @@ fn parse_gemini_response(json: Value) -> Result<LlmResponse> {
         .cloned()
         .unwrap_or_default();
 
-    let function_calls: Vec<&Value> = parts.iter()
+    let function_calls: Vec<&Value> = parts
+        .iter()
         .filter(|p| p.get("functionCall").is_some())
         .collect();
 
     if !function_calls.is_empty() {
-        let calls = function_calls.iter().map(|p| {
-            let fc = &p["functionCall"];
-            let name = fc["name"].as_str().unwrap_or("").to_string();
-            ToolCall {
-                id:                name.clone(),
-                name,
-                input:             fc["args"].clone(),
-                thought_signature: p["thoughtSignature"].as_str().map(|s| s.to_string()),
-            }
-        }).collect();
-        let preamble = parts.iter()
+        let calls = function_calls
+            .iter()
+            .map(|p| {
+                let fc = &p["functionCall"];
+                let name = fc["name"].as_str().unwrap_or("").to_string();
+                ToolCall {
+                    id: name.clone(),
+                    name,
+                    input: fc["args"].clone(),
+                    thought_signature: p["thoughtSignature"].as_str().map(|s| s.to_string()),
+                }
+            })
+            .collect();
+        let preamble = parts
+            .iter()
             .filter(|p| p.get("text").is_some())
             .filter_map(|p| p["text"].as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        return Ok(LlmResponse::ToolCalls { calls, preamble, usage });
+        return Ok(LlmResponse::ToolCalls {
+            calls,
+            preamble,
+            usage,
+        });
     }
 
-    let text = parts.iter()
+    let text = parts
+        .iter()
         .filter(|p| p.get("text").is_some() && !p["thought"].as_bool().unwrap_or(false))
         .filter_map(|p| p["text"].as_str())
         .collect::<Vec<_>>()
@@ -528,10 +661,15 @@ mod tests {
     use serde_json::json;
 
     fn make_provider(base_url: &str) -> GeminiProvider {
-        GeminiProvider::new("gemini-test".into(), "test-key".into(), 30, 0, ProviderMeta::new("gemini-1"))
-            .with_base_url(base_url)
+        GeminiProvider::new(
+            "gemini-test".into(),
+            "test-key".into(),
+            30,
+            0,
+            ProviderMeta::new("gemini-1"),
+        )
+        .with_base_url(base_url)
     }
-
 
     fn embedding_response(n: usize) -> serde_json::Value {
         json!({ "embeddings": (0..n).map(|i| json!({ "values": vec![i as f64, 0.5, -0.25] })).collect::<Vec<_>>() })
@@ -560,9 +698,21 @@ mod tests {
 
     #[tokio::test]
     async fn embed_posts_to_the_batch_endpoint_and_returns_vectors() {
-        let server = embed_server("/v1beta/models/text-embedding-004:batchEmbedContents", 200, embedding_response(2).to_string(), None);
+        let server = embed_server(
+            "/v1beta/models/text-embedding-004:batchEmbedContents",
+            200,
+            embedding_response(2).to_string(),
+            None,
+        );
         let p = make_provider(&server.url(""));
-        let out = p.embed(&["a".to_string(), "b".to_string()], "text-embedding-004", Some(3)).await.unwrap();
+        let out = p
+            .embed(
+                &["a".to_string(), "b".to_string()],
+                "text-embedding-004",
+                Some(3),
+            )
+            .await
+            .unwrap();
         assert_eq!(out, vec![vec![0.0, 0.5, -0.25], vec![1.0, 0.5, -0.25]]);
     }
 
@@ -587,14 +737,25 @@ mod tests {
             Some(("outputDimensionality", true)),
         );
         let p = make_provider(&server.url(""));
-        p.embed(&["a".to_string()], "text-embedding-004", Some(768)).await.unwrap();
+        p.embed(&["a".to_string()], "text-embedding-004", Some(768))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn embed_surfaces_a_non_json_error_body() {
-        let server = embed_server("/v1beta/models/m:batchEmbedContents", 500, "<html>boom</html>".to_string(), None);
+        let server = embed_server(
+            "/v1beta/models/m:batchEmbedContents",
+            500,
+            "<html>boom</html>".to_string(),
+            None,
+        );
         let p = make_provider(&server.url(""));
-        let err = p.embed(&["a".to_string()], "m", None).await.unwrap_err().to_string();
+        let err = p
+            .embed(&["a".to_string()], "m", None)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("non-JSON"), "unexpected error: {err}");
         assert!(err.contains("boom"), "the body should be included: {err}");
     }
@@ -608,21 +769,33 @@ mod tests {
             None,
         );
         let p = make_provider(&server.url(""));
-        let err = p.embed(&["a".to_string()], "m", None).await.unwrap_err().to_string();
+        let err = p
+            .embed(&["a".to_string()], "m", None)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("429"), "unexpected error: {err}");
         assert!(err.contains("quota"), "unexpected error: {err}");
     }
 
     #[tokio::test]
     async fn embed_rejects_a_short_response() {
-        let server = embed_server("/v1beta/models/m:batchEmbedContents", 200, embedding_response(1).to_string(), None);
+        let server = embed_server(
+            "/v1beta/models/m:batchEmbedContents",
+            200,
+            embedding_response(1).to_string(),
+            None,
+        );
         let p = make_provider(&server.url(""));
         let err = p
             .embed(&["a".to_string(), "b".to_string()], "m", None)
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("expected 2 embeddings"), "unexpected error: {err}");
+        assert!(
+            err.contains("expected 2 embeddings"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]
@@ -651,7 +824,11 @@ mod tests {
     #[tokio::test]
     async fn embed_rejects_zero_dimensions() {
         let p = make_provider("http://127.0.0.1:1");
-        let err = p.embed(&["a".to_string()], "m", Some(0)).await.unwrap_err().to_string();
+        let err = p
+            .embed(&["a".to_string()], "m", Some(0))
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("greater than zero"), "unexpected error: {err}");
     }
 
@@ -680,8 +857,13 @@ mod tests {
     #[tokio::test]
     async fn embed_rejects_an_oversized_batch() {
         let p = make_provider("http://unused.invalid");
-        let inputs: Vec<String> = (0..=EMBEDDING_BATCH_MAX).map(|i| format!("input {i}")).collect();
-        let err = p.embed(&inputs, DEFAULT_EMBEDDING_MODEL, None).await.unwrap_err();
+        let inputs: Vec<String> = (0..=EMBEDDING_BATCH_MAX)
+            .map(|i| format!("input {i}"))
+            .collect();
+        let err = p
+            .embed(&inputs, DEFAULT_EMBEDDING_MODEL, None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("exceeds the Gemini limit"));
     }
 
@@ -695,16 +877,28 @@ mod tests {
             None,
         );
         let p = make_provider(&server.url(""));
-        let inputs: Vec<String> = (0..EMBEDDING_BATCH_MAX).map(|i| format!("input {i}")).collect();
-        let out = p.embed(&inputs, DEFAULT_EMBEDDING_MODEL, None).await.unwrap();
+        let inputs: Vec<String> = (0..EMBEDDING_BATCH_MAX)
+            .map(|i| format!("input {i}"))
+            .collect();
+        let out = p
+            .embed(&inputs, DEFAULT_EMBEDDING_MODEL, None)
+            .await
+            .unwrap();
         assert_eq!(out.len(), EMBEDDING_BATCH_MAX);
         assert!(dimensions_match(&out[0], &out[EMBEDDING_BATCH_MAX - 1]));
     }
 
     #[test]
     fn embedding_body_uses_the_configured_model_and_dimensionality() {
-        let body = build_embedding_body("text-embedding-004", &["hello".to_string(), "world".to_string()]).unwrap();
-        assert!(body.get("model").is_none(), "the batch body carries the model per request");
+        let body = build_embedding_body(
+            "text-embedding-004",
+            &["hello".to_string(), "world".to_string()],
+        )
+        .unwrap();
+        assert!(
+            body.get("model").is_none(),
+            "the batch body carries the model per request"
+        );
         let reqs = body["requests"].as_array().unwrap();
         assert_eq!(reqs.len(), 2);
         assert_eq!(reqs[0]["model"], "models/text-embedding-004");
@@ -741,7 +935,10 @@ mod tests {
     fn parse_embeddings_rejects_a_count_mismatch() {
         let json = json!({ "embeddings": [{ "values": [0.1] }] });
         let err = parse_embeddings_checked(&json, 2).unwrap_err();
-        assert!(err.to_string().contains("expected 2"), "unexpected error: {err}");
+        assert!(
+            err.to_string().contains("expected 2"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -770,7 +967,8 @@ mod tests {
     async fn embed_returns_one_vector_per_input_in_order() {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
-            when.method("POST").path("/v1beta/models/text-embedding-004:batchEmbedContents");
+            when.method("POST")
+                .path("/v1beta/models/text-embedding-004:batchEmbedContents");
             then.status(200).json_body(json!({
                 "embeddings": [
                     { "values": [0.1, 0.2] },
@@ -779,7 +977,14 @@ mod tests {
             }));
         });
         let provider = make_provider(&server.base_url());
-        let out = provider.embed(&["first".to_string(), "second".to_string()], "text-embedding-004", None).await.unwrap();
+        let out = provider
+            .embed(
+                &["first".to_string(), "second".to_string()],
+                "text-embedding-004",
+                None,
+            )
+            .await
+            .unwrap();
         assert_eq!(out, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
         mock.assert();
     }
@@ -789,10 +994,14 @@ mod tests {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
             when.method("POST");
-            then.status(429).json_body(json!({ "error": { "message": "quota" } }));
+            then.status(429)
+                .json_body(json!({ "error": { "message": "quota" } }));
         });
         let provider = make_provider(&server.base_url());
-        let err = provider.embed(&["x".to_string()], "text-embedding-004", None).await.unwrap_err();
+        let err = provider
+            .embed(&["x".to_string()], "text-embedding-004", None)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("429"), "unexpected error: {err}");
         mock.assert();
     }
@@ -805,7 +1014,10 @@ mod tests {
             then.status(200).body("<html>gateway</html>");
         });
         let provider = make_provider(&server.base_url());
-        assert!(provider.embed(&["x".to_string()], "text-embedding-004", None).await.is_err());
+        assert!(provider
+            .embed(&["x".to_string()], "text-embedding-004", None)
+            .await
+            .is_err());
         mock.assert();
     }
 
@@ -904,15 +1116,17 @@ mod tests {
         let msg = Message {
             role: Role::Assistant,
             content: MessageContent::Parts(vec![ContentPart::ToolUse {
-                id:                "search".into(),
-                name:              "search".into(),
-                input:             json!({}),
+                id: "search".into(),
+                name: "search".into(),
+                input: json!({}),
                 thought_signature: Some("CsIBCsMB==".into()),
             }]),
         };
         let v = to_gemini_message(&msg);
         assert_eq!(v["parts"][0]["thoughtSignature"], "CsIBCsMB==");
-        assert!(v["parts"][0]["functionCall"].get("thoughtSignature").is_none());
+        assert!(v["parts"][0]["functionCall"]
+            .get("thoughtSignature")
+            .is_none());
     }
 
     #[test]
@@ -920,15 +1134,17 @@ mod tests {
         let msg = Message {
             role: Role::Assistant,
             content: MessageContent::Parts(vec![ContentPart::ToolUse {
-                id:                "search".into(),
-                name:              "search".into(),
-                input:             json!({}),
+                id: "search".into(),
+                name: "search".into(),
+                input: json!({}),
                 thought_signature: None,
             }]),
         };
         let v = to_gemini_message(&msg);
-        assert!(v["parts"][0].get("thoughtSignature").is_none()
-            || v["parts"][0]["thoughtSignature"].is_null());
+        assert!(
+            v["parts"][0].get("thoughtSignature").is_none()
+                || v["parts"][0]["thoughtSignature"].is_null()
+        );
     }
 
     #[test]
@@ -1024,9 +1240,9 @@ mod tests {
         let msg = Message {
             role: Role::Assistant,
             content: MessageContent::Parts(vec![ContentPart::ToolUse {
-                id:                "ignored_id".into(),
-                name:              "search".into(),
-                input:             json!({ "q": "rust" }),
+                id: "ignored_id".into(),
+                name: "search".into(),
+                input: json!({ "q": "rust" }),
                 thought_signature: None,
             }]),
         };
@@ -1043,8 +1259,8 @@ mod tests {
             role: Role::User,
             content: MessageContent::Parts(vec![ContentPart::ToolResult {
                 tool_use_id: "search".into(),
-                content:     "found it".into(),
-                is_error:    false,
+                content: "found it".into(),
+                is_error: false,
             }]),
         };
         let v = to_gemini_message(&msg);
@@ -1059,8 +1275,14 @@ mod tests {
         let msg = Message {
             role: Role::User,
             content: MessageContent::Parts(vec![
-                ContentPart::Text { text: "look".into(), thought_signature: None },
-                ContentPart::Image { media_type: "image/png".into(), data: "abc123".into() },
+                ContentPart::Text {
+                    text: "look".into(),
+                    thought_signature: None,
+                },
+                ContentPart::Image {
+                    media_type: "image/png".into(),
+                    data: "abc123".into(),
+                },
             ]),
         };
         let v = to_gemini_message(&msg);
@@ -1073,9 +1295,10 @@ mod tests {
     fn document_content_maps_to_inline_data() {
         let msg = Message {
             role: Role::User,
-            content: MessageContent::Parts(vec![
-                ContentPart::Document { media_type: "application/pdf".into(), data: "pdfdata".into() },
-            ]),
+            content: MessageContent::Parts(vec![ContentPart::Document {
+                media_type: "application/pdf".into(),
+                data: "pdfdata".into(),
+            }]),
         };
         let v = to_gemini_message(&msg);
         let parts = v["parts"].as_array().unwrap();
@@ -1086,15 +1309,18 @@ mod tests {
     #[test]
     fn tool_definition_has_parameters_key() {
         let def = ToolDefinition {
-            name:        "my_tool".into(),
+            name: "my_tool".into(),
             description: "does stuff".into(),
-            parameters:  json!({ "type": "object", "properties": {} }),
+            parameters: json!({ "type": "object", "properties": {} }),
         };
         let v = to_gemini_tool(&def);
         assert_eq!(v["name"], "my_tool");
         assert_eq!(v["description"], "does stuff");
         assert!(v.get("parameters").is_some(), "must use 'parameters' key");
-        assert!(v.get("input_schema").is_none(), "must NOT use anthropic 'input_schema' key");
+        assert!(
+            v.get("input_schema").is_none(),
+            "must NOT use anthropic 'input_schema' key"
+        );
     }
 
     fn text_response_body() -> Value {
@@ -1144,7 +1370,10 @@ mod tests {
         });
 
         let provider = make_provider(&server.base_url());
-        provider.chat_with(Some("override-model"), &[Message::user("hi")], &[]).await.unwrap();
+        provider
+            .chat_with(Some("override-model"), &[Message::user("hi")], &[])
+            .await
+            .unwrap();
         mock.assert();
     }
 
@@ -1157,7 +1386,10 @@ mod tests {
         });
 
         let provider = make_provider(&server.base_url());
-        provider.chat_with(None, &[Message::user("hi")], &[]).await.unwrap();
+        provider
+            .chat_with(None, &[Message::user("hi")], &[])
+            .await
+            .unwrap();
         mock.assert();
     }
 
@@ -1245,20 +1477,47 @@ mod tests {
 
         let provider = make_provider(&server.base_url());
         let models = provider.list_models().await.unwrap();
-        assert_eq!(models, vec![ModelInfo { id: "gemini-test".into(), display_name: None }]);
+        assert_eq!(
+            models,
+            vec![ModelInfo {
+                id: "gemini-test".into(),
+                display_name: None
+            }]
+        );
     }
 
     #[test]
     fn expose_to_ui_reflects_constructor_value() {
         let visible = GeminiProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("a"));
-        let hidden  = GeminiProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "b".into(), expose_to_ui: false, ..Default::default() });
+        let hidden = GeminiProvider::new(
+            "m".into(),
+            "k".into(),
+            30,
+            0,
+            ProviderMeta {
+                id: "b".into(),
+                expose_to_ui: false,
+                ..Default::default()
+            },
+        );
         assert!(visible.expose_to_ui());
         assert!(!hidden.expose_to_ui());
     }
 
     #[test]
     fn name_reflects_constructor_value() {
-        let named   = GeminiProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta { id: "a".into(), expose_to_ui: true, name: Some("Gemini Direct".into()), ..Default::default() });
+        let named = GeminiProvider::new(
+            "m".into(),
+            "k".into(),
+            30,
+            0,
+            ProviderMeta {
+                id: "a".into(),
+                expose_to_ui: true,
+                name: Some("Gemini Direct".into()),
+                ..Default::default()
+            },
+        );
         let unnamed = GeminiProvider::new("m".into(), "k".into(), 30, 0, ProviderMeta::new("b"));
         assert_eq!(named.name(), Some("Gemini Direct"));
         assert_eq!(unnamed.name(), None);
@@ -1287,7 +1546,8 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("POST").path("/gemini-test:generateContent");
-            then.status(400).json_body(json!({ "error": { "message": "bad request" } }));
+            then.status(400)
+                .json_body(json!({ "error": { "message": "bad request" } }));
         });
 
         let provider = make_provider(&server.base_url());
@@ -1338,9 +1598,9 @@ mod tests {
         });
 
         let tools = vec![ToolDefinition {
-            name:        "search".into(),
+            name: "search".into(),
             description: "search for things".into(),
-            parameters:  json!({ "type": "object" }),
+            parameters: json!({ "type": "object" }),
         }];
         let provider = make_provider(&server.base_url());
         provider.chat(&[Message::user("hi")], &tools).await.unwrap();
@@ -1361,10 +1621,14 @@ mod tests {
             }]
         });
         match parse_gemini_response(json).unwrap() {
-            LlmResponse::ToolCalls { preamble, calls, .. } => {
+            LlmResponse::ToolCalls {
+                preamble, calls, ..
+            } => {
                 assert_eq!(calls.len(), 1);
-                assert!(preamble.contains("Let me think about this."),
-                    "thought text should appear in preamble, got: {preamble:?}");
+                assert!(
+                    preamble.contains("Let me think about this."),
+                    "thought text should appear in preamble, got: {preamble:?}"
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1386,8 +1650,11 @@ mod tests {
         });
         match parse_gemini_response(json).unwrap() {
             LlmResponse::ToolCalls { preamble, .. } => {
-                assert!(preamble.contains("First thought."),  "first thought missing");
-                assert!(preamble.contains("Second thought."), "second thought missing");
+                assert!(preamble.contains("First thought."), "first thought missing");
+                assert!(
+                    preamble.contains("Second thought."),
+                    "second thought missing"
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1409,8 +1676,14 @@ mod tests {
         });
         match parse_gemini_response(json).unwrap() {
             LlmResponse::ToolCalls { preamble, .. } => {
-                assert!(preamble.contains("I'll search for X."),   "thought text missing");
-                assert!(preamble.contains("Using the search tool."), "normal text missing");
+                assert!(
+                    preamble.contains("I'll search for X."),
+                    "thought text missing"
+                );
+                assert!(
+                    preamble.contains("Using the search tool."),
+                    "normal text missing"
+                );
             }
             other => panic!("unexpected: {other:?}"),
         }
@@ -1432,8 +1705,10 @@ mod tests {
         });
         match parse_gemini_response(json).unwrap() {
             LlmResponse::Message { text, .. } => {
-                assert!(!text.contains("Internal reasoning here."),
-                    "thought text must not appear in final message");
+                assert!(
+                    !text.contains("Internal reasoning here."),
+                    "thought text must not appear in final message"
+                );
                 assert!(text.contains("Here is the answer."));
             }
             other => panic!("unexpected: {other:?}"),
@@ -1476,12 +1751,18 @@ mod tests {
     // the live API), not the bare "\n\n" other providers use — match that here
     // so these tests actually exercise the real wire format.
     fn sse_body(events: &[Value]) -> String {
-        events.iter().map(|e| format!("data: {}\r\n\r\n", e)).collect::<String>()
+        events
+            .iter()
+            .map(|e| format!("data: {}\r\n\r\n", e))
+            .collect::<String>()
     }
 
     async fn collect_stream_events(provider: &GeminiProvider) -> Vec<StreamEvent> {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-        provider.stream(None, &[Message::user("hi")], &[], tx).await.unwrap();
+        provider
+            .stream(None, &[Message::user("hi")], &[], tx)
+            .await
+            .unwrap();
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() {
             events.push(e);
@@ -1505,13 +1786,18 @@ mod tests {
         let provider = make_provider(&server.base_url());
         let events = collect_stream_events(&provider).await;
 
-        let text_deltas: Vec<_> = events.iter().filter_map(|e| match e {
-            StreamEvent::TextDelta { text } => Some(text.as_str()),
-            _ => None,
-        }).collect();
+        let text_deltas: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(text_deltas, vec!["Hello", " world"]);
 
-        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "end_turn"));
+        let done = events.iter().any(
+            |e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "end_turn"),
+        );
         assert!(done, "expected Done(end_turn) event");
     }
 
@@ -1531,21 +1817,30 @@ mod tests {
         let provider = make_provider(&server.base_url());
         let events = collect_stream_events(&provider).await;
 
-        let thinking: Vec<_> = events.iter().filter_map(|e| match e {
-            StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
-            _ => None,
-        }).collect();
+        let thinking: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ThinkingDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(thinking, vec!["I should search"]);
 
-        let done = events.iter().any(|e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "tool_use"));
-        assert!(done, "expected Done(tool_use) event since a tool call was streamed");
+        let done = events.iter().any(
+            |e| matches!(e, StreamEvent::Done { stop_reason, .. } if stop_reason == "tool_use"),
+        );
+        assert!(
+            done,
+            "expected Done(tool_use) event since a tool call was streamed"
+        );
     }
 
     #[tokio::test]
     async fn stream_tool_call_carries_thought_signature() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method("POST").path("/gemini-test:streamGenerateContent");
+            when.method("POST")
+                .path("/gemini-test:streamGenerateContent");
             then.status(200)
                 .header("content-type", "text/event-stream")
                 .body(sse_body(&[
@@ -1559,10 +1854,13 @@ mod tests {
         let provider = make_provider(&server.base_url());
         let events = collect_stream_events(&provider).await;
 
-        let call = events.iter().find_map(|e| match e {
-            StreamEvent::ToolCallReady(c) => Some(c),
-            _ => None,
-        }).expect("expected a ToolCallReady event");
+        let call = events
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::ToolCallReady(c) => Some(c),
+                _ => None,
+            })
+            .expect("expected a ToolCallReady event");
         assert_eq!(call.name, "search_symbols");
         assert_eq!(call.input["query"], "alpha");
         assert_eq!(call.thought_signature.as_deref(), Some("CsIBCsMB=="));
@@ -1572,12 +1870,17 @@ mod tests {
     async fn stream_4xx_returns_error() {
         let server = MockServer::start();
         server.mock(|when, then| {
-            when.method("POST").path("/gemini-test:streamGenerateContent");
-            then.status(400).json_body(json!({ "error": { "message": "bad request" } }));
+            when.method("POST")
+                .path("/gemini-test:streamGenerateContent");
+            then.status(400)
+                .json_body(json!({ "error": { "message": "bad request" } }));
         });
 
         let provider = make_provider(&server.base_url());
         let (tx, _rx) = tokio::sync::mpsc::channel(64);
-        assert!(provider.stream(None, &[Message::user("hi")], &[], tx).await.is_err());
+        assert!(provider
+            .stream(None, &[Message::user("hi")], &[], tx)
+            .await
+            .is_err());
     }
 }

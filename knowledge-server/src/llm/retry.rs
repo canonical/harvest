@@ -19,7 +19,12 @@ where
             Err(e) if e.is_timeout() && attempt < max_retries => {
                 attempt += 1;
                 let delay = 2u64 * (1u64 << attempt.min(4));
-                tracing::warn!(attempt, delay_secs = delay, provider, "request timed out — retrying");
+                tracing::warn!(
+                    attempt,
+                    delay_secs = delay,
+                    provider,
+                    "request timed out — retrying"
+                );
                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                 continue;
             }
@@ -37,11 +42,19 @@ where
                 .and_then(|s| s.parse::<u64>().ok())
             {
                 attempt += 1;
-                tracing::warn!(attempt, delay_secs = delay, provider, "rate limited — retrying");
+                tracing::warn!(
+                    attempt,
+                    delay_secs = delay,
+                    provider,
+                    "rate limited — retrying"
+                );
                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                 continue;
             }
-            tracing::warn!(provider, "rate limited with no Retry-After — propagating without retry");
+            tracing::warn!(
+                provider,
+                "rate limited with no Retry-After — propagating without retry"
+            );
         }
 
         if overload_codes.contains(&status_code) && attempt < max_retries {
@@ -64,7 +77,10 @@ where
 mod tests {
     use super::*;
     use httpmock::prelude::*;
-    use std::sync::{Arc, atomic::{AtomicU32, Ordering}};
+    use std::sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    };
 
     async fn get(url: String) -> Result<reqwest::Response, reqwest::Error> {
         reqwest::get(&url).await
@@ -77,7 +93,9 @@ mod tests {
             when.method("GET").path("/ok");
             then.status(200);
         });
-        let r = send_with_retry(3, &[], "test", || get(server.url("/ok"))).await.unwrap();
+        let r = send_with_retry(3, &[], "test", || get(server.url("/ok")))
+            .await
+            .unwrap();
         assert_eq!(r.status().as_u16(), 200);
     }
 
@@ -93,7 +111,9 @@ mod tests {
         let r = send_with_retry(2, &[503], "test", || {
             calls2.fetch_add(1, Ordering::SeqCst);
             get(server.url("/overload"))
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(r.status().as_u16(), 503);
         assert_eq!(calls.load(Ordering::SeqCst), 3, "1 original + 2 retries");
     }
@@ -110,9 +130,15 @@ mod tests {
         let r = send_with_retry(3, &[], "test", || {
             calls2.fetch_add(1, Ordering::SeqCst);
             get(server.url("/quota"))
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(r.status().as_u16(), 429);
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "must not retry when no Retry-After");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "must not retry when no Retry-After"
+        );
     }
 
     #[tokio::test]
@@ -127,8 +153,14 @@ mod tests {
         let r = send_with_retry(1, &[], "test", || {
             calls2.fetch_add(1, Ordering::SeqCst);
             get(server.url("/transient"))
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(r.status().as_u16(), 429);
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "must retry once when Retry-After present");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "must retry once when Retry-After present"
+        );
     }
 }
