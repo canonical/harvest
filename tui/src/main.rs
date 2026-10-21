@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use harvest_tui::app::App;
 use harvest_tui::api::ClientConfig;
+use harvest_tui::app::App;
 
 #[derive(Parser)]
 #[command(name = "harvest-tui", about = "Terminal UI for Harvest")]
@@ -50,8 +50,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 config.cookie_store = Some(store);
             }
-            _ => {
-            }
+            _ => {}
         }
     }
 

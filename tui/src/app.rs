@@ -6,7 +6,7 @@ use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers}
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use crossterm::{execute, event::DisableMouseCapture, event::EnableMouseCapture};
+use crossterm::{event::DisableMouseCapture, event::EnableMouseCapture, execute};
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -70,10 +70,21 @@ impl AppData {
 
         tokio::spawn(async move {
             let body = serde_json::json!({});
-            match client.post_json::<_, serde_json::Value>("/auth/tui/login", &body).await {
+            match client
+                .post_json::<_, serde_json::Value>("/auth/tui/login", &body)
+                .await
+            {
                 Ok(resp) => {
-                    let uuid = resp.get("uuid").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                    let auth_url = resp.get("auth_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let uuid = resp
+                        .get("uuid")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let auth_url = resp
+                        .get("auth_url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
 
                     if uuid.is_empty() {
                         let _ = tx.send(AppEvent::AuthFailed("no uuid returned".to_string()));
@@ -85,13 +96,25 @@ impl AppData {
                     let poll_client = client.clone();
                     for _ in 0..150 {
                         tokio::time::sleep(Duration::from_secs(2)).await;
-                        match poll_client.get_json::<serde_json::Value>(&format!("/auth/tui/poll/{}", uuid)).await {
+                        match poll_client
+                            .get_json::<serde_json::Value>(&format!("/auth/tui/poll/{}", uuid))
+                            .await
+                        {
                             Ok(resp) => {
-                                let status = resp.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                                let status =
+                                    resp.get("status").and_then(|v| v.as_str()).unwrap_or("");
                                 match status {
                                     "authorized" => {
-                                        let token = resp.get("token").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                        let email = resp.get("email").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                        let token = resp
+                                            .get("token")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        let email = resp
+                                            .get("email")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
                                         let _ = tx.send(AppEvent::Authenticated(token, email));
                                         return;
                                     }
@@ -100,7 +123,8 @@ impl AppData {
                                         return;
                                     }
                                     "expired" => {
-                                        let _ = tx.send(AppEvent::AuthFailed("expired".to_string()));
+                                        let _ =
+                                            tx.send(AppEvent::AuthFailed("expired".to_string()));
                                         return;
                                     }
                                     _ => {}
@@ -168,19 +192,12 @@ impl App {
         let result = self.run_loop(&mut terminal).await;
 
         disable_raw_mode()?;
-        execute!(
-            std::io::stdout(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
+        execute!(std::io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
 
         result
     }
 
-    async fn run_loop(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> Result<()> {
+    async fn run_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
         let mut event_stream = crossterm::event::EventStream::new();
 
         loop {
@@ -246,13 +263,13 @@ impl App {
             return;
         }
 
-        if key.code == KeyCode::Char('q')
-            && key.modifiers == KeyModifiers::NONE
-        {
+        if key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::NONE {
             self.should_quit = true;
             return;
         }
-        if key.code == KeyCode::F(1) || (key.code == KeyCode::Char('?') && key.modifiers == KeyModifiers::NONE) {
+        if key.code == KeyCode::F(1)
+            || (key.code == KeyCode::Char('?') && key.modifiers == KeyModifiers::NONE)
+        {
             self.show_help = true;
             return;
         }
@@ -290,7 +307,9 @@ impl App {
 
         lines.push(Line::from(Span::styled(
             " Not authenticated",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
@@ -306,12 +325,16 @@ impl App {
         if let Some(url) = &self.data.auth_url {
             lines.push(Line::from(Span::styled(
                 " Open this link in your browser to authenticate:",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )));
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 format!("  {}", url),
-                Style::default().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::UNDERLINED),
             )));
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
@@ -330,7 +353,12 @@ impl App {
 
         let input_text = self.chat.get_input_for_auth();
         let input_para = Paragraph::new(Line::from(vec![
-            Span::styled("> ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "> ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(input_text.clone()),
             Span::styled(" ", Style::default().add_modifier(Modifier::SLOW_BLINK)),
         ]))

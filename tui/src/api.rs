@@ -48,9 +48,9 @@ impl Client {
     }
 
     fn auth_header(&self) -> Option<reqwest::header::HeaderValue> {
-        self.token.as_ref().and_then(|t| {
-            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", t)).ok()
-        })
+        self.token
+            .as_ref()
+            .and_then(|t| reqwest::header::HeaderValue::from_str(&format!("Bearer {}", t)).ok())
     }
 
     pub async fn post_text<B: Serialize>(&self, path: &str, body: &B) -> Result<String> {
@@ -331,7 +331,9 @@ mod tests {
         let s = r#"{"type":"done","answer":"ok","sources":[{"repo":"r","version":"v1","file":"f.rs","line":12}],"tool_calls_made":2,"provider_used":{"provider_id":"p","kind":"anthropic","model":"claude"},"duration_ms":500,"hit_max_iterations":false}"#;
         let ev: AgentEvent = serde_json::from_str(s).unwrap();
         match ev {
-            AgentEvent::Done { answer, sources, .. } => {
+            AgentEvent::Done {
+                answer, sources, ..
+            } => {
                 assert_eq!(answer, "ok");
                 assert_eq!(sources.len(), 1);
                 assert_eq!(sources[0].file, "f.rs");
@@ -358,7 +360,12 @@ mod tests {
         let s = r#"{"type":"confirm_action","id":"c1","name":"run_cmd","input":{"cmd":"rm"},"description":"dangerous"}"#;
         let ev: AgentEvent = serde_json::from_str(s).unwrap();
         match ev {
-            AgentEvent::ConfirmAction { id, name, description, .. } => {
+            AgentEvent::ConfirmAction {
+                id,
+                name,
+                description,
+                ..
+            } => {
                 assert_eq!(id, "c1");
                 assert_eq!(name, "run_cmd");
                 assert_eq!(description, "dangerous");

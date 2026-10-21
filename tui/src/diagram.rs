@@ -55,13 +55,23 @@ fn render_code(source: &str, lang: &str, width: usize) -> Vec<Line<'static>> {
     if !lang.is_empty() {
         lines.push(Line::from(Span::styled(
             format!(" {} ", lang),
-            Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
         )));
     }
     let w = width.saturating_sub(2).max(20);
     for l in source.lines().take(30) {
-        let truncated = if l.len() > w { format!("{}…", &l[..w.saturating_sub(1)]) } else { l.to_string() };
-        lines.push(Line::from(Span::styled(truncated, Style::default().fg(Color::Green))));
+        let truncated = if l.len() > w {
+            format!("{}…", &l[..w.saturating_sub(1)])
+        } else {
+            l.to_string()
+        };
+        lines.push(Line::from(Span::styled(
+            truncated,
+            Style::default().fg(Color::Green),
+        )));
     }
     lines.push(Line::from(""));
     lines
@@ -70,7 +80,8 @@ fn render_code(source: &str, lang: &str, width: usize) -> Vec<Line<'static>> {
 fn render_mermaid(source: &str, width: usize) -> Vec<Line<'static>> {
     let first_line = source.lines().next().unwrap_or("").trim();
     let lower = first_line.to_lowercase();
-    if lower.starts_with("flowchart") || lower.starts_with("graph ") || lower.starts_with("graph\t") {
+    if lower.starts_with("flowchart") || lower.starts_with("graph ") || lower.starts_with("graph\t")
+    {
         match parse_mermaid(source) {
             Some(p) => render_flowchart(&p, width),
             None => render_code(source, "mermaid", width),
@@ -217,7 +228,10 @@ fn parse_line(line: &str) -> (Vec<DiagNode>, Vec<DiagEdge>) {
 
             if let (Some(from), Some(next_node)) = (&prev_id, parts.get(i + 1)) {
                 let to_node = parse_node_token(next_node);
-                let to_id = to_node.as_ref().map(|n| n.id.clone()).unwrap_or_else(|| next_node.clone());
+                let to_id = to_node
+                    .as_ref()
+                    .map(|n| n.id.clone())
+                    .unwrap_or_else(|| next_node.clone());
                 edges.push(DiagEdge {
                     from: from.clone(),
                     to: to_id.clone(),
@@ -406,12 +420,19 @@ fn extract_edge_token(s: &str) -> Option<(String, Option<String>, &str)> {
 }
 
 fn is_edge_token(s: &str) -> bool {
-    s.contains("-->") || s.contains("==>") || s.contains("-.->") || s.contains("---") || s.contains("===") || s.contains("-.-")
+    s.contains("-->")
+        || s.contains("==>")
+        || s.contains("-.->")
+        || s.contains("---")
+        || s.contains("===")
+        || s.contains("-.-")
 }
 
 fn parse_node_token(token: &str) -> Option<DiagNode> {
     let token = token.trim();
-    let id_end = token.find(|c: char| !c.is_alphanumeric() && c != '_' && c != '-').unwrap_or(token.len());
+    let id_end = token
+        .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+        .unwrap_or(token.len());
     let id = token[..id_end].to_string();
     if id.is_empty() {
         return None;
@@ -459,7 +480,9 @@ fn compute_layers(diag: &ParsedDiagram) -> Vec<Vec<String>> {
         acc
     });
 
-    let roots: Vec<String> = diag.node_order.iter()
+    let roots: Vec<String> = diag
+        .node_order
+        .iter()
         .filter(|id| !incoming.contains_key(*id))
         .cloned()
         .collect();
@@ -506,20 +529,30 @@ fn render_flowchart_td(diag: &ParsedDiagram, width: usize) -> Vec<Line<'static>>
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         " mermaid ",
-        Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
     )));
     lines.push(Line::from(""));
 
-    let edge_map: HashMap<(String, String), &DiagEdge> = diag.edges.iter()
+    let edge_map: HashMap<(String, String), &DiagEdge> = diag
+        .edges
+        .iter()
         .map(|e| ((e.from.clone(), e.to.clone()), e))
         .collect();
 
     for (li, layer) in layers.iter().enumerate() {
-        let boxes: Vec<Vec<String>> = layer.iter().map(|id| {
-            let node = diag.nodes.get(id);
-            let (label, shape) = node.map(|n| (n.label.as_str(), n.shape)).unwrap_or((id.as_str(), NodeShape::Plain));
-            render_box(label, shape, max_box_w)
-        }).collect();
+        let boxes: Vec<Vec<String>> = layer
+            .iter()
+            .map(|id| {
+                let node = diag.nodes.get(id);
+                let (label, shape) = node
+                    .map(|n| (n.label.as_str(), n.shape))
+                    .unwrap_or((id.as_str(), NodeShape::Plain));
+                render_box(label, shape, max_box_w)
+            })
+            .collect();
 
         if !boxes.is_empty() {
             let n_boxes = boxes.len();
@@ -541,7 +574,10 @@ fn render_flowchart_td(diag: &ParsedDiagram, width: usize) -> Vec<Line<'static>>
             let next_layer = &layers[li + 1];
             let connectors = compute_connectors(&layer, next_layer, &edge_map, diag);
             for conn_line in connectors {
-                lines.push(Line::from(Span::styled(conn_line, Style::default().fg(Color::DarkGray))));
+                lines.push(Line::from(Span::styled(
+                    conn_line,
+                    Style::default().fg(Color::DarkGray),
+                )));
             }
         }
     }
@@ -579,7 +615,10 @@ fn compute_connectors(
     let mut lines = Vec::new();
 
     for &(fi, ti, ref label) in &connections {
-        let label_str = label.as_ref().map(|l| format!(" {}", truncate_str(l, 20))).unwrap_or_default();
+        let label_str = label
+            .as_ref()
+            .map(|l| format!(" {}", truncate_str(l, 20)))
+            .unwrap_or_default();
         lines.push(format!("  {}{}", "│", label_str));
     }
     lines.push("  ▼".to_string());
@@ -595,7 +634,10 @@ fn render_flowchart_lr(diag: &ParsedDiagram, width: usize) -> Vec<Line<'static>>
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         " mermaid ",
-        Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
     )));
     lines.push(Line::from(""));
 
@@ -608,7 +650,9 @@ fn render_flowchart_lr(diag: &ParsedDiagram, width: usize) -> Vec<Line<'static>>
             if row < layer.len() {
                 let id = &layer[row];
                 let node = diag.nodes.get(id);
-                let (label, shape) = node.map(|n| (n.label.as_str(), n.shape)).unwrap_or((id.as_str(), NodeShape::Plain));
+                let (label, shape) = node
+                    .map(|n| (n.label.as_str(), n.shape))
+                    .unwrap_or((id.as_str(), NodeShape::Plain));
                 row_boxes.push(render_box(label, shape, max_box_w));
             } else {
                 row_boxes.push(vec![" ".repeat(max_box_w + 4)]);
@@ -619,7 +663,10 @@ fn render_flowchart_lr(diag: &ParsedDiagram, width: usize) -> Vec<Line<'static>>
             let mut spans: Vec<Span<'static>> = Vec::new();
             for (bi, box_lines) in row_boxes.iter().enumerate() {
                 let line = box_lines.get(r).map(|s| s.as_str()).unwrap_or("");
-                spans.push(Span::styled(line.to_string(), Style::default().fg(Color::Cyan)));
+                spans.push(Span::styled(
+                    line.to_string(),
+                    Style::default().fg(Color::Cyan),
+                ));
                 if bi + 1 < row_boxes.len() {
                     if r == 1 {
                         spans.push(Span::styled("───▶  ", Style::default().fg(Color::DarkGray)));
@@ -641,7 +688,11 @@ fn render_box(label: &str, shape: NodeShape, max_w: usize) -> Vec<String> {
     let label_w = label.chars().count();
     let inner_w = label_w.min(max_w).max(3);
     let label_display: String = label.chars().take(inner_w).collect();
-    let pad = if inner_w > label_display.chars().count() { 0 } else { 0 };
+    let pad = if inner_w > label_display.chars().count() {
+        0
+    } else {
+        0
+    };
     let _ = pad;
     let inner_w = inner_w.max(label_display.chars().count());
 
@@ -712,9 +763,18 @@ fn render_harvest_graph(source: &str, width: usize) -> Vec<Line<'static>> {
 
     if symbols.is_empty() {
         return vec![
-            Line::from(Span::styled(" harvest-graph ", Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::ITALIC))),
+            Line::from(Span::styled(
+                " harvest-graph ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            )),
             Line::from(""),
-            Line::from(Span::styled("(empty graph)", Style::default().fg(Color::DarkGray))),
+            Line::from(Span::styled(
+                "(empty graph)",
+                Style::default().fg(Color::DarkGray),
+            )),
             Line::from(""),
         ];
     }
@@ -738,29 +798,55 @@ fn render_harvest_graph(source: &str, width: usize) -> Vec<Line<'static>> {
             let target_name = r.get("target").and_then(|v| v.as_str()).unwrap_or("");
             let rel = r.get("relation").and_then(|v| v.as_str()).unwrap_or("");
             if !source_name.is_empty() && !target_name.is_empty() {
-                outgoing.entry(source_name.to_string()).or_default().push((target_name.to_string(), rel.to_string()));
+                outgoing
+                    .entry(source_name.to_string())
+                    .or_default()
+                    .push((target_name.to_string(), rel.to_string()));
                 incoming.insert(target_name.to_string());
             }
         }
     }
 
-    let roots: Vec<String> = node_labels.keys().filter(|k| !incoming.contains(*k)).cloned().collect();
+    let roots: Vec<String> = node_labels
+        .keys()
+        .filter(|k| !incoming.contains(*k))
+        .cloned()
+        .collect();
     let max_box_w = (width / 3).max(10).min(25);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         " harvest-graph ",
-        Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
     )));
     lines.push(Line::from(""));
 
     let mut visited = HashSet::new();
     for root in &roots {
-        render_graph_node(root, &node_labels, &outgoing, 0, max_box_w, &mut visited, &mut lines);
+        render_graph_node(
+            root,
+            &node_labels,
+            &outgoing,
+            0,
+            max_box_w,
+            &mut visited,
+            &mut lines,
+        );
     }
     for (name, _) in &node_labels {
         if !visited.contains(name) {
-            render_graph_node(name, &node_labels, &outgoing, 0, max_box_w, &mut visited, &mut lines);
+            render_graph_node(
+                name,
+                &node_labels,
+                &outgoing,
+                0,
+                max_box_w,
+                &mut visited,
+                &mut lines,
+            );
         }
     }
 
@@ -790,18 +876,31 @@ fn render_graph_node(
     let name_line = label_lines.first().unwrap_or(&name);
     let file_line = label_lines.get(1).unwrap_or(&"");
 
-    let inner_w = name_line.chars().count().max(file_line.chars().count()).max(3).min(max_w);
+    let inner_w = name_line
+        .chars()
+        .count()
+        .max(file_line.chars().count())
+        .max(3)
+        .min(max_w);
 
     let kind_tag = if kind.is_empty() { "" } else { kind };
 
     lines.push(Line::from(vec![
         Span::styled(indent.clone(), Style::default()),
-        Span::styled(format!("┌─{}─┐", "─".repeat(inner_w)), Style::default().fg(Color::Cyan)),
+        Span::styled(
+            format!("┌─{}─┐", "─".repeat(inner_w)),
+            Style::default().fg(Color::Cyan),
+        ),
     ]));
     lines.push(Line::from(vec![
         Span::styled(indent.clone(), Style::default()),
         Span::styled("│ ", Style::default().fg(Color::Cyan)),
-        Span::styled(center_text(name_line, inner_w), Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            center_text(name_line, inner_w),
+            Style::default()
+                .fg(Color::Reset)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" │", Style::default().fg(Color::Cyan)),
     ]));
     if !file_line.is_empty() || !kind_tag.is_empty() {
@@ -815,20 +914,37 @@ fn render_graph_node(
         lines.push(Line::from(vec![
             Span::styled(indent.clone(), Style::default()),
             Span::styled("│ ", Style::default().fg(Color::Cyan)),
-            Span::styled(center_text(&meta, inner_w), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                center_text(&meta, inner_w),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(" │", Style::default().fg(Color::Cyan)),
         ]));
     }
     lines.push(Line::from(vec![
         Span::styled(indent.clone(), Style::default()),
-        Span::styled(format!("└─{}─┘", "─".repeat(inner_w)), Style::default().fg(Color::Cyan)),
+        Span::styled(
+            format!("└─{}─┘", "─".repeat(inner_w)),
+            Style::default().fg(Color::Cyan),
+        ),
     ]));
 
     if let Some(targets) = outgoing.get(name) {
         for (target, rel) in targets {
-            let arrow = if rel == "calls" { "──calls──▶" } else if rel == "uses" { "──uses──▶" } else if rel == "contains" { "──contains──▶" } else { "────▶" };
+            let arrow = if rel == "calls" {
+                "──calls──▶"
+            } else if rel == "uses" {
+                "──uses──▶"
+            } else if rel == "contains" {
+                "──contains──▶"
+            } else {
+                "────▶"
+            };
             lines.push(Line::from(vec![
-                Span::styled(format!("{}  {}", indent, arrow), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{}  {}", indent, arrow),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(format!(" {}", rel), Style::default().fg(Color::DarkGray)),
             ]));
             render_graph_node(target, labels, outgoing, depth + 1, max_w, visited, lines);
@@ -955,16 +1071,30 @@ fn render_sequence(source: &str, width: usize) -> Vec<Line<'static>> {
 
             let (from, to, kind) = if left.contains("->>") {
                 let parts: Vec<&str> = left.splitn(2, "->>").collect();
-                (parts[0].trim().to_string(), parts[1].trim().to_string(), SeqKind::Solid)
+                (
+                    parts[0].trim().to_string(),
+                    parts[1].trim().to_string(),
+                    SeqKind::Solid,
+                )
             } else if left.contains("-->>") {
                 let parts: Vec<&str> = left.splitn(2, "-->>").collect();
-                (parts[0].trim().to_string(), parts[1].trim().to_string(), SeqKind::Dashed)
+                (
+                    parts[0].trim().to_string(),
+                    parts[1].trim().to_string(),
+                    SeqKind::Dashed,
+                )
             } else if left.contains("-x") || left.contains("--x") {
                 let parts: Vec<&str> = left.splitn(2, "-x").collect();
                 let to = if parts.len() > 1 { parts[1].trim() } else { "" };
                 let to = if to.is_empty() {
-                    if let Some(p) = left.splitn(2, "--x").nth(1) { p.trim() } else { "" }
-                } else { to };
+                    if let Some(p) = left.splitn(2, "--x").nth(1) {
+                        p.trim()
+                    } else {
+                        ""
+                    }
+                } else {
+                    to
+                };
                 (parts[0].trim().to_string(), to.to_string(), SeqKind::Failed)
             } else {
                 continue;
@@ -993,14 +1123,19 @@ fn render_sequence(source: &str, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         " mermaid ",
-        Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
     )));
     lines.push(Line::from(""));
 
     if !title.is_empty() {
         lines.push(Line::from(Span::styled(
             title.clone(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
     }
@@ -1017,7 +1152,8 @@ fn render_sequence(source: &str, width: usize) -> Vec<Line<'static>> {
         .map(|i| i * col_width + col_width / 2)
         .collect();
 
-    let part_display: Vec<String> = participants.iter()
+    let part_display: Vec<String> = participants
+        .iter()
         .map(|(id, name)| part_map.get(id).cloned().unwrap_or_else(|| name.clone()))
         .collect();
 
@@ -1037,7 +1173,12 @@ fn render_sequence(source: &str, width: usize) -> Vec<Line<'static>> {
         if i > 0 {
             header_line_spans.push(Span::raw(" "));
         }
-        header_line_spans.push(Span::styled(format!("[{}]", padded), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+        header_line_spans.push(Span::styled(
+            format!("[{}]", padded),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
     }
     lines.push(Line::from(header_line_spans));
 
@@ -1046,17 +1187,31 @@ fn render_sequence(source: &str, width: usize) -> Vec<Line<'static>> {
         if i > 0 {
             lifeline_spans.push(Span::raw(" "));
         }
-        lifeline_spans.push(Span::styled("│".repeat(header_w + 2), Style::default().fg(Color::DarkGray)));
+        lifeline_spans.push(Span::styled(
+            "│".repeat(header_w + 2),
+            Style::default().fg(Color::DarkGray),
+        ));
     }
     let lifeline_template = Line::from(lifeline_spans);
 
-    let lifeline_template_spans: Vec<Span<'static>> = (0..n_parts).flat_map(|i| {
-        if i > 0 {
-            vec![Span::raw(" "), Span::styled("│".repeat(header_w + 2), Style::default().fg(Color::DarkGray))]
-        } else {
-            vec![Span::styled("│".repeat(header_w + 2), Style::default().fg(Color::DarkGray))]
-        }
-    }).collect();
+    let lifeline_template_spans: Vec<Span<'static>> = (0..n_parts)
+        .flat_map(|i| {
+            if i > 0 {
+                vec![
+                    Span::raw(" "),
+                    Span::styled(
+                        "│".repeat(header_w + 2),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]
+            } else {
+                vec![Span::styled(
+                    "│".repeat(header_w + 2),
+                    Style::default().fg(Color::DarkGray),
+                )]
+            }
+        })
+        .collect();
     let lifeline_line = Line::from(lifeline_template_spans);
 
     lines.push(lifeline_line.clone());
@@ -1098,14 +1253,29 @@ fn render_sequence(source: &str, width: usize) -> Vec<Line<'static>> {
                 msg_spans.push(Span::raw(" "));
             }
             if i == from_i && i == to_i {
-                msg_spans.push(Span::styled(format!("│ ╭──{}──╮ │", label_trunc.chars().take(header_w.saturating_sub(4).max(4)).collect::<String>()), Style::default().fg(Color::DarkGray)));
+                msg_spans.push(Span::styled(
+                    format!(
+                        "│ ╭──{}──╮ │",
+                        label_trunc
+                            .chars()
+                            .take(header_w.saturating_sub(4).max(4))
+                            .collect::<String>()
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ));
             } else if i == from_i || i == to_i {
                 let min_c = col_centers[from_i].min(col_centers[to_i]);
                 let max_c = col_centers[from_i].max(col_centers[to_i]);
                 let _ = (min_c, max_c);
-                msg_spans.push(Span::styled("│".repeat(header_w + 2), Style::default().fg(Color::DarkGray)));
+                msg_spans.push(Span::styled(
+                    "│".repeat(header_w + 2),
+                    Style::default().fg(Color::DarkGray),
+                ));
             } else {
-                msg_spans.push(Span::styled("│".repeat(header_w + 2), Style::default().fg(Color::DarkGray)));
+                msg_spans.push(Span::styled(
+                    "│".repeat(header_w + 2),
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
         }
 
@@ -1118,13 +1288,25 @@ fn render_sequence(source: &str, width: usize) -> Vec<Line<'static>> {
                 arrow_row.push(Span::raw(" "));
             }
             if i == lo {
-                arrow_row.push(Span::styled(format!("├{}┤", "─".repeat(header_w)), Style::default().fg(Color::DarkGray)));
+                arrow_row.push(Span::styled(
+                    format!("├{}┤", "─".repeat(header_w)),
+                    Style::default().fg(Color::DarkGray),
+                ));
             } else if i == hi {
-                arrow_row.push(Span::styled(format!("├{}┤", "─".repeat(header_w)), Style::default().fg(Color::DarkGray)));
+                arrow_row.push(Span::styled(
+                    format!("├{}┤", "─".repeat(header_w)),
+                    Style::default().fg(Color::DarkGray),
+                ));
             } else if i > lo && i < hi {
-                arrow_row.push(Span::styled(format!("├{}┤", "─".repeat(header_w)), Style::default().fg(Color::DarkGray)));
+                arrow_row.push(Span::styled(
+                    format!("├{}┤", "─".repeat(header_w)),
+                    Style::default().fg(Color::DarkGray),
+                ));
             } else {
-                arrow_row.push(Span::styled("│".repeat(header_w + 2), Style::default().fg(Color::DarkGray)));
+                arrow_row.push(Span::styled(
+                    "│".repeat(header_w + 2),
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
         }
 
@@ -1137,13 +1319,29 @@ fn render_sequence(source: &str, width: usize) -> Vec<Line<'static>> {
                 if i == lo {
                     let mid = col_centers[lo].saturating_sub(0);
                     let _ = mid;
-                    spans.push(Span::styled(format!("  {}  ", center_text(&label_trunc, header_w)), Style::default().fg(arrow_color)));
+                    spans.push(Span::styled(
+                        format!("  {}  ", center_text(&label_trunc, header_w)),
+                        Style::default().fg(arrow_color),
+                    ));
                 } else if i == hi {
-                    spans.push(Span::styled(format!("  {}{}", arrow_char, " ".repeat(header_w.saturating_sub(arrow_len))), Style::default().fg(arrow_color)));
+                    spans.push(Span::styled(
+                        format!(
+                            "  {}{}",
+                            arrow_char,
+                            " ".repeat(header_w.saturating_sub(arrow_len))
+                        ),
+                        Style::default().fg(arrow_color),
+                    ));
                 } else if i > lo && i < hi {
-                    spans.push(Span::styled(format!("  {}  ", "─".repeat(header_w)), Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled(
+                        format!("  {}  ", "─".repeat(header_w)),
+                        Style::default().fg(Color::DarkGray),
+                    ));
                 } else {
-                    spans.push(Span::styled("│".repeat(header_w + 2), Style::default().fg(Color::DarkGray)));
+                    spans.push(Span::styled(
+                        "│".repeat(header_w + 2),
+                        Style::default().fg(Color::DarkGray),
+                    ));
                 }
             }
             spans
@@ -1159,14 +1357,26 @@ fn render_sequence(source: &str, width: usize) -> Vec<Line<'static>> {
             }
             if i == lo {
                 let a = if from_left { "├" } else { "┤" };
-                arrow_row2.push(Span::styled(format!("{}{}{}", a, "─".repeat(header_w), "┤"), Style::default().fg(Color::DarkGray)));
+                arrow_row2.push(Span::styled(
+                    format!("{}{}{}", a, "─".repeat(header_w), "┤"),
+                    Style::default().fg(Color::DarkGray),
+                ));
             } else if i == hi {
                 let a = if from_left { "├" } else { "┤" };
-                arrow_row2.push(Span::styled(format!("{}{}{}", "├", "─".repeat(header_w), a), Style::default().fg(Color::DarkGray)));
+                arrow_row2.push(Span::styled(
+                    format!("{}{}{}", "├", "─".repeat(header_w), a),
+                    Style::default().fg(Color::DarkGray),
+                ));
             } else if i > lo && i < hi {
-                arrow_row2.push(Span::styled(format!("├{}┤", "─".repeat(header_w)), Style::default().fg(Color::DarkGray)));
+                arrow_row2.push(Span::styled(
+                    format!("├{}┤", "─".repeat(header_w)),
+                    Style::default().fg(Color::DarkGray),
+                ));
             } else {
-                arrow_row2.push(Span::styled("│".repeat(header_w + 2), Style::default().fg(Color::DarkGray)));
+                arrow_row2.push(Span::styled(
+                    "│".repeat(header_w + 2),
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
         }
         lines.push(Line::from(arrow_row2));
@@ -1195,9 +1405,10 @@ fn render_seq_note(
     let mut out = Vec::new();
     let text = &note.text;
     let w = header_w.min(40).max(8);
-    out.push(Line::from(vec![
-        Span::styled(format!("  ┌─{}─┐", "─".repeat(w)), Style::default().fg(Color::Yellow)),
-    ]));
+    out.push(Line::from(vec![Span::styled(
+        format!("  ┌─{}─┐", "─".repeat(w)),
+        Style::default().fg(Color::Yellow),
+    )]));
     for line in text.lines().take(3) {
         out.push(Line::from(vec![
             Span::styled("  │ ", Style::default().fg(Color::Yellow)),
@@ -1205,9 +1416,10 @@ fn render_seq_note(
             Span::styled(" │", Style::default().fg(Color::Yellow)),
         ]));
     }
-    out.push(Line::from(vec![
-        Span::styled(format!("  └─{}─┘", "─".repeat(w)), Style::default().fg(Color::Yellow)),
-    ]));
+    out.push(Line::from(vec![Span::styled(
+        format!("  └─{}─┘", "─".repeat(w)),
+        Style::default().fg(Color::Yellow),
+    )]));
     out
 }
 
@@ -1242,13 +1454,20 @@ fn render_class_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
             continue;
         }
         if line.starts_with("class ") {
-            let name = line["class ".len()..].trim().trim_end_matches('{').trim().to_string();
+            let name = line["class ".len()..]
+                .trim()
+                .trim_end_matches('{')
+                .trim()
+                .to_string();
             if in_class {
-                classes.insert(current_name.clone(), ClassDef {
-                    name: current_name.clone(),
-                    attrs: current_attrs.clone(),
-                    methods: current_methods.clone(),
-                });
+                classes.insert(
+                    current_name.clone(),
+                    ClassDef {
+                        name: current_name.clone(),
+                        attrs: current_attrs.clone(),
+                        methods: current_methods.clone(),
+                    },
+                );
                 if !class_order.contains(&current_name) {
                     class_order.push(current_name.clone());
                 }
@@ -1259,11 +1478,14 @@ fn render_class_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
             in_class = true;
             if line.ends_with('}') {
                 in_class = false;
-                classes.insert(current_name.clone(), ClassDef {
-                    name: current_name.clone(),
-                    attrs: current_attrs.clone(),
-                    methods: current_methods.clone(),
-                });
+                classes.insert(
+                    current_name.clone(),
+                    ClassDef {
+                        name: current_name.clone(),
+                        attrs: current_attrs.clone(),
+                        methods: current_methods.clone(),
+                    },
+                );
                 if !class_order.contains(&current_name) {
                     class_order.push(current_name.clone());
                 }
@@ -1272,11 +1494,14 @@ fn render_class_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
         }
         if line == "}" {
             if in_class {
-                classes.insert(current_name.clone(), ClassDef {
-                    name: current_name.clone(),
-                    attrs: current_attrs.clone(),
-                    methods: current_methods.clone(),
-                });
+                classes.insert(
+                    current_name.clone(),
+                    ClassDef {
+                        name: current_name.clone(),
+                        attrs: current_attrs.clone(),
+                        methods: current_methods.clone(),
+                    },
+                );
                 if !class_order.contains(&current_name) {
                     class_order.push(current_name.clone());
                 }
@@ -1307,7 +1532,10 @@ fn render_class_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
                 let from = line[..pos].trim().to_string();
                 let rest = &line[pos + pat.len()..];
                 let (to, label) = if let Some(colon) = rest.find(':') {
-                    (rest[..colon].trim().to_string(), Some(rest[colon + 1..].trim().to_string()))
+                    (
+                        rest[..colon].trim().to_string(),
+                        Some(rest[colon + 1..].trim().to_string()),
+                    )
                 } else {
                     (rest.trim().to_string(), None)
                 };
@@ -1323,11 +1551,14 @@ fn render_class_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
     }
 
     if in_class {
-        classes.insert(current_name.clone(), ClassDef {
-            name: current_name.clone(),
-            attrs: current_attrs.clone(),
-            methods: current_methods.clone(),
-        });
+        classes.insert(
+            current_name.clone(),
+            ClassDef {
+                name: current_name.clone(),
+                attrs: current_attrs.clone(),
+                methods: current_methods.clone(),
+            },
+        );
         if !class_order.contains(&current_name) {
             class_order.push(current_name.clone());
         }
@@ -1340,11 +1571,14 @@ fn render_class_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
     for r in &rels {
         for name in [&r.from, &r.to] {
             if !classes.contains_key(name) {
-                classes.insert(name.clone(), ClassDef {
-                    name: name.clone(),
-                    attrs: Vec::new(),
-                    methods: Vec::new(),
-                });
+                classes.insert(
+                    name.clone(),
+                    ClassDef {
+                        name: name.clone(),
+                        attrs: Vec::new(),
+                        methods: Vec::new(),
+                    },
+                );
                 class_order.push(name.clone());
             }
         }
@@ -1353,7 +1587,10 @@ fn render_class_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         " mermaid ",
-        Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
     )));
     lines.push(Line::from(""));
 
@@ -1371,7 +1608,10 @@ fn render_class_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
                 let rel_label = rel_short_label(&r.rel_type, r.label.as_deref());
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(format!("    {}────▶ {}", rel_label, r.to), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("    {}────▶ {}", rel_label, r.to),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]));
             }
         }
@@ -1383,52 +1623,77 @@ fn render_class_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
 
 fn render_class_box(name: &str, cls: &ClassDef, max_w: usize) -> Vec<Line<'static>> {
     let name_w = name.chars().count();
-    let attr_w = cls.attrs.iter().map(|a| a.chars().count()).max().unwrap_or(0);
-    let method_w = cls.methods.iter().map(|m| m.chars().count()).max().unwrap_or(0);
+    let attr_w = cls
+        .attrs
+        .iter()
+        .map(|a| a.chars().count())
+        .max()
+        .unwrap_or(0);
+    let method_w = cls
+        .methods
+        .iter()
+        .map(|m| m.chars().count())
+        .max()
+        .unwrap_or(0);
     let inner_w = name_w.max(attr_w).max(method_w).min(max_w).max(4);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    lines.push(Line::from(vec![
-        Span::styled(format!("  ┌─{}─┐", "─".repeat(inner_w)), Style::default().fg(Color::Cyan)),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        format!("  ┌─{}─┐", "─".repeat(inner_w)),
+        Style::default().fg(Color::Cyan),
+    )]));
     lines.push(Line::from(vec![
         Span::styled("  │ ", Style::default().fg(Color::Cyan)),
-        Span::styled(center_text(name, inner_w), Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            center_text(name, inner_w),
+            Style::default()
+                .fg(Color::Reset)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" │", Style::default().fg(Color::Cyan)),
     ]));
 
     if !cls.attrs.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(format!("  ├─{}─┤", "─".repeat(inner_w)), Style::default().fg(Color::Cyan)),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("  ├─{}─┤", "─".repeat(inner_w)),
+            Style::default().fg(Color::Cyan),
+        )]));
         for attr in &cls.attrs {
             let display = truncate_str(attr, inner_w);
             lines.push(Line::from(vec![
                 Span::styled("  │ ", Style::default().fg(Color::Cyan)),
-                Span::styled(center_text(&display, inner_w), Style::default().fg(Color::Reset)),
+                Span::styled(
+                    center_text(&display, inner_w),
+                    Style::default().fg(Color::Reset),
+                ),
                 Span::styled(" │", Style::default().fg(Color::Cyan)),
             ]));
         }
     }
 
     if !cls.methods.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(format!("  ├─{}─┤", "─".repeat(inner_w)), Style::default().fg(Color::Cyan)),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("  ├─{}─┤", "─".repeat(inner_w)),
+            Style::default().fg(Color::Cyan),
+        )]));
         for method in &cls.methods {
             let display = truncate_str(method, inner_w);
             lines.push(Line::from(vec![
                 Span::styled("  │ ", Style::default().fg(Color::Cyan)),
-                Span::styled(center_text(&display, inner_w), Style::default().fg(Color::Reset)),
+                Span::styled(
+                    center_text(&display, inner_w),
+                    Style::default().fg(Color::Reset),
+                ),
                 Span::styled(" │", Style::default().fg(Color::Cyan)),
             ]));
         }
     }
 
-    lines.push(Line::from(vec![
-        Span::styled(format!("  └─{}─┘", "─".repeat(inner_w)), Style::default().fg(Color::Cyan)),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        format!("  └─{}─┘", "─".repeat(inner_w)),
+        Style::default().fg(Color::Cyan),
+    )]));
 
     lines
 }
@@ -1459,7 +1724,11 @@ fn render_state_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
 
     for line in source.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with("%%") || line.starts_with("stateDiagram") || line.starts_with("stateDiagram-v2") {
+        if line.is_empty()
+            || line.starts_with("%%")
+            || line.starts_with("stateDiagram")
+            || line.starts_with("stateDiagram-v2")
+        {
             continue;
         }
         if line.starts_with("note ") || line.starts_with("end note") {
@@ -1472,12 +1741,15 @@ fn render_state_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
         if let Some(rest) = line.strip_prefix("state ") {
             let name = rest.trim().trim_end_matches('{').trim().to_string();
             if !name.is_empty() && !nodes.contains_key(&name) {
-                nodes.insert(name.clone(), DiagNode {
-                    id: name.clone(),
-                    label: name.clone(),
-                    shape: NodeShape::Round,
-                    subgraph: current_subgraph.clone(),
-                });
+                nodes.insert(
+                    name.clone(),
+                    DiagNode {
+                        id: name.clone(),
+                        label: name.clone(),
+                        shape: NodeShape::Round,
+                        subgraph: current_subgraph.clone(),
+                    },
+                );
                 node_order.push(name.clone());
             }
             if line.ends_with('{') {
@@ -1492,7 +1764,10 @@ fn render_state_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
             let (target, label) = if let Some(pos) = rest.find("-->") {
                 let after = rest[pos + 3..].trim();
                 if let Some(colon) = after.find(':') {
-                    (after[..colon].trim().to_string(), Some(after[colon + 1..].trim().to_string()))
+                    (
+                        after[..colon].trim().to_string(),
+                        Some(after[colon + 1..].trim().to_string()),
+                    )
                 } else {
                     (after.to_string(), None)
                 }
@@ -1501,21 +1776,27 @@ fn render_state_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
             };
             let start_id = "__start__".to_string();
             if !nodes.contains_key(&start_id) {
-                nodes.insert(start_id.clone(), DiagNode {
-                    id: start_id.clone(),
-                    label: "Start".to_string(),
-                    shape: NodeShape::Circle,
-                    subgraph: None,
-                });
+                nodes.insert(
+                    start_id.clone(),
+                    DiagNode {
+                        id: start_id.clone(),
+                        label: "Start".to_string(),
+                        shape: NodeShape::Circle,
+                        subgraph: None,
+                    },
+                );
                 node_order.push(start_id.clone());
             }
             if !nodes.contains_key(&target) {
-                nodes.insert(target.clone(), DiagNode {
-                    id: target.clone(),
-                    label: target.clone(),
-                    shape: NodeShape::Round,
-                    subgraph: current_subgraph.clone(),
-                });
+                nodes.insert(
+                    target.clone(),
+                    DiagNode {
+                        id: target.clone(),
+                        label: target.clone(),
+                        shape: NodeShape::Round,
+                        subgraph: current_subgraph.clone(),
+                    },
+                );
                 node_order.push(target.clone());
             }
             edges.push(DiagEdge {
@@ -1534,7 +1815,11 @@ fn render_state_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
 
         let (parsed_nodes, parsed_edges) = parse_line(line);
         for n in &parsed_nodes {
-            let id = if n.id == "*" { "__end__".to_string() } else { n.id.clone() };
+            let id = if n.id == "*" {
+                "__end__".to_string()
+            } else {
+                n.id.clone()
+            };
             if !nodes.contains_key(&id) {
                 let mut node = n.clone();
                 node.id = id.clone();
@@ -1553,18 +1838,37 @@ fn render_state_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
             }
         }
         for e in &parsed_edges {
-            let from = if e.from == "*" { "__end__".to_string() } else { e.from.clone() };
-            let to = if e.to == "*" { "__end__".to_string() } else { e.to.clone() };
+            let from = if e.from == "*" {
+                "__end__".to_string()
+            } else {
+                e.from.clone()
+            };
+            let to = if e.to == "*" {
+                "__end__".to_string()
+            } else {
+                e.to.clone()
+            };
             for id in [&from, &to] {
                 if !nodes.contains_key(id) {
-                    let label = if id == "__end__" { "End".to_string() } else { id.clone() };
-                    let shape = if id == "__end__" || id == "__start__" { NodeShape::Circle } else { NodeShape::Round };
-                    nodes.insert(id.clone(), DiagNode {
-                        id: id.clone(),
-                        label,
-                        shape,
-                        subgraph: current_subgraph.clone(),
-                    });
+                    let label = if id == "__end__" {
+                        "End".to_string()
+                    } else {
+                        id.clone()
+                    };
+                    let shape = if id == "__end__" || id == "__start__" {
+                        NodeShape::Circle
+                    } else {
+                        NodeShape::Round
+                    };
+                    nodes.insert(
+                        id.clone(),
+                        DiagNode {
+                            id: id.clone(),
+                            label,
+                            shape,
+                            subgraph: current_subgraph.clone(),
+                        },
+                    );
                     node_order.push(id.clone());
                 }
             }
@@ -1615,10 +1919,13 @@ fn render_er_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
         }
         if line == "}" {
             if in_entity {
-                entities.insert(current_name.clone(), ErEntity {
-                    name: current_name.clone(),
-                    attrs: current_attrs.clone(),
-                });
+                entities.insert(
+                    current_name.clone(),
+                    ErEntity {
+                        name: current_name.clone(),
+                        attrs: current_attrs.clone(),
+                    },
+                );
                 if !entity_order.contains(&current_name) {
                     entity_order.push(current_name.clone());
                 }
@@ -1635,10 +1942,13 @@ fn render_er_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
                 in_entity = true;
                 if line.ends_with('}') {
                     in_entity = false;
-                    entities.insert(current_name.clone(), ErEntity {
-                        name: current_name.clone(),
-                        attrs: Vec::new(),
-                    });
+                    entities.insert(
+                        current_name.clone(),
+                        ErEntity {
+                            name: current_name.clone(),
+                            attrs: Vec::new(),
+                        },
+                    );
                     if !entity_order.contains(&current_name) {
                         entity_order.push(current_name.clone());
                     }
@@ -1658,15 +1968,18 @@ fn render_er_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
         }
 
         let card_patterns = [
-            "||--o{", "||--|{", "||--||", "}o--o{", "}o--||", "}o--|{",
-            "|o--o{", "|o--|{", "|o--||",
+            "||--o{", "||--|{", "||--||", "}o--o{", "}o--||", "}o--|{", "|o--o{", "|o--|{",
+            "|o--||",
         ];
         for card in card_patterns {
             if let Some(pos) = line.find(card) {
                 let from = line[..pos].trim().to_string();
                 let rest = &line[pos + card.len()..];
                 let (to, label) = if let Some(colon) = rest.find(':') {
-                    (rest[..colon].trim().to_string(), rest[colon + 1..].trim().to_string())
+                    (
+                        rest[..colon].trim().to_string(),
+                        rest[colon + 1..].trim().to_string(),
+                    )
                 } else {
                     (rest.trim().to_string(), String::new())
                 };
@@ -1682,10 +1995,13 @@ fn render_er_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
     }
 
     if in_entity {
-        entities.insert(current_name.clone(), ErEntity {
-            name: current_name.clone(),
-            attrs: current_attrs.clone(),
-        });
+        entities.insert(
+            current_name.clone(),
+            ErEntity {
+                name: current_name.clone(),
+                attrs: current_attrs.clone(),
+            },
+        );
         if !entity_order.contains(&current_name) {
             entity_order.push(current_name.clone());
         }
@@ -1698,10 +2014,13 @@ fn render_er_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
     for r in &rels {
         for name in [&r.from, &r.to] {
             if !entities.contains_key(name) {
-                entities.insert(name.clone(), ErEntity {
-                    name: name.clone(),
-                    attrs: Vec::new(),
-                });
+                entities.insert(
+                    name.clone(),
+                    ErEntity {
+                        name: name.clone(),
+                        attrs: Vec::new(),
+                    },
+                );
                 entity_order.push(name.clone());
             }
         }
@@ -1710,7 +2029,10 @@ fn render_er_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         " mermaid ",
-        Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
     )));
     lines.push(Line::from(""));
 
@@ -1733,7 +2055,10 @@ fn render_er_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
                 };
                 lines.push(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(format!("    {}────▶ {}", label, r.to), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("    {}────▶ {}", label, r.to),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]));
             }
         }
@@ -1745,38 +2070,54 @@ fn render_er_diagram(source: &str, width: usize) -> Vec<Line<'static>> {
 
 fn render_er_box(name: &str, entity: &ErEntity, max_w: usize) -> Vec<Line<'static>> {
     let name_w = name.chars().count();
-    let attr_w = entity.attrs.iter().map(|(t, n)| format!("{} {}", t, n).chars().count()).max().unwrap_or(0);
+    let attr_w = entity
+        .attrs
+        .iter()
+        .map(|(t, n)| format!("{} {}", t, n).chars().count())
+        .max()
+        .unwrap_or(0);
     let inner_w = name_w.max(attr_w).min(max_w).max(4);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    lines.push(Line::from(vec![
-        Span::styled(format!("  ┌─{}─┐", "─".repeat(inner_w)), Style::default().fg(Color::Cyan)),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        format!("  ┌─{}─┐", "─".repeat(inner_w)),
+        Style::default().fg(Color::Cyan),
+    )]));
     lines.push(Line::from(vec![
         Span::styled("  │ ", Style::default().fg(Color::Cyan)),
-        Span::styled(center_text(name, inner_w), Style::default().fg(Color::Reset).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            center_text(name, inner_w),
+            Style::default()
+                .fg(Color::Reset)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" │", Style::default().fg(Color::Cyan)),
     ]));
 
     if !entity.attrs.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(format!("  ├─{}─┤", "─".repeat(inner_w)), Style::default().fg(Color::Cyan)),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("  ├─{}─┤", "─".repeat(inner_w)),
+            Style::default().fg(Color::Cyan),
+        )]));
         for (attr_type, attr_name) in &entity.attrs {
             let display = format!("{} {}", attr_type, attr_name);
             let truncated = truncate_str(&display, inner_w);
             lines.push(Line::from(vec![
                 Span::styled("  │ ", Style::default().fg(Color::Cyan)),
-                Span::styled(center_text(&truncated, inner_w), Style::default().fg(Color::Reset)),
+                Span::styled(
+                    center_text(&truncated, inner_w),
+                    Style::default().fg(Color::Reset),
+                ),
                 Span::styled(" │", Style::default().fg(Color::Cyan)),
             ]));
         }
     }
 
-    lines.push(Line::from(vec![
-        Span::styled(format!("  └─{}─┘", "─".repeat(inner_w)), Style::default().fg(Color::Cyan)),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        format!("  └─{}─┘", "─".repeat(inner_w)),
+        Style::default().fg(Color::Cyan),
+    )]));
 
     lines
 }
@@ -1818,8 +2159,15 @@ fn render_gantt(source: &str, width: usize) -> Vec<Line<'static>> {
             let parts: Vec<&str> = s.split_whitespace().collect();
             if parts.len() >= 3 {
                 if let Ok(day) = parts[0].parse::<i64>() {
-                    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-                    let month_idx = months.iter().position(|m| *m == parts[1]).map(|i| i as i64).unwrap_or(0);
+                    let months = [
+                        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct",
+                        "Nov", "Dec",
+                    ];
+                    let month_idx = months
+                        .iter()
+                        .position(|m| *m == parts[1])
+                        .map(|i| i as i64)
+                        .unwrap_or(0);
                     let year: i64 = parts[2].parse().unwrap_or(2000);
                     return (year - 2000) * 365 + month_idx * 30 + day;
                 }
@@ -1837,7 +2185,10 @@ fn render_gantt(source: &str, width: usize) -> Vec<Line<'static>> {
             title = rest.trim().to_string();
             continue;
         }
-        if line.starts_with("dateFormat ") || line.starts_with("axisFormat ") || line.starts_with("excludes ") {
+        if line.starts_with("dateFormat ")
+            || line.starts_with("axisFormat ")
+            || line.starts_with("excludes ")
+        {
             continue;
         }
         if let Some(rest) = line.strip_prefix("section ") {
@@ -1856,18 +2207,30 @@ fn render_gantt(source: &str, width: usize) -> Vec<Line<'static>> {
 
             let (start_day, duration) = if parts.len() >= 3 {
                 let start = date_to_day(parts[0].trim());
-                let dur = parts[1].trim().trim_end_matches('d').parse::<i64>().unwrap_or(1);
+                let dur = parts[1]
+                    .trim()
+                    .trim_end_matches('d')
+                    .parse::<i64>()
+                    .unwrap_or(1);
                 (start, dur)
             } else if parts.len() == 2 {
                 let first = parts[0].trim();
                 if first.starts_with("after ") {
                     let dep = first["after ".len()..].trim().to_string();
                     let start = day_map.get(&dep).copied().unwrap_or(0);
-                    let dur = parts[1].trim().trim_end_matches('d').parse::<i64>().unwrap_or(1);
+                    let dur = parts[1]
+                        .trim()
+                        .trim_end_matches('d')
+                        .parse::<i64>()
+                        .unwrap_or(1);
                     (start, dur)
                 } else {
                     let start = date_to_day(first);
-                    let dur = parts[1].trim().trim_end_matches('d').parse::<i64>().unwrap_or(1);
+                    let dur = parts[1]
+                        .trim()
+                        .trim_end_matches('d')
+                        .parse::<i64>()
+                        .unwrap_or(1);
                     (start, dur)
                 }
             } else if parts.len() == 1 {
@@ -1900,7 +2263,11 @@ fn render_gantt(source: &str, width: usize) -> Vec<Line<'static>> {
     }
 
     let min_start = tasks.iter().map(|t| t.start_day).min().unwrap_or(0);
-    let max_end = tasks.iter().map(|t| t.start_day + t.duration).max().unwrap_or(1);
+    let max_end = tasks
+        .iter()
+        .map(|t| t.start_day + t.duration)
+        .max()
+        .unwrap_or(1);
     let total_span = (max_end - min_start).max(1);
 
     let max_bar_w = (width as i64).saturating_sub(30).max(20) as usize;
@@ -1908,12 +2275,20 @@ fn render_gantt(source: &str, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         " mermaid ",
-        Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
     )));
     lines.push(Line::from(""));
 
     if !title.is_empty() {
-        lines.push(Line::from(Span::styled(title, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
         lines.push(Line::from(""));
     }
 
@@ -1933,13 +2308,17 @@ fn render_gantt(source: &str, width: usize) -> Vec<Line<'static>> {
             if sec_idx < sections.len() {
                 lines.push(Line::from(Span::styled(
                     sections[sec_idx].clone(),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
         } else if sec_idx == 0 && !sections.is_empty() {
             lines.push(Line::from(Span::styled(
                 sections[0].clone(),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )));
             sec_idx = 1;
         }
@@ -1957,7 +2336,10 @@ fn render_gantt(source: &str, width: usize) -> Vec<Line<'static>> {
             Span::styled(prefix, Style::default().fg(Color::Reset)),
             Span::styled(padding, Style::default()),
             Span::styled(bar, Style::default().fg(Color::Blue)),
-            Span::styled(format!("  {}d", t.duration), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("  {}d", t.duration),
+                Style::default().fg(Color::DarkGray),
+            ),
         ]));
     }
 
@@ -2001,17 +2383,32 @@ fn render_pie_chart(source: &str, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(Span::styled(
         " mermaid ",
-        Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
     )));
     lines.push(Line::from(""));
 
     if !title.is_empty() {
-        lines.push(Line::from(Span::styled(title, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
         lines.push(Line::from(""));
     }
 
     let max_bar_w = (width.saturating_sub(30)).max(20);
-    let colors = [Color::Blue, Color::Green, Color::Yellow, Color::Magenta, Color::Cyan, Color::Red];
+    let colors = [
+        Color::Blue,
+        Color::Green,
+        Color::Yellow,
+        Color::Magenta,
+        Color::Cyan,
+        Color::Red,
+    ];
     let label_w = 15;
 
     for (i, (label, value)) in entries.iter().enumerate() {
@@ -2022,7 +2419,10 @@ fn render_pie_chart(source: &str, width: usize) -> Vec<Line<'static>> {
         let padded_label = format!("{:<width$}", label_display, width = label_w);
 
         lines.push(Line::from(vec![
-            Span::styled(format!("  {} ", padded_label), Style::default().fg(Color::Reset)),
+            Span::styled(
+                format!("  {} ", padded_label),
+                Style::default().fg(Color::Reset),
+            ),
             Span::styled("█".repeat(bar_len), Style::default().fg(color)),
             Span::styled(format!("  {}%", pct), Style::default().fg(Color::DarkGray)),
         ]));
@@ -2066,7 +2466,8 @@ mod tests {
 
     #[test]
     fn parses_subgraph() {
-        let src = "flowchart TD\n    A[Root] --> B[Child]\n    subgraph MyGroup\n        B\n    end";
+        let src =
+            "flowchart TD\n    A[Root] --> B[Child]\n    subgraph MyGroup\n        B\n    end";
         let diag = parse_mermaid(src).unwrap();
         assert_eq!(diag.subgraphs.len(), 1);
         assert_eq!(diag.subgraphs[0].0, "MyGroup");
@@ -2090,68 +2491,111 @@ mod tests {
     fn harvest_graph_renders() {
         let src = r#"{"symbols":[{"name":"main","kind":"function","file":"main.go"},{"name":"cmdDaemon","kind":"function","file":"main_daemon.go"}],"relations":[{"source":"main","target":"cmdDaemon","relation":"calls"}]}"#;
         let lines = render_harvest_graph(src, 80);
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("main"))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("calls"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("main"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("calls"))));
     }
 
     #[test]
     fn renders_sequence_diagram() {
         let src = "sequenceDiagram\n    participant A as User\n    participant B as API\n    A->>B: Login\n    B-->>A: Token";
         let lines = render_mermaid(src, 120);
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("User"))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("API"))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("Login"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("User"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("API"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("Login"))));
     }
 
     #[test]
     fn renders_class_diagram() {
         let src = "classDiagram\n    class Animal {\n      +name: String\n      +makeSound()\n    }\n    class Dog {\n      +fetch()\n    }\n    Animal <|-- Dog";
         let lines = render_mermaid(src, 100);
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("Animal"))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("Dog"))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("ext"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("Animal"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("Dog"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("ext"))));
     }
 
     #[test]
     fn renders_state_diagram() {
         let src = "stateDiagram-v2\n    [*] --> Idle\n    Idle --> Processing: Start\n    Processing --> Done\n    Done --> [*]";
         let lines = render_mermaid(src, 100);
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("Idle"))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("Processing"))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("Start"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("Idle"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("Processing"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("Start"))));
     }
 
     #[test]
     fn renders_er_diagram() {
         let src = "erDiagram\n    USER {\n      int id\n      string email\n    }\n    POST {\n      int id\n      string title\n    }\n    USER ||--o{ POST : creates";
         let lines = render_mermaid(src, 100);
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("USER"))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("POST"))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("1:0+"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("USER"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("POST"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("1:0+"))));
     }
 
     #[test]
     fn renders_gantt() {
         let src = "gantt\n    title Project Timeline\n    section Planning\n    Research :0, 30d\n    Design :30, 20d\n    section Development\n    Code :50, 60d";
         let lines = render_mermaid(src, 100);
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("Research"))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("Code"))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("█"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("Research"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("Code"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("█"))));
     }
 
     #[test]
     fn renders_pie_chart() {
-        let src = "pie title Pet Ownership\n    \"Dogs\" : 52\n    \"Cats\" : 34\n    \"Fish\" : 14";
+        let src =
+            "pie title Pet Ownership\n    \"Dogs\" : 52\n    \"Cats\" : 34\n    \"Fish\" : 14";
         let lines = render_mermaid(src, 100);
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("Dogs"))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("52%"))));
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("█"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("Dogs"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("52%"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("█"))));
     }
 
     #[test]
     fn unknown_mermaid_falls_back_to_code() {
         let src = "journey\n    title My working day\n    Go to work: 5";
         let lines = render_mermaid(src, 80);
-        assert!(lines.iter().any(|l| l.spans.iter().any(|s| s.content.contains("journey"))));
+        assert!(lines
+            .iter()
+            .any(|l| l.spans.iter().any(|s| s.content.contains("journey"))));
     }
 }
