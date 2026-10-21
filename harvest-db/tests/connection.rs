@@ -6,7 +6,8 @@ use harvest_db::{Db, DbOptions};
 use serde_json::json;
 
 fn admin_url() -> String {
-    std::env::var(harvest_db::test_support::TEST_DATABASE_URL_VAR).expect("HARVEST_TEST_DATABASE_URL")
+    std::env::var(harvest_db::test_support::TEST_DATABASE_URL_VAR)
+        .expect("HARVEST_TEST_DATABASE_URL")
 }
 
 fn with_dead_first_host(url: &str) -> String {
@@ -17,7 +18,10 @@ fn with_dead_first_host(url: &str) -> String {
     };
     let port = config.get_ports().first().copied().unwrap_or(5432);
     let user = config.get_user().unwrap_or("postgres");
-    let password = config.get_password().map(|p| String::from_utf8_lossy(p).to_string()).unwrap_or_default();
+    let password = config
+        .get_password()
+        .map(|p| String::from_utf8_lossy(p).to_string())
+        .unwrap_or_default();
     let dbname = config.get_dbname().unwrap_or("postgres");
     format!("postgres://{user}:{password}@127.0.0.1:1,{host}:{port}/{dbname}?target_session_attrs=read-write&connect_timeout=2")
 }
@@ -38,7 +42,8 @@ fn sslmode_require_turns_tls_on() {
 
 #[test]
 fn a_ca_file_turns_tls_on() {
-    let options = DbOptions::new("postgres://u:p@localhost:5432/db").with_ca_file(Some("/tmp/ca.pem".into()));
+    let options =
+        DbOptions::new("postgres://u:p@localhost:5432/db").with_ca_file(Some("/tmp/ca.pem".into()));
     assert!(options.requires_tls().unwrap());
 }
 
@@ -48,15 +53,23 @@ fn multi_host_urls_keep_every_host_and_the_read_write_requirement() {
     let config = options.parsed().unwrap();
     assert_eq!(config.get_hosts().len(), 3);
     assert_eq!(config.get_ports(), &[5432, 5432, 5432]);
-    assert_eq!(config.get_target_session_attrs(), tokio_postgres::config::TargetSessionAttrs::ReadWrite);
+    assert_eq!(
+        config.get_target_session_attrs(),
+        tokio_postgres::config::TargetSessionAttrs::ReadWrite
+    );
 }
 
 #[test]
 fn a_missing_ca_file_is_reported_when_building_the_pool() {
     let options = DbOptions::new("postgres://u:p@localhost:5432/db?sslmode=require")
         .with_ca_file(Some("/nonexistent/ca.pem".into()));
-    let error = Db::connect_with_without_migrating(&options).err().expect("expected an error");
-    assert!(format!("{error:#}").contains("/nonexistent/ca.pem"), "{error:#}");
+    let error = Db::connect_with_without_migrating(&options)
+        .err()
+        .expect("expected an error");
+    assert!(
+        format!("{error:#}").contains("/nonexistent/ca.pem"),
+        "{error:#}"
+    );
 }
 
 #[test]
@@ -66,7 +79,8 @@ fn a_valid_ca_file_builds_a_tls_pool() {
     let ca = rcgen::generate_simple_self_signed(vec!["db.internal".to_string()]).unwrap();
     let path = dir.join("ca.pem");
     std::fs::write(&path, ca.cert.pem()).unwrap();
-    let options = DbOptions::new("postgres://u:p@localhost:5432/db?sslmode=require").with_ca_file(Some(path));
+    let options =
+        DbOptions::new("postgres://u:p@localhost:5432/db?sslmode=require").with_ca_file(Some(path));
     assert!(Db::connect_with_without_migrating(&options).is_ok());
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -107,13 +121,28 @@ async fn multi_host_url_skips_an_unreachable_host() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn pool_replaces_connections_killed_by_the_server() {
     let t = TestDb::new().await;
-    let db = Db::connect_with(&DbOptions::new(&t.url).with_pool_size(1)).await.unwrap();
-    let pid = db.query("SELECT pg_backend_pid() AS pid", json!({})).await.unwrap()[0]["pid"].as_i64().unwrap();
-    let (admin, connection) = tokio_postgres::connect(&admin_url(), tokio_postgres::NoTls).await.unwrap();
+    let db = Db::connect_with(&DbOptions::new(&t.url).with_pool_size(1))
+        .await
+        .unwrap();
+    let pid = db
+        .query("SELECT pg_backend_pid() AS pid", json!({}))
+        .await
+        .unwrap()[0]["pid"]
+        .as_i64()
+        .unwrap();
+    let (admin, connection) = tokio_postgres::connect(&admin_url(), tokio_postgres::NoTls)
+        .await
+        .unwrap();
     tokio::spawn(connection);
-    admin.execute("SELECT pg_terminate_backend($1)", &[&(pid as i32)]).await.unwrap();
+    admin
+        .execute("SELECT pg_terminate_backend($1)", &[&(pid as i32)])
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
-    let rows = db.query("SELECT pg_backend_pid() AS pid", json!({})).await.unwrap();
+    let rows = db
+        .query("SELECT pg_backend_pid() AS pid", json!({}))
+        .await
+        .unwrap();
     assert_ne!(rows[0]["pid"].as_i64().unwrap(), pid);
 }
 
@@ -124,8 +153,14 @@ async fn listener_receives_notifications_from_a_dedicated_client() {
     let channel = format!("harvest_test_{}", uuid::Uuid::new_v4().simple());
     let mut listener = t.db.listen(&[channel.as_str()]).await.unwrap();
     let publisher = t.db.dedicated_client().await.unwrap();
-    publisher.execute("SELECT pg_notify($1, $2)", &[&channel, &"hello"]).await.unwrap();
-    let notification = tokio::time::timeout(Duration::from_secs(5), listener.recv()).await.unwrap().unwrap();
+    publisher
+        .execute("SELECT pg_notify($1, $2)", &[&channel, &"hello"])
+        .await
+        .unwrap();
+    let notification = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(notification.channel, channel);
     assert_eq!(notification.payload, "hello");
 }
@@ -137,10 +172,17 @@ async fn listener_ends_when_its_connection_is_terminated() {
     let channel = format!("harvest_test_{}", uuid::Uuid::new_v4().simple());
     let mut listener = t.db.listen(&[channel.as_str()]).await.unwrap();
     let pid = listener.backend_pid();
-    let (admin, connection) = tokio_postgres::connect(&admin_url(), tokio_postgres::NoTls).await.unwrap();
+    let (admin, connection) = tokio_postgres::connect(&admin_url(), tokio_postgres::NoTls)
+        .await
+        .unwrap();
     tokio::spawn(connection);
-    admin.execute("SELECT pg_terminate_backend($1)", &[&pid]).await.unwrap();
-    let next = tokio::time::timeout(Duration::from_secs(5), listener.recv()).await.unwrap();
+    admin
+        .execute("SELECT pg_terminate_backend($1)", &[&pid])
+        .await
+        .unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .unwrap();
     assert!(next.is_none());
 }
 
@@ -148,7 +190,10 @@ async fn listener_ends_when_its_connection_is_terminated() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn schema_version_reports_the_latest_migration_after_migrating() {
     let t = TestDb::new().await;
-    assert_eq!(t.db.schema_version().await.unwrap(), harvest_db::LATEST_SCHEMA_VERSION);
+    assert_eq!(
+        t.db.schema_version().await.unwrap(),
+        harvest_db::LATEST_SCHEMA_VERSION
+    );
 }
 
 #[tokio::test]
@@ -156,12 +201,24 @@ async fn schema_version_reports_the_latest_migration_after_migrating() {
 async fn schema_version_is_zero_before_any_migration() {
     let t = TestDb::new().await;
     let name = format!("harvest_empty_{}", uuid::Uuid::new_v4().simple());
-    let (admin, connection) = tokio_postgres::connect(&admin_url(), tokio_postgres::NoTls).await.unwrap();
+    let (admin, connection) = tokio_postgres::connect(&admin_url(), tokio_postgres::NoTls)
+        .await
+        .unwrap();
     tokio::spawn(connection);
-    admin.batch_execute(&format!("CREATE DATABASE {name}")).await.unwrap();
-    let url = t.url.rsplit_once('/').map(|(base, _)| format!("{base}/{name}")).unwrap();
+    admin
+        .batch_execute(&format!("CREATE DATABASE {name}"))
+        .await
+        .unwrap();
+    let url = t
+        .url
+        .rsplit_once('/')
+        .map(|(base, _)| format!("{base}/{name}"))
+        .unwrap();
     let db = Db::connect_without_migrating(&url).unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 0);
     drop(db);
-    admin.batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)")).await.unwrap();
+    admin
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+        .await
+        .unwrap();
 }

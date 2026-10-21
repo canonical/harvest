@@ -24,7 +24,10 @@ pub fn bind_named(sql: &str, params: &Value) -> Result<(String, Vec<Value>)> {
                 i = end;
             }
             '-' if chars.get(i + 1) == Some(&'-') => {
-                let end = chars[i..].iter().position(|&ch| ch == '\n').map_or(chars.len(), |p| i + p);
+                let end = chars[i..]
+                    .iter()
+                    .position(|&ch| ch == '\n')
+                    .map_or(chars.len(), |p| i + p);
                 out.extend(&chars[i..end]);
                 i = end;
             }
@@ -36,19 +39,24 @@ pub fn bind_named(sql: &str, params: &Value) -> Result<(String, Vec<Value>)> {
             '$' => {
                 let start = i + 1;
                 let mut end = start;
-                while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_')
+                {
                     end += 1;
                 }
                 let ident: String = chars[start..end].iter().collect();
                 if chars.get(end) == Some(&'$') {
                     let tag: Vec<char> = chars[i..=end].to_vec();
-                    let close = find_seq(&chars, end + 1, &tag).map_or(chars.len(), |p| p + tag.len());
+                    let close =
+                        find_seq(&chars, end + 1, &tag).map_or(chars.len(), |p| p + tag.len());
                     out.extend(&chars[i..close]);
                     i = close;
                 } else if ident.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '_') {
                     let position = match names.iter().position(|n| *n == ident) {
                         Some(p) => p,
-                        None => { names.push(ident.clone()); names.len() - 1 }
+                        None => {
+                            names.push(ident.clone());
+                            names.len() - 1
+                        }
                     };
                     out.push('$');
                     out.push_str(&(position + 1).to_string());
@@ -65,9 +73,15 @@ pub fn bind_named(sql: &str, params: &Value) -> Result<(String, Vec<Value>)> {
         }
     }
 
-    let values = names.iter().map(|name| {
-        params.get(name).cloned().ok_or_else(|| anyhow!("missing query parameter ${name}"))
-    }).collect::<Result<Vec<_>>>()?;
+    let values = names
+        .iter()
+        .map(|name| {
+            params
+                .get(name)
+                .cloned()
+                .ok_or_else(|| anyhow!("missing query parameter ${name}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
     Ok((out, values))
 }
 
@@ -75,7 +89,10 @@ fn skip_quoted(chars: &[char], start: usize, quote: char) -> usize {
     let mut i = start + 1;
     while i < chars.len() {
         if chars[i] == quote {
-            if chars.get(i + 1) == Some(&quote) { i += 2; continue; }
+            if chars.get(i + 1) == Some(&quote) {
+                i += 2;
+                continue;
+            }
             return i + 1;
         }
         i += 1;
@@ -107,11 +124,19 @@ impl ToSql for JsonParam<'_> {
             Type::TIMESTAMPTZ => as_timestamp(v)?.to_sql(ty, out),
             Type::JSON | Type::JSONB => v.to_sql(ty, out),
             Type::TEXT_ARRAY | Type::VARCHAR_ARRAY => as_text_vec(v)?.to_sql(ty, out),
-            Type::INT8_ARRAY => as_array(v)?.iter().map(as_i64).collect::<Result<Vec<_>, _>>()?.to_sql(ty, out),
-            Type::INT4_ARRAY => as_array(v)?.iter()
+            Type::INT8_ARRAY => as_array(v)?
+                .iter()
+                .map(as_i64)
+                .collect::<Result<Vec<_>, _>>()?
+                .to_sql(ty, out),
+            Type::INT4_ARRAY => as_array(v)?
+                .iter()
                 .map(|x| as_i64(x).and_then(|n| Ok(i32::try_from(n)?)))
-                .collect::<Result<Vec<_>, _>>()?.to_sql(ty, out),
-            Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN => as_text(v).to_sql(ty, out),
+                .collect::<Result<Vec<_>, _>>()?
+                .to_sql(ty, out),
+            Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN => {
+                as_text(v).to_sql(ty, out)
+            }
             ref other => Err(format!("unsupported parameter type {other}").into()),
         }
     }
@@ -133,7 +158,8 @@ fn as_bool(v: &Value) -> Result<bool, BoxError> {
 
 fn as_i64(v: &Value) -> Result<i64, BoxError> {
     match v {
-        Value::Number(n) => n.as_i64()
+        Value::Number(n) => n
+            .as_i64()
             .or_else(|| n.as_u64().and_then(|u| i64::try_from(u).ok()))
             .or_else(|| n.as_f64().map(|f| f as i64))
             .ok_or_else(|| format!("number {n} does not fit in an integer").into()),
@@ -145,7 +171,9 @@ fn as_i64(v: &Value) -> Result<i64, BoxError> {
 
 fn as_f64(v: &Value) -> Result<f64, BoxError> {
     match v {
-        Value::Number(n) => n.as_f64().ok_or_else(|| format!("invalid number {n}").into()),
+        Value::Number(n) => n
+            .as_f64()
+            .ok_or_else(|| format!("invalid number {n}").into()),
         Value::String(s) => Ok(s.parse()?),
         other => Err(format!("expected a number, got {other}").into()),
     }
@@ -168,7 +196,8 @@ fn as_text(v: &Value) -> String {
 }
 
 fn as_array(v: &Value) -> Result<&Vec<Value>, BoxError> {
-    v.as_array().ok_or_else(|| format!("expected an array, got {v}").into())
+    v.as_array()
+        .ok_or_else(|| format!("expected an array, got {v}").into())
 }
 
 fn as_text_vec(v: &Value) -> Result<Vec<String>, BoxError> {
@@ -185,7 +214,8 @@ mod tests {
         let (sql, values) = bind_named(
             "SELECT * FROM t WHERE a = $pid AND b = $did OR c = $pid",
             &json!({ "pid": "p", "did": "d", "unused": 1 }),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(sql, "SELECT * FROM t WHERE a = $1 AND b = $2 OR c = $1");
         assert_eq!(values, vec![json!("p"), json!("d")]);
     }
@@ -195,8 +225,12 @@ mod tests {
         let (sql, values) = bind_named(
             "SELECT '$x', \"$y\", $z::text -- $c\n, $$ $q $$, $t$ $w $t$ /* $b */",
             &json!({ "z": 1 }),
-        ).unwrap();
-        assert_eq!(sql, "SELECT '$x', \"$y\", $1::text -- $c\n, $$ $q $$, $t$ $w $t$ /* $b */");
+        )
+        .unwrap();
+        assert_eq!(
+            sql,
+            "SELECT '$x', \"$y\", $1::text -- $c\n, $$ $q $$, $t$ $w $t$ /* $b */"
+        );
         assert_eq!(values, vec![json!(1)]);
     }
 

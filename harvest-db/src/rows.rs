@@ -7,7 +7,10 @@ use tokio_postgres::Row;
 pub fn row_to_json(row: &Row) -> Result<Value> {
     let mut map = Map::with_capacity(row.len());
     for (i, column) in row.columns().iter().enumerate() {
-        map.insert(column.name().to_string(), column_to_json(row, i, column.type_(), column.name())?);
+        map.insert(
+            column.name().to_string(),
+            column_to_json(row, i, column.type_(), column.name())?,
+        );
     }
     Ok(Value::Object(map))
 }
@@ -24,8 +27,12 @@ fn column_to_json(row: &Row, i: usize, ty: &Type, name: &str) -> Result<Value> {
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN => {
             json!(row.try_get::<_, Option<String>>(i)?)
         }
-        Type::TIMESTAMPTZ => json!(row.try_get::<_, Option<DateTime<Utc>>>(i)?.map(|t| t.to_rfc3339())),
-        Type::TIMESTAMP => json!(row.try_get::<_, Option<NaiveDateTime>>(i)?.map(|t| t.to_string())),
+        Type::TIMESTAMPTZ => json!(row
+            .try_get::<_, Option<DateTime<Utc>>>(i)?
+            .map(|t| t.to_rfc3339())),
+        Type::TIMESTAMP => json!(row
+            .try_get::<_, Option<NaiveDateTime>>(i)?
+            .map(|t| t.to_string())),
         Type::JSON | Type::JSONB => row.try_get::<_, Option<Value>>(i)?.unwrap_or(Value::Null),
         Type::TEXT_ARRAY | Type::VARCHAR_ARRAY | Type::NAME_ARRAY => {
             json!(row.try_get::<_, Option<Vec<Option<String>>>>(i)?)
