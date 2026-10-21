@@ -9,9 +9,19 @@ fn lowercase_roman(mut n: usize) -> String {
         return String::new();
     }
     const VALUES: [(usize, &str); 13] = [
-        (1000, "m"), (900, "cm"), (500, "d"), (400, "cd"),
-        (100, "c"), (90, "xc"), (50, "l"), (40, "xl"),
-        (10, "x"), (9, "ix"), (5, "v"), (4, "iv"), (1, "i"),
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
     ];
     let mut out = String::new();
     for (value, symbol) in VALUES {
@@ -84,7 +94,10 @@ fn parse_toc_headings(markdown: &str, max_level: u8) -> Vec<(u8, String)> {
 
 fn decode_pdf_text(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        let units: Vec<u16> = rest.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        let units: Vec<u16> = rest
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
         String::from_utf16_lossy(&units)
     } else {
         String::from_utf8_lossy(bytes).to_string()
@@ -102,9 +115,15 @@ fn extract_outline_entries(doc: &Document) -> Vec<OutlineEntry> {
     let page_number_of = |id: ObjectId| pages.iter().find(|(_, v)| **v == id).map(|(k, _)| *k);
 
     let mut entries = Vec::new();
-    let Ok(catalog) = doc.catalog() else { return entries };
-    let Ok(outlines_id) = catalog.get(b"Outlines").and_then(Object::as_reference) else { return entries };
-    let Ok(outlines) = doc.get_dictionary(outlines_id) else { return entries };
+    let Ok(catalog) = doc.catalog() else {
+        return entries;
+    };
+    let Ok(outlines_id) = catalog.get(b"Outlines").and_then(Object::as_reference) else {
+        return entries;
+    };
+    let Ok(outlines) = doc.get_dictionary(outlines_id) else {
+        return entries;
+    };
 
     let mut stack: Vec<ObjectId> = Vec::new();
     if let Ok(first) = outlines.get(b"First").and_then(Object::as_reference) {
@@ -115,22 +134,35 @@ fn extract_outline_entries(doc: &Document) -> Vec<OutlineEntry> {
         if !visited.insert(id) {
             continue;
         }
-        let Ok(item) = doc.get_dictionary(id) else { continue };
+        let Ok(item) = doc.get_dictionary(id) else {
+            continue;
+        };
         if let Ok(next) = item.get(b"Next").and_then(Object::as_reference) {
             stack.push(next);
         }
 
-        let title_bytes = item.get(b"Title").and_then(Object::as_str).unwrap_or_default();
+        let title_bytes = item
+            .get(b"Title")
+            .and_then(Object::as_str)
+            .unwrap_or_default();
         let title = decode_pdf_text(title_bytes);
         let indent = title.chars().take_while(|c| *c == ' ').count() / 2;
         let level = (indent + 1) as u8;
         let text = title.trim_start().to_string();
 
-        let dest_page = item.get(b"Dest").ok().and_then(|d| d.as_array().ok()).and_then(|arr| arr.first());
+        let dest_page = item
+            .get(b"Dest")
+            .ok()
+            .and_then(|d| d.as_array().ok())
+            .and_then(|arr| arr.first());
         let page_id = dest_page.and_then(|o| o.as_reference().ok());
         if let Some(page_id) = page_id {
             if let Some(page_number) = page_number_of(page_id) {
-                entries.push(OutlineEntry { level, text, page_number });
+                entries.push(OutlineEntry {
+                    level,
+                    text,
+                    page_number,
+                });
             }
         }
     }
@@ -142,30 +174,40 @@ fn heading_pages(markdown: &str, doc: &Document, max_level: u8) -> Vec<(u8, Stri
     let outline = extract_outline_entries(doc);
     let mut lookup: HashMap<(u8, String), std::collections::VecDeque<u32>> = HashMap::new();
     for entry in outline {
-        lookup.entry((entry.level, entry.text)).or_default().push_back(entry.page_number);
+        lookup
+            .entry((entry.level, entry.text))
+            .or_default()
+            .push_back(entry.page_number);
     }
     headings
         .into_iter()
         .filter_map(|(level, text)| {
-            let page = lookup.get_mut(&(level, text.clone())).and_then(|q| q.pop_front())?;
+            let page = lookup
+                .get_mut(&(level, text.clone()))
+                .and_then(|q| q.pop_front())?;
             Some((level, text, page))
         })
         .collect()
 }
 
 fn font_asset_path(filename: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/fonts").join(filename)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/fonts")
+        .join(filename)
 }
 
 fn ubuntu_font_config() -> FontConfig {
-    FontConfig::new()
-        .with_default_font_source(FontSource::File(font_asset_path("Ubuntu.ttf")))
+    FontConfig::new().with_default_font_source(FontSource::File(font_asset_path("Ubuntu.ttf")))
 }
 
 fn render_markdown(markdown: &str, config_toml: &str) -> Result<Vec<u8>, String> {
     let font_config = ubuntu_font_config();
-    markdown2pdf::parse_into_bytes(markdown.to_string(), ConfigSource::Embedded(config_toml), Some(&font_config))
-        .map_err(|e| e.to_string())
+    markdown2pdf::parse_into_bytes(
+        markdown.to_string(),
+        ConfigSource::Embedded(config_toml),
+        Some(&font_config),
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn merge_documents(mut docs: Vec<Document>) -> Document {
@@ -193,8 +235,13 @@ fn merge_documents(mut docs: Vec<Document>) -> Document {
     let mut pages_dict = Dictionary::new();
     pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
     pages_dict.set("Count", Object::Integer(page_ids.len() as i64));
-    pages_dict.set("Kids", Object::Array(page_ids.iter().map(|id| Object::Reference(*id)).collect()));
-    target.objects.insert(pages_id, Object::Dictionary(pages_dict));
+    pages_dict.set(
+        "Kids",
+        Object::Array(page_ids.iter().map(|id| Object::Reference(*id)).collect()),
+    );
+    target
+        .objects
+        .insert(pages_id, Object::Dictionary(pages_dict));
 
     let mut catalog = Dictionary::new();
     catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -223,12 +270,19 @@ fn helvetica_text_width(text: &str, size_pt: f32) -> f32 {
 }
 
 fn page_resources_id(doc: &mut Document, page_id: ObjectId) -> Result<ObjectId, String> {
-    let page_dict = doc.get_dictionary(page_id).map_err(|e| e.to_string())?.clone();
+    let page_dict = doc
+        .get_dictionary(page_id)
+        .map_err(|e| e.to_string())?
+        .clone();
     match page_dict.get(b"Resources") {
         Ok(Object::Reference(id)) => Ok(*id),
         _ => {
             let new_id = doc.new_object_id();
-            let resources = page_dict.get(b"Resources").and_then(Object::as_dict).cloned().unwrap_or_default();
+            let resources = page_dict
+                .get(b"Resources")
+                .and_then(Object::as_dict)
+                .cloned()
+                .unwrap_or_default();
             doc.objects.insert(new_id, Object::Dictionary(resources));
             let page_dict_mut = doc.get_dictionary_mut(page_id).map_err(|e| e.to_string())?;
             page_dict_mut.set("Resources", Object::Reference(new_id));
@@ -244,7 +298,12 @@ fn add_resource_entry(
     key: &[u8],
     value_id: ObjectId,
 ) -> Result<(), String> {
-    let category_entry = doc.get_dictionary(resources_id).map_err(|e| e.to_string())?.get(category).cloned().ok();
+    let category_entry = doc
+        .get_dictionary(resources_id)
+        .map_err(|e| e.to_string())?
+        .get(category)
+        .cloned()
+        .ok();
     match category_entry {
         Some(Object::Reference(sub_id)) => {
             let sub = doc.get_dictionary_mut(sub_id).map_err(|e| e.to_string())?;
@@ -252,24 +311,33 @@ fn add_resource_entry(
         }
         Some(Object::Dictionary(mut sub)) => {
             sub.set(key, Object::Reference(value_id));
-            let resources = doc.get_dictionary_mut(resources_id).map_err(|e| e.to_string())?;
+            let resources = doc
+                .get_dictionary_mut(resources_id)
+                .map_err(|e| e.to_string())?;
             resources.set(category, Object::Dictionary(sub));
         }
         _ => {
             let mut sub = Dictionary::new();
             sub.set(key, Object::Reference(value_id));
-            let resources = doc.get_dictionary_mut(resources_id).map_err(|e| e.to_string())?;
+            let resources = doc
+                .get_dictionary_mut(resources_id)
+                .map_err(|e| e.to_string())?;
             resources.set(category, Object::Dictionary(sub));
         }
     }
     Ok(())
 }
 
-fn add_isolated_page_contents(doc: &mut Document, page_id: ObjectId, content: &str) -> Result<(), String> {
+fn add_isolated_page_contents(
+    doc: &mut Document,
+    page_id: ObjectId,
+    content: &str,
+) -> Result<(), String> {
     let mut isolated = String::with_capacity(content.len() + 1);
     isolated.push('\n');
     isolated.push_str(content);
-    doc.add_page_contents(page_id, isolated.into_bytes()).map_err(|e| e.to_string())
+    doc.add_page_contents(page_id, isolated.into_bytes())
+        .map_err(|e| e.to_string())
 }
 
 fn ensure_page_font_resource(doc: &mut Document, page_id: ObjectId) -> Result<(), String> {
@@ -292,7 +360,11 @@ fn page_media_box(doc: &Document, page_id: ObjectId) -> (f32, f32) {
         .and_then(|o| o.as_array().ok())
         .and_then(|arr| {
             let nums: Vec<f32> = arr.iter().filter_map(|o| o.as_float().ok()).collect();
-            if nums.len() == 4 { Some((nums[2], nums[3])) } else { None }
+            if nums.len() == 4 {
+                Some((nums[2], nums[3]))
+            } else {
+                None
+            }
         })
         .unwrap_or((595.0, 842.0))
 }
@@ -458,8 +530,13 @@ fn render_title_page(info: &TitlePageInfo) -> Result<Vec<u8>, String> {
     let mut pages_dict = Dictionary::new();
     pages_dict.set("Type", Object::Name(b"Pages".to_vec()));
     pages_dict.set("Count", Object::Integer(1));
-    pages_dict.set("Kids", Object::Array(vec![Object::Reference(first_page_id)]));
-    single.objects.insert(pages_id, Object::Dictionary(pages_dict));
+    pages_dict.set(
+        "Kids",
+        Object::Array(vec![Object::Reference(first_page_id)]),
+    );
+    single
+        .objects
+        .insert(pages_id, Object::Dictionary(pages_dict));
     if let Ok(page_dict) = single.get_dictionary_mut(first_page_id) {
         page_dict.set("Parent", Object::Reference(pages_id));
     }
@@ -645,20 +722,30 @@ mod tests {
 
     #[test]
     fn strip_inline_markdown_removes_emphasis_and_links() {
-        assert_eq!(strip_inline_markdown("**Bold** and _italic_"), "Bold and italic");
-        assert_eq!(strip_inline_markdown("[Link text](https://example.com)"), "Link text");
+        assert_eq!(
+            strip_inline_markdown("**Bold** and _italic_"),
+            "Bold and italic"
+        );
+        assert_eq!(
+            strip_inline_markdown("[Link text](https://example.com)"),
+            "Link text"
+        );
         assert_eq!(strip_inline_markdown("`code`"), "code");
     }
 
     #[test]
     fn parse_toc_headings_extracts_h1_and_h2_in_order() {
-        let markdown = "# Intro\n\nBody.\n\n## Background\n\nMore.\n\n### Skip me\n\n# Architecture\n";
+        let markdown =
+            "# Intro\n\nBody.\n\n## Background\n\nMore.\n\n### Skip me\n\n# Architecture\n";
         let headings = parse_toc_headings(markdown, 2);
-        assert_eq!(headings, vec![
-            (1, "Intro".to_string()),
-            (2, "Background".to_string()),
-            (1, "Architecture".to_string()),
-        ]);
+        assert_eq!(
+            headings,
+            vec![
+                (1, "Intro".to_string()),
+                (2, "Background".to_string()),
+                (1, "Architecture".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -670,12 +757,16 @@ mod tests {
 
     #[test]
     fn parse_toc_headings_ignores_hashes_inside_fenced_code_blocks() {
-        let markdown = "# Real Heading\n\n```text\n# fake heading\n## also fake\n```\n\n## Real Subheading\n";
+        let markdown =
+            "# Real Heading\n\n```text\n# fake heading\n## also fake\n```\n\n## Real Subheading\n";
         let headings = parse_toc_headings(markdown, 2);
-        assert_eq!(headings, vec![
-            (1, "Real Heading".to_string()),
-            (2, "Real Subheading".to_string()),
-        ]);
+        assert_eq!(
+            headings,
+            vec![
+                (1, "Real Heading".to_string()),
+                (2, "Real Subheading".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -685,7 +776,10 @@ mod tests {
         assert!(styled.contains("style=\"rounded,filled\""));
         assert!(styled.contains("#E95420"));
         assert!(styled.contains("a -> b;"));
-        assert!(styled.contains("fontname=\"Ubuntu,"), "diagram text should use the Ubuntu font");
+        assert!(
+            styled.contains("fontname=\"Ubuntu,"),
+            "diagram text should use the Ubuntu font"
+        );
 
         let brace_pos = styled.find('{').unwrap();
         let style_pos = styled.find("rounded,filled").unwrap();
@@ -699,7 +793,10 @@ mod tests {
         let styled = apply_modern_dot_style(source);
         let default_pos = styled.find("shape=box").unwrap();
         let explicit_pos = styled.find("shape=ellipse").unwrap();
-        assert!(default_pos < explicit_pos, "later attribute statements must win in dot");
+        assert!(
+            default_pos < explicit_pos,
+            "later attribute statements must win in dot"
+        );
     }
 
     fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
@@ -726,8 +823,14 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read png");
         let (w, h) = png_dimensions(&bytes).expect("valid png header");
         let dpi = DOT_RENDER_DPI as f32;
-        assert!(w as f32 / dpi <= 6.35, "diagram wider than the page-safe cap: {w}px");
-        assert!(h as f32 / dpi <= 8.05, "diagram taller than the page-safe cap: {h}px");
+        assert!(
+            w as f32 / dpi <= 6.35,
+            "diagram wider than the page-safe cap: {w}px"
+        );
+        assert!(
+            h as f32 / dpi <= 8.05,
+            "diagram taller than the page-safe cap: {h}px"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -736,13 +839,19 @@ mod tests {
         let markdown = "Before.\n\n```dot\ndigraph G {\n  a -> b;\n}\n```\n\nAfter.\n";
         let out = render_dot_diagrams(markdown);
         assert!(!out.contains("```dot"), "dot fence should be replaced");
-        assert!(!out.contains("digraph G"), "raw dot source should not remain");
+        assert!(
+            !out.contains("digraph G"),
+            "raw dot source should not remain"
+        );
         assert!(out.contains("![diagram]("), "expected an image reference");
 
         let path_start = out.find("![diagram](").unwrap() + "![diagram](".len();
         let path_end = out[path_start..].find(')').unwrap() + path_start;
         let path = &out[path_start..path_end];
-        assert!(std::path::Path::new(path).exists(), "referenced image file must exist: {path}");
+        assert!(
+            std::path::Path::new(path).exists(),
+            "referenced image file must exist: {path}"
+        );
         assert!(path.ends_with(".png"));
         let _ = std::fs::remove_file(path);
     }
@@ -758,7 +867,10 @@ mod tests {
     fn render_dot_diagrams_falls_back_on_invalid_dot_source() {
         let markdown = "```dot\nthis is not { valid dot syntax\n```\n";
         let out = render_dot_diagrams(markdown);
-        assert!(out.contains("```dot"), "invalid dot source should fall back to the raw fence");
+        assert!(
+            out.contains("```dot"),
+            "invalid dot source should fall back to the raw fence"
+        );
         assert!(out.contains("this is not { valid dot syntax"));
     }
 
@@ -767,7 +879,10 @@ mod tests {
         let markdown = "```dot\ndigraph G {\n  a -> b;\n}\n```\n\nMiddle text.\n\n```dot\ndigraph H {\n  x -> y;\n}\n```\n";
         let out = render_dot_diagrams(markdown);
         let image_count = out.matches("![diagram](").count();
-        assert_eq!(image_count, 2, "expected each dot block to render its own image");
+        assert_eq!(
+            image_count, 2,
+            "expected each dot block to render its own image"
+        );
 
         let mut paths = Vec::new();
         let mut rest = out.as_str();
@@ -827,17 +942,26 @@ mod tests {
         let resolved = resolve(cfg, None).expect("resolve theme");
 
         assert_eq!(resolved.paragraph.text_align, TextAlignment::Justify);
-        assert!(resolved.table.border.top.is_some(), "expected a table border");
+        assert!(
+            resolved.table.border.top.is_some(),
+            "expected a table border"
+        );
         assert!(
             resolved.table.alternating_row_background.is_some(),
             "expected zebra-striped table rows"
         );
-        assert!(resolved.table.header.is_bold(), "expected a bold table header");
+        assert!(
+            resolved.table.header.is_bold(),
+            "expected a bold table header"
+        );
         assert_ne!(
             resolved.table.header.text_color, resolved.table.cell.text_color,
             "expected the header text color to stand out from body cells"
         );
-        assert!(resolved.code_block.background_color.is_some(), "expected a code-block panel background");
+        assert!(
+            resolved.code_block.background_color.is_some(),
+            "expected a code-block panel background"
+        );
         assert!(
             resolved.image.max_width_pct < 100.0,
             "expected diagrams to be capped below full column width"
@@ -853,7 +977,12 @@ mod tests {
 
         let black = Color::rgb(0x1B, 0x1F, 0x23);
         for (idx, heading) in resolved.headings.iter().take(3).enumerate() {
-            assert_eq!(heading.text_color, black, "heading level {} should be black, not orange", idx + 1);
+            assert_eq!(
+                heading.text_color,
+                black,
+                "heading level {} should be black, not orange",
+                idx + 1
+            );
         }
     }
 
@@ -928,13 +1057,21 @@ mod tests {
         let mut resources = Dictionary::new();
         resources.set("Font", Object::Reference(fonts_id));
         let resources_id = doc.add_object(Object::Dictionary(resources));
-        doc.get_dictionary_mut(page_id).unwrap().set("Resources", Object::Reference(resources_id));
+        doc.get_dictionary_mut(page_id)
+            .unwrap()
+            .set("Resources", Object::Reference(resources_id));
 
         stamp_page_label(&mut doc, page_id, "iv").expect("stamp");
 
         let fonts = doc.get_page_fonts(page_id).expect("fonts");
-        assert!(fonts.contains_key(b"ExistingFontKey".as_slice()), "existing font entry must survive");
-        assert!(fonts.contains_key(PAGE_NUMBER_FONT_KEY), "new page-number font entry must be added");
+        assert!(
+            fonts.contains_key(b"ExistingFontKey".as_slice()),
+            "existing font entry must survive"
+        );
+        assert!(
+            fonts.contains_key(PAGE_NUMBER_FONT_KEY),
+            "new page-number font entry must be added"
+        );
     }
 
     #[test]
@@ -946,13 +1083,20 @@ mod tests {
         stamp_logo(&mut doc, page_id).expect("stamp logo");
 
         let resources_id = page_resources_id(&mut doc, page_id).expect("resources id");
-        let xobjects = doc.get_dictionary(resources_id).expect("resources dict").get(b"XObject").expect("XObject entry");
+        let xobjects = doc
+            .get_dictionary(resources_id)
+            .expect("resources dict")
+            .get(b"XObject")
+            .expect("XObject entry");
         let xobjects_dict = match xobjects {
             Object::Reference(id) => doc.get_dictionary(*id).expect("xobject dict"),
             Object::Dictionary(d) => d,
             _ => panic!("unexpected XObject entry type"),
         };
-        assert!(xobjects_dict.has(UBUNTU_LOGO_KEY), "expected an XObject resource entry for the logo");
+        assert!(
+            xobjects_dict.has(UBUNTU_LOGO_KEY),
+            "expected an XObject resource entry for the logo"
+        );
 
         let content = doc.get_and_decode_page_content(page_id).expect("content");
         let has_draw = content.operations.iter().any(|op| {
@@ -994,12 +1138,20 @@ mod tests {
 
     fn minimal_page_with_content_ending_without_whitespace() -> (Document, ObjectId) {
         let mut doc = Document::with_version("1.5");
-        let content_id = doc.add_object(Stream::new(Dictionary::new(), b"q 1 0 0 1 0 0 cm Q".to_vec()));
+        let content_id = doc.add_object(Stream::new(
+            Dictionary::new(),
+            b"q 1 0 0 1 0 0 cm Q".to_vec(),
+        ));
         let mut page_dict = Dictionary::new();
         page_dict.set("Type", Object::Name(b"Page".to_vec()));
         page_dict.set(
             "MediaBox",
-            Object::Array(vec![Object::Real(0.0), Object::Real(0.0), Object::Real(595.0), Object::Real(842.0)]),
+            Object::Array(vec![
+                Object::Real(0.0),
+                Object::Real(0.0),
+                Object::Real(595.0),
+                Object::Real(842.0),
+            ]),
         );
         page_dict.set("Resources", Object::Dictionary(Dictionary::new()));
         page_dict.set("Contents", Object::Reference(content_id));
@@ -1010,7 +1162,9 @@ mod tests {
         pages_dict.set("Kids", Object::Array(vec![Object::Reference(page_id)]));
         pages_dict.set("Count", Object::Integer(1));
         let pages_id = doc.add_object(Object::Dictionary(pages_dict));
-        doc.get_dictionary_mut(page_id).unwrap().set("Parent", Object::Reference(pages_id));
+        doc.get_dictionary_mut(page_id)
+            .unwrap()
+            .set("Parent", Object::Reference(pages_id));
 
         let mut catalog = Dictionary::new();
         catalog.set("Type", Object::Name(b"Catalog".to_vec()));
@@ -1033,9 +1187,13 @@ mod tests {
             "content streams were concatenated without a separator"
         );
         let has_do = content.operations.iter().any(|op| {
-            op.operator == "Do" && op.operands.first().and_then(|o| o.as_name().ok()) == Some(UBUNTU_LOGO_KEY)
+            op.operator == "Do"
+                && op.operands.first().and_then(|o| o.as_name().ok()) == Some(UBUNTU_LOGO_KEY)
         });
-        assert!(has_do, "expected a properly parsed Do operation drawing the logo");
+        assert!(
+            has_do,
+            "expected a properly parsed Do operation drawing the logo"
+        );
     }
 
     #[test]
@@ -1050,9 +1208,13 @@ mod tests {
             "content streams were concatenated without a separator"
         );
         let has_label = content.operations.iter().any(|op| {
-            op.operator == "Tj" && op.operands.first().and_then(|o| o.as_str().ok()) == Some(b"3".as_slice())
+            op.operator == "Tj"
+                && op.operands.first().and_then(|o| o.as_str().ok()) == Some(b"3".as_slice())
         });
-        assert!(has_label, "expected a properly parsed Tj operation drawing the label");
+        assert!(
+            has_label,
+            "expected a properly parsed Tj operation drawing the label"
+        );
     }
 
     #[test]
@@ -1077,30 +1239,37 @@ mod tests {
         assert_eq!(pages.len(), 1 + 1 + body_page_count);
 
         let title_page_id = *pages.get(&1).unwrap();
-        let title_content = doc.get_and_decode_page_content(title_page_id).expect("title content");
-        assert!(!title_content.operations.iter().any(|op| op.operator == "Tj"
-            && op.operands.first().and_then(|o| o.as_str().ok()).map(|s| s == b"i".as_slice()).unwrap_or(false)));
+        let title_content = doc
+            .get_and_decode_page_content(title_page_id)
+            .expect("title content");
+        assert!(
+            !title_content.operations.iter().any(|op| op.operator == "Tj"
+                && op
+                    .operands
+                    .first()
+                    .and_then(|o| o.as_str().ok())
+                    .map(|s| s == b"i".as_slice())
+                    .unwrap_or(false))
+        );
 
         let toc_page_id = *pages.get(&2).unwrap();
-        let toc_content = doc.get_and_decode_page_content(toc_page_id).expect("toc content");
+        let toc_content = doc
+            .get_and_decode_page_content(toc_page_id)
+            .expect("toc content");
         let has_roman_i = toc_content.operations.iter().any(|op| {
-            op.operator == "Tj" && op.operands.first().and_then(|o| o.as_str().ok()) == Some(b"i".as_slice())
+            op.operator == "Tj"
+                && op.operands.first().and_then(|o| o.as_str().ok()) == Some(b"i".as_slice())
         });
         assert!(has_roman_i);
 
         let first_body_page_id = *pages.get(&3).unwrap();
-        let body_content = doc.get_and_decode_page_content(first_body_page_id).expect("body content");
+        let body_content = doc
+            .get_and_decode_page_content(first_body_page_id)
+            .expect("body content");
         let has_arabic_1 = body_content.operations.iter().any(|op| {
-            op.operator == "Tj" && op.operands.first().and_then(|o| o.as_str().ok()) == Some(b"1".as_slice())
+            op.operator == "Tj"
+                && op.operands.first().and_then(|o| o.as_str().ok()) == Some(b"1".as_slice())
         });
         assert!(has_arabic_1);
     }
-
-    }
-
-
-
-
-
-
-
+}

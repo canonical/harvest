@@ -8,39 +8,47 @@ use crate::skills;
 
 #[derive(Debug)]
 pub struct ParsedSkill {
-    pub name:        String,
+    pub name: String,
     pub description: String,
-    pub content:     String,
+    pub content: String,
 }
 
 #[derive(Debug)]
 pub struct ParsedArtifact {
-    pub name:    String,
-    pub kind:    String,
+    pub name: String,
+    pub kind: String,
     pub content: String,
 }
 
 #[derive(Debug)]
 pub struct ParsedHarvest {
-    pub name:            String,
-    pub description:     String,
+    pub name: String,
+    pub description: String,
     pub design_template: String,
-    pub skills:           Vec<ParsedSkill>,
-    pub artifacts:        Vec<ParsedArtifact>,
+    pub skills: Vec<ParsedSkill>,
+    pub artifacts: Vec<ParsedArtifact>,
 }
 
 #[derive(Deserialize)]
 struct Metadata {
-    name:        String,
+    name: String,
     description: String,
 }
 
 fn infer_kind(filename: &str) -> Option<&'static str> {
     let lower = filename.to_lowercase();
-    if lower.ends_with(".tf") || lower.ends_with(".tf.json")      { return Some("terraform"); }
-    if lower.ends_with(".tg.hcl") || lower.ends_with(".tg")      { return Some("terragrunt"); }
-    if lower.ends_with(".sh") || lower.ends_with(".bash")        { return Some("bash"); }
-    if lower.ends_with(".md") || lower.ends_with(".markdown")    { return Some("markdown"); }
+    if lower.ends_with(".tf") || lower.ends_with(".tf.json") {
+        return Some("terraform");
+    }
+    if lower.ends_with(".tg.hcl") || lower.ends_with(".tg") {
+        return Some("terragrunt");
+    }
+    if lower.ends_with(".sh") || lower.ends_with(".bash") {
+        return Some("bash");
+    }
+    if lower.ends_with(".md") || lower.ends_with(".markdown") {
+        return Some("markdown");
+    }
     None
 }
 
@@ -56,18 +64,17 @@ fn read_zip_file(
     archive: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>,
     name: &str,
 ) -> anyhow::Result<String> {
-    let mut entry = archive.by_name(name)
+    let mut entry = archive
+        .by_name(name)
         .map_err(|e| anyhow::anyhow!("file '{name}' not found in archive: {e}"))?;
     let mut buf = String::new();
     entry.read_to_string(&mut buf)?;
     Ok(buf)
 }
 
-fn entries_under(
-    archive: &zip::ZipArchive<std::io::Cursor<&[u8]>>,
-    prefix: &str,
-) -> Vec<String> {
-    let mut names: Vec<String> = archive.file_names()
+fn entries_under(archive: &zip::ZipArchive<std::io::Cursor<&[u8]>>, prefix: &str) -> Vec<String> {
+    let mut names: Vec<String> = archive
+        .file_names()
         .filter(|n| n.starts_with(prefix) && !n.ends_with('/'))
         .map(|n| n.to_string())
         .collect();
@@ -77,8 +84,8 @@ fn entries_under(
 
 pub fn parse_harvest_archive(bytes: &[u8]) -> anyhow::Result<ParsedHarvest> {
     let cursor = std::io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| anyhow::anyhow!("invalid zip archive: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| anyhow::anyhow!("invalid zip archive: {e}"))?;
 
     let metadata_text = read_zip_file(&mut archive, "metadata.yaml")
         .map_err(|e| anyhow::anyhow!("metadata.yaml is required: {e}"))?;
@@ -96,11 +103,17 @@ pub fn parse_harvest_archive(bytes: &[u8]) -> anyhow::Result<ParsedHarvest> {
     for file in skill_files {
         let md = read_zip_file(&mut archive, &file)?;
         let fm = skills::parse_frontmatter(&md);
-        let name = fm.get("name").cloned()
+        let name = fm
+            .get("name")
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("skill '{file}' has no 'name' in frontmatter"))?;
         let description = fm.get("description").cloned().unwrap_or_default();
         let content = skills::skill_body(&md).to_string();
-        skills.push(ParsedSkill { name, description, content });
+        skills.push(ParsedSkill {
+            name,
+            description,
+            content,
+        });
     }
 
     let artifact_files = entries_under(&archive, "artifacts/");
@@ -128,8 +141,8 @@ pub fn parse_harvest_archive(bytes: &[u8]) -> anyhow::Result<ParsedHarvest> {
     }
 
     Ok(ParsedHarvest {
-        name:            metadata.name,
-        description:     metadata.description,
+        name: metadata.name,
+        description: metadata.description,
         design_template,
         skills,
         artifacts,
@@ -173,9 +186,15 @@ mod tests {
 
     fn full_archive_with_extra(extra: &[(&str, &str)]) -> Vec<u8> {
         let mut entries = vec![
-            ("metadata.yaml", "name: Charmed Landscape\ndescription: Fleet management"),
+            (
+                "metadata.yaml",
+                "name: Charmed Landscape\ndescription: Fleet management",
+            ),
             ("design.md", "# 1. Introduction\n${CUSTOMER}"),
-            ("skills/landscape.md", "---\nname: landscape\ndescription: Deploy Landscape\n---\n# Landscape\nBody."),
+            (
+                "skills/landscape.md",
+                "---\nname: landscape\ndescription: Deploy Landscape\n---\n# Landscape\nBody.",
+            ),
             ("artifacts/main.tf", "resource \"null_resource\" \"x\" {}"),
         ];
         entries.extend_from_slice(extra);

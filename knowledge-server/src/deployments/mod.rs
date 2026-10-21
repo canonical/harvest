@@ -20,29 +20,29 @@ pub enum StepAction {
 impl StepAction {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "run"     => Some(Self::Run),
-            "plan"    => Some(Self::Plan),
-            "apply"   => Some(Self::Apply),
+            "run" => Some(Self::Run),
+            "plan" => Some(Self::Plan),
+            "apply" => Some(Self::Apply),
             "destroy" => Some(Self::Destroy),
-            _         => None,
+            _ => None,
         }
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Run     => "run",
-            Self::Plan    => "plan",
-            Self::Apply   => "apply",
+            Self::Run => "run",
+            Self::Plan => "plan",
+            Self::Apply => "apply",
             Self::Destroy => "destroy",
         }
     }
 
     pub fn to_terraform_action(&self) -> Option<TerraformAction> {
         match self {
-            Self::Plan    => Some(TerraformAction::Plan),
-            Self::Apply   => Some(TerraformAction::Apply),
+            Self::Plan => Some(TerraformAction::Plan),
+            Self::Apply => Some(TerraformAction::Apply),
             Self::Destroy => Some(TerraformAction::Destroy),
-            Self::Run     => None,
+            Self::Run => None,
         }
     }
 }
@@ -56,15 +56,15 @@ pub enum StepPhase {
 impl StepPhase {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "deploy"  => Some(Self::Deploy),
+            "deploy" => Some(Self::Deploy),
             "destroy" => Some(Self::Destroy),
-            _         => None,
+            _ => None,
         }
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Deploy  => "deploy",
+            Self::Deploy => "deploy",
             Self::Destroy => "destroy",
         }
     }
@@ -82,32 +82,32 @@ pub enum InfraState {
 impl InfraState {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "none"           => Some(Self::None),
-            "up"              => Some(Self::Up),
-            "broken"          => Some(Self::Broken),
-            "destroyed"       => Some(Self::Destroyed),
-            "destroy_failed"  => Some(Self::DestroyFailed),
-            _                 => None,
+            "none" => Some(Self::None),
+            "up" => Some(Self::Up),
+            "broken" => Some(Self::Broken),
+            "destroyed" => Some(Self::Destroyed),
+            "destroy_failed" => Some(Self::DestroyFailed),
+            _ => None,
         }
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::None          => "none",
-            Self::Up             => "up",
-            Self::Broken         => "broken",
-            Self::Destroyed      => "destroyed",
-            Self::DestroyFailed  => "destroy_failed",
+            Self::None => "none",
+            Self::Up => "up",
+            Self::Broken => "broken",
+            Self::Destroyed => "destroyed",
+            Self::DestroyFailed => "destroy_failed",
         }
     }
 }
 
 pub fn next_infra_state(action: TerraformAction, success: bool) -> Option<InfraState> {
     match (action, success) {
-        (TerraformAction::Plan, _)        => None,
-        (TerraformAction::Apply, true)    => Some(InfraState::Up),
-        (TerraformAction::Apply, false)   => Some(InfraState::Broken),
-        (TerraformAction::Destroy, true)  => Some(InfraState::Destroyed),
+        (TerraformAction::Plan, _) => None,
+        (TerraformAction::Apply, true) => Some(InfraState::Up),
+        (TerraformAction::Apply, false) => Some(InfraState::Broken),
+        (TerraformAction::Destroy, true) => Some(InfraState::Destroyed),
         (TerraformAction::Destroy, false) => Some(InfraState::DestroyFailed),
     }
 }
@@ -122,8 +122,8 @@ pub fn needs_destroy_before_apply(state: InfraState) -> bool {
 /// Deploy and every Redeploy/Destroy attempt fails the same "nothing was ever applied" way. Reset
 /// it back to `none` so the user can just deploy again.
 pub async fn reset_infra_state_to_none(
-    db:         &Db,
-    project_id:    &str,
+    db: &Db,
+    project_id: &str,
     deployment_id: &str,
 ) -> anyhow::Result<()> {
     let now = harvest_db::now_rfc3339();
@@ -131,7 +131,8 @@ pub async fn reset_infra_state_to_none(
         "UPDATE deployments SET infra_state = 'none', updated_at = $now
          WHERE id = $did AND project_id = $pid",
         json!({ "pid": project_id, "did": deployment_id, "now": now }),
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -144,26 +145,32 @@ fn preview(s: &str, max_chars: usize) -> String {
 
 #[allow(clippy::too_many_arguments)]
 pub async fn record_run_and_update_state(
-    db:           &Db,
-    project_id:      &str,
-    artifact_id:     &str,
-    action:          TerraformAction,
-    exit_code:       Option<i32>,
-    stdout:          &str,
-    stderr:          &str,
+    db: &Db,
+    project_id: &str,
+    artifact_id: &str,
+    action: TerraformAction,
+    exit_code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
     applied_content: Option<&str>,
-    initiated_by:    &str,
-    reasoning:       Option<&str>,
+    initiated_by: &str,
+    reasoning: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
-    let linked = db.query(
-        "SELECT id FROM deployments WHERE project_id = $pid AND terraform_bundle_id = $aid",
-        json!({ "pid": project_id, "aid": artifact_id }),
-    ).await?;
-    let Some(deployment_id) = linked.into_iter().next().and_then(|r| r["id"].as_str().map(str::to_string)) else {
+    let linked = db
+        .query(
+            "SELECT id FROM deployments WHERE project_id = $pid AND terraform_bundle_id = $aid",
+            json!({ "pid": project_id, "aid": artifact_id }),
+        )
+        .await?;
+    let Some(deployment_id) = linked
+        .into_iter()
+        .next()
+        .and_then(|r| r["id"].as_str().map(str::to_string))
+    else {
         return Ok(None);
     };
 
-    let success       = exit_code == Some(0);
+    let success = exit_code == Some(0);
     let Some(new_state) = next_infra_state(action, success) else {
         return Ok(None);
     };
@@ -189,7 +196,8 @@ pub async fn record_run_and_update_state(
             "initiated_by": initiated_by, "reasoning": reasoning, "now": now,
             "new_state": new_state.as_str(),
         }),
-    ).await?;
+    )
+    .await?;
 
     if matches!(action, TerraformAction::Apply) && success {
         if let Some(content) = applied_content {
@@ -206,26 +214,30 @@ pub async fn record_run_and_update_state(
 }
 
 pub async fn last_applied_bundle_for_artifact(
-    db:       &Db,
-    project_id:  &str,
+    db: &Db,
+    project_id: &str,
     artifact_id: &str,
 ) -> anyhow::Result<Option<String>> {
     let rows = db.query(
         "SELECT last_applied_content FROM deployments WHERE project_id = $pid AND terraform_bundle_id = $aid",
         json!({ "pid": project_id, "aid": artifact_id }),
     ).await?;
-    Ok(rows.into_iter().next().and_then(|r| r["last_applied_content"].as_str().map(str::to_string)))
+    Ok(rows
+        .into_iter()
+        .next()
+        .and_then(|r| r["last_applied_content"].as_str().map(str::to_string)))
 }
 
 pub async fn resolve_run_content(
-    db:        &Db,
-    project_id:   &str,
-    artifact_id:  &str,
-    action:       TerraformAction,
+    db: &Db,
+    project_id: &str,
+    artifact_id: &str,
+    action: TerraformAction,
     live_content: &str,
 ) -> anyhow::Result<String> {
     if action == TerraformAction::Destroy {
-        if let Some(applied) = last_applied_bundle_for_artifact(db, project_id, artifact_id).await? {
+        if let Some(applied) = last_applied_bundle_for_artifact(db, project_id, artifact_id).await?
+        {
             return Ok(applied);
         }
     }
@@ -233,25 +245,26 @@ pub async fn resolve_run_content(
 }
 
 pub struct PriorDeploymentSummary {
-    pub name:                     String,
+    pub name: String,
     pub environment_description: String,
-    pub infra_state:              String,
+    pub infra_state: String,
 }
 
 pub struct DeploymentContext {
-    pub deployment_id:            String,
-    pub deployment_name:          String,
+    pub deployment_id: String,
+    pub deployment_name: String,
     pub environment_description: String,
-    pub infra_state:              String,
-    pub product_template_name:    Option<String>,
+    pub infra_state: String,
+    pub product_template_name: Option<String>,
     pub product_template_content: Option<String>,
-    pub product_template_design:  Option<String>,
-    pub prior_deployments:        Vec<PriorDeploymentSummary>,
+    pub product_template_design: Option<String>,
+    pub prior_deployments: Vec<PriorDeploymentSummary>,
 }
 
 fn extract_design_template(template_content: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(template_content).ok()?;
-    parsed["design_template"].as_str()
+    parsed["design_template"]
+        .as_str()
         .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
 }
@@ -259,19 +272,23 @@ fn extract_design_template(template_content: &str) -> Option<String> {
 const MAX_PRIOR_DEPLOYMENTS: i64 = 5;
 
 pub async fn load_deployment_context(
-    db:         &Db,
-    project_id:    &str,
+    db: &Db,
+    project_id: &str,
     deployment_id: &str,
 ) -> anyhow::Result<Option<DeploymentContext>> {
-    let rows = db.query(
-        "SELECT d.name, d.environment_description, d.infra_state,
+    let rows = db
+        .query(
+            "SELECT d.name, d.environment_description, d.infra_state,
                 t.id AS template_id, t.name AS template_name, t.content AS template_content
          FROM deployments d
          LEFT JOIN product_templates t ON t.id = d.template_id
          WHERE d.project_id = $pid AND d.id = $did",
-        json!({ "pid": project_id, "did": deployment_id }),
-    ).await?;
-    let Some(row) = rows.into_iter().next() else { return Ok(None) };
+            json!({ "pid": project_id, "did": deployment_id }),
+        )
+        .await?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(None);
+    };
 
     let prior_deployments = match opt_str(&row, "template_id") {
         Some(template_id) => {
@@ -282,25 +299,35 @@ pub async fn load_deployment_context(
                  LIMIT $limit",
                 json!({ "tid": template_id, "did": deployment_id, "limit": MAX_PRIOR_DEPLOYMENTS }),
             ).await?;
-            prior_rows.iter().map(|r| PriorDeploymentSummary {
-                name:                     r["name"].as_str().unwrap_or_default().to_string(),
-                environment_description: r["environment_description"].as_str().unwrap_or_default().to_string(),
-                infra_state:              r["infra_state"].as_str().unwrap_or_default().to_string(),
-            }).collect()
+            prior_rows
+                .iter()
+                .map(|r| PriorDeploymentSummary {
+                    name: r["name"].as_str().unwrap_or_default().to_string(),
+                    environment_description: r["environment_description"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                    infra_state: r["infra_state"].as_str().unwrap_or_default().to_string(),
+                })
+                .collect()
         }
         None => Vec::new(),
     };
 
     let product_template_content = opt_str(&row, "template_content");
-    let product_template_design = product_template_content.as_deref()
+    let product_template_design = product_template_content
+        .as_deref()
         .and_then(extract_design_template);
 
     Ok(Some(DeploymentContext {
-        deployment_id:            deployment_id.to_string(),
-        deployment_name:          row["name"].as_str().unwrap_or_default().to_string(),
-        environment_description: row["environment_description"].as_str().unwrap_or_default().to_string(),
-        infra_state:              row["infra_state"].as_str().unwrap_or("none").to_string(),
-        product_template_name:    opt_str(&row, "template_name"),
+        deployment_id: deployment_id.to_string(),
+        deployment_name: row["name"].as_str().unwrap_or_default().to_string(),
+        environment_description: row["environment_description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+        infra_state: row["infra_state"].as_str().unwrap_or("none").to_string(),
+        product_template_name: opt_str(&row, "template_name"),
         product_template_content,
         product_template_design,
         prior_deployments,
@@ -369,7 +396,9 @@ fn opt_str(row: &Value, key: &str) -> Option<String> {
 }
 
 fn artifact_ref(row: &Value, id_key: &str, title_key: &str, kind_key: Option<&str>) -> Value {
-    let Some(id) = opt_str(row, id_key) else { return Value::Null };
+    let Some(id) = opt_str(row, id_key) else {
+        return Value::Null;
+    };
     let mut obj = json!({ "id": id, "title": opt_str(row, title_key) });
     if let Some(k) = kind_key {
         obj["kind"] = json!(opt_str(row, k));
@@ -378,7 +407,9 @@ fn artifact_ref(row: &Value, id_key: &str, title_key: &str, kind_key: Option<&st
 }
 
 fn design_doc_ref(row: &Value) -> Value {
-    let Some(id) = opt_str(row, "design_doc_id") else { return Value::Null };
+    let Some(id) = opt_str(row, "design_doc_id") else {
+        return Value::Null;
+    };
     json!({
         "id":              id,
         "title":           opt_str(row, "design_doc_title"),
@@ -393,13 +424,16 @@ pub fn shape_context_artifacts(row: &Value) -> Value {
     let Some(list) = row.get("context_artifacts").and_then(|v| v.as_array()) else {
         return json!([]);
     };
-    let shaped: Vec<Value> = list.iter()
+    let shaped: Vec<Value> = list
+        .iter()
         .filter(|entry| entry.get("id").and_then(|v| v.as_str()).is_some())
-        .map(|entry| json!({
-            "id":    entry["id"],
-            "title": entry["title"],
-            "kind":  entry["kind"],
-        }))
+        .map(|entry| {
+            json!({
+                "id":    entry["id"],
+                "title": entry["title"],
+                "kind":  entry["kind"],
+            })
+        })
         .collect();
     json!(shaped)
 }
@@ -424,12 +458,15 @@ pub fn shape_proposals(rows: &[Value]) -> Value {
 }
 
 pub fn shape_execution_step(row: &Value) -> Value {
-    let depends_on: Vec<Value> = row.get("depends_on")
+    let depends_on: Vec<Value> = row
+        .get("depends_on")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter()
-            .filter_map(|d| d.as_str().map(String::from))
-            .map(Value::String)
-            .collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|d| d.as_str().map(String::from))
+                .map(Value::String)
+                .collect()
+        })
         .unwrap_or_default();
     json!({
         "id":       row["id"],
@@ -452,14 +489,12 @@ pub fn shape_execution_plan(rows: &[Value]) -> Value {
 
 #[derive(Debug, Clone)]
 pub struct StepNode {
-    pub id:         String,
+    pub id: String,
     pub depends_on: Vec<String>,
 }
 
 pub fn topological_sort(steps: &[StepNode]) -> Result<Vec<String>, String> {
-    let id_set: HashMap<&str, &StepNode> = steps.iter()
-        .map(|s| (s.id.as_str(), s))
-        .collect();
+    let id_set: HashMap<&str, &StepNode> = steps.iter().map(|s| (s.id.as_str(), s)).collect();
     for s in steps {
         for dep in &s.depends_on {
             if !id_set.contains_key(dep.as_str()) {
@@ -481,7 +516,8 @@ pub fn topological_sort(steps: &[StepNode]) -> Result<Vec<String>, String> {
         }
     }
 
-    let mut queue: VecDeque<&str> = in_degree.iter()
+    let mut queue: VecDeque<&str> = in_degree
+        .iter()
         .filter(|(_, &d)| d == 0)
         .map(|(k, _)| *k)
         .collect();
@@ -512,7 +548,10 @@ pub fn shape_deployment(row: &Value) -> Value {
         None => Value::Null,
     };
     let has_tf = opt_str(row, "terraform_bundle_id").is_some();
-    let has_steps = row["execution_step_count"].as_i64().map(|n| n > 0).unwrap_or(false);
+    let has_steps = row["execution_step_count"]
+        .as_i64()
+        .map(|n| n > 0)
+        .unwrap_or(false);
     let provisioned = has_tf || has_steps;
     json!({
         "id":                       row["id"],
@@ -539,8 +578,12 @@ mod tests {
 
     #[test]
     fn extract_design_template_reads_design_template_field() {
-        let content = r##"{"design_template": "# Intro\n${CUSTOMER}", "skills": [], "artifacts": []}"##;
-        assert_eq!(extract_design_template(content), Some("# Intro\n${CUSTOMER}".to_string()));
+        let content =
+            r##"{"design_template": "# Intro\n${CUSTOMER}", "skills": [], "artifacts": []}"##;
+        assert_eq!(
+            extract_design_template(content),
+            Some("# Intro\n${CUSTOMER}".to_string())
+        );
     }
 
     #[test]
@@ -587,13 +630,19 @@ mod tests {
     #[test]
     fn extract_json_block_handles_nested_braces() {
         let text = "Explanation first.\n\n{\"a\": {\"b\": 1}, \"c\": [1, 2]}\n\nTrailing text.";
-        assert_eq!(extract_json_block(text), Some(json!({ "a": { "b": 1 }, "c": [1, 2] })));
+        assert_eq!(
+            extract_json_block(text),
+            Some(json!({ "a": { "b": 1 }, "c": [1, 2] }))
+        );
     }
 
     #[test]
     fn extract_json_block_ignores_braces_inside_string_literals() {
         let text = "{\"text\": \"a { b } c\"}";
-        assert_eq!(extract_json_block(text), Some(json!({ "text": "a { b } c" })));
+        assert_eq!(
+            extract_json_block(text),
+            Some(json!({ "text": "a { b } c" }))
+        );
     }
 
     #[test]
@@ -616,8 +665,12 @@ mod tests {
 
     #[test]
     fn extract_json_block_handles_multibyte_characters_around_and_inside_the_json() {
-        let text = "Here's the plan — it's straightforward: {\"café\": \"düsseldorf — ready\"} — done.";
-        assert_eq!(extract_json_block(text), Some(json!({ "café": "düsseldorf — ready" })));
+        let text =
+            "Here's the plan — it's straightforward: {\"café\": \"düsseldorf — ready\"} — done.";
+        assert_eq!(
+            extract_json_block(text),
+            Some(json!({ "café": "düsseldorf — ready" }))
+        );
     }
 
     #[test]
@@ -628,22 +681,34 @@ mod tests {
 
     #[test]
     fn next_infra_state_successful_apply_is_up() {
-        assert_eq!(next_infra_state(TerraformAction::Apply, true), Some(InfraState::Up));
+        assert_eq!(
+            next_infra_state(TerraformAction::Apply, true),
+            Some(InfraState::Up)
+        );
     }
 
     #[test]
     fn next_infra_state_failed_apply_is_broken() {
-        assert_eq!(next_infra_state(TerraformAction::Apply, false), Some(InfraState::Broken));
+        assert_eq!(
+            next_infra_state(TerraformAction::Apply, false),
+            Some(InfraState::Broken)
+        );
     }
 
     #[test]
     fn next_infra_state_successful_destroy_is_destroyed() {
-        assert_eq!(next_infra_state(TerraformAction::Destroy, true), Some(InfraState::Destroyed));
+        assert_eq!(
+            next_infra_state(TerraformAction::Destroy, true),
+            Some(InfraState::Destroyed)
+        );
     }
 
     #[test]
     fn next_infra_state_failed_destroy_is_destroy_failed() {
-        assert_eq!(next_infra_state(TerraformAction::Destroy, false), Some(InfraState::DestroyFailed));
+        assert_eq!(
+            next_infra_state(TerraformAction::Destroy, false),
+            Some(InfraState::DestroyFailed)
+        );
     }
 
     #[test]
@@ -657,7 +722,13 @@ mod tests {
 
     #[test]
     fn infra_state_parse_and_as_str_round_trip() {
-        for state in [InfraState::None, InfraState::Up, InfraState::Broken, InfraState::Destroyed, InfraState::DestroyFailed] {
+        for state in [
+            InfraState::None,
+            InfraState::Up,
+            InfraState::Broken,
+            InfraState::Destroyed,
+            InfraState::DestroyFailed,
+        ] {
             assert_eq!(InfraState::parse(state.as_str()), Some(state));
         }
     }
@@ -885,7 +956,12 @@ mod tests {
 
     #[test]
     fn step_action_as_str_round_trips() {
-        for action in [StepAction::Run, StepAction::Plan, StepAction::Apply, StepAction::Destroy] {
+        for action in [
+            StepAction::Run,
+            StepAction::Plan,
+            StepAction::Apply,
+            StepAction::Destroy,
+        ] {
             assert_eq!(StepAction::parse(action.as_str()), Some(action));
         }
     }
@@ -957,16 +1033,28 @@ mod tests {
 
     #[test]
     fn topological_sort_single_step_no_deps() {
-        let steps = vec![StepNode { id: "s0".into(), depends_on: vec![] }];
+        let steps = vec![StepNode {
+            id: "s0".into(),
+            depends_on: vec![],
+        }];
         assert_eq!(topological_sort(&steps).unwrap(), vec!["s0".to_string()]);
     }
 
     #[test]
     fn topological_sort_linear_chain() {
         let steps = vec![
-            StepNode { id: "s2".into(), depends_on: vec!["s1".into()] },
-            StepNode { id: "s0".into(), depends_on: vec![] },
-            StepNode { id: "s1".into(), depends_on: vec!["s0".into()] },
+            StepNode {
+                id: "s2".into(),
+                depends_on: vec!["s1".into()],
+            },
+            StepNode {
+                id: "s0".into(),
+                depends_on: vec![],
+            },
+            StepNode {
+                id: "s1".into(),
+                depends_on: vec!["s0".into()],
+            },
         ];
         let sorted = topological_sort(&steps).unwrap();
         let pos_s0 = sorted.iter().position(|s| s == "s0").unwrap();
@@ -979,13 +1067,29 @@ mod tests {
     #[test]
     fn topological_sort_diamond_dependency() {
         let steps = vec![
-            StepNode { id: "s3".into(), depends_on: vec!["s1".into(), "s2".into()] },
-            StepNode { id: "s1".into(), depends_on: vec!["s0".into()] },
-            StepNode { id: "s2".into(), depends_on: vec!["s0".into()] },
-            StepNode { id: "s0".into(), depends_on: vec![] },
+            StepNode {
+                id: "s3".into(),
+                depends_on: vec!["s1".into(), "s2".into()],
+            },
+            StepNode {
+                id: "s1".into(),
+                depends_on: vec!["s0".into()],
+            },
+            StepNode {
+                id: "s2".into(),
+                depends_on: vec!["s0".into()],
+            },
+            StepNode {
+                id: "s0".into(),
+                depends_on: vec![],
+            },
         ];
         let sorted = topological_sort(&steps).unwrap();
-        let pos: std::collections::HashMap<&str, usize> = sorted.iter().zip(0..).map(|(s, i)| (s.as_str(), i)).collect();
+        let pos: std::collections::HashMap<&str, usize> = sorted
+            .iter()
+            .zip(0..)
+            .map(|(s, i)| (s.as_str(), i))
+            .collect();
         assert!(pos["s0"] < pos["s1"]);
         assert!(pos["s0"] < pos["s2"]);
         assert!(pos["s1"] < pos["s3"]);
@@ -995,26 +1099,42 @@ mod tests {
     #[test]
     fn topological_sort_detects_cycle() {
         let steps = vec![
-            StepNode { id: "s0".into(), depends_on: vec!["s1".into()] },
-            StepNode { id: "s1".into(), depends_on: vec!["s0".into()] },
+            StepNode {
+                id: "s0".into(),
+                depends_on: vec!["s1".into()],
+            },
+            StepNode {
+                id: "s1".into(),
+                depends_on: vec!["s0".into()],
+            },
         ];
         assert!(topological_sort(&steps).is_err());
     }
 
     #[test]
     fn topological_sort_missing_dependency_errors() {
-        let steps = vec![
-            StepNode { id: "s0".into(), depends_on: vec!["nonexistent".into()] },
-        ];
+        let steps = vec![StepNode {
+            id: "s0".into(),
+            depends_on: vec!["nonexistent".into()],
+        }];
         assert!(topological_sort(&steps).is_err());
     }
 
     #[test]
     fn topological_sort_independent_steps_all_present() {
         let steps = vec![
-            StepNode { id: "s0".into(), depends_on: vec![] },
-            StepNode { id: "s1".into(), depends_on: vec![] },
-            StepNode { id: "s2".into(), depends_on: vec![] },
+            StepNode {
+                id: "s0".into(),
+                depends_on: vec![],
+            },
+            StepNode {
+                id: "s1".into(),
+                depends_on: vec![],
+            },
+            StepNode {
+                id: "s2".into(),
+                depends_on: vec![],
+            },
         ];
         let sorted = topological_sort(&steps).unwrap();
         assert_eq!(sorted.len(), 3);
@@ -1022,5 +1142,4 @@ mod tests {
         assert!(sorted.contains(&"s1".to_string()));
         assert!(sorted.contains(&"s2".to_string()));
     }
-
 }

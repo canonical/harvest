@@ -7,14 +7,16 @@ const MAX_FILES: usize = 200;
 const MAX_TOTAL_BYTES: usize = 2 * 1024 * 1024;
 
 pub fn parse_bundle(content: &str) -> Result<FileBundle, String> {
-    let value: Value = serde_json::from_str(content)
-        .map_err(|_| "content must be valid JSON".to_string())?;
-    let object = value.as_object()
-        .ok_or_else(|| "content must be a JSON object mapping file paths to file text".to_string())?;
+    let value: Value =
+        serde_json::from_str(content).map_err(|_| "content must be valid JSON".to_string())?;
+    let object = value.as_object().ok_or_else(|| {
+        "content must be a JSON object mapping file paths to file text".to_string()
+    })?;
 
     let mut bundle = FileBundle::new();
     for (path, text) in object {
-        let text = text.as_str()
+        let text = text
+            .as_str()
             .ok_or_else(|| format!("file '{path}' must have a string value"))?;
         bundle.insert(path.clone(), text.to_string());
     }
@@ -25,7 +27,8 @@ fn is_safe_relative_path(path: &str) -> bool {
     if path.is_empty() || path.starts_with('/') || path.contains('\\') {
         return false;
     }
-    path.split('/').all(|segment| !segment.is_empty() && segment != "..")
+    path.split('/')
+        .all(|segment| !segment.is_empty() && segment != "..")
 }
 
 pub fn validate_bundle(bundle: &FileBundle) -> Result<(), String> {
@@ -44,7 +47,9 @@ pub fn validate_bundle(bundle: &FileBundle) -> Result<(), String> {
         total_bytes += text.len();
     }
     if total_bytes > MAX_TOTAL_BYTES {
-        return Err(format!("bundle exceeds the maximum total size of {MAX_TOTAL_BYTES} bytes"));
+        return Err(format!(
+            "bundle exceeds the maximum total size of {MAX_TOTAL_BYTES} bytes"
+        ));
     }
     Ok(())
 }
@@ -71,7 +76,10 @@ mod tests {
     #[test]
     fn parse_bundle_accepts_valid_map() {
         let bundle = parse_bundle(r#"{"main.tf": "resource \"local_file\" \"x\" {}"}"#).unwrap();
-        assert_eq!(bundle.get("main.tf").unwrap(), "resource \"local_file\" \"x\" {}");
+        assert_eq!(
+            bundle.get("main.tf").unwrap(),
+            "resource \"local_file\" \"x\" {}"
+        );
     }
 
     #[test]
