@@ -6,7 +6,10 @@ use clap::{Parser as ClapParser, Subcommand};
 use knowledge_server::config::Config;
 
 #[derive(ClapParser)]
-#[command(name = "knowledge-server", about = "Query code knowledge graphs via HTTP")]
+#[command(
+    name = "knowledge-server",
+    about = "Query code knowledge graphs via HTTP"
+)]
 struct Cli {
     #[arg(short, long, default_value = "server.toml")]
     config: PathBuf,
@@ -44,7 +47,11 @@ async fn main() -> Result<()> {
         }
         Command::SchemaVersion => {
             let db = harvest_db::Db::connect_with_without_migrating(&config.database.options())?;
-            println!("{} {}", db.schema_version().await?, harvest_db::LATEST_SCHEMA_VERSION);
+            println!(
+                "{} {}",
+                db.schema_version().await?,
+                harvest_db::LATEST_SCHEMA_VERSION
+            );
             Ok(())
         }
     }

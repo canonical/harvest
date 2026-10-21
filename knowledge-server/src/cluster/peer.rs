@@ -21,9 +21,21 @@ pub const FORWARDED_HEADER: &str = "x-harvest-forwarded-by";
 fn is_hop_by_hop(name: &str) -> bool {
     matches!(
         name,
-        "connection" | "keep-alive" | "proxy-authenticate" | "proxy-authorization" | "te" | "trailer"
-            | "trailers" | "transfer-encoding" | "upgrade" | "host" | "content-length"
-            | "sec-websocket-key" | "sec-websocket-version" | "sec-websocket-extensions" | "sec-websocket-accept"
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "trailers"
+            | "transfer-encoding"
+            | "upgrade"
+            | "host"
+            | "content-length"
+            | "sec-websocket-key"
+            | "sec-websocket-version"
+            | "sec-websocket-extensions"
+            | "sec-websocket-accept"
     )
 }
 
@@ -44,7 +56,11 @@ impl PeerClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("building the peer http client");
-        Arc::new(Self { http, secret: secret.into(), node_id: node_id.into() })
+        Arc::new(Self {
+            http,
+            secret: secret.into(),
+            node_id: node_id.into(),
+        })
     }
 
     pub fn node_id(&self) -> &str {
@@ -56,10 +72,17 @@ impl PeerClient {
     }
 
     fn internal(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        builder.header(SECRET_HEADER, &self.secret).header(FORWARDED_HEADER, &self.node_id)
+        builder
+            .header(SECRET_HEADER, &self.secret)
+            .header(FORWARDED_HEADER, &self.node_id)
     }
 
-    pub async fn get_json(&self, base: &str, path: &str, timeout: Duration) -> Result<Option<Value>> {
+    pub async fn get_json(
+        &self,
+        base: &str,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<Option<Value>> {
         let response = self
             .internal(self.http.get(Self::url(base, path)))
             .timeout(timeout)
@@ -69,11 +92,19 @@ impl PeerClient {
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        let response = response.error_for_status().with_context(|| format!("GET {path} on peer {base}"))?;
+        let response = response
+            .error_for_status()
+            .with_context(|| format!("GET {path} on peer {base}"))?;
         Ok(Some(response.json().await?))
     }
 
-    pub async fn post_json(&self, base: &str, path: &str, body: &Value, timeout: Duration) -> Result<(StatusCode, Value)> {
+    pub async fn post_json(
+        &self,
+        base: &str,
+        path: &str,
+        body: &Value,
+        timeout: Duration,
+    ) -> Result<(StatusCode, Value)> {
         let response = self
             .internal(self.http.post(Self::url(base, path)))
             .json(body)
@@ -81,12 +112,18 @@ impl PeerClient {
             .send()
             .await
             .with_context(|| format!("POST {path} on peer {base}"))?;
-        let status = StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let status =
+            StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let value = response.json().await.unwrap_or(Value::Null);
         Ok((status, value))
     }
 
-    pub async fn post_streaming(&self, base: &str, path: &str, body: &Value) -> Result<reqwest::Response> {
+    pub async fn post_streaming(
+        &self,
+        base: &str,
+        path: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response> {
         let response = self
             .internal(self.http.post(Self::url(base, path)))
             .json(body)
@@ -98,25 +135,39 @@ impl PeerClient {
 
     pub async fn forward(&self, base: &str, request: Request) -> Response {
         let (parts, body) = request.into_parts();
-        let path_and_query = parts.uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/".into());
-        let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
+        let path_and_query = parts
+            .uri
+            .path_and_query()
+            .map(|p| p.as_str().to_string())
+            .unwrap_or_else(|| "/".into());
+        let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
+            .unwrap_or(reqwest::Method::GET);
         let mut builder = self.http.request(method, Self::url(base, &path_and_query));
         for (name, value) in parts.headers.iter() {
-            if is_hop_by_hop(name.as_str()) || name.as_str() == SECRET_HEADER || name.as_str() == FORWARDED_HEADER {
+            if is_hop_by_hop(name.as_str())
+                || name.as_str() == SECRET_HEADER
+                || name.as_str() == FORWARDED_HEADER
+            {
                 continue;
             }
             builder = builder.header(name.as_str(), value.as_bytes());
         }
-        builder = self.internal(builder).body(reqwest::Body::wrap_stream(body.into_data_stream()));
+        builder = self
+            .internal(builder)
+            .body(reqwest::Body::wrap_stream(body.into_data_stream()));
         match builder.send().await {
             Ok(upstream) => {
-                let status = StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let status = StatusCode::from_u16(upstream.status().as_u16())
+                    .unwrap_or(StatusCode::BAD_GATEWAY);
                 let mut response = Response::builder().status(status);
                 for (name, value) in upstream.headers().iter() {
                     if is_hop_by_hop(name.as_str()) {
                         continue;
                     }
-                    if let (Ok(n), Ok(v)) = (HeaderName::from_bytes(name.as_str().as_bytes()), HeaderValue::from_bytes(value.as_bytes())) {
+                    if let (Ok(n), Ok(v)) = (
+                        HeaderName::from_bytes(name.as_str().as_bytes()),
+                        HeaderValue::from_bytes(value.as_bytes()),
+                    ) {
                         response = response.header(n, v);
                     }
                 }
@@ -126,7 +177,11 @@ impl PeerClient {
             }
             Err(e) => {
                 tracing::warn!(error = %e, base, "forwarding to peer failed");
-                (StatusCode::BAD_GATEWAY, axum::Json(serde_json::json!({ "error": "peer node unavailable" }))).into_response()
+                (
+                    StatusCode::BAD_GATEWAY,
+                    axum::Json(serde_json::json!({ "error": "peer node unavailable" })),
+                )
+                    .into_response()
             }
         }
     }
@@ -145,7 +200,10 @@ impl PeerClient {
             Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
         };
         for (name, value) in headers.iter() {
-            if is_hop_by_hop(name.as_str()) || name.as_str() == SECRET_HEADER || name.as_str() == FORWARDED_HEADER {
+            if is_hop_by_hop(name.as_str())
+                || name.as_str() == SECRET_HEADER
+                || name.as_str() == FORWARDED_HEADER
+            {
                 continue;
             }
             request.headers_mut().insert(name.clone(), value.clone());
@@ -165,7 +223,9 @@ impl PeerClient {
                         tracing::warn!(error = %e, "websocket forward to peer failed");
                         let mut socket = socket;
                         let _ = socket
-                            .send(AxumMessage::Text(r#"{"type":"error","message":"peer node unavailable"}"#.into()))
+                            .send(AxumMessage::Text(
+                                r#"{"type":"error","message":"peer node unavailable"}"#.into(),
+                            ))
                             .await;
                     }
                 }
@@ -179,10 +239,12 @@ fn to_tungstenite(message: AxumMessage) -> TungsteniteMessage {
         AxumMessage::Binary(b) => TungsteniteMessage::Binary(b.into()),
         AxumMessage::Ping(p) => TungsteniteMessage::Ping(p.into()),
         AxumMessage::Pong(p) => TungsteniteMessage::Pong(p.into()),
-        AxumMessage::Close(frame) => TungsteniteMessage::Close(frame.map(|f| TungsteniteCloseFrame {
-            code: CloseCode::from(f.code),
-            reason: f.reason.to_string().into(),
-        })),
+        AxumMessage::Close(frame) => {
+            TungsteniteMessage::Close(frame.map(|f| TungsteniteCloseFrame {
+                code: CloseCode::from(f.code),
+                reason: f.reason.to_string().into(),
+            }))
+        }
     }
 }
 
@@ -217,7 +279,9 @@ where
     };
     let outbound = async {
         while let Some(Ok(message)) = upstream_rx.next().await {
-            let Some(message) = to_axum(message) else { continue };
+            let Some(message) = to_axum(message) else {
+                continue;
+            };
             let closing = matches!(message, AxumMessage::Close(_));
             if client_tx.send(message).await.is_err() || closing {
                 break;
@@ -231,8 +295,16 @@ where
     }
 }
 
-pub async fn require_secret(State(secret): State<Arc<String>>, request: Request, next: Next) -> Response {
-    let presented = request.headers().get(SECRET_HEADER).and_then(|v| v.to_str().ok()).unwrap_or("");
+pub async fn require_secret(
+    State(secret): State<Arc<String>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let presented = request
+        .headers()
+        .get(SECRET_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     if secret.is_empty() || !constant_time_eq(presented.as_bytes(), secret.as_bytes()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -266,17 +338,27 @@ mod tests {
     async fn internal_calls_carry_the_secret_and_the_calling_node() {
         let router = Router::new().route(
             "/internal/echo",
-            post(|headers: HeaderMap, axum::Json(body): axum::Json<Value>| async move {
-                axum::Json(json!({
-                    "secret": headers.get(SECRET_HEADER).and_then(|v| v.to_str().ok()),
-                    "from": headers.get(FORWARDED_HEADER).and_then(|v| v.to_str().ok()),
-                    "body": body,
-                }))
-            }),
+            post(
+                |headers: HeaderMap, axum::Json(body): axum::Json<Value>| async move {
+                    axum::Json(json!({
+                        "secret": headers.get(SECRET_HEADER).and_then(|v| v.to_str().ok()),
+                        "from": headers.get(FORWARDED_HEADER).and_then(|v| v.to_str().ok()),
+                        "body": body,
+                    }))
+                },
+            ),
         );
         let base = serve(router).await;
         let peer = PeerClient::new("node-a", "s3cret");
-        let (status, value) = peer.post_json(&base, "/internal/echo", &json!({ "x": 1 }), Duration::from_secs(5)).await.unwrap();
+        let (status, value) = peer
+            .post_json(
+                &base,
+                "/internal/echo",
+                &json!({ "x": 1 }),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["secret"], "s3cret");
         assert_eq!(value["from"], "node-a");
@@ -287,7 +369,11 @@ mod tests {
     async fn get_json_maps_not_found_to_none() {
         let base = serve(Router::new()).await;
         let peer = PeerClient::new("node-a", "s");
-        assert!(peer.get_json(&base, "/missing", Duration::from_secs(5)).await.unwrap().is_none());
+        assert!(peer
+            .get_json(&base, "/missing", Duration::from_secs(5))
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -320,7 +406,9 @@ mod tests {
         let response = peer.forward(&base, request).await;
         assert_eq!(response.status(), StatusCode::CREATED);
         assert_eq!(response.headers().get("x-upstream").unwrap(), "yes");
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let value: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["method"], "PUT");
         assert_eq!(value["q"], "42");
@@ -342,12 +430,22 @@ mod tests {
         let upstream = Router::new().route(
             "/ws",
             get(|ws: WebSocketUpgrade, headers: HeaderMap| async move {
-                let cookie = headers.get("cookie").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                let cookie = headers
+                    .get("cookie")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
                 ws.on_upgrade(move |mut socket| async move {
-                    let _ = socket.send(AxumMessage::Text(format!("hello {cookie}"))).await;
+                    let _ = socket
+                        .send(AxumMessage::Text(format!("hello {cookie}")))
+                        .await;
                     while let Some(Ok(message)) = socket.next().await {
                         match message {
-                            AxumMessage::Binary(b) => { let _ = socket.send(AxumMessage::Binary(b.iter().rev().cloned().collect())).await; }
+                            AxumMessage::Binary(b) => {
+                                let _ = socket
+                                    .send(AxumMessage::Binary(b.iter().rev().cloned().collect()))
+                                    .await;
+                            }
                             AxumMessage::Close(_) => break,
                             _ => {}
                         }
@@ -366,12 +464,19 @@ mod tests {
             }),
         );
         let front_base = serve(front).await;
-        let mut request = format!("{}/ws", front_base.replacen("http", "ws", 1)).into_client_request().unwrap();
-        request.headers_mut().insert("cookie", HeaderValue::from_static("token=abc"));
+        let mut request = format!("{}/ws", front_base.replacen("http", "ws", 1))
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("cookie", HeaderValue::from_static("token=abc"));
         let (mut client, _) = tokio_tungstenite::connect_async(request).await.unwrap();
         let greeting = client.next().await.unwrap().unwrap();
         assert_eq!(greeting.into_text().unwrap().as_str(), "hello token=abc");
-        client.send(TungsteniteMessage::Binary(vec![1u8, 2, 3].into())).await.unwrap();
+        client
+            .send(TungsteniteMessage::Binary(vec![1u8, 2, 3].into()))
+            .await
+            .unwrap();
         let echoed = client.next().await.unwrap().unwrap();
         assert_eq!(echoed.into_data().to_vec(), vec![3u8, 2, 1]);
     }
@@ -384,9 +489,32 @@ mod tests {
             .layer(axum::middleware::from_fn_with_state(secret, require_secret));
         let base = serve(router).await;
         let http = reqwest::Client::new();
-        assert_eq!(http.get(format!("{base}/internal/ok")).send().await.unwrap().status(), 401);
-        assert_eq!(http.get(format!("{base}/internal/ok")).header(SECRET_HEADER, "wrong").send().await.unwrap().status(), 401);
-        assert_eq!(http.get(format!("{base}/internal/ok")).header(SECRET_HEADER, "right").send().await.unwrap().status(), 200);
+        assert_eq!(
+            http.get(format!("{base}/internal/ok"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        assert_eq!(
+            http.get(format!("{base}/internal/ok"))
+                .header(SECRET_HEADER, "wrong")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        assert_eq!(
+            http.get(format!("{base}/internal/ok"))
+                .header(SECRET_HEADER, "right")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
     }
 
     #[test]

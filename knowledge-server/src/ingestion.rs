@@ -42,24 +42,30 @@ impl IngestionStatus {
             Some("completed") => Self::Completed {
                 versions: row["versions"]
                     .as_array()
-                    .map(|v| v.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .map(|v| {
+                        v.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    })
                     .unwrap_or_default(),
             },
-            _ => Self::Failed { error: row["error"].as_str().unwrap_or("unknown error").to_string() },
+            _ => Self::Failed {
+                error: row["error"].as_str().unwrap_or("unknown error").to_string(),
+            },
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct IngestionJob {
-    pub id:     String,
-    pub repo:   String,
+    pub id: String,
+    pub repo: String,
     pub status: IngestionStatus,
 }
 
 #[derive(Clone)]
 pub struct IngestionJobs {
-    db:   Arc<Db>,
+    db: Arc<Db>,
     node: Arc<ClusterNode>,
 }
 
@@ -102,10 +108,13 @@ impl IngestionJobs {
     }
 
     pub async fn status(&self, job_id: &str) -> Result<Option<IngestionStatus>> {
-        let rows = self.db.query(
-            "SELECT status, error, versions FROM ingestion_jobs WHERE id = $id",
-            json!({ "id": job_id }),
-        ).await?;
+        let rows = self
+            .db
+            .query(
+                "SELECT status, error, versions FROM ingestion_jobs WHERE id = $id",
+                json!({ "id": job_id }),
+            )
+            .await?;
         Ok(rows.first().map(IngestionStatus::from_row))
     }
 
@@ -114,22 +123,35 @@ impl IngestionJobs {
             "SELECT DISTINCT ON (repo) repo, status, error, versions FROM ingestion_jobs ORDER BY repo, started_at DESC",
             json!({}),
         ).await?;
-        Ok(rows.iter().map(|r| (r["repo"].as_str().unwrap_or_default().to_string(), IngestionStatus::from_row(r))).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r["repo"].as_str().unwrap_or_default().to_string(),
+                    IngestionStatus::from_row(r),
+                )
+            })
+            .collect())
     }
 
     pub async fn is_active(&self, repo: &str) -> Result<bool> {
         reap_dead_nodes(&self.db, &self.node).await?;
-        Ok(self.latest(repo).await?.is_some_and(|j| j.status.is_active()))
+        Ok(self
+            .latest(repo)
+            .await?
+            .is_some_and(|j| j.status.is_active()))
     }
 
     pub async fn append(&self, job_id: &str, lines: &[String]) -> Result<()> {
         if lines.is_empty() {
             return Ok(());
         }
-        self.db.execute(
-            "INSERT INTO ingestion_progress (job_id, line) SELECT $id, unnest($lines::text[])",
-            json!({ "id": job_id, "lines": lines }),
-        ).await?;
+        self.db
+            .execute(
+                "INSERT INTO ingestion_progress (job_id, line) SELECT $id, unnest($lines::text[])",
+                json!({ "id": job_id, "lines": lines }),
+            )
+            .await?;
         Ok(())
     }
 
@@ -138,7 +160,15 @@ impl IngestionJobs {
             "SELECT seq, line FROM ingestion_progress WHERE job_id = $id AND seq > $after ORDER BY seq",
             json!({ "id": job_id, "after": after }),
         ).await?;
-        Ok(rows.iter().map(|r| (r["seq"].as_i64().unwrap_or(0), r["line"].as_str().unwrap_or_default().to_string())).collect())
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r["seq"].as_i64().unwrap_or(0),
+                    r["line"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect())
     }
 
     pub async fn finish(&self, job_id: &str, outcome: Result<Vec<String>, String>) -> Result<()> {
@@ -163,7 +193,10 @@ impl IngestionJobs {
         Ok(())
     }
 
-    fn progress_writer(&self, job_id: String) -> (mpsc::UnboundedSender<String>, tokio::task::JoinHandle<()>) {
+    fn progress_writer(
+        &self,
+        job_id: String,
+    ) -> (mpsc::UnboundedSender<String>, tokio::task::JoinHandle<()>) {
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
         let jobs = self.clone();
         let handle = tokio::spawn(async move {
@@ -214,7 +247,8 @@ pub async fn run_ingestion(
     refs: Vec<String>,
 ) {
     let (progress_tx, writer) = jobs.progress_writer(job_id.clone());
-    let result = perform_ingestion(db, &name, &url, browse_url.as_deref(), &refs, progress_tx).await;
+    let result =
+        perform_ingestion(db, &name, &url, browse_url.as_deref(), &refs, progress_tx).await;
     let _ = writer.await;
     let outcome = result.map_err(|e| {
         tracing::error!(repo = %name, error = %e, "ingestion failed");
@@ -265,7 +299,10 @@ pub async fn run_resync(
     let result = match Pipeline::with_db(db) {
         Ok(mut pipeline) => {
             pipeline.set_progress_tx(progress_tx);
-            pipeline.process_single(&repo, true).await.map(|_| vec![version])
+            pipeline
+                .process_single(&repo, true)
+                .await
+                .map(|_| vec![version])
         }
         Err(e) => {
             drop(progress_tx);
@@ -288,16 +325,26 @@ mod tests {
 
     #[test]
     fn statuses_map_from_rows() {
-        assert_eq!(IngestionStatus::from_row(&json!({ "status": "running" })), IngestionStatus::Running);
+        assert_eq!(
+            IngestionStatus::from_row(&json!({ "status": "running" })),
+            IngestionStatus::Running
+        );
         assert_eq!(
             IngestionStatus::from_row(&json!({ "status": "completed", "versions": ["v1"] })),
-            IngestionStatus::Completed { versions: vec!["v1".into()] }
+            IngestionStatus::Completed {
+                versions: vec!["v1".into()]
+            }
         );
         assert_eq!(
             IngestionStatus::from_row(&json!({ "status": "failed", "error": "boom" })),
-            IngestionStatus::Failed { error: "boom".into() }
+            IngestionStatus::Failed {
+                error: "boom".into()
+            }
         );
         assert!(IngestionStatus::Pending.is_active());
-        assert!(!IngestionStatus::Failed { error: String::new() }.is_active());
+        assert!(!IngestionStatus::Failed {
+            error: String::new()
+        }
+        .is_active());
     }
 }

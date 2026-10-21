@@ -50,7 +50,10 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!waiter.is_finished());
         shutdown.trigger();
-        tokio::time::timeout(Duration::from_secs(1), waiter).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(shutdown.is_triggered());
     }
 
@@ -58,6 +61,8 @@ mod tests {
     async fn waiting_after_the_trigger_resolves_immediately() {
         let shutdown = Shutdown::new();
         shutdown.trigger();
-        tokio::time::timeout(Duration::from_millis(100), shutdown.wait()).await.unwrap();
+        tokio::time::timeout(Duration::from_millis(100), shutdown.wait())
+            .await
+            .unwrap();
     }
 }

@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 
 use crate::agent::{graph_tools, Agent};
 use crate::api::{AppState, GraphCache, ProjectAgentBuilder};
-use crate::auth::user_keys::UserKeyStore;
+use crate::auth::{api_keys::ApiKeyStore, user_keys::UserKeyStore};
 use crate::cluster::bus::ClusterBus;
 use crate::cluster::node::ClusterNode;
 use crate::cluster::peer::{require_secret, PeerClient};
@@ -32,12 +32,12 @@ const SCHEMA_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const SERVE_GRACE: Duration = Duration::from_secs(5);
 
 pub struct RunningServer {
-    pub public_addr:   SocketAddr,
+    pub public_addr: SocketAddr,
     pub internal_addr: Option<SocketAddr>,
-    pub node:          Arc<ClusterNode>,
-    pub live:          Arc<ProjectLive>,
-    drain:             Option<tokio::sync::oneshot::Sender<()>>,
-    finished:          tokio::task::JoinHandle<()>,
+    pub node: Arc<ClusterNode>,
+    pub live: Arc<ProjectLive>,
+    drain: Option<tokio::sync::oneshot::Sender<()>>,
+    finished: tokio::task::JoinHandle<()>,
 }
 
 impl RunningServer {
@@ -66,7 +66,11 @@ pub async fn connect_database(config: &Config) -> Result<Arc<Db>> {
     loop {
         match db.schema_version().await {
             Ok(version) if version >= harvest_db::LATEST_SCHEMA_VERSION => return Ok(Arc::new(db)),
-            Ok(version) => tracing::info!(version, wanted = harvest_db::LATEST_SCHEMA_VERSION, "waiting for database migrations"),
+            Ok(version) => tracing::info!(
+                version,
+                wanted = harvest_db::LATEST_SCHEMA_VERSION,
+                "waiting for database migrations"
+            ),
             Err(e) => tracing::warn!(error = %e, "waiting for the database"),
         }
         tokio::time::sleep(SCHEMA_WAIT_INTERVAL).await;
@@ -79,17 +83,30 @@ pub async fn migrate(config: &Config) -> Result<i32> {
     db.schema_version().await
 }
 
-async fn turn_snapshot(State(live): State<Arc<ProjectLive>>, Path(conv_id): Path<String>) -> Response {
+async fn turn_snapshot(
+    State(live): State<Arc<ProjectLive>>,
+    Path(conv_id): Path<String>,
+) -> Response {
     match live.local_snapshot(&conv_id).await {
         Some(snapshot) => Json(snapshot).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-fn internal_router(live: Arc<ProjectLive>, registry: Arc<MachineRegistry>, secret: Arc<String>) -> Router {
+fn internal_router(
+    live: Arc<ProjectLive>,
+    registry: Arc<MachineRegistry>,
+    secret: Arc<String>,
+) -> Router {
     Router::new()
-        .route("/internal/ping", get(|| async { Json(json!({ "ok": true })) }))
-        .route("/internal/turns/:conv_id/snapshot", get(turn_snapshot).with_state(live))
+        .route(
+            "/internal/ping",
+            get(|| async { Json(json!({ "ok": true })) }),
+        )
+        .route(
+            "/internal/turns/:conv_id/snapshot",
+            get(turn_snapshot).with_state(live),
+        )
         .merge(crate::machines::internal::router(registry))
         .layer(axum::middleware::from_fn_with_state(secret, require_secret))
 }
@@ -105,8 +122,18 @@ async fn reap(db: &Db, live: &ProjectLive, directory: &AgentDirectory) {
         tracing::warn!(error = %e, "reaping ingestion jobs of lost nodes failed");
     }
     let _ = crate::auth::ephemeral::purge_expired(db).await;
-    let _ = db.execute("DELETE FROM bus_payloads WHERE created_at < now() - interval '10 minutes'", json!({})).await;
-    let _ = db.execute("DELETE FROM cluster_nodes WHERE heartbeat_at < now() - interval '1 hour'", json!({})).await;
+    let _ = db
+        .execute(
+            "DELETE FROM bus_payloads WHERE created_at < now() - interval '10 minutes'",
+            json!({}),
+        )
+        .await;
+    let _ = db
+        .execute(
+            "DELETE FROM cluster_nodes WHERE heartbeat_at < now() - interval '1 hour'",
+            json!({}),
+        )
+        .await;
 }
 
 fn spawn_reaper(
@@ -124,7 +151,8 @@ fn spawn_reaper(
             let result = singleton::run_exclusive(&db, "reaper", || async {
                 reap(&db, &live, &directory).await;
                 collocate.reap_dead_nodes(live.node().timeout_secs()).await;
-            }).await;
+            })
+            .await;
             if let Err(e) = result {
                 tracing::warn!(error = %e, "reaper could not run");
             }
@@ -138,7 +166,9 @@ fn spawn_graph_cache_invalidation(bus: Arc<ClusterBus>, cache: Arc<GraphCache>) 
         loop {
             match receiver.recv().await {
                 Ok(prefix) => crate::api::repositories::drop_cached_graphs(&cache, &prefix).await,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => cache.write().await.clear(),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    cache.write().await.clear()
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             }
         }
@@ -153,7 +183,10 @@ async fn drain(
     grace: Duration,
     timeout: Duration,
 ) {
-    tracing::info!(node_id = node.node_id(), "draining: refusing new turns and failing readiness");
+    tracing::info!(
+        node_id = node.node_id(),
+        "draining: refusing new turns and failing readiness"
+    );
     if let Err(e) = node.set_draining().await {
         tracing::warn!(error = %e, "could not record draining state");
     }
@@ -165,7 +198,10 @@ async fn drain(
     }
     let aborted = live.abort_local_turns().await;
     if aborted > 0 {
-        tracing::warn!(aborted, "aborted turns that did not finish within the drain timeout");
+        tracing::warn!(
+            aborted,
+            "aborted turns that did not finish within the drain timeout"
+        );
     }
     let _ = live.release_presence().await;
     let _ = directory.release_node().await;
@@ -174,7 +210,9 @@ async fn drain(
 }
 
 async fn bind(address: &str) -> Result<TcpListener> {
-    TcpListener::bind(address).await.with_context(|| format!("binding {address}"))
+    TcpListener::bind(address)
+        .await
+        .with_context(|| format!("binding {address}"))
 }
 
 pub async fn start(config: Config) -> Result<RunningServer> {
@@ -193,7 +231,10 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         Some(address) => Some(bind(address).await?),
         None => None,
     };
-    let internal_addr = internal_listener.as_ref().map(|l| l.local_addr()).transpose()?;
+    let internal_addr = internal_listener
+        .as_ref()
+        .map(|l| l.local_addr())
+        .transpose()?;
 
     let mut cluster_config = config.cluster.clone();
     if let Some(addr) = internal_addr {
@@ -201,7 +242,9 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     }
 
     let node = ClusterNode::new(Arc::clone(&db), &cluster_config);
-    node.heartbeat().await.context("registering this node in the cluster")?;
+    node.heartbeat()
+        .await
+        .context("registering this node in the cluster")?;
     node.spawn_heartbeat();
     tracing::info!(node_id = node.node_id(), internal_url = ?node.internal_url(), "cluster node registered");
 
@@ -215,7 +258,13 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         (Some(secret), Some(_)) => Some(PeerClient::new(node.node_id(), secret.clone())),
         _ => None,
     };
-    let live = ProjectLive::new(Arc::clone(&db), Arc::clone(&node), Arc::clone(&bus), peers.clone(), shutdown.clone());
+    let live = ProjectLive::new(
+        Arc::clone(&db),
+        Arc::clone(&node),
+        Arc::clone(&bus),
+        peers.clone(),
+        shutdown.clone(),
+    );
 
     let has_user_key_providers = config.llm.iter().any(|c| c.user_provided_key());
     let user_key_store = if has_user_key_providers {
@@ -224,16 +273,19 @@ pub async fn start(config: Config) -> Result<RunningServer> {
              Generate one with: openssl rand -hex 32",
         )?;
         let crypto = Crypto::from_hex(key_hex).context("invalid user_key_encryption_key")?;
-        Some(Arc::new(UserKeyStore::new(Arc::clone(&db), Arc::new(crypto))))
+        Some(Arc::new(UserKeyStore::new(
+            Arc::clone(&db),
+            Arc::new(crypto),
+        )))
     } else {
         None
     };
 
-    let llm_provider               = crate::llm::from_config(&config.llm);
-    let llm_configs                = Arc::new(config.llm.clone());
-    let max_iterations             = config.agent.max_iterations;
+    let llm_provider = crate::llm::from_config(&config.llm);
+    let llm_configs = Arc::new(config.llm.clone());
+    let max_iterations = config.agent.max_iterations;
     let compaction_threshold_chars = config.agent.compaction_threshold_chars;
-    let compaction_keep_last       = config.agent.compaction_keep_last;
+    let compaction_keep_last = config.agent.compaction_keep_last;
 
     let system_one_client = match &config.system_one {
         Some(so_cfg) if so_cfg.is_enabled() && !so_cfg.api_key.is_empty() => {
@@ -242,7 +294,8 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         _ => None,
     };
 
-    let semantic_handle = match crate::agent::semantic::build_handle(&config.semantic, &config.llm) {
+    let semantic_handle = match crate::agent::semantic::build_handle(&config.semantic, &config.llm)
+    {
         Ok(handle) => handle,
         Err(err) => {
             tracing::error!(error = %err, "semantic search is configured but could not be initialised; continuing with lexical search only");
@@ -256,11 +309,22 @@ pub async fn start(config: Config) -> Result<RunningServer> {
                 let semantic_cfg = config.semantic.clone();
                 tokio::spawn(async move {
                     let ran = singleton::run_exclusive(&db, "semantic-backfill", || async {
-                        match crate::agent::semantic::run_backfill_if_configured(db.as_ref(), embedder.as_ref(), &semantic_cfg).await {
-                            Ok(stats) => tracing::info!(scanned = stats.scanned, embedded = stats.embedded, "semantic backfill finished"),
+                        match crate::agent::semantic::run_backfill_if_configured(
+                            db.as_ref(),
+                            embedder.as_ref(),
+                            &semantic_cfg,
+                        )
+                        .await
+                        {
+                            Ok(stats) => tracing::info!(
+                                scanned = stats.scanned,
+                                embedded = stats.embedded,
+                                "semantic backfill finished"
+                            ),
                             Err(err) => tracing::warn!(error = %err, "semantic backfill failed"),
                         }
-                    }).await;
+                    })
+                    .await;
                     if matches!(ran, Ok(false)) {
                         tracing::info!("semantic backfill already running on another node");
                     }
@@ -270,15 +334,18 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     }
 
     graph_tools::set_run_sql_available(graph_tools::probe_run_sql(&db).await);
-    let global_tools = graph_tools::all_tools_with_semantic(Arc::clone(&db), semantic_handle.clone());
+    let global_tools =
+        graph_tools::all_tools_with_semantic(Arc::clone(&db), semantic_handle.clone());
     let thresholds = crate::api::Thresholds::from_system_one(config.system_one.as_ref());
 
-    let agent = Arc::new(thresholds.apply(
-        Agent::new(Arc::clone(&llm_provider), global_tools, max_iterations)
-            .with_system_one(system_one_client.clone())
-            .with_compaction(compaction_threshold_chars, compaction_keep_last)
-            .with_parallel_research(true),
-    ));
+    let agent = Arc::new(
+        thresholds.apply(
+            Agent::new(Arc::clone(&llm_provider), global_tools, max_iterations)
+                .with_system_one(system_one_client.clone())
+                .with_compaction(compaction_threshold_chars, compaction_keep_last)
+                .with_parallel_research(true),
+        ),
+    );
 
     let machine_registry = MachineRegistry::new();
     let directory = AgentDirectory::new(Arc::clone(&db), Arc::clone(&node), peers.clone());
@@ -286,8 +353,10 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     machine_registry.attach_shutdown(shutdown.clone());
     let skill_registry = Arc::new(SkillStore::new(Arc::clone(&db)));
 
-    let docs_dir    = config.documentation.docs_dir.clone().map(Arc::new);
-    let server_url  = config.agents.public_url
+    let docs_dir = config.documentation.docs_dir.clone().map(Arc::new);
+    let server_url = config
+        .agents
+        .public_url
         .clone()
         .or_else(|| config.auth.public_url.clone())
         .unwrap_or_else(|| format!("http://{}:{}", config.server.host, public_addr.port()));
@@ -308,18 +377,22 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         },
         None => None,
     };
-    collocate_registry.attach_store(Arc::clone(&db), node.node_id().to_string(), collocate.clone().map(Arc::new));
+    collocate_registry.attach_store(
+        Arc::clone(&db),
+        node.node_id().to_string(),
+        collocate.clone().map(Arc::new),
+    );
 
     let agent_builder = Arc::new(ProjectAgentBuilder {
-        llm:            Arc::clone(&llm_provider),
-        system_one:     system_one_client.clone(),
-        db:             Arc::clone(&db),
-        registry:       Arc::clone(&machine_registry),
-        skills:         Arc::clone(&skill_registry),
-        lxd:            lxd.clone(),
+        llm: Arc::clone(&llm_provider),
+        system_one: system_one_client.clone(),
+        db: Arc::clone(&db),
+        registry: Arc::clone(&machine_registry),
+        skills: Arc::clone(&skill_registry),
+        lxd: lxd.clone(),
         collocate,
         collocate_registry: Arc::clone(&collocate_registry),
-        server_url:     server_url.clone(),
+        server_url: server_url.clone(),
         max_iterations,
         compaction_threshold_chars,
         compaction_keep_last,
@@ -337,18 +410,19 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     let collocate_reaper = Arc::clone(&collocate_registry);
     let state = AppState {
         agent,
-        db:               Arc::clone(&db),
-        ingestion:        crate::ingestion::IngestionJobs::new(Arc::clone(&db), Arc::clone(&node)),
+        db: Arc::clone(&db),
+        ingestion: crate::ingestion::IngestionJobs::new(Arc::clone(&db), Arc::clone(&node)),
         docs_dir,
-        auth:             Arc::new(config.auth),
-        ui:               Arc::new(config.ui),
+        auth: Arc::new(config.auth),
+        ui: Arc::new(config.ui),
         machine_registry: Arc::clone(&machine_registry),
-        agent_builder:    Arc::clone(&agent_builder),
+        agent_builder: Arc::clone(&agent_builder),
         binary_path,
-        llm:              Arc::clone(&llm_provider),
+        llm: Arc::clone(&llm_provider),
         llm_configs,
         system_one_config: config.system_one.clone(),
         user_key_store,
+        api_key_store: Arc::new(ApiKeyStore::new(Arc::clone(&db))),
         lxd,
         collocate_registry,
         pricing,
@@ -360,10 +434,18 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     tokio::spawn({
         let db = Arc::clone(&db);
         let cache = Arc::clone(&cache);
-        async move { crate::api::graph::warm_graph_cache(db, cache).await; }
+        async move {
+            crate::api::graph::warm_graph_cache(db, cache).await;
+        }
     });
     spawn_graph_cache_invalidation(Arc::clone(&bus), Arc::clone(&cache));
-    spawn_reaper(Arc::clone(&db), Arc::clone(&live), Arc::clone(&directory), Arc::clone(&collocate_reaper), reap_interval);
+    spawn_reaper(
+        Arc::clone(&db),
+        Arc::clone(&live),
+        Arc::clone(&directory),
+        Arc::clone(&collocate_reaper),
+        reap_interval,
+    );
 
     let app = crate::api::router(state, cache, server_url).await;
     tracing::info!(%public_addr, ?internal_addr, timeout_ms = cluster_timeout.as_millis() as u64, "listening");
@@ -372,18 +454,28 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         let app = app.clone();
         let shutdown = shutdown.clone();
         async move {
-            let _ = axum::serve(public_listener, app.into_make_service_with_connect_info::<SocketAddr>())
-                .with_graceful_shutdown(shutdown.wait())
-                .await;
+            let _ = axum::serve(
+                public_listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown.wait())
+            .await;
         }
     });
     let internal = internal_listener.map(|listener| {
-        let app = app.clone().merge(internal_router(Arc::clone(&live), Arc::clone(&machine_registry), secret));
+        let app = app.clone().merge(internal_router(
+            Arc::clone(&live),
+            Arc::clone(&machine_registry),
+            secret,
+        ));
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
-            let _ = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-                .with_graceful_shutdown(shutdown.wait())
-                .await;
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown.wait())
+            .await;
         })
     });
 
@@ -393,7 +485,15 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         let live = Arc::clone(&live);
         async move {
             let _ = drain_rx.await;
-            drain(Arc::clone(&node), Arc::clone(&live), directory, shutdown, drain_grace, drain_timeout).await;
+            drain(
+                Arc::clone(&node),
+                Arc::clone(&live),
+                directory,
+                shutdown,
+                drain_grace,
+                drain_timeout,
+            )
+            .await;
             let _ = tokio::time::timeout(SERVE_GRACE, public).await;
             if let Some(internal) = internal {
                 let _ = tokio::time::timeout(SERVE_GRACE, internal).await;
@@ -401,19 +501,27 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         }
     });
 
-    Ok(RunningServer { public_addr, internal_addr, node, live, drain: Some(drain_tx), finished })
+    Ok(RunningServer {
+        public_addr,
+        internal_addr,
+        node,
+        live,
+        drain: Some(drain_tx),
+        finished,
+    })
 }
 
 pub async fn wait_for_termination() {
     #[cfg(unix)]
     {
-        let mut terminate = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
-                return;
-            }
-        };
+        let mut terminate =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(_) => {
+                    let _ = tokio::signal::ctrl_c().await;
+                    return;
+                }
+            };
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = terminate.recv() => {}
