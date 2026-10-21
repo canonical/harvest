@@ -22,7 +22,11 @@ pub async fn resolve_client(cfg: &LxdConfig, db: &Db) -> Result<Option<LxdClient
     }
 
     let lock = db.dedicated_client().await?;
-    lock.execute("SELECT pg_advisory_lock(hashtext('harvest:lxd-identity'))", &[]).await?;
+    lock.execute(
+        "SELECT pg_advisory_lock(hashtext('harvest:lxd-identity'))",
+        &[],
+    )
+    .await?;
     let mut ident = identity::load_or_generate(db).await?;
 
     if !ident.trusted {
@@ -35,8 +39,15 @@ pub async fn resolve_client(cfg: &LxdConfig, db: &Db) -> Result<Option<LxdClient
         };
 
         match identity::join_with_token(
-            &cfg.endpoint, &ident, IDENTITY_NAME, token, cfg.ca_cert.as_deref(), cfg.insecure,
-        ).await {
+            &cfg.endpoint,
+            &ident,
+            IDENTITY_NAME,
+            token,
+            cfg.ca_cert.as_deref(),
+            cfg.insecure,
+        )
+        .await
+        {
             Ok(()) => {
                 identity::mark_trusted(db).await?;
                 ident.trusted = true;
@@ -49,7 +60,11 @@ pub async fn resolve_client(cfg: &LxdConfig, db: &Db) -> Result<Option<LxdClient
         }
     }
 
-    Ok(Some(LxdClient::from_identity(&ident.client_cert, &ident.client_key, cfg)?))
+    Ok(Some(LxdClient::from_identity(
+        &ident.client_cert,
+        &ident.client_key,
+        cfg,
+    )?))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +78,13 @@ pub enum Flavor {
 
 impl Flavor {
     pub fn all() -> &'static [Flavor] {
-        &[Flavor::Tiny, Flavor::Small, Flavor::Medium, Flavor::Large, Flavor::XLarge]
+        &[
+            Flavor::Tiny,
+            Flavor::Small,
+            Flavor::Medium,
+            Flavor::Large,
+            Flavor::XLarge,
+        ]
     }
 
     pub fn id(&self) -> &'static str {
@@ -120,25 +141,25 @@ impl Flavor {
 }
 
 pub struct CreateInstance {
-    pub name:        String,
-    pub network:     String,
+    pub name: String,
+    pub network: String,
     pub description: String,
-    pub flavor:      Flavor,
+    pub flavor: Flavor,
 }
 
 pub struct LxdClient {
-    http:         Client,
-    base_url:     String,
-    project:      String,
-    image_alias:  String,
+    http: Client,
+    base_url: String,
+    project: String,
+    image_alias: String,
     image_server: String,
-    profile:      String,
+    profile: String,
 }
 
 pub(crate) fn build_http_client(
     cert_pem: &str,
-    key_pem:  &str,
-    ca_cert:  Option<&str>,
+    key_pem: &str,
+    ca_cert: Option<&str>,
     insecure: bool,
 ) -> Result<Client> {
     let pem = format!("{cert_pem}\n{key_pem}");
@@ -151,8 +172,8 @@ pub(crate) fn build_http_client(
         .timeout(Duration::from_secs(DEFAULT_OPERATION_WAIT_SECS + 60));
 
     if let Some(ca) = ca_cert {
-        let cert = reqwest::Certificate::from_pem(ca.as_bytes())
-            .context("parsing LXD CA certificate")?;
+        let cert =
+            reqwest::Certificate::from_pem(ca.as_bytes()).context("parsing LXD CA certificate")?;
         builder = builder.add_root_certificate(cert);
     }
     if insecure {
@@ -164,9 +185,13 @@ pub(crate) fn build_http_client(
 
 impl LxdClient {
     pub fn new(cfg: &LxdConfig) -> Result<Self> {
-        let cert = cfg.client_cert.as_deref()
+        let cert = cfg
+            .client_cert
+            .as_deref()
             .ok_or_else(|| anyhow::anyhow!("LxdClient::new requires client_cert to be set"))?;
-        let key = cfg.client_key.as_deref()
+        let key = cfg
+            .client_key
+            .as_deref()
             .ok_or_else(|| anyhow::anyhow!("LxdClient::new requires client_key to be set"))?;
         Self::from_identity(cert, key, cfg)
     }
@@ -176,23 +201,23 @@ impl LxdClient {
 
         Ok(Self {
             http,
-            base_url:     cfg.endpoint.trim_end_matches('/').to_string(),
-            project:      cfg.project.clone(),
-            image_alias:  cfg.image_alias.clone(),
+            base_url: cfg.endpoint.trim_end_matches('/').to_string(),
+            project: cfg.project.clone(),
+            image_alias: cfg.image_alias.clone(),
             image_server: cfg.image_server.clone(),
-            profile:      cfg.profile.clone(),
+            profile: cfg.profile.clone(),
         })
     }
 
     #[cfg(test)]
     fn test_client(base_url: &str) -> Self {
         Self {
-            http:         Client::new(),
-            base_url:     base_url.trim_end_matches('/').to_string(),
-            project:      "default".into(),
-            image_alias:  "24.04".into(),
+            http: Client::new(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            project: "default".into(),
+            image_alias: "24.04".into(),
             image_server: "https://cloud-images.ubuntu.com/releases".into(),
-            profile:      "default".into(),
+            profile: "default".into(),
         }
     }
 
@@ -209,13 +234,24 @@ impl LxdClient {
     }
 
     async fn wait_for_operation(&self, envelope: &Value, timeout_secs: u64) -> Result<Value> {
-        let op_id = envelope["metadata"]["id"].as_str()
+        let op_id = envelope["metadata"]["id"]
+            .as_str()
             .ok_or_else(|| anyhow::anyhow!("LXD response missing operation id: {envelope}"))?;
-        let url = self.url(&format!("/1.0/operations/{op_id}/wait?timeout={timeout_secs}"));
+        let url = self.url(&format!(
+            "/1.0/operations/{op_id}/wait?timeout={timeout_secs}"
+        ));
 
-        let resp = self.http.get(&url).send().await.context("waiting for LXD operation")?;
+        let resp = self
+            .http
+            .get(&url)
+            .send()
+            .await
+            .context("waiting for LXD operation")?;
         let status = resp.status();
-        let body: Value = resp.json().await.context("parsing LXD operation-wait response")?;
+        let body: Value = resp
+            .json()
+            .await
+            .context("parsing LXD operation-wait response")?;
         if !status.is_success() {
             bail!("LXD operation wait failed ({status}): {body}");
         }
@@ -243,7 +279,12 @@ impl LxdClient {
     pub async fn ensure_network(&self, name: &str) -> Result<()> {
         let get_url = self.url(&format!("/1.0/networks/{name}?{}", self.project_qs()));
         tracing::debug!(url = %get_url, "LXD GET (check network)");
-        let resp = self.http.get(&get_url).send().await.context("checking LXD network")?;
+        let resp = self
+            .http
+            .get(&get_url)
+            .send()
+            .await
+            .context("checking LXD network")?;
         let status = resp.status();
         tracing::debug!(url = %get_url, %status, "LXD GET (check network) response");
         if status.is_success() {
@@ -256,9 +297,13 @@ impl LxdClient {
 
         let create_url = self.url(&format!("/1.0/networks?{}", self.project_qs()));
         tracing::debug!(url = %create_url, network = name, "LXD POST (create network)");
-        let resp = self.http.post(&create_url)
+        let resp = self
+            .http
+            .post(&create_url)
             .json(&json!({ "name": name, "type": "bridge" }))
-            .send().await.context("creating LXD network")?;
+            .send()
+            .await
+            .context("creating LXD network")?;
         let status = resp.status();
         let body: Value = resp.json().await.unwrap_or_default();
         tracing::debug!(url = %create_url, %status, %body, "LXD POST (create network) response");
@@ -298,7 +343,13 @@ impl LxdClient {
         });
 
         tracing::debug!(url = %url, project = %self.project, profile = %self.profile, image_alias = %self.image_alias, "LXD POST (create instance)");
-        let resp = self.http.post(&url).json(&body).send().await.context("creating LXD instance")?;
+        let resp = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("creating LXD instance")?;
         let status = resp.status();
         tracing::debug!(url = %url, %status, "LXD POST (create instance) initial response");
         self.run_async(resp, DEFAULT_OPERATION_WAIT_SECS).await?;
@@ -306,11 +357,18 @@ impl LxdClient {
     }
 
     async fn set_instance_state(&self, name: &str, action: &str, timeout: u64) -> Result<()> {
-        let url = self.url(&format!("/1.0/instances/{name}/state?{}", self.project_qs()));
+        let url = self.url(&format!(
+            "/1.0/instances/{name}/state?{}",
+            self.project_qs()
+        ));
         tracing::debug!(url = %url, action, "LXD PUT (set instance state)");
-        let resp = self.http.put(&url)
+        let resp = self
+            .http
+            .put(&url)
             .json(&json!({ "action": action, "timeout": timeout, "force": action == "stop" }))
-            .send().await.context("setting LXD instance state")?;
+            .send()
+            .await
+            .context("setting LXD instance state")?;
         let status = resp.status();
         tracing::debug!(url = %url, action, %status, "LXD PUT (set instance state) initial response");
         self.run_async(resp, timeout + 30).await?;
@@ -330,11 +388,23 @@ impl LxdClient {
     }
 
     pub async fn wait_running(&self, name: &str, timeout_secs: u64) -> Result<()> {
-        tracing::debug!(name, timeout_secs, "LXD wait_running: polling instance state");
+        tracing::debug!(
+            name,
+            timeout_secs,
+            "LXD wait_running: polling instance state"
+        );
         let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
         loop {
-            let url = self.url(&format!("/1.0/instances/{name}/state?{}", self.project_qs()));
-            let resp = self.http.get(&url).send().await.context("checking LXD instance state")?;
+            let url = self.url(&format!(
+                "/1.0/instances/{name}/state?{}",
+                self.project_qs()
+            ));
+            let resp = self
+                .http
+                .get(&url)
+                .send()
+                .await
+                .context("checking LXD instance state")?;
             if resp.status().is_success() {
                 let body: Value = resp.json().await.context("parsing LXD instance state")?;
                 let instance_status = body["metadata"]["status"].as_str().unwrap_or("");
@@ -354,18 +424,23 @@ impl LxdClient {
     pub async fn exec(&self, name: &str, command: Vec<String>) -> Result<i64> {
         let url = self.url(&format!("/1.0/instances/{name}/exec?{}", self.project_qs()));
         tracing::debug!(url = %url, name, "LXD POST (exec)");
-        let resp = self.http.post(&url)
+        let resp = self
+            .http
+            .post(&url)
             .json(&json!({
                 "command":            command,
                 "wait-for-websocket": false,
                 "record-output":      true,
                 "interactive":        false,
             }))
-            .send().await.context("executing command in LXD instance")?;
+            .send()
+            .await
+            .context("executing command in LXD instance")?;
         let status = resp.status();
         tracing::debug!(url = %url, %status, "LXD POST (exec) initial response");
         let operation = self.run_async(resp, DEFAULT_OPERATION_WAIT_SECS).await?;
-        let exit_code = operation["metadata"]["return"].as_i64()
+        let exit_code = operation["metadata"]["return"]
+            .as_i64()
             .ok_or_else(|| anyhow::anyhow!("LXD exec response missing exit code: {operation}"))?;
         tracing::debug!(name, exit_code, "LXD exec finished");
         Ok(exit_code)
@@ -396,12 +471,20 @@ impl LxdClient {
     }
 
     pub async fn delete_instance(&self, name: &str) -> Result<()> {
-        tracing::debug!(name, "LXD delete_instance: stopping instance first (best-effort)");
+        tracing::debug!(
+            name,
+            "LXD delete_instance: stopping instance first (best-effort)"
+        );
         let _ = self.stop_instance(name).await;
 
         let url = self.url(&format!("/1.0/instances/{name}?{}", self.project_qs()));
         tracing::debug!(url = %url, name, "LXD DELETE (instance)");
-        let resp = self.http.delete(&url).send().await.context("deleting LXD instance")?;
+        let resp = self
+            .http
+            .delete(&url)
+            .send()
+            .await
+            .context("deleting LXD instance")?;
         let status = resp.status();
         tracing::debug!(url = %url, %status, "LXD DELETE (instance) response");
         if status == StatusCode::NOT_FOUND {
@@ -424,14 +507,14 @@ mod tests {
         LxdConfig {
             endpoint,
             client_cert: Some(TEST_CERT.to_string()),
-            client_key:  Some(TEST_KEY.to_string()),
+            client_key: Some(TEST_KEY.to_string()),
             trust_token: None,
-            ca_cert:     None,
-            insecure:    false,
-            project:     "default".into(),
+            ca_cert: None,
+            insecure: false,
+            project: "default".into(),
             image_alias: "24.04".into(),
             image_server: "https://cloud-images.ubuntu.com/releases".into(),
-            profile:     "default".into(),
+            profile: "default".into(),
         }
     }
 
@@ -485,8 +568,11 @@ mod tests {
     async fn ensure_network_noop_when_already_exists() {
         let server = MockServer::start();
         let get_mock = server.mock(|when, then| {
-            when.method("GET").path("/1.0/networks/hv-abc123").query_param("project", "default");
-            then.status(200).json_body(sync_op(json!({ "name": "hv-abc123" })));
+            when.method("GET")
+                .path("/1.0/networks/hv-abc123")
+                .query_param("project", "default");
+            then.status(200)
+                .json_body(sync_op(json!({ "name": "hv-abc123" })));
         });
         let create_mock = server.mock(|when, then| {
             when.method("POST").path("/1.0/networks");
@@ -505,10 +591,13 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("GET").path("/1.0/networks/hv-abc123");
-            then.status(404).json_body(json!({ "error": "not found", "error_code": 404 }));
+            then.status(404)
+                .json_body(json!({ "error": "not found", "error_code": 404 }));
         });
         let create_mock = server.mock(|when, then| {
-            when.method("POST").path("/1.0/networks").query_param("project", "default");
+            when.method("POST")
+                .path("/1.0/networks")
+                .query_param("project", "default");
             then.status(200).json_body(sync_op(json!({})));
         });
 
@@ -527,7 +616,8 @@ mod tests {
         });
         server.mock(|when, then| {
             when.method("POST").path("/1.0/networks");
-            then.status(400).json_body(json!({ "error": "The network already exists" }));
+            then.status(400)
+                .json_body(json!({ "error": "The network already exists" }));
         });
 
         let client = LxdClient::test_client(&server.base_url());
@@ -538,7 +628,9 @@ mod tests {
     async fn create_instance_waits_for_operation_success() {
         let server = MockServer::start();
         let create_mock = server.mock(|when, then| {
-            when.method("POST").path("/1.0/instances").query_param("project", "default");
+            when.method("POST")
+                .path("/1.0/instances")
+                .query_param("project", "default");
             then.status(202).json_body(async_op("op-create"));
         });
         server.mock(|when, then| {
@@ -566,7 +658,8 @@ mod tests {
         });
         server.mock(|when, then| {
             when.method("GET").path("/1.0/operations/op-fail/wait");
-            then.status(200).json_body(op_wait_failure("no space left on device"));
+            then.status(200)
+                .json_body(op_wait_failure("no space left on device"));
         });
 
         let client = LxdClient::test_client(&server.base_url());
@@ -585,14 +678,16 @@ mod tests {
         let server = MockServer::start();
         let starting = server.mock(|when, then| {
             when.method("GET").path("/1.0/instances/agent-1/state");
-            then.status(200).json_body(sync_op(json!({ "status": "Starting" })));
+            then.status(200)
+                .json_body(sync_op(json!({ "status": "Starting" })));
         });
 
         let client = LxdClient::test_client(&server.base_url());
         let result = tokio::time::timeout(
             Duration::from_millis(700),
             client.wait_running("agent-1", 5),
-        ).await;
+        )
+        .await;
         assert!(result.is_err() || result.unwrap().is_err());
         assert!(starting.calls() >= 1);
     }
@@ -602,7 +697,8 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("GET").path("/1.0/instances/agent-1/state");
-            then.status(200).json_body(sync_op(json!({ "status": "Running" })));
+            then.status(200)
+                .json_body(sync_op(json!({ "status": "Running" })));
         });
 
         let client = LxdClient::test_client(&server.base_url());
@@ -618,11 +714,15 @@ mod tests {
         });
         server.mock(|when, then| {
             when.method("GET").path("/1.0/operations/op-exec/wait");
-            then.status(200).json_body(op_wait_success(json!({ "return": 0 })));
+            then.status(200)
+                .json_body(op_wait_success(json!({ "return": 0 })));
         });
 
         let client = LxdClient::test_client(&server.base_url());
-        let code = client.exec("agent-1", vec!["bash".into(), "-c".into(), "true".into()]).await.unwrap();
+        let code = client
+            .exec("agent-1", vec!["bash".into(), "-c".into(), "true".into()])
+            .await
+            .unwrap();
         assert_eq!(code, 0);
     }
 
@@ -635,7 +735,8 @@ mod tests {
         });
         server.mock(|when, then| {
             when.method("GET").path("/1.0/operations/op-exec/wait");
-            then.status(200).json_body(op_wait_success(json!({ "return": 1 })));
+            then.status(200)
+                .json_body(op_wait_success(json!({ "return": 1 })));
         });
 
         let client = LxdClient::test_client(&server.base_url());
@@ -652,13 +753,21 @@ mod tests {
         });
         server.mock(|when, then| {
             when.method("GET").path("/1.0/operations/op-exec/wait");
-            then.status(200).json_body(op_wait_success(json!({ "return": 0 })));
+            then.status(200)
+                .json_body(op_wait_success(json!({ "return": 0 })));
         });
 
         let client = LxdClient::test_client(&server.base_url());
         let code = client
-            .exec_with_retry("agent-1", vec!["true".into()], 3, Duration::from_millis(1), |_, _| {})
-            .await.unwrap();
+            .exec_with_retry(
+                "agent-1",
+                vec!["true".into()],
+                3,
+                Duration::from_millis(1),
+                |_, _| {},
+            )
+            .await
+            .unwrap();
 
         assert_eq!(code, 0);
         exec_mock.assert_calls(1);
@@ -673,15 +782,26 @@ mod tests {
         });
         server.mock(|when, then| {
             when.method("GET").path("/1.0/operations/op-exec/wait");
-            then.status(200).json_body(op_wait_success(json!({ "return": 6 })));
+            then.status(200)
+                .json_body(op_wait_success(json!({ "return": 6 })));
         });
 
         let client = LxdClient::test_client(&server.base_url());
         let code = client
-            .exec_with_retry("agent-1", vec!["curl".into()], 3, Duration::from_millis(1), |_, _| {})
-            .await.unwrap();
+            .exec_with_retry(
+                "agent-1",
+                vec!["curl".into()],
+                3,
+                Duration::from_millis(1),
+                |_, _| {},
+            )
+            .await
+            .unwrap();
 
-        assert_eq!(code, 6, "should surface the last attempt's exit code once attempts are exhausted");
+        assert_eq!(
+            code, 6,
+            "should surface the last attempt's exit code once attempts are exhausted"
+        );
         exec_mock.assert_calls(3);
     }
 
@@ -695,7 +815,13 @@ mod tests {
 
         let client = LxdClient::test_client(&server.base_url());
         let result = client
-            .exec_with_retry("agent-1", vec!["true".into()], 2, Duration::from_millis(1), |_, _| {})
+            .exec_with_retry(
+                "agent-1",
+                vec!["true".into()],
+                2,
+                Duration::from_millis(1),
+                |_, _| {},
+            )
             .await;
 
         assert!(result.is_err());
@@ -711,7 +837,8 @@ mod tests {
         });
         server.mock(|when, then| {
             when.method("GET").path("/1.0/operations/op-exec/wait");
-            then.status(200).json_body(op_wait_success(json!({ "return": 6 })));
+            then.status(200)
+                .json_body(op_wait_success(json!({ "return": 6 })));
         });
 
         let client = LxdClient::test_client(&server.base_url());
@@ -719,10 +846,17 @@ mod tests {
         let seen2 = std::sync::Arc::clone(&seen);
 
         client
-            .exec_with_retry("agent-1", vec!["curl".into()], 3, Duration::from_millis(1), move |attempt, attempts| {
-                seen2.lock().unwrap().push((attempt, attempts));
-            })
-            .await.unwrap();
+            .exec_with_retry(
+                "agent-1",
+                vec!["curl".into()],
+                3,
+                Duration::from_millis(1),
+                move |attempt, attempts| {
+                    seen2.lock().unwrap().push((attempt, attempts));
+                },
+            )
+            .await
+            .unwrap();
 
         assert_eq!(*seen.lock().unwrap(), vec![(1, 3), (2, 3)]);
     }
@@ -823,5 +957,4 @@ mod tests {
         cfg.client_key = None;
         assert!(!wants_manual_cert(&cfg));
     }
-
 }

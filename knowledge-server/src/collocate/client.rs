@@ -30,9 +30,15 @@ pub struct CreateContainerOpts {
 }
 
 impl CreateContainerOpts {
-    fn apply_to_builder<'a>(self, b: &'a mut collocate_remote::control::RunBuilder<'a>, project: &str) -> &'a mut collocate_remote::control::RunBuilder<'a> {
+    fn apply_to_builder<'a>(
+        self,
+        b: &'a mut collocate_remote::control::RunBuilder<'a>,
+        project: &str,
+    ) -> &'a mut collocate_remote::control::RunBuilder<'a> {
         let image = self.image.as_deref().unwrap_or("");
-        b.image(image).project(project).label("harvest.managed", "true");
+        b.image(image)
+            .project(project)
+            .label("harvest.managed", "true");
         if !self.command.is_empty() {
             let argv: Vec<&str> = self.command.iter().map(|s| s.as_str()).collect();
             b.command(&argv);
@@ -93,7 +99,8 @@ impl CollocateHandle {
 
     pub async fn pull(&self, reference: &str) -> Result<ImageMeta> {
         let mut c = self.inner.lock().await;
-        c.pull(reference).map_err(|e| anyhow!("collocate pull {reference}: {e}"))
+        c.pull(reference)
+            .map_err(|e| anyhow!("collocate pull {reference}: {e}"))
     }
 
     pub async fn images(&self) -> Result<Vec<ImageMeta>> {
@@ -101,7 +108,11 @@ impl CollocateHandle {
         c.images().map_err(|e| anyhow!("collocate images: {e}"))
     }
 
-    pub async fn create_container(&self, name: &str, opts: CreateContainerOpts) -> Result<ContainerId> {
+    pub async fn create_container(
+        &self,
+        name: &str,
+        opts: CreateContainerOpts,
+    ) -> Result<ContainerId> {
         let mut c = self.inner.lock().await;
         let mut builder = c.specify(name);
         let builder = opts.apply_to_builder(&mut builder, &self.config.project);
@@ -110,12 +121,25 @@ impl CollocateHandle {
             .map_err(|e| anyhow!("collocate run {name}: {e}"))
     }
 
-    pub async fn exec(&self, target: &str, argv: &[&str], opts: &ExecOptions, stdin: Vec<u8>) -> Result<ExecResult> {
+    pub async fn exec(
+        &self,
+        target: &str,
+        argv: &[&str],
+        opts: &ExecOptions,
+        stdin: Vec<u8>,
+    ) -> Result<ExecResult> {
         let mut c = self.inner.lock().await;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let exit = c
-            .exec(target, argv, opts, Cursor::new(stdin), &mut stdout, &mut stderr)
+            .exec(
+                target,
+                argv,
+                opts,
+                Cursor::new(stdin),
+                &mut stdout,
+                &mut stderr,
+            )
             .map_err(|e| anyhow!("collocate exec in {target}: {e}"))?;
         Ok(ExecResult {
             stdout: String::from_utf8_lossy(&stdout).into_owned(),
@@ -129,7 +153,12 @@ impl CollocateHandle {
         self.exec(target, argv, &opts, Vec::new()).await
     }
 
-    pub async fn exec_with_timeout(&self, target: &str, argv: &[&str], timeout_secs: u64) -> Result<ExecResult> {
+    pub async fn exec_with_timeout(
+        &self,
+        target: &str,
+        argv: &[&str],
+        timeout_secs: u64,
+    ) -> Result<ExecResult> {
         let opts = ExecOptions {
             timeout_secs: Some(timeout_secs),
             ..ExecOptions::new()
@@ -137,7 +166,12 @@ impl CollocateHandle {
         self.exec(target, argv, &opts, Vec::new()).await
     }
 
-    pub async fn transfer_to(&self, target: &str, remote_path: &str, content: Vec<u8>) -> Result<()> {
+    pub async fn transfer_to(
+        &self,
+        target: &str,
+        remote_path: &str,
+        content: Vec<u8>,
+    ) -> Result<()> {
         let opts = ExecOptions::new();
         let shell_cmd = format!("cat > '{remote_path}'");
         let argv: [&str; 3] = ["sh", "-c", &shell_cmd];
@@ -150,7 +184,9 @@ impl CollocateHandle {
 
     pub async fn transfer_from(&self, target: &str, remote_path: &str) -> Result<Vec<u8>> {
         let opts = ExecOptions::new();
-        let result = self.exec(target, &["cat", remote_path], &opts, Vec::new()).await?;
+        let result = self
+            .exec(target, &["cat", remote_path], &opts, Vec::new())
+            .await?;
         if result.exit_code != 0 {
             anyhow::bail!("transfer from {remote_path} failed: {}", result.stderr);
         }
@@ -213,21 +249,22 @@ fn build_identity(config: &CollocateConfig) -> Result<(Identity, String)> {
             .with_context(|| format!("reading client cert at {cert_path}"))?;
         let key = std::fs::read_to_string(key_path)
             .with_context(|| format!("reading client key at {key_path}"))?;
-        let fingerprint = collocate_trust::fingerprint_pem(&cert)
-            .map_err(|e| anyhow!("fingerprint_pem: {e}"))?;
+        let fingerprint =
+            collocate_trust::fingerprint_pem(&cert).map_err(|e| anyhow!("fingerprint_pem: {e}"))?;
         let identity = Identity {
             certificate: cert,
             key,
             fingerprint,
         };
-        let server_fp = config.server_fingerprint.as_ref()
-            .ok_or_else(|| anyhow!("collocate config with client_cert+client_key requires server_fingerprint"))?;
+        let server_fp = config.server_fingerprint.as_ref().ok_or_else(|| {
+            anyhow!("collocate config with client_cert+client_key requires server_fingerprint")
+        })?;
         return Ok((identity, server_fp.clone()));
     }
     if let Some(token) = &config.trust_token {
         let identity = generate_identity()?;
-        let parsed = collocate_trust::Token::decode(token)
-            .context("decoding collocate trust token")?;
+        let parsed =
+            collocate_trust::Token::decode(token).context("decoding collocate trust token")?;
         let server_fingerprint = parsed.fingerprint.clone();
         let _enrolled = collocate_remote::client::enroll(&parsed, &identity, Some("harvest"))
             .map_err(|e| anyhow!("collocate enroll: {e}"))?;
@@ -239,10 +276,10 @@ fn build_identity(config: &CollocateConfig) -> Result<(Identity, String)> {
 }
 
 fn generate_identity() -> Result<Identity> {
-    use rcgen::KeyPair;
     use rcgen::CertificateParams;
     use rcgen::DistinguishedName;
     use rcgen::DnType;
+    use rcgen::KeyPair;
 
     let params = CertificateParams::new(vec!["harvest".to_string()])?;
     let mut dn = DistinguishedName::new();
@@ -251,8 +288,8 @@ fn generate_identity() -> Result<Identity> {
     let cert = params.self_signed(&key_pair)?;
     let cert_pem = cert.pem();
     let key_pem = key_pair.serialize_pem();
-    let fingerprint = collocate_trust::fingerprint_pem(&cert_pem)
-        .map_err(|e| anyhow!("fingerprint_pem: {e}"))?;
+    let fingerprint =
+        collocate_trust::fingerprint_pem(&cert_pem).map_err(|e| anyhow!("fingerprint_pem: {e}"))?;
     Ok(Identity {
         certificate: cert_pem,
         key: key_pem,

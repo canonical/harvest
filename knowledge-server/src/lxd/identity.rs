@@ -2,8 +2,8 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
 
-use harvest_db::Db;
 use super::build_http_client;
+use harvest_db::Db;
 
 const IDENTITY_ID: &str = "singleton";
 
@@ -17,23 +17,25 @@ pub struct LxdIdentity {
 /// Loads the persisted singleton identity, generating and persisting a new
 /// self-signed one (untrusted) if none exists yet.
 pub async fn load_or_generate(db: &Db) -> Result<LxdIdentity> {
-    let rows = db.query(
-        "SELECT client_cert, client_key, trusted FROM lxd_identity WHERE id = $id",
-        json!({ "id": IDENTITY_ID }),
-    ).await?;
+    let rows = db
+        .query(
+            "SELECT client_cert, client_key, trusted FROM lxd_identity WHERE id = $id",
+            json!({ "id": IDENTITY_ID }),
+        )
+        .await?;
 
     if let Some(row) = rows.into_iter().next() {
         return Ok(LxdIdentity {
             client_cert: row["client_cert"].as_str().unwrap_or_default().to_string(),
-            client_key:  row["client_key"].as_str().unwrap_or_default().to_string(),
-            trusted:     row["trusted"].as_bool().unwrap_or(false),
+            client_key: row["client_key"].as_str().unwrap_or_default().to_string(),
+            trusted: row["trusted"].as_bool().unwrap_or(false),
         });
     }
 
     let certified_key = rcgen::generate_simple_self_signed(vec!["harvest".to_string()])
         .context("generating LXD client identity")?;
     let client_cert = certified_key.cert.pem();
-    let client_key  = certified_key.signing_key.serialize_pem();
+    let client_key = certified_key.signing_key.serialize_pem();
     let now = harvest_db::now_rfc3339();
 
     db.query(
@@ -43,9 +45,14 @@ pub async fn load_or_generate(db: &Db) -> Result<LxdIdentity> {
              client_cert = EXCLUDED.client_cert, client_key = EXCLUDED.client_key,
              trusted = false, created_at = EXCLUDED.created_at",
         json!({ "id": IDENTITY_ID, "cert": client_cert, "key": client_key, "now": now }),
-    ).await?;
+    )
+    .await?;
 
-    Ok(LxdIdentity { client_cert, client_key, trusted: false })
+    Ok(LxdIdentity {
+        client_cert,
+        client_key,
+        trusted: false,
+    })
 }
 
 /// Marks the persisted identity as trusted after a successful join.
@@ -53,7 +60,8 @@ pub async fn mark_trusted(db: &Db) -> Result<()> {
     db.query(
         "UPDATE lxd_identity SET trusted = true WHERE id = $id",
         json!({ "id": IDENTITY_ID }),
-    ).await?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -63,18 +71,26 @@ pub async fn mark_trusted(db: &Db) -> Result<()> {
 /// the server side) — not the PEM text itself.
 fn pem_cert_to_der(pem: &str) -> Result<Vec<u8>> {
     const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
-    const END:   &str = "-----END CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
 
-    let start = pem.find(BEGIN).map(|i| i + BEGIN.len())
+    let start = pem
+        .find(BEGIN)
+        .map(|i| i + BEGIN.len())
         .ok_or_else(|| anyhow::anyhow!("no PEM certificate block found"))?;
-    let end = pem.find(END)
+    let end = pem
+        .find(END)
         .ok_or_else(|| anyhow::anyhow!("unterminated PEM certificate block"))?;
     if end < start {
         bail!("malformed PEM certificate block");
     }
 
-    let body: String = pem[start..end].chars().filter(|c| !c.is_whitespace()).collect();
-    STANDARD.decode(body.as_bytes()).context("decoding PEM certificate body")
+    let body: String = pem[start..end]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    STANDARD
+        .decode(body.as_bytes())
+        .context("decoding PEM certificate body")
 }
 
 /// Self-registers `identity`'s certificate with an LXD server using a
@@ -90,18 +106,26 @@ pub async fn join_with_token(
     ca_cert: Option<&str>,
     insecure: bool,
 ) -> Result<()> {
-    let http = build_http_client(&identity.client_cert, &identity.client_key, ca_cert, insecure)?;
+    let http = build_http_client(
+        &identity.client_cert,
+        &identity.client_key,
+        ca_cert,
+        insecure,
+    )?;
     let der = pem_cert_to_der(&identity.client_cert)?;
 
     let url = format!("{}/1.0/certificates", endpoint.trim_end_matches('/'));
-    let resp = http.post(&url)
+    let resp = http
+        .post(&url)
         .json(&json!({
             "type":        "client",
             "name":        name,
             "certificate": STANDARD.encode(der),
             "trust_token": token,
         }))
-        .send().await.context("submitting LXD trust-token join request")?;
+        .send()
+        .await
+        .context("submitting LXD trust-token join request")?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -122,8 +146,8 @@ mod tests {
     fn test_identity() -> LxdIdentity {
         LxdIdentity {
             client_cert: TEST_CERT.to_string(),
-            client_key:  TEST_KEY.to_string(),
-            trusted:     false,
+            client_key: TEST_KEY.to_string(),
+            trusted: false,
         }
     }
 
@@ -146,12 +170,23 @@ mod tests {
         let mock = server.mock(|when, then| {
             when.method("POST")
                 .path("/1.0/certificates")
-                .json_body_includes(r#"{ "type": "client", "name": "harvest", "trust_token": "tok-123" }"#);
-            then.status(200).json_body(json!({ "type": "sync", "status": "Success", "metadata": {} }));
+                .json_body_includes(
+                    r#"{ "type": "client", "name": "harvest", "trust_token": "tok-123" }"#,
+                );
+            then.status(200)
+                .json_body(json!({ "type": "sync", "status": "Success", "metadata": {} }));
         });
 
-        join_with_token(&server.base_url(), &test_identity(), "harvest", "tok-123", None, false)
-            .await.unwrap();
+        join_with_token(
+            &server.base_url(),
+            &test_identity(),
+            "harvest",
+            "tok-123",
+            None,
+            false,
+        )
+        .await
+        .unwrap();
 
         mock.assert();
     }
@@ -167,11 +202,20 @@ mod tests {
             when.method("POST")
                 .path("/1.0/certificates")
                 .json_body_includes(format!(r#"{{ "certificate": "{expected_b64}" }}"#));
-            then.status(200).json_body(json!({ "type": "sync", "status": "Success", "metadata": {} }));
+            then.status(200)
+                .json_body(json!({ "type": "sync", "status": "Success", "metadata": {} }));
         });
 
-        join_with_token(&server.base_url(), &test_identity(), "harvest", "tok-123", None, false)
-            .await.unwrap();
+        join_with_token(
+            &server.base_url(),
+            &test_identity(),
+            "harvest",
+            "tok-123",
+            None,
+            false,
+        )
+        .await
+        .unwrap();
 
         capture.assert();
     }
@@ -181,11 +225,20 @@ mod tests {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method("POST").path("/1.0/certificates");
-            then.status(403).json_body(json!({ "error": "invalid trust token" }));
+            then.status(403)
+                .json_body(json!({ "error": "invalid trust token" }));
         });
 
-        let err = join_with_token(&server.base_url(), &test_identity(), "harvest", "bad-token", None, false)
-            .await.unwrap_err();
+        let err = join_with_token(
+            &server.base_url(),
+            &test_identity(),
+            "harvest",
+            "bad-token",
+            None,
+            false,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("403"));
     }
 }

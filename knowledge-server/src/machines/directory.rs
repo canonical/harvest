@@ -9,25 +9,25 @@ use crate::cluster::peer::PeerClient;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentLocation {
-    pub agent_id:   String,
-    pub node_id:    String,
+    pub agent_id: String,
+    pub node_id: String,
     pub project_id: String,
-    pub hostname:   String,
+    pub hostname: String,
     pub connected_at: String,
 }
 
 pub struct AgentDirectory {
-    db:    Arc<Db>,
-    node:  Arc<ClusterNode>,
+    db: Arc<Db>,
+    node: Arc<ClusterNode>,
     peers: Option<Arc<PeerClient>>,
 }
 
 fn location_from_row(row: &Value) -> AgentLocation {
     AgentLocation {
-        agent_id:     row["agent_id"].as_str().unwrap_or_default().to_string(),
-        node_id:      row["node_id"].as_str().unwrap_or_default().to_string(),
-        project_id:   row["project_id"].as_str().unwrap_or_default().to_string(),
-        hostname:     row["hostname"].as_str().unwrap_or_default().to_string(),
+        agent_id: row["agent_id"].as_str().unwrap_or_default().to_string(),
+        node_id: row["node_id"].as_str().unwrap_or_default().to_string(),
+        project_id: row["project_id"].as_str().unwrap_or_default().to_string(),
+        hostname: row["hostname"].as_str().unwrap_or_default().to_string(),
         connected_at: row["connected_at"].as_str().unwrap_or_default().to_string(),
     }
 }
@@ -53,7 +53,13 @@ impl AgentDirectory {
         self.peers.as_ref()
     }
 
-    pub async fn register(&self, agent_id: &str, connection_id: &str, project_id: &str, hostname: &str) -> Result<()> {
+    pub async fn register(
+        &self,
+        agent_id: &str,
+        connection_id: &str,
+        project_id: &str,
+        hostname: &str,
+    ) -> Result<()> {
         self.db.execute(
             "INSERT INTO agent_connections (agent_id, node_id, connection_id, project_id, hostname, connected_at)
              VALUES ($aid, $node, $conn, $pid, $host, now())
@@ -66,10 +72,12 @@ impl AgentDirectory {
     }
 
     pub async fn unregister(&self, agent_id: &str, connection_id: &str) -> Result<()> {
-        self.db.execute(
-            "DELETE FROM agent_connections WHERE agent_id = $aid AND connection_id = $conn",
-            json!({ "aid": agent_id, "conn": connection_id }),
-        ).await?;
+        self.db
+            .execute(
+                "DELETE FROM agent_connections WHERE agent_id = $aid AND connection_id = $conn",
+                json!({ "aid": agent_id, "conn": connection_id }),
+            )
+            .await?;
         Ok(())
     }
 
@@ -100,7 +108,11 @@ impl AgentDirectory {
         if location.node_id == self.node.node_id() {
             return None;
         }
-        self.node.internal_url_of(&location.node_id).await.ok().flatten()
+        self.node
+            .internal_url_of(&location.node_id)
+            .await
+            .ok()
+            .flatten()
     }
 
     pub async fn node_url(&self, node_id: &str) -> Option<String> {
@@ -111,33 +123,47 @@ impl AgentDirectory {
     }
 
     pub async fn agent_for_token_hash(&self, token_hash: &str) -> Option<String> {
-        let rows = self.db.query(
-            "SELECT id FROM machines WHERE agent_token_hash = $h",
-            json!({ "h": token_hash }),
-        ).await.ok()?;
+        let rows = self
+            .db
+            .query(
+                "SELECT id FROM machines WHERE agent_token_hash = $h",
+                json!({ "h": token_hash }),
+            )
+            .await
+            .ok()?;
         rows.first()?["id"].as_str().map(str::to_string)
     }
 
     pub async fn hostname_from_inventory(&self, agent_id: &str) -> Option<String> {
-        let rows = self.db.query(
-            "SELECT hostname FROM machines WHERE id = $aid",
-            json!({ "aid": agent_id }),
-        ).await.ok()?;
+        let rows = self
+            .db
+            .query(
+                "SELECT hostname FROM machines WHERE id = $aid",
+                json!({ "aid": agent_id }),
+            )
+            .await
+            .ok()?;
         rows.first()?["hostname"].as_str().map(str::to_string)
     }
 
     pub async fn release_node(&self) -> Result<()> {
-        self.db.execute(
-            "DELETE FROM agent_connections WHERE node_id = $node",
-            json!({ "node": self.node.node_id() }),
-        ).await?;
+        self.db
+            .execute(
+                "DELETE FROM agent_connections WHERE node_id = $node",
+                json!({ "node": self.node.node_id() }),
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn reap_dead_nodes(&self) -> Result<u64> {
-        self.db.execute(
-            &format!("DELETE FROM agent_connections c WHERE c.node_id <> $node AND NOT {ALIVE}"),
-            json!({ "node": self.node.node_id(), "timeout": self.node.timeout_secs() }),
-        ).await
+        self.db
+            .execute(
+                &format!(
+                    "DELETE FROM agent_connections c WHERE c.node_id <> $node AND NOT {ALIVE}"
+                ),
+                json!({ "node": self.node.node_id(), "timeout": self.node.timeout_secs() }),
+            )
+            .await
     }
 }
