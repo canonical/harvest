@@ -73,11 +73,23 @@ fn render_markdown(result: &ExplorationResult) -> String {
     md.push_str("## Summary\n\n");
     md.push_str(&result.report.summary);
     md.push_str("\n\n## Run Stats\n\n");
-    md.push_str(&format!("- Iterations in transcript: {}\n", result.transcript.len()));
+    md.push_str(&format!(
+        "- Iterations in transcript: {}\n",
+        result.transcript.len()
+    ));
     md.push_str(&format!("- Tool calls made: {}\n", result.tool_calls_made));
-    md.push_str(&format!("- Hit max iterations: {}\n", result.hit_max_iterations));
-    md.push_str(&format!("- Total tokens: {}\n", result.total_usage.total_tokens()));
-    md.push_str(&format!("- Estimated cost: {}\n", format_cost(result.estimated_cost_microusd)));
+    md.push_str(&format!(
+        "- Hit max iterations: {}\n",
+        result.hit_max_iterations
+    ));
+    md.push_str(&format!(
+        "- Total tokens: {}\n",
+        result.total_usage.total_tokens()
+    ));
+    md.push_str(&format!(
+        "- Estimated cost: {}\n",
+        format_cost(result.estimated_cost_microusd)
+    ));
     md.push_str(&format!("- Duration: {} ms\n", result.duration_ms));
     md
 }
@@ -102,16 +114,24 @@ fn render_transcript_jsonl(result: &ExplorationResult) -> Result<String> {
 }
 
 pub async fn write(dir: &Path, result: &ExplorationResult) -> Result<()> {
-    tokio::fs::create_dir_all(dir).await.with_context(|| format!("creating report dir: {}", dir.display()))?;
+    tokio::fs::create_dir_all(dir)
+        .await
+        .with_context(|| format!("creating report dir: {}", dir.display()))?;
 
     let md = render_markdown(result);
-    tokio::fs::write(dir.join("report.md"), md).await.context("writing report.md")?;
+    tokio::fs::write(dir.join("report.md"), md)
+        .await
+        .context("writing report.md")?;
 
     let json = serde_json::to_string_pretty(result)?;
-    tokio::fs::write(dir.join("report.json"), json).await.context("writing report.json")?;
+    tokio::fs::write(dir.join("report.json"), json)
+        .await
+        .context("writing report.json")?;
 
     let jsonl = render_transcript_jsonl(result)?;
-    tokio::fs::write(dir.join("transcript.jsonl"), jsonl).await.context("writing transcript.jsonl")?;
+    tokio::fs::write(dir.join("transcript.jsonl"), jsonl)
+        .await
+        .context("writing transcript.jsonl")?;
 
     Ok(())
 }
@@ -133,17 +153,37 @@ mod tests {
                 tool_calls: vec![],
             }],
             tool_calls_made: 3,
-            total_usage: Usage { input_tokens: 100, output_tokens: 50, ..Default::default() },
+            total_usage: Usage {
+                input_tokens: 100,
+                output_tokens: 50,
+                ..Default::default()
+            },
             estimated_cost_microusd: 42_000,
             duration_ms: 1500,
             hit_max_iterations: false,
             report: FinishExplorationPayload {
                 quality_assessment: "solid".to_string(),
                 bugs_found: vec![
-                    Bug { severity: "low".to_string(), area: "chat".to_string(), description: "minor issue".to_string(), repro_steps: String::new(), evidence: String::new() },
-                    Bug { severity: "critical".to_string(), area: "deploy".to_string(), description: "big issue".to_string(), repro_steps: "do X".to_string(), evidence: "log line".to_string() },
+                    Bug {
+                        severity: "low".to_string(),
+                        area: "chat".to_string(),
+                        description: "minor issue".to_string(),
+                        repro_steps: String::new(),
+                        evidence: String::new(),
+                    },
+                    Bug {
+                        severity: "critical".to_string(),
+                        area: "deploy".to_string(),
+                        description: "big issue".to_string(),
+                        repro_steps: "do X".to_string(),
+                        evidence: "log line".to_string(),
+                    },
                 ],
-                improvements: vec![Improvement { area: "ux".to_string(), suggestion: "clearer errors".to_string(), rationale: "confused users".to_string() }],
+                improvements: vec![Improvement {
+                    area: "ux".to_string(),
+                    suggestion: "clearer errors".to_string(),
+                    rationale: "confused users".to_string(),
+                }],
                 summary: "all good".to_string(),
             },
         }
@@ -177,7 +217,10 @@ mod tests {
         let md = render_markdown(&sample_result());
         let critical_pos = md.find("[critical]").unwrap();
         let low_pos = md.find("[low]").unwrap();
-        assert!(critical_pos < low_pos, "critical bug should be listed before low severity");
+        assert!(
+            critical_pos < low_pos,
+            "critical bug should be listed before low severity"
+        );
         assert!(md.contains("Tool calls made: 3"));
         assert!(md.contains("Estimated cost: $0.042000"));
     }
@@ -194,7 +237,8 @@ mod tests {
     fn transcript_jsonl_has_one_line_per_entry() {
         let jsonl = render_transcript_jsonl(&sample_result()).unwrap();
         assert_eq!(jsonl.lines().count(), 1);
-        let parsed: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert_eq!(parsed["assistant_text"], "creating a project");
     }
 

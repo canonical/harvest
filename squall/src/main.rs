@@ -56,9 +56,9 @@ async fn resolve_group_id(client: &harvest::Client, cfg: &config::HarvestConfig)
         return Ok(id.clone());
     }
     let groups = client.list_groups().await?;
-    let first = groups
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("account has no groups and harvest.group_id is not set in config"))?;
+    let first = groups.first().ok_or_else(|| {
+        anyhow::anyhow!("account has no groups and harvest.group_id is not set in config")
+    })?;
     Ok(first["id"].as_str().unwrap_or_default().to_string())
 }
 
@@ -67,33 +67,62 @@ async fn run_smoke_test(cfg: &config::Config) -> Result<()> {
     let group_id = resolve_group_id(&client, &cfg.harvest).await?;
 
     println!("[1/8] create_project");
-    let project = client.create_project("squall-smoke-test", Some("created by squall smoke-test"), &group_id).await?;
-    let project_id = project["id"].as_str().context("create_project response missing id")?;
+    let project = client
+        .create_project(
+            "squall-smoke-test",
+            Some("created by squall smoke-test"),
+            &group_id,
+        )
+        .await?;
+    let project_id = project["id"]
+        .as_str()
+        .context("create_project response missing id")?;
 
     println!("[2/8] create_conversation");
-    let conversation = client.create_conversation(project_id, Some("smoke test")).await?;
-    let conversation_id = conversation["id"].as_str().context("create_conversation response missing id")?;
+    let conversation = client
+        .create_conversation(project_id, Some("smoke test"))
+        .await?;
+    let conversation_id = conversation["id"]
+        .as_str()
+        .context("create_conversation response missing id")?;
 
     println!("[3/8] send_chat_message");
-    let query_resp = client.send_chat_message(project_id, "hello", Some(conversation_id)).await?;
+    let query_resp = client
+        .send_chat_message(project_id, "hello", Some(conversation_id))
+        .await?;
     println!("      agent answered ({} chars)", query_resp.answer.len());
 
     println!("[4/8] create_artifact");
     let artifact = client
-        .create_artifact(project_id, "smoke-test-note", "markdown", &serde_json::json!("# smoke test"))
+        .create_artifact(
+            project_id,
+            "smoke-test-note",
+            "markdown",
+            &serde_json::json!("# smoke test"),
+        )
         .await?;
     println!("      artifact id: {}", artifact["id"]);
 
     println!("[5/8] get_deployment");
     let deployment = client.get_deployment(project_id).await?;
-    let deployment_id = deployment["id"].as_str().context("get_deployment response missing id")?;
+    let deployment_id = deployment["id"]
+        .as_str()
+        .context("get_deployment response missing id")?;
 
     println!("[6/8] generate_design");
-    client.generate_design(project_id, deployment_id, None).await?;
+    client
+        .generate_design(project_id, deployment_id, None)
+        .await?;
 
     println!("[7/8] add_context_artifact");
     client
-        .add_context_artifact(project_id, deployment_id, "smoke-test-context", "markdown", &serde_json::json!("context"))
+        .add_context_artifact(
+            project_id,
+            deployment_id,
+            "smoke-test-context",
+            "markdown",
+            &serde_json::json!("context"),
+        )
         .await?;
 
     println!("[8/8] done — all non-destructive Harvest actions succeeded");
@@ -101,7 +130,13 @@ async fn run_smoke_test(cfg: &config::Config) -> Result<()> {
     Ok(())
 }
 
-async fn run_explore(cfg: &config::Config, objective: String, max_iterations: Option<usize>, no_infra: bool, out: Option<String>) -> Result<()> {
+async fn run_explore(
+    cfg: &config::Config,
+    objective: String,
+    max_iterations: Option<usize>,
+    no_infra: bool,
+    out: Option<String>,
+) -> Result<()> {
     let client = Arc::new(connect(&cfg.harvest).await?);
     let allow_infra = cfg.exploration.allow_infra && !no_infra;
     let max_iterations = max_iterations.unwrap_or(cfg.exploration.max_iterations);
@@ -117,7 +152,12 @@ async fn run_explore(cfg: &config::Config, objective: String, max_iterations: Op
     let dir = report::run_dir(&output_dir, &objective);
     report::write(&dir, &result).await?;
 
-    println!("exploration finished in {} iterations, {} tool calls, {}", result.transcript.len(), result.tool_calls_made, llm::pricing::format_cost(result.estimated_cost_microusd));
+    println!(
+        "exploration finished in {} iterations, {} tool calls, {}",
+        result.transcript.len(),
+        result.tool_calls_made,
+        llm::pricing::format_cost(result.estimated_cost_microusd)
+    );
     println!("report written to {}", dir.display());
     Ok(())
 }
@@ -134,8 +174,11 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Login => run_login(&cfg).await,
         Command::SmokeTest => run_smoke_test(&cfg).await,
-        Command::Explore { objective, max_iterations, no_infra, out } => {
-            run_explore(&cfg, objective, max_iterations, no_infra, out).await
-        }
+        Command::Explore {
+            objective,
+            max_iterations,
+            no_infra,
+            out,
+        } => run_explore(&cfg, objective, max_iterations, no_infra, out).await,
     }
 }

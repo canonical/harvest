@@ -8,7 +8,9 @@ use std::time::Instant;
 use super::prompt::system_prompt;
 use super::tools::ExplorationTool;
 use crate::llm::pricing::PricingTable;
-use crate::llm::types::{ContentPart, LlmResponse, Message, MessageContent, Role, ToolDefinition, Usage};
+use crate::llm::types::{
+    ContentPart, LlmResponse, Message, MessageContent, Role, ToolDefinition, Usage,
+};
 use crate::llm::LlmProvider;
 
 const FINISH_TOOL_NAME: &str = "finish_exploration";
@@ -138,8 +140,10 @@ pub async fn run(
 
     let mut tool_defs: Vec<ToolDefinition> = tools.iter().map(|t| t.definition()).collect();
     tool_defs.push(finish_tool_definition());
-    let tool_map: HashMap<String, Arc<dyn ExplorationTool>> =
-        tools.into_iter().map(|t| (t.definition().name, t)).collect();
+    let tool_map: HashMap<String, Arc<dyn ExplorationTool>> = tools
+        .into_iter()
+        .map(|t| (t.definition().name, t))
+        .collect();
 
     let mut messages = vec![
         Message::system(system_prompt(objective)),
@@ -170,7 +174,9 @@ pub async fn run(
                     "Call a tool to continue investigating, or call finish_exploration if the objective is complete.",
                 ));
             }
-            LlmResponse::ToolCalls { calls, preamble, .. } => {
+            LlmResponse::ToolCalls {
+                calls, preamble, ..
+            } => {
                 let mut records = Vec::new();
                 let mut result_parts = Vec::new();
                 let mut finished = None;
@@ -189,13 +195,25 @@ pub async fn run(
                         Ok(result) => (result, false),
                         Err(e) => (e.to_string(), true),
                     };
-                    records.push(ToolCallRecord { name: call.name.clone(), input: call.input.clone(), result: content.clone(), is_error });
-                    result_parts.push(ContentPart::ToolResult { tool_use_id: call.id.clone(), content, is_error });
+                    records.push(ToolCallRecord {
+                        name: call.name.clone(),
+                        input: call.input.clone(),
+                        result: content.clone(),
+                        is_error,
+                    });
+                    result_parts.push(ContentPart::ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content,
+                        is_error,
+                    });
                 }
 
                 let mut assistant_parts = Vec::new();
                 if !preamble.is_empty() {
-                    assistant_parts.push(ContentPart::Text { text: preamble.clone(), thought_signature: None });
+                    assistant_parts.push(ContentPart::Text {
+                        text: preamble.clone(),
+                        thought_signature: None,
+                    });
                 }
                 for call in &calls {
                     assistant_parts.push(ContentPart::ToolUse {
@@ -205,7 +223,10 @@ pub async fn run(
                         thought_signature: call.thought_signature.clone(),
                     });
                 }
-                messages.push(Message { role: Role::Assistant, content: MessageContent::Parts(assistant_parts) });
+                messages.push(Message {
+                    role: Role::Assistant,
+                    content: MessageContent::Parts(assistant_parts),
+                });
                 transcript.push(TranscriptEntry {
                     iteration,
                     provider_id: used.provider_id,
@@ -219,7 +240,10 @@ pub async fn run(
                     break;
                 }
                 if !result_parts.is_empty() {
-                    messages.push(Message { role: Role::User, content: MessageContent::Parts(result_parts) });
+                    messages.push(Message {
+                        role: Role::User,
+                        content: MessageContent::Parts(result_parts),
+                    });
                 }
             }
         }
@@ -277,7 +301,10 @@ mod tests {
 
     impl ScriptedLlm {
         fn new(responses: Vec<LlmResponse>) -> Arc<Self> {
-            Arc::new(Self { responses: Mutex::new(responses), received: Mutex::new(Vec::new()) })
+            Arc::new(Self {
+                responses: Mutex::new(responses),
+                received: Mutex::new(Vec::new()),
+            })
         }
 
         fn calls(&self) -> Vec<Vec<Message>> {
@@ -287,11 +314,24 @@ mod tests {
 
     #[async_trait]
     impl LlmProvider for ScriptedLlm {
-        fn id(&self) -> &str { "scripted" }
-        fn kind(&self) -> &str { "scripted" }
-        fn default_model(&self) -> &str { "scripted-model" }
-        async fn list_models(&self) -> Result<Vec<ModelInfo>> { Ok(vec![]) }
-        async fn chat_with(&self, _model: Option<&str>, messages: &[Message], _tools: &[ToolDefinition]) -> Result<LlmResponse> {
+        fn id(&self) -> &str {
+            "scripted"
+        }
+        fn kind(&self) -> &str {
+            "scripted"
+        }
+        fn default_model(&self) -> &str {
+            "scripted-model"
+        }
+        async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat_with(
+            &self,
+            _model: Option<&str>,
+            messages: &[Message],
+            _tools: &[ToolDefinition],
+        ) -> Result<LlmResponse> {
             self.received.lock().unwrap().push(messages.to_vec());
             let mut responses = self.responses.lock().unwrap();
             if responses.is_empty() {
@@ -310,7 +350,11 @@ mod tests {
     #[async_trait]
     impl ExplorationTool for RecordingTool {
         fn definition(&self) -> ToolDefinition {
-            ToolDefinition { name: self.name.to_string(), description: "test tool".to_string(), parameters: json!({"type": "object"}) }
+            ToolDefinition {
+                name: self.name.to_string(),
+                description: "test tool".to_string(),
+                parameters: json!({"type": "object"}),
+            }
         }
         async fn execute(&self, params: Value) -> Result<String> {
             self.calls.lock().unwrap().push(params);
@@ -322,7 +366,12 @@ mod tests {
     }
 
     fn tool_call(id: &str, name: &str, input: Value) -> ToolCall {
-        ToolCall { id: id.to_string(), name: name.to_string(), input, thought_signature: None }
+        ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            input,
+            thought_signature: None,
+        }
     }
 
     fn finish_call(quality: &str, summary: &str) -> ToolCall {
@@ -344,7 +393,9 @@ mod tests {
             preamble: String::new(),
             usage: Usage::default(),
         }]);
-        let result = run(llm, vec![], &no_pricing(), "test the thing", 10).await.unwrap();
+        let result = run(llm, vec![], &no_pricing(), "test the thing", 10)
+            .await
+            .unwrap();
         assert_eq!(result.report.quality_assessment, "looks solid");
         assert_eq!(result.report.summary, "nothing else to check");
         assert!(!result.hit_max_iterations);
@@ -354,7 +405,11 @@ mod tests {
     #[tokio::test]
     async fn dispatches_tool_call_then_finishes_on_next_turn() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let tool = Arc::new(RecordingTool { name: "create_project", result: Ok("{\"id\":\"p1\"}".into()), calls: calls.clone() });
+        let tool = Arc::new(RecordingTool {
+            name: "create_project",
+            result: Ok("{\"id\":\"p1\"}".into()),
+            calls: calls.clone(),
+        });
         let llm = ScriptedLlm::new(vec![
             LlmResponse::ToolCalls {
                 calls: vec![tool_call("c1", "create_project", json!({"name": "n"}))],
@@ -367,7 +422,9 @@ mod tests {
                 usage: Usage::default(),
             },
         ]);
-        let result = run(llm, vec![tool], &no_pricing(), "objective", 10).await.unwrap();
+        let result = run(llm, vec![tool], &no_pricing(), "objective", 10)
+            .await
+            .unwrap();
         assert_eq!(result.tool_calls_made, 1);
         assert_eq!(calls.lock().unwrap().len(), 1);
         assert_eq!(result.transcript[0].tool_calls[0].name, "create_project");
@@ -378,7 +435,11 @@ mod tests {
     #[tokio::test]
     async fn tool_execution_error_is_recorded_and_loop_continues() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let tool = Arc::new(RecordingTool { name: "create_project", result: Err("boom".into()), calls });
+        let tool = Arc::new(RecordingTool {
+            name: "create_project",
+            result: Err("boom".into()),
+            calls,
+        });
         let llm = ScriptedLlm::new(vec![
             LlmResponse::ToolCalls {
                 calls: vec![tool_call("c1", "create_project", json!({}))],
@@ -391,7 +452,9 @@ mod tests {
                 usage: Usage::default(),
             },
         ]);
-        let result = run(llm, vec![tool], &no_pricing(), "objective", 10).await.unwrap();
+        let result = run(llm, vec![tool], &no_pricing(), "objective", 10)
+            .await
+            .unwrap();
         assert!(result.transcript[0].tool_calls[0].is_error);
         assert!(result.transcript[0].tool_calls[0].result.contains("boom"));
     }
@@ -410,22 +473,31 @@ mod tests {
                 usage: Usage::default(),
             },
         ]);
-        let result = run(llm, vec![], &no_pricing(), "objective", 10).await.unwrap();
+        let result = run(llm, vec![], &no_pricing(), "objective", 10)
+            .await
+            .unwrap();
         assert!(result.transcript[0].tool_calls[0].is_error);
-        assert!(result.transcript[0].tool_calls[0].result.contains("unknown tool"));
+        assert!(result.transcript[0].tool_calls[0]
+            .result
+            .contains("unknown tool"));
     }
 
     #[tokio::test]
     async fn text_only_response_does_not_terminate_the_loop() {
         let llm = ScriptedLlm::new(vec![
-            LlmResponse::Message { text: "thinking...".into(), usage: Usage::default() },
+            LlmResponse::Message {
+                text: "thinking...".into(),
+                usage: Usage::default(),
+            },
             LlmResponse::ToolCalls {
                 calls: vec![finish_call("q", "s")],
                 preamble: String::new(),
                 usage: Usage::default(),
             },
         ]);
-        let result = run(llm, vec![], &no_pricing(), "objective", 10).await.unwrap();
+        let result = run(llm, vec![], &no_pricing(), "objective", 10)
+            .await
+            .unwrap();
         assert_eq!(result.transcript[0].assistant_text, "thinking...");
         assert_eq!(result.report.summary, "s");
     }
@@ -433,25 +505,44 @@ mod tests {
     #[tokio::test]
     async fn exhausting_iterations_without_finish_call_sets_hit_max_iterations() {
         let llm = ScriptedLlm::new(vec![
-            LlmResponse::Message { text: "still working".into(), usage: Usage::default() },
-            LlmResponse::Message { text: "still working".into(), usage: Usage::default() },
+            LlmResponse::Message {
+                text: "still working".into(),
+                usage: Usage::default(),
+            },
+            LlmResponse::Message {
+                text: "still working".into(),
+                usage: Usage::default(),
+            },
         ]);
-        let result = run(llm, vec![], &no_pricing(), "objective", 2).await.unwrap();
+        let result = run(llm, vec![], &no_pricing(), "objective", 2)
+            .await
+            .unwrap();
         assert!(result.hit_max_iterations);
-        assert_eq!(result.report.quality_assessment, FinishExplorationPayload::fallback().quality_assessment);
+        assert_eq!(
+            result.report.quality_assessment,
+            FinishExplorationPayload::fallback().quality_assessment
+        );
     }
 
     #[tokio::test]
     async fn hitting_max_iterations_forces_a_synthesis_call_that_can_still_finish() {
         let llm = ScriptedLlm::new(vec![
-            LlmResponse::Message { text: "still working".into(), usage: Usage::default() },
+            LlmResponse::Message {
+                text: "still working".into(),
+                usage: Usage::default(),
+            },
             LlmResponse::ToolCalls {
-                calls: vec![finish_call("forced but complete", "wrapped up under pressure")],
+                calls: vec![finish_call(
+                    "forced but complete",
+                    "wrapped up under pressure",
+                )],
                 preamble: String::new(),
                 usage: Usage::default(),
             },
         ]);
-        let result = run(llm, vec![], &no_pricing(), "objective", 1).await.unwrap();
+        let result = run(llm, vec![], &no_pricing(), "objective", 1)
+            .await
+            .unwrap();
         assert!(result.hit_max_iterations);
         assert_eq!(result.report.quality_assessment, "forced but complete");
     }
@@ -464,7 +555,9 @@ mod tests {
             usage: Usage::default(),
         }]);
         let llm_for_inspection = llm.clone();
-        run(llm, vec![], &no_pricing(), "objective", 10).await.unwrap();
+        run(llm, vec![], &no_pricing(), "objective", 10)
+            .await
+            .unwrap();
 
         let calls = llm_for_inspection.calls();
         let first_call_messages = &calls[0];
@@ -476,14 +569,18 @@ mod tests {
 
     #[tokio::test]
     async fn usage_and_cost_accumulate_across_iterations() {
-        let llm = ScriptedLlm::new(vec![
-            LlmResponse::ToolCalls {
-                calls: vec![finish_call("q", "s")],
-                preamble: String::new(),
-                usage: Usage { input_tokens: 100, output_tokens: 50, ..Default::default() },
+        let llm = ScriptedLlm::new(vec![LlmResponse::ToolCalls {
+            calls: vec![finish_call("q", "s")],
+            preamble: String::new(),
+            usage: Usage {
+                input_tokens: 100,
+                output_tokens: 50,
+                ..Default::default()
             },
-        ]);
-        let result = run(llm, vec![], &no_pricing(), "objective", 10).await.unwrap();
+        }]);
+        let result = run(llm, vec![], &no_pricing(), "objective", 10)
+            .await
+            .unwrap();
         assert_eq!(result.total_usage.input_tokens, 100);
         assert_eq!(result.total_usage.output_tokens, 50);
     }
