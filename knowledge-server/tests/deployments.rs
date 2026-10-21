@@ -10,8 +10,8 @@ use axum::{
     Router,
 };
 use chrono::Utc;
-use http_body_util::BodyExt as _;
 use harvest_db::test_support::TestDb;
+use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tower::ServiceExt as _;
@@ -25,37 +25,61 @@ use knowledge_server::{
     deployments::{
         design_cache,
         handlers::{
-            add_context_artifact, apply_provision_change, approve_proposal, create_deployment, create_template, delete_deployment, delete_template,
-            deploy_deployment, destroy_deployment, discard_proposal,
-            generate_design, generate_design_decisions, generate_design_stream,
-            generate_environment_questions, generate_provision, generate_provision_stream, get_deployment, get_design_pdf, get_execution_plan, get_project_deployment, get_template,
-            link_context_artifact, list_deployment_runs, list_deployments, list_templates, list_proposals, propose_artifact_change, propose_provision_change,
-            redeploy_deployment, remove_context_artifact, revise_design, run_dag, run_destroy_dag, set_execution_plan, update_deployment, update_design_content, update_template,
+            add_context_artifact, apply_provision_change, approve_proposal, create_deployment,
+            create_template, delete_deployment, delete_template, deploy_deployment,
+            destroy_deployment, discard_proposal, generate_design, generate_design_decisions,
+            generate_design_stream, generate_environment_questions, generate_provision,
+            generate_provision_stream, get_deployment, get_design_pdf, get_execution_plan,
+            get_project_deployment, get_template, link_context_artifact, list_deployment_runs,
+            list_deployments, list_proposals, list_templates, propose_artifact_change,
+            propose_provision_change, redeploy_deployment, remove_context_artifact, revise_design,
+            run_dag, run_destroy_dag, set_execution_plan, update_deployment, update_design_content,
+            update_template,
         },
         last_applied_bundle_for_artifact, record_run_and_update_state,
     },
     llm::{
+        types::{
+            ContentPart, LlmResponse, Message, MessageContent, ModelInfo, Role, ToolCall,
+            ToolDefinition, Usage,
+        },
         LlmProvider,
-        types::{ContentPart, LlmResponse, Message, MessageContent, ModelInfo, Role, ToolCall, ToolDefinition, Usage},
     },
     machines::{CommandResult, ConnectedAgent, MachineRegistry, ServerToAgent, TerraformAction},
-
     projects::handlers::{create_project, ProjectState},
     skills::SkillStore,
 };
 
 struct FixedTextLlm(String);
 impl FixedTextLlm {
-    fn new(t: impl Into<String>) -> Arc<Self> { Arc::new(Self(t.into())) }
+    fn new(t: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self(t.into()))
+    }
 }
 #[async_trait]
 impl LlmProvider for FixedTextLlm {
-    fn id(&self) -> &str { "fixed-text" }
-    fn kind(&self) -> &str { "mock" }
-    fn default_model(&self) -> &str { "mock-model" }
-    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> { Ok(vec![]) }
-    async fn chat_with(&self, _model: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> anyhow::Result<LlmResponse> {
-        Ok(LlmResponse::Message { text: self.0.clone(), usage: Usage::default() })
+    fn id(&self) -> &str {
+        "fixed-text"
+    }
+    fn kind(&self) -> &str {
+        "mock"
+    }
+    fn default_model(&self) -> &str {
+        "mock-model"
+    }
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_with(
+        &self,
+        _model: Option<&str>,
+        _: &[Message],
+        _: &[ToolDefinition],
+    ) -> anyhow::Result<LlmResponse> {
+        Ok(LlmResponse::Message {
+            text: self.0.clone(),
+            usage: Usage::default(),
+        })
     }
 }
 
@@ -67,56 +91,91 @@ impl ScriptedLlm {
 }
 #[async_trait]
 impl LlmProvider for ScriptedLlm {
-    fn id(&self) -> &str { "scripted" }
-    fn kind(&self) -> &str { "mock" }
-    fn default_model(&self) -> &str { "mock-model" }
-    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> { Ok(vec![]) }
-    async fn chat_with(&self, _model: Option<&str>, _: &[Message], _: &[ToolDefinition]) -> anyhow::Result<LlmResponse> {
-        self.0.lock().unwrap().pop_front().ok_or_else(|| anyhow::anyhow!("ScriptedLlm: no more responses"))
+    fn id(&self) -> &str {
+        "scripted"
+    }
+    fn kind(&self) -> &str {
+        "mock"
+    }
+    fn default_model(&self) -> &str {
+        "mock-model"
+    }
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_with(
+        &self,
+        _model: Option<&str>,
+        _: &[Message],
+        _: &[ToolDefinition],
+    ) -> anyhow::Result<LlmResponse> {
+        self.0
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("ScriptedLlm: no more responses"))
     }
 }
 
 fn text_response(text: &str) -> LlmResponse {
-    LlmResponse::Message { text: text.to_string(), usage: Usage::default() }
+    LlmResponse::Message {
+        text: text.to_string(),
+        usage: Usage::default(),
+    }
 }
 
 fn tool_call_response(name: &str, input: Value) -> LlmResponse {
     LlmResponse::ToolCalls {
-        calls: vec![ToolCall { id: Uuid::new_v4().to_string(), name: name.to_string(), input, thought_signature: None }],
+        calls: vec![ToolCall {
+            id: Uuid::new_v4().to_string(),
+            name: name.to_string(),
+            input,
+            thought_signature: None,
+        }],
         preamble: String::new(),
-    usage: Usage::default(),
+        usage: Usage::default(),
     }
 }
 
 fn tool_result_contents(messages: &[Message]) -> Vec<&str> {
-    messages.iter().filter_map(|m| {
-        if let MessageContent::Parts(parts) = &m.content {
-            parts.iter().find_map(|p| match p {
-                ContentPart::ToolResult { content, .. } => Some(content.as_str()),
-                _ => None,
-            })
-        } else {
-            None
-        }
-    }).collect()
+    messages
+        .iter()
+        .filter_map(|m| {
+            if let MessageContent::Parts(parts) = &m.content {
+                parts.iter().find_map(|p| match p {
+                    ContentPart::ToolResult { content, .. } => Some(content.as_str()),
+                    _ => None,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn message_text(m: &Message) -> String {
     match &m.content {
         MessageContent::Text(t) => t.clone(),
-        MessageContent::Parts(parts) => parts.iter().filter_map(|p| match p {
-            ContentPart::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        }).collect::<Vec<_>>().join("\n"),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
     }
 }
 
 fn captured_prompt_for_design(messages: &[Message]) -> (String, String) {
-    let system = messages.iter()
+    let system = messages
+        .iter()
         .find(|m| matches!(m.role, Role::System))
         .map(message_text)
         .unwrap_or_default();
-    let user = messages.iter().rev()
+    let user = messages
+        .iter()
+        .rev()
         .find(|m| matches!(m.role, Role::User))
         .map(message_text)
         .unwrap_or_default();
@@ -131,11 +190,24 @@ impl ClosureLlm {
 }
 #[async_trait]
 impl LlmProvider for ClosureLlm {
-    fn id(&self) -> &str { "closure" }
-    fn kind(&self) -> &str { "mock" }
-    fn default_model(&self) -> &str { "mock-model" }
-    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> { Ok(vec![]) }
-    async fn chat_with(&self, _model: Option<&str>, messages: &[Message], _tools: &[ToolDefinition]) -> anyhow::Result<LlmResponse> {
+    fn id(&self) -> &str {
+        "closure"
+    }
+    fn kind(&self) -> &str {
+        "mock"
+    }
+    fn default_model(&self) -> &str {
+        "mock-model"
+    }
+    async fn list_models(&self) -> anyhow::Result<Vec<ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_with(
+        &self,
+        _model: Option<&str>,
+        messages: &[Message],
+        _tools: &[ToolDefinition],
+    ) -> anyhow::Result<LlmResponse> {
         Ok((self.0)(messages))
     }
 }
@@ -146,65 +218,164 @@ fn deployments_app(db: Arc<Db>) -> (Router, Arc<MachineRegistry>) {
     deployments_app_with_llm(db, FixedTextLlm::new("stub"))
 }
 
-fn deployments_app_with_llm(db: Arc<Db>, llm: Arc<dyn LlmProvider>) -> (Router, Arc<MachineRegistry>) {
-    let secret      = Arc::new(JWT_SECRET.to_string());
+fn deployments_app_with_llm(
+    db: Arc<Db>,
+    llm: Arc<dyn LlmProvider>,
+) -> (Router, Arc<MachineRegistry>) {
+    let secret = Arc::new(JWT_SECRET.to_string());
     let skill_store = Arc::new(SkillStore::new(Arc::clone(&db)));
-    let agent    = Arc::new(Agent::new(Arc::clone(&llm), vec![], 2));
+    let agent = Arc::new(Agent::new(Arc::clone(&llm), vec![], 2));
     let registry = MachineRegistry::new();
-    let builder  = Arc::new(ProjectAgentBuilder {
-        llm:                        Arc::clone(&llm),
-        db:                      Arc::clone(&db),
-        registry:                   Arc::clone(&registry),
-        skills:                     Arc::clone(&skill_store),
-        lxd:                        None,
-        system_one:                 None,
-        collocate:                  None,
-        collocate_registry:         knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
-        server_url:                 "http://localhost".into(),
-        max_iterations:             5,
+    let builder = Arc::new(ProjectAgentBuilder {
+        llm: Arc::clone(&llm),
+        db: Arc::clone(&db),
+        registry: Arc::clone(&registry),
+        skills: Arc::clone(&skill_store),
+        lxd: None,
+        system_one: None,
+        collocate: None,
+        collocate_registry: knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
+        server_url: "http://localhost".into(),
+        max_iterations: 5,
         compaction_threshold_chars: usize::MAX,
-        compaction_keep_last:       6,
-        thresholds:                 None,
-        semantic:  None,
+        compaction_keep_last: 6,
+        thresholds: None,
+        semantic: None,
     });
-    let project_state = Arc::new(ProjectState::new(Arc::clone(&db), agent, builder, Arc::clone(&llm) as Arc<dyn LlmProvider>, Arc::new(vec![]), None, None, Arc::new(knowledge_server::cost::PricingTable::default()), knowledge_server::collocate::sessions::SessionContainerRegistry::new()));
+    let project_state = Arc::new(ProjectState::new(
+        Arc::clone(&db),
+        agent,
+        builder,
+        Arc::clone(&llm) as Arc<dyn LlmProvider>,
+        Arc::new(vec![]),
+        None,
+        None,
+        Arc::new(knowledge_server::cost::PricingTable::default()),
+        knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
+    ));
 
     let project_routes = Router::new()
         .route("/projects", route_post(create_project))
-        .route("/projects/:pid/deployment",
-               route_get(get_project_deployment))
-        .route("/projects/:pid/deployments",
-               route_get(list_deployments).post(create_deployment))
-        .route("/projects/:pid/deployments/:did",
-               route_get(get_deployment).patch(update_deployment).delete(delete_deployment))
-        .route("/projects/:pid/deployments/:did/deploy",   route_post(deploy_deployment))
-        .route("/projects/:pid/deployments/:did/redeploy", route_post(redeploy_deployment))
-        .route("/projects/:pid/deployments/:did/destroy",  route_post(destroy_deployment))
-        .route("/projects/:pid/deployments/:did/runs",     route_get(list_deployment_runs))
-        .route("/projects/:pid/deployments/:did/environment/questions", route_post(generate_environment_questions))
-        .route("/projects/:pid/deployments/:did/design/generate",       route_post(generate_design))
-        .route("/projects/:pid/deployments/:did/design/generate/stream", route_post(generate_design_stream))
-        .route("/projects/:pid/deployments/:did/design/decisions",      route_post(generate_design_decisions))
-        .route("/projects/:pid/deployments/:did/design/revise",         route_post(revise_design))
-        .route("/projects/:pid/deployments/:did/design/pdf",             route_get(get_design_pdf))
-        .route("/projects/:pid/deployments/:did/design/content",         axum::routing::put(update_design_content))
-        .route("/projects/:pid/deployments/:did/provision/generate",       route_post(generate_provision))
-        .route("/projects/:pid/deployments/:did/provision/generate/stream", route_post(generate_provision_stream))
-        .route("/projects/:pid/deployments/:did/provision/propose-change", route_post(propose_provision_change))
-        .route("/projects/:pid/deployments/:did/provision/apply-change",   route_post(apply_provision_change))
-        .route("/projects/:pid/deployments/:did/context-artifacts",        route_post(add_context_artifact))
-        .route("/projects/:pid/deployments/:did/context-artifacts/link",   route_post(link_context_artifact))
-        .route("/projects/:pid/deployments/:did/context-artifacts/:aid",  axum::routing::delete(remove_context_artifact))
-        .route("/projects/:pid/deployments/:did/proposals",                 route_get(list_proposals).post(propose_artifact_change))
-        .route("/projects/:pid/deployments/:did/proposals/:propid/approve", route_post(approve_proposal))
-        .route("/projects/:pid/deployments/:did/proposals/:propid/discard", route_post(discard_proposal))
-        .route("/projects/:pid/deployments/:did/execution-plan",            axum::routing::get(get_execution_plan).post(set_execution_plan))
-        .route("/projects/:pid/deployments/:did/run-dag",                    route_post(run_dag))
-        .route("/projects/:pid/deployments/:did/run-destroy-dag",             route_post(run_destroy_dag))
-        .route("/templates",
-               route_get(list_templates).post(create_template))
-        .route("/templates/:tid",
-               route_get(get_template).put(update_template).delete(delete_template))
+        .route(
+            "/projects/:pid/deployment",
+            route_get(get_project_deployment),
+        )
+        .route(
+            "/projects/:pid/deployments",
+            route_get(list_deployments).post(create_deployment),
+        )
+        .route(
+            "/projects/:pid/deployments/:did",
+            route_get(get_deployment)
+                .patch(update_deployment)
+                .delete(delete_deployment),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/deploy",
+            route_post(deploy_deployment),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/redeploy",
+            route_post(redeploy_deployment),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/destroy",
+            route_post(destroy_deployment),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/runs",
+            route_get(list_deployment_runs),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/environment/questions",
+            route_post(generate_environment_questions),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/design/generate",
+            route_post(generate_design),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/design/generate/stream",
+            route_post(generate_design_stream),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/design/decisions",
+            route_post(generate_design_decisions),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/design/revise",
+            route_post(revise_design),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/design/pdf",
+            route_get(get_design_pdf),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/design/content",
+            axum::routing::put(update_design_content),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/provision/generate",
+            route_post(generate_provision),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/provision/generate/stream",
+            route_post(generate_provision_stream),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/provision/propose-change",
+            route_post(propose_provision_change),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/provision/apply-change",
+            route_post(apply_provision_change),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/context-artifacts",
+            route_post(add_context_artifact),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/context-artifacts/link",
+            route_post(link_context_artifact),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/context-artifacts/:aid",
+            axum::routing::delete(remove_context_artifact),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/proposals",
+            route_get(list_proposals).post(propose_artifact_change),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/proposals/:propid/approve",
+            route_post(approve_proposal),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/proposals/:propid/discard",
+            route_post(discard_proposal),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/execution-plan",
+            axum::routing::get(get_execution_plan).post(set_execution_plan),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/run-dag",
+            route_post(run_dag),
+        )
+        .route(
+            "/projects/:pid/deployments/:did/run-destroy-dag",
+            route_post(run_destroy_dag),
+        )
+        .route(
+            "/templates",
+            route_get(list_templates).post(create_template),
+        )
+        .route(
+            "/templates/:tid",
+            route_get(get_template)
+                .put(update_template)
+                .delete(delete_template),
+        )
         .with_state(project_state)
         .layer(from_fn_with_state(Arc::clone(&secret), auth::require_auth));
 
@@ -219,24 +390,28 @@ macro_rules! db {
 }
 
 async fn make_user(db: &Db, email: &str, name: &str, role: &str) -> (String, String) {
-    let id  = Uuid::new_v4().to_string();
+    let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     db.query(
         "INSERT INTO users (id, email, name, role, provider, created_at)
                         VALUES ($id, $email, $name, $role, 'password', $now)",
         json!({"id":id,"email":email,"name":name,"role":role,"now":now}),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let token = jwt::issue(JWT_SECRET, &id, email, name, role).unwrap();
     (id, token)
 }
 
 async fn make_group(db: &Db, name: &str) -> String {
-    let id  = Uuid::new_v4().to_string();
+    let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     db.query(
         "INSERT INTO groups (id, name, description, created_at) VALUES ($id, $name, '', $now)",
         json!({"id":id,"name":name,"now":now}),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     id
 }
 
@@ -244,66 +419,94 @@ async fn join_group(db: &Db, user_id: &str, group_id: &str) {
     db.query(
         "INSERT INTO user_groups (user_id, group_id) VALUES ($uid, $gid) ON CONFLICT DO NOTHING",
         json!({"uid":user_id,"gid":group_id}),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 }
 
 async fn seed_project(app: &Router, token: &str, group_id: &str, name: &str) -> String {
     let (_, body) = send(
         app.clone(),
-        req_post("/projects", token, json!({"name": name, "group_id": group_id})),
-    ).await;
+        req_post(
+            "/projects",
+            token,
+            json!({"name": name, "group_id": group_id}),
+        ),
+    )
+    .await;
     body["id"].as_str().unwrap().to_string()
 }
 
-fn cookie(token: &str) -> String { format!("token={token}") }
+fn cookie(token: &str) -> String {
+    format!("token={token}")
+}
 
 fn req_get(uri: &str, token: &str) -> Request<Body> {
-    Request::builder().method("GET").uri(uri)
-        .header("Cookie", cookie(token)).body(Body::empty()).unwrap()
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("Cookie", cookie(token))
+        .body(Body::empty())
+        .unwrap()
 }
 
 fn req_post(uri: &str, token: &str, body: Value) -> Request<Body> {
-    Request::builder().method("POST").uri(uri)
+    Request::builder()
+        .method("POST")
+        .uri(uri)
         .header("Cookie", cookie(token))
         .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_string(&body).unwrap())).unwrap()
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap()
 }
 
 fn req_patch(uri: &str, token: &str, body: Value) -> Request<Body> {
-    Request::builder().method("PATCH").uri(uri)
+    Request::builder()
+        .method("PATCH")
+        .uri(uri)
         .header("Cookie", cookie(token))
         .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_string(&body).unwrap())).unwrap()
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap()
 }
 
 fn req_put(uri: &str, token: &str, body: Value) -> Request<Body> {
-    Request::builder().method("PUT").uri(uri)
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
         .header("Cookie", cookie(token))
         .header("content-type", "application/json")
-        .body(Body::from(serde_json::to_string(&body).unwrap())).unwrap()
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap()
 }
 
 fn req_del(uri: &str, token: &str) -> Request<Body> {
-    Request::builder().method("DELETE").uri(uri)
-        .header("Cookie", cookie(token)).body(Body::empty()).unwrap()
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header("Cookie", cookie(token))
+        .body(Body::empty())
+        .unwrap()
 }
 
 async fn send(app: Router, req: Request<Body>) -> (StatusCode, Value) {
-    let resp   = app.oneshot(req).await.unwrap();
+    let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes  = resp.into_body().collect().await.unwrap().to_bytes();
-    let json   = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     (status, json)
 }
 
 async fn send_sse(app: Router, req: Request<Body>) -> (StatusCode, String, String) {
-    let resp   = app.oneshot(req).await.unwrap();
+    let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
-    let ct     = resp.headers().get("content-type")
+    let ct = resp
+        .headers()
+        .get("content-type")
         .map(|v| v.to_str().unwrap_or("").to_string())
         .unwrap_or_default();
-    let bytes  = resp.into_body().collect().await.unwrap().to_bytes();
-    let body   = String::from_utf8(bytes.to_vec()).unwrap_or_default();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8(bytes.to_vec()).unwrap_or_default();
     (status, ct, body)
 }
 
@@ -317,19 +520,29 @@ fn parse_sse_events(body: &str) -> Vec<Value> {
 }
 
 async fn count_rows(db: &Db, table: &str) -> usize {
-    let rows = db.query(&format!("SELECT count(*) AS n FROM {table}"), json!({})).await.unwrap();
+    let rows = db
+        .query(&format!("SELECT count(*) AS n FROM {table}"), json!({}))
+        .await
+        .unwrap();
     rows.first().and_then(|r| r["n"].as_u64()).unwrap_or(0) as usize
 }
 
-fn register_agent(registry: &MachineRegistry, agent_id: &str, project_id: &str) -> mpsc::Receiver<ServerToAgent> {
+fn register_agent(
+    registry: &MachineRegistry,
+    agent_id: &str,
+    project_id: &str,
+) -> mpsc::Receiver<ServerToAgent> {
     let (tx, rx) = mpsc::channel::<ServerToAgent>(8);
-    registry.agents.insert(agent_id.to_string(), ConnectedAgent {
-        id:           agent_id.to_string(),
-        project_id:   project_id.to_string(),
-        hostname:     "host-1".into(),
-        connected_at: Utc::now(),
-        sender:       tx,
-    });
+    registry.agents.insert(
+        agent_id.to_string(),
+        ConnectedAgent {
+            id: agent_id.to_string(),
+            project_id: project_id.to_string(),
+            hostname: "host-1".into(),
+            connected_at: Utc::now(),
+            sender: tx,
+        },
+    );
     rx
 }
 
@@ -340,11 +553,19 @@ fn spawn_fake_agent_always_succeeds(
     let (sent_tx, sent_rx) = mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if let ServerToAgent::RunTerraform { request_id, action, files, .. } = msg {
+            if let ServerToAgent::RunTerraform {
+                request_id,
+                action,
+                files,
+                ..
+            } = msg
+            {
                 let _ = sent_tx.send((action, serde_json::to_string(&files).unwrap()));
                 if let Some((_, pending)) = registry.pending.remove(&request_id) {
                     let _ = pending.tx.send(Ok(CommandResult {
-                        stdout: "ok".into(), stderr: String::new(), exit_code: 0,
+                        stdout: "ok".into(),
+                        stderr: String::new(),
+                        exit_code: 0,
                     }));
                 }
             }
@@ -360,11 +581,16 @@ fn spawn_fake_agent_with_script(
 ) {
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if let ServerToAgent::RunTerraform { request_id, action, .. } = msg {
+            if let ServerToAgent::RunTerraform {
+                request_id, action, ..
+            } = msg
+            {
                 let exit_code = exit_code_for(action);
                 if let Some((_, pending)) = registry.pending.remove(&request_id) {
                     let _ = pending.tx.send(Ok(CommandResult {
-                        stdout: "ok".into(), stderr: String::new(), exit_code,
+                        stdout: "ok".into(),
+                        stderr: String::new(),
+                        exit_code,
                     }));
                 }
             }
@@ -380,11 +606,15 @@ fn spawn_dag_fake_agent(
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             match msg {
-                ServerToAgent::RunTerraform { request_id, action, .. } => {
+                ServerToAgent::RunTerraform {
+                    request_id, action, ..
+                } => {
                     let exit_code = exit_code_for(action.as_str());
                     if let Some((_, pending)) = registry.pending.remove(&request_id) {
                         let _ = pending.tx.send(Ok(CommandResult {
-                            stdout: format!("{} ok", action.as_str()), stderr: String::new(), exit_code,
+                            stdout: format!("{} ok", action.as_str()),
+                            stderr: String::new(),
+                            exit_code,
                         }));
                     }
                 }
@@ -392,7 +622,9 @@ fn spawn_dag_fake_agent(
                     let exit_code = exit_code_for("run");
                     if let Some((_, pending)) = registry.pending.remove(&request_id) {
                         let _ = pending.tx.send(Ok(CommandResult {
-                            stdout: "run ok".into(), stderr: String::new(), exit_code,
+                            stdout: "run ok".into(),
+                            stderr: String::new(),
+                            exit_code,
                         }));
                     }
                 }
@@ -403,24 +635,52 @@ fn spawn_dag_fake_agent(
 }
 
 async fn seed_terraform_artifact(db: &Db, project_id: &str, content: &str) -> String {
-    let created = create_artifact(db, project_id, ArtifactKind::Terraform, "Infra", content, "system")
-        .await.unwrap();
+    let created = create_artifact(
+        db,
+        project_id,
+        ArtifactKind::Terraform,
+        "Infra",
+        content,
+        "system",
+    )
+    .await
+    .unwrap();
     created["id"].as_str().unwrap().to_string()
 }
 
 async fn seed_bash_artifact(db: &Db, project_id: &str, content: &str) -> String {
-    let created = create_artifact(db, project_id, ArtifactKind::Bash, "Script", content, "system")
-        .await.unwrap();
+    let created = create_artifact(
+        db,
+        project_id,
+        ArtifactKind::Bash,
+        "Script",
+        content,
+        "system",
+    )
+    .await
+    .unwrap();
     created["id"].as_str().unwrap().to_string()
 }
 
-async fn seed_bash_artifact_titled(db: &Db, project_id: &str, title: &str, content: &str) -> String {
+async fn seed_bash_artifact_titled(
+    db: &Db,
+    project_id: &str,
+    title: &str,
+    content: &str,
+) -> String {
     let created = create_artifact(db, project_id, ArtifactKind::Bash, title, content, "system")
-        .await.unwrap();
+        .await
+        .unwrap();
     created["id"].as_str().unwrap().to_string()
 }
 
-async fn link_bash_step(db: &Db, deployment_id: &str, artifact_id: &str, phase: &str, action: &str) {
+async fn link_bash_step(
+    db: &Db,
+    deployment_id: &str,
+    artifact_id: &str,
+    phase: &str,
+    action: &str,
+) {
     let step_id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     db.query(
@@ -434,17 +694,29 @@ async fn link_terraform_bundle(db: &Db, deployment_id: &str, artifact_id: &str) 
     db.query(
         "UPDATE deployments SET terraform_bundle_id = $aid WHERE id = $did",
         json!({ "did": deployment_id, "aid": artifact_id }),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 }
 
 async fn seed_design_doc(db: &Db, project_id: &str, deployment_id: &str, content: &str) -> String {
-    let created = create_artifact(db, project_id, ArtifactKind::Markdown, "Design", content, "system")
-        .await.unwrap();
+    let created = create_artifact(
+        db,
+        project_id,
+        ArtifactKind::Markdown,
+        "Design",
+        content,
+        "system",
+    )
+    .await
+    .unwrap();
     let aid = created["id"].as_str().unwrap().to_string();
     db.query(
         "UPDATE deployments SET design_doc_id = $aid WHERE id = $did",
         json!({ "did": deployment_id, "aid": aid }),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     aid
 }
 
@@ -452,7 +724,8 @@ async fn create_deployment_raw(app: &Router, token: &str, project_id: &str, _nam
     let (_, body) = send(
         app.clone(),
         req_get(&format!("/projects/{project_id}/deployment"), token),
-    ).await;
+    )
+    .await;
     body["id"].as_str().unwrap().to_string()
 }
 
@@ -496,10 +769,15 @@ async fn template_visible_from_two_different_projects_in_the_same_group() {
 
     let (_, created) = send(
         app.clone(),
-        req_post("/templates", &tok, json!({
-            "name": "Acme Gateway v3", "description": "", "content": "playbook v1"
-        })),
-    ).await;
+        req_post(
+            "/templates",
+            &tok,
+            json!({
+                "name": "Acme Gateway v3", "description": "", "content": "playbook v1"
+            }),
+        ),
+    )
+    .await;
     let tid = created["id"].as_str().unwrap();
 
     let (status, dep1) = send(
@@ -512,14 +790,39 @@ async fn template_visible_from_two_different_projects_in_the_same_group() {
 
     let (status, dep2) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid2}/deployments"), &tok, json!({
-            "name": "B rollout", "environment_description": "cloud", "product_template_id": tid
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid2}/deployments"),
+            &tok,
+            json!({
+                "name": "B rollout", "environment_description": "cloud", "product_template_id": tid
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
 
-    let (_, got1) = send(app.clone(), req_get(&format!("/projects/{pid1}/deployments/{}", dep1["id"].as_str().unwrap()), &tok)).await;
-    let (_, got2) = send(app, req_get(&format!("/projects/{pid2}/deployments/{}", dep2["id"].as_str().unwrap()), &tok)).await;
+    let (_, got1) = send(
+        app.clone(),
+        req_get(
+            &format!(
+                "/projects/{pid1}/deployments/{}",
+                dep1["id"].as_str().unwrap()
+            ),
+            &tok,
+        ),
+    )
+    .await;
+    let (_, got2) = send(
+        app,
+        req_get(
+            &format!(
+                "/projects/{pid2}/deployments/{}",
+                dep2["id"].as_str().unwrap()
+            ),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(got1["template"]["id"], tid);
     assert_eq!(got2["template"]["id"], tid);
 }
@@ -535,16 +838,26 @@ async fn update_template_replaces_content() {
 
     let (_, created) = send(
         app.clone(),
-        req_post("/templates", &tok, json!({
-            "name": "x", "description": "", "content": "v1"
-        })),
-    ).await;
+        req_post(
+            "/templates",
+            &tok,
+            json!({
+                "name": "x", "description": "", "content": "v1"
+            }),
+        ),
+    )
+    .await;
     let tid = created["id"].as_str().unwrap();
 
     let (status, _) = send(
         app.clone(),
-        req_put(&format!("/templates/{tid}"), &tok, json!({ "content": "v2" })),
-    ).await;
+        req_put(
+            &format!("/templates/{tid}"),
+            &tok,
+            json!({ "content": "v2" }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     let (_, got) = send(app, req_get(&format!("/templates/{tid}"), &tok)).await;
@@ -562,8 +875,13 @@ async fn delete_template_removes_it() {
 
     let (_, created) = send(
         app.clone(),
-        req_post("/templates", &tok, json!({ "name": "x", "description": "", "content": "" })),
-    ).await;
+        req_post(
+            "/templates",
+            &tok,
+            json!({ "name": "x", "description": "", "content": "" }),
+        ),
+    )
+    .await;
     let tid = created["id"].as_str().unwrap();
 
     let (status, _) = send(app.clone(), req_del(&format!("/templates/{tid}"), &tok)).await;
@@ -594,10 +912,13 @@ async fn create_deployment_without_template_creates_deployment() {
     assert_eq!(status, StatusCode::CREATED);
     assert!(body["id"].is_string());
 
-    let rows = db.query(
-        "SELECT infra_state FROM deployments WHERE id = $did AND project_id = $pid",
-        json!({ "pid": pid, "did": body["id"] }),
-    ).await.unwrap();
+    let rows = db
+        .query(
+            "SELECT infra_state FROM deployments WHERE id = $did AND project_id = $pid",
+            json!({ "pid": pid, "did": body["id"] }),
+        )
+        .await
+        .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["infra_state"], "none");
 }
@@ -614,19 +935,39 @@ async fn create_deployment_with_template_links_uses_template_edge() {
 
     let (_, created_template) = send(
         app.clone(),
-        req_post("/templates", &tok, json!({ "name": "x", "description": "", "content": "" })),
-    ).await;
+        req_post(
+            "/templates",
+            &tok,
+            json!({ "name": "x", "description": "", "content": "" }),
+        ),
+    )
+    .await;
     let tid = created_template["id"].as_str().unwrap();
 
     let (status, body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments"), &tok, json!({
-            "name": "Rollout", "environment_description": "env", "product_template_id": tid
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments"),
+            &tok,
+            json!({
+                "name": "Rollout", "environment_description": "env", "product_template_id": tid
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
 
-    let (_, got) = send(app, req_get(&format!("/projects/{pid}/deployments/{}", body["id"].as_str().unwrap()), &tok)).await;
+    let (_, got) = send(
+        app,
+        req_get(
+            &format!(
+                "/projects/{pid}/deployments/{}",
+                body["id"].as_str().unwrap()
+            ),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(got["template"]["id"], tid);
 }
 
@@ -642,10 +983,15 @@ async fn create_deployment_rejects_empty_name() {
 
     let (status, _) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments"), &tok, json!({
-            "name": "   ", "environment_description": "env", "product_template_id": Value::Null
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments"),
+            &tok,
+            json!({
+                "name": "   ", "environment_description": "env", "product_template_id": Value::Null
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -663,20 +1009,35 @@ async fn list_deployments_orders_by_updated_at_desc() {
 
     let (_, first) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments"), &tok, json!({
-            "name": "First", "environment_description": "e", "product_template_id": Value::Null
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments"),
+            &tok,
+            json!({
+                "name": "First", "environment_description": "e", "product_template_id": Value::Null
+            }),
+        ),
+    )
+    .await;
     let (_, second) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments"), &tok, json!({
-            "name": "Second", "environment_description": "e", "product_template_id": Value::Null
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments"),
+            &tok,
+            json!({
+                "name": "Second", "environment_description": "e", "product_template_id": Value::Null
+            }),
+        ),
+    )
+    .await;
 
     let (status, list) = send(app, req_get(&format!("/projects/{pid}/deployments"), &tok)).await;
     assert_eq!(status, StatusCode::OK);
-    let names: Vec<_> = list.as_array().unwrap().iter().map(|d| d["id"].clone()).collect();
+    let names: Vec<_> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["id"].clone())
+        .collect();
     assert_eq!(names, vec![second["id"].clone(), first["id"].clone()]);
 }
 
@@ -700,11 +1061,20 @@ async fn update_deployment_changes_environment_description() {
 
     let (status, _) = send(
         app.clone(),
-        req_patch(&format!("/projects/{pid}/deployments/{did}"), &tok, json!({ "environment_description": "v2" })),
-    ).await;
+        req_patch(
+            &format!("/projects/{pid}/deployments/{did}"),
+            &tok,
+            json!({ "environment_description": "v2" }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
-    let (_, got) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
+    let (_, got) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
+    )
+    .await;
     assert_eq!(got["environment_description"], "v2");
 }
 
@@ -727,11 +1097,19 @@ async fn delete_deployment_removes_deployment() {
     let did = created["id"].as_str().unwrap();
     assert_eq!(count_rows(&db, "deployments").await, 1);
 
-    let (status, _) = send(app.clone(), req_del(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
+    let (status, _) = send(
+        app.clone(),
+        req_del(&format!("/projects/{pid}/deployments/{did}"), &tok),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(count_rows(&db, "deployments").await, 0);
 
-    let (status, _) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
+    let (status, _) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -739,7 +1117,7 @@ async fn delete_deployment_removes_deployment() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_deployment_rejected_for_user_outside_the_project_group() {
     db!(c, db);
-    let (uid, tok)     = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, other_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
     let gid = make_group(&db, "eng").await;
     join_group(&db, &uid, &gid).await;
@@ -754,7 +1132,11 @@ async fn get_deployment_rejected_for_user_outside_the_project_group() {
     ).await;
     let did = created["id"].as_str().unwrap();
 
-    let (status, _) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &other_tok)).await;
+    let (status, _) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}"), &other_tok),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -772,8 +1154,19 @@ async fn record_run_and_update_state_no_ops_for_artifact_not_linked_to_a_deploym
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
 
     let new_state = record_run_and_update_state(
-        &db, &pid, &aid, TerraformAction::Apply, Some(0), "out", "", Some(r#"{"main.tf":"v1"}"#), "agent", None,
-    ).await.unwrap();
+        &db,
+        &pid,
+        &aid,
+        TerraformAction::Apply,
+        Some(0),
+        "out",
+        "",
+        Some(r#"{"main.tf":"v1"}"#),
+        "agent",
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(new_state, None);
     assert_eq!(count_rows(&db, "deployment_runs").await, 0);
 }
@@ -802,9 +1195,24 @@ async fn record_run_and_update_state_covers_all_action_success_combinations() {
     for (action, success, expected) in cases {
         let exit_code = if success { Some(0) } else { Some(1) };
         let new_state = record_run_and_update_state(
-            &db, &pid, &aid, action, exit_code, "out", "err", Some(r#"{"main.tf":"v1"}"#), "agent", None,
-        ).await.unwrap();
-        assert_eq!(new_state.as_deref(), expected, "action={action:?} success={success}");
+            &db,
+            &pid,
+            &aid,
+            action,
+            exit_code,
+            "out",
+            "err",
+            Some(r#"{"main.tf":"v1"}"#),
+            "agent",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            new_state.as_deref(),
+            expected,
+            "action={action:?} success={success}"
+        );
     }
 }
 
@@ -821,18 +1229,52 @@ async fn record_run_and_update_state_only_sets_last_applied_on_successful_apply(
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
 
-    assert_eq!(last_applied_bundle_for_artifact(&db, &pid, &aid).await.unwrap(), None);
-
-    record_run_and_update_state(
-        &db, &pid, &aid, TerraformAction::Apply, Some(1), "", "boom", None, "agent", None,
-    ).await.unwrap();
-    assert_eq!(last_applied_bundle_for_artifact(&db, &pid, &aid).await.unwrap(), None);
-
-    record_run_and_update_state(
-        &db, &pid, &aid, TerraformAction::Apply, Some(0), "ok", "", Some(r#"{"main.tf":"v1"}"#), "agent", None,
-    ).await.unwrap();
     assert_eq!(
-        last_applied_bundle_for_artifact(&db, &pid, &aid).await.unwrap(),
+        last_applied_bundle_for_artifact(&db, &pid, &aid)
+            .await
+            .unwrap(),
+        None
+    );
+
+    record_run_and_update_state(
+        &db,
+        &pid,
+        &aid,
+        TerraformAction::Apply,
+        Some(1),
+        "",
+        "boom",
+        None,
+        "agent",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        last_applied_bundle_for_artifact(&db, &pid, &aid)
+            .await
+            .unwrap(),
+        None
+    );
+
+    record_run_and_update_state(
+        &db,
+        &pid,
+        &aid,
+        TerraformAction::Apply,
+        Some(0),
+        "ok",
+        "",
+        Some(r#"{"main.tf":"v1"}"#),
+        "agent",
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        last_applied_bundle_for_artifact(&db, &pid, &aid)
+            .await
+            .unwrap(),
         Some(r#"{"main.tf":"v1"}"#.to_string()),
     );
 }
@@ -857,12 +1299,21 @@ async fn deploy_runs_apply_and_marks_infra_up() {
 
     let (status, body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/deploy"), &tok, json!({ "agent_id": "agent-1" })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/deploy"),
+            &tok,
+            json!({ "agent_id": "agent-1" }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["runs"][0]["infra_state"], "up");
 
-    let (_, got) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
+    let (_, got) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
+    )
+    .await;
     assert_eq!(got["infra_state"], "up");
 }
 
@@ -882,16 +1333,33 @@ async fn redeploy_applies_directly_when_infra_is_already_clean() {
     let rx = register_agent(&registry, "agent-1", &pid);
     let mut sent = spawn_fake_agent_always_succeeds(rx, Arc::clone(&registry));
 
-    send(app.clone(), req_post(&format!("/projects/{pid}/deployments/{did}/deploy"), &tok, json!({ "agent_id": "agent-1" }))).await;
+    send(
+        app.clone(),
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/deploy"),
+            &tok,
+            json!({ "agent_id": "agent-1" }),
+        ),
+    )
+    .await;
     let _ = sent.recv().await;
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/redeploy"), &tok, json!({ "agent_id": "agent-1" })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/redeploy"),
+            &tok,
+            json!({ "agent_id": "agent-1" }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let runs = body["runs"].as_array().unwrap();
-    assert_eq!(runs.len(), 1, "should apply directly without a destroy step");
+    assert_eq!(
+        runs.len(),
+        1,
+        "should apply directly without a destroy step"
+    );
     assert_eq!(runs[0]["action"], "apply");
 }
 
@@ -909,8 +1377,19 @@ async fn redeploy_destroys_first_when_infra_is_broken() {
     link_terraform_bundle(&db, &did, &aid).await;
 
     record_run_and_update_state(
-        &db, &pid, &aid, TerraformAction::Apply, Some(1), "", "boom", None, "agent", None,
-    ).await.unwrap();
+        &db,
+        &pid,
+        &aid,
+        TerraformAction::Apply,
+        Some(1),
+        "",
+        "boom",
+        None,
+        "agent",
+        None,
+    )
+    .await
+    .unwrap();
     db.query(
         "UPDATE deployments SET last_applied_content = $c, last_applied_artifact_id = $aid WHERE id = $did",
         json!({ "did": did, "c": r#"{"main.tf":"v0"}"#, "aid": aid }),
@@ -921,8 +1400,13 @@ async fn redeploy_destroys_first_when_infra_is_broken() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/redeploy"), &tok, json!({ "agent_id": "agent-1" })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/redeploy"),
+            &tok,
+            json!({ "agent_id": "agent-1" }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let runs = body["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 2, "should destroy then apply");
@@ -946,20 +1430,46 @@ async fn redeploy_resets_to_none_when_broken_and_never_applied() {
     // First-ever apply failed: infra_state becomes "broken" but nothing was ever applied,
     // so there's no last_applied_content snapshot to destroy.
     record_run_and_update_state(
-        &db, &pid, &aid, TerraformAction::Apply, Some(1), "", "boom", None, "agent", None,
-    ).await.unwrap();
+        &db,
+        &pid,
+        &aid,
+        TerraformAction::Apply,
+        Some(1),
+        "",
+        "boom",
+        None,
+        "agent",
+        None,
+    )
+    .await
+    .unwrap();
 
     register_agent(&registry, "agent-1", &pid);
 
     let (status, body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/redeploy"), &tok, json!({ "agent_id": "agent-1" })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/redeploy"),
+            &tok,
+            json!({ "agent_id": "agent-1" }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].as_str().unwrap_or("").contains("reset"), "body: {body}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("reset"),
+        "body: {body}"
+    );
 
-    let (_, got) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
-    assert_eq!(got["infra_state"], "none", "deployment should no longer be stuck broken");
+    let (_, got) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
+    )
+    .await;
+    assert_eq!(
+        got["infra_state"], "none",
+        "deployment should no longer be stuck broken"
+    );
 }
 
 #[tokio::test]
@@ -976,20 +1486,46 @@ async fn destroy_resets_to_none_when_broken_and_never_applied() {
     link_terraform_bundle(&db, &did, &aid).await;
 
     record_run_and_update_state(
-        &db, &pid, &aid, TerraformAction::Apply, Some(1), "", "boom", None, "agent", None,
-    ).await.unwrap();
+        &db,
+        &pid,
+        &aid,
+        TerraformAction::Apply,
+        Some(1),
+        "",
+        "boom",
+        None,
+        "agent",
+        None,
+    )
+    .await
+    .unwrap();
 
     register_agent(&registry, "agent-1", &pid);
 
     let (status, body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/destroy"), &tok, json!({ "agent_id": "agent-1" })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/destroy"),
+            &tok,
+            json!({ "agent_id": "agent-1" }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].as_str().unwrap_or("").contains("reset"), "body: {body}");
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("reset"),
+        "body: {body}"
+    );
 
-    let (_, got) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
-    assert_eq!(got["infra_state"], "none", "deployment should no longer be stuck broken");
+    let (_, got) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
+    )
+    .await;
+    assert_eq!(
+        got["infra_state"], "none",
+        "deployment should no longer be stuck broken"
+    );
 }
 
 #[tokio::test]
@@ -1008,8 +1544,13 @@ async fn destroy_rejected_when_nothing_was_ever_applied() {
 
     let (status, _) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/destroy"), &tok, json!({ "agent_id": "agent-1" })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/destroy"),
+            &tok,
+            json!({ "agent_id": "agent-1" }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -1031,8 +1572,13 @@ async fn destroy_targets_the_last_applied_snapshot_not_unapplied_edits() {
 
     let (status, _) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/deploy"), &tok, json!({ "agent_id": "agent-1" })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/deploy"),
+            &tok,
+            json!({ "agent_id": "agent-1" }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let (apply_action, apply_files) = sent.recv().await.unwrap();
     assert_eq!(apply_action, TerraformAction::Apply);
@@ -1041,12 +1587,19 @@ async fn destroy_targets_the_last_applied_snapshot_not_unapplied_edits() {
     db.query(
         "UPDATE artifacts SET content = $content WHERE id = $aid",
         json!({ "aid": aid, "content": r#"{"main.tf":"content-B-never-applied"}"# }),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     let (status, _) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/destroy"), &tok, json!({ "agent_id": "agent-1" })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/destroy"),
+            &tok,
+            json!({ "agent_id": "agent-1" }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let (destroy_action, destroy_files) = sent.recv().await.unwrap();
     assert_eq!(destroy_action, TerraformAction::Destroy);
@@ -1074,10 +1627,30 @@ async fn list_deployment_runs_returns_runs_ordered_newest_first() {
     let rx = register_agent(&registry, "agent-1", &pid);
     spawn_fake_agent_with_script(rx, Arc::clone(&registry), |_| 0);
 
-    send(app.clone(), req_post(&format!("/projects/{pid}/deployments/{did}/deploy"), &tok, json!({ "agent_id": "agent-1" }))).await;
-    send(app.clone(), req_post(&format!("/projects/{pid}/deployments/{did}/destroy"), &tok, json!({ "agent_id": "agent-1" }))).await;
+    send(
+        app.clone(),
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/deploy"),
+            &tok,
+            json!({ "agent_id": "agent-1" }),
+        ),
+    )
+    .await;
+    send(
+        app.clone(),
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/destroy"),
+            &tok,
+            json!({ "agent_id": "agent-1" }),
+        ),
+    )
+    .await;
 
-    let (status, body) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}/runs"), &tok)).await;
+    let (status, body) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}/runs"), &tok),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let runs = body.as_array().unwrap();
     assert_eq!(runs.len(), 2);
@@ -1101,7 +1674,15 @@ async fn generate_environment_questions_returns_parsed_questions() {
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
-    let (status, body) = send(app, req_post(&format!("/projects/{pid}/deployments/{did}/environment/questions"), &tok, json!({}))).await;
+    let (status, body) = send(
+        app,
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/environment/questions"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let questions = body["questions"].as_array().unwrap();
     assert_eq!(questions.len(), 1);
@@ -1116,12 +1697,22 @@ async fn generate_environment_questions_returns_422_when_unparseable() {
     let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let gid = make_group(&db, "eng").await;
     join_group(&db, &uid, &gid).await;
-    let llm = ScriptedLlm::new(vec![text_response("Sorry, I don't understand the request.")]);
+    let llm = ScriptedLlm::new(vec![text_response(
+        "Sorry, I don't understand the request.",
+    )]);
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
-    let (status, _) = send(app, req_post(&format!("/projects/{pid}/deployments/{did}/environment/questions"), &tok, json!({}))).await;
+    let (status, _) = send(
+        app,
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/environment/questions"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
@@ -1142,7 +1733,15 @@ async fn generate_design_saves_the_document_deterministically() {
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
-    let (status, body) = send(app, req_post(&format!("/projects/{pid}/deployments/{did}/design/generate"), &tok, json!({}))).await;
+    let (status, body) = send(
+        app,
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/design/generate"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["design_doc"]["id"].is_string());
     assert_eq!(body["design_doc"]["title"], "Rollout Design");
@@ -1161,8 +1760,13 @@ async fn generate_design_stream_returns_event_stream_content_type() {
 
     let (status, ct, _body) = send_sse(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/design/generate/stream"), &tok, json!({})),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/design/generate/stream"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(ct.contains("text/event-stream"), "content-type: {ct}");
 }
@@ -1182,20 +1786,38 @@ async fn generate_design_stream_emits_text_delta_and_done_and_saves_document() {
 
     let (status, _ct, body) = send_sse(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/design/generate/stream"), &tok, json!({})),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/design/generate/stream"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let events = parse_sse_events(&body);
 
-    let text: String = events.iter()
-        .filter_map(|e| (e["type"] == "text_delta").then(|| e["text"].as_str().unwrap_or("").to_string()))
+    let text: String = events
+        .iter()
+        .filter_map(|e| {
+            (e["type"] == "text_delta").then(|| e["text"].as_str().unwrap_or("").to_string())
+        })
         .collect();
     assert!(text.contains(design_doc), "text deltas: {text}");
 
-    assert!(events.iter().any(|e| e["type"] == "done"), "missing done event");
-    assert!(!events.iter().any(|e| e["type"] == "error"), "unexpected error event: {events:?}");
+    assert!(
+        events.iter().any(|e| e["type"] == "done"),
+        "missing done event"
+    );
+    assert!(
+        !events.iter().any(|e| e["type"] == "error"),
+        "unexpected error event: {events:?}"
+    );
 
-    let (_, dep) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
+    let (_, dep) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
+    )
+    .await;
     assert!(dep["design_doc"]["id"].is_string());
     assert_eq!(dep["design_doc"]["title"], "Rollout Design");
 }
@@ -1219,7 +1841,7 @@ async fn generate_design_stream_persists_synthesis_not_narration_when_max_iterat
                     thought_signature: None,
                 }],
                 preamble: format!("Wait, let's write out the full diagram {}:", rounds + 1),
-            usage: Usage::default(),
+                usage: Usage::default(),
             }
         } else {
             text_response(synthesis_doc)
@@ -1231,18 +1853,34 @@ async fn generate_design_stream_persists_synthesis_not_narration_when_max_iterat
 
     let (status, _ct, body) = send_sse(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/design/generate/stream"), &tok, json!({})),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/design/generate/stream"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let events = parse_sse_events(&body);
-    assert!(events.iter().any(|e| e["type"] == "done"), "missing done event");
+    assert!(
+        events.iter().any(|e| e["type"] == "done"),
+        "missing done event"
+    );
 
-    let (_, dep) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
-    let aid = dep["design_doc"]["id"].as_str()
+    let (_, dep) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
+    )
+    .await;
+    let aid = dep["design_doc"]["id"]
+        .as_str()
         .expect("design_doc should be persisted as a fallback artifact")
         .to_string();
 
-    let artifact = get_artifact_in_project(&db, &pid, &aid).await.unwrap().unwrap();
+    let artifact = get_artifact_in_project(&db, &pid, &aid)
+        .await
+        .unwrap()
+        .unwrap();
     let content = artifact["content"].as_str().unwrap();
     assert_eq!(content, synthesis_doc);
     assert!(
@@ -1258,17 +1896,15 @@ async fn generate_design_stream_does_not_persist_generic_fallback_as_design_doc(
     let (uid, tok) = make_user(&db, "z@x.com", "Zoe", "regular").await;
     let gid = make_group(&db, "eng").await;
     join_group(&db, &uid, &gid).await;
-    let llm = ClosureLlm::new(move |_messages| {
-        LlmResponse::ToolCalls {
-            calls: vec![ToolCall {
-                id: Uuid::new_v4().to_string(),
-                name: "some_unused_tool".into(),
-                input: json!({}),
-                thought_signature: None,
-            }],
-            preamble: String::new(),
+    let llm = ClosureLlm::new(move |_messages| LlmResponse::ToolCalls {
+        calls: vec![ToolCall {
+            id: Uuid::new_v4().to_string(),
+            name: "some_unused_tool".into(),
+            input: json!({}),
+            thought_signature: None,
+        }],
+        preamble: String::new(),
         usage: Usage::default(),
-        }
     });
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
     let pid = seed_project(&app, &tok, &gid, "Customer Z").await;
@@ -1276,13 +1912,25 @@ async fn generate_design_stream_does_not_persist_generic_fallback_as_design_doc(
 
     let (status, _ct, body) = send_sse(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/design/generate/stream"), &tok, json!({})),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/design/generate/stream"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let events = parse_sse_events(&body);
-    assert!(events.iter().any(|e| e["type"] == "done"), "missing done event");
+    assert!(
+        events.iter().any(|e| e["type"] == "done"),
+        "missing done event"
+    );
 
-    let (_, dep) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
+    let (_, dep) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
+    )
+    .await;
     assert!(
         dep["design_doc"].is_null(),
         "a generic tool-call-limit message should never be persisted as a design document: {dep}"
@@ -1302,34 +1950,65 @@ async fn generate_design_includes_selected_artifacts_and_links_template() {
 
     let (tpl_status, tpl_body) = send(
         setup_app.clone(),
-        req_post(&format!("/groups/{gid}/templates"), &tok, json!({
-            "name": "Gateway", "description": "baseline rollout",
-            "content": "# Gateway playbook\nprovision 3 nodes"
-        })),
-    ).await;
+        req_post(
+            &format!("/groups/{gid}/templates"),
+            &tok,
+            json!({
+                "name": "Gateway", "description": "baseline rollout",
+                "content": "# Gateway playbook\nprovision 3 nodes"
+            }),
+        ),
+    )
+    .await;
     assert_eq!(tpl_status, StatusCode::CREATED);
     let tpl_id = tpl_body["id"].as_str().unwrap().to_string();
 
-    let a1 = create_artifact(&db, &pid, ArtifactKind::Markdown, "Requirements", "We need 3 VMs across two zones", "system").await.unwrap();
+    let a1 = create_artifact(
+        &db,
+        &pid,
+        ArtifactKind::Markdown,
+        "Requirements",
+        "We need 3 VMs across two zones",
+        "system",
+    )
+    .await
+    .unwrap();
     let a1_id = a1["id"].as_str().unwrap().to_string();
-    let a2 = create_artifact(&db, &pid, ArtifactKind::Markdown, "Constraints", "No public IPs are allowed", "system").await.unwrap();
+    let a2 = create_artifact(
+        &db,
+        &pid,
+        ArtifactKind::Markdown,
+        "Constraints",
+        "No public IPs are allowed",
+        "system",
+    )
+    .await
+    .unwrap();
     let a2_id = a2["id"].as_str().unwrap().to_string();
 
     let captured = Arc::new(std::sync::Mutex::new(None::<(String, String)>));
     let captured_for_llm = Arc::clone(&captured);
     let llm = ClosureLlm::new(move |messages| {
-        captured_for_llm.lock().unwrap().replace(captured_prompt_for_design(messages));
+        captured_for_llm
+            .lock()
+            .unwrap()
+            .replace(captured_prompt_for_design(messages));
         text_response("# Design\nUse a single VM.")
     });
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/design/generate"), &tok, json!({
-            "artifact_ids": [a1_id, a2_id],
-            "product_template_id": tpl_id,
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/design/generate"),
+            &tok,
+            json!({
+                "artifact_ids": [a1_id, a2_id],
+                "product_template_id": tpl_id,
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["design_doc"]["id"].is_string());
 
@@ -1338,7 +2017,11 @@ async fn generate_design_includes_selected_artifacts_and_links_template() {
     assert!(user_prompt.contains("No public IPs are allowed"));
     assert!(system_prompt.contains("Gateway playbook"));
 
-    let (_, dep) = send(setup_app, req_get(&format!("/projects/{pid}/deployment"), &tok)).await;
+    let (_, dep) = send(
+        setup_app,
+        req_get(&format!("/projects/{pid}/deployment"), &tok),
+    )
+    .await;
     assert_eq!(dep["template_id"], tpl_id);
 }
 
@@ -1354,25 +2037,51 @@ async fn generate_design_ignores_artifacts_belonging_to_other_projects() {
     let did = create_deployment_raw(&setup_app, &tok, &pid, "Rollout").await;
     let other_pid = seed_project(&setup_app, &tok, &gid, "Customer D").await;
 
-    let own = create_artifact(&db, &pid, ArtifactKind::Markdown, "Own", "OWN-MARKER-keep", "system").await.unwrap();
+    let own = create_artifact(
+        &db,
+        &pid,
+        ArtifactKind::Markdown,
+        "Own",
+        "OWN-MARKER-keep",
+        "system",
+    )
+    .await
+    .unwrap();
     let own_id = own["id"].as_str().unwrap().to_string();
-    let foreign = create_artifact(&db, &other_pid, ArtifactKind::Markdown, "Foreign", "FOREIGN-MARKER-leak", "system").await.unwrap();
+    let foreign = create_artifact(
+        &db,
+        &other_pid,
+        ArtifactKind::Markdown,
+        "Foreign",
+        "FOREIGN-MARKER-leak",
+        "system",
+    )
+    .await
+    .unwrap();
     let foreign_id = foreign["id"].as_str().unwrap().to_string();
 
     let captured = Arc::new(std::sync::Mutex::new(None::<String>));
     let captured_for_llm = Arc::clone(&captured);
     let llm = ClosureLlm::new(move |messages| {
-        captured_for_llm.lock().unwrap().replace(captured_prompt_for_design(messages).1);
+        captured_for_llm
+            .lock()
+            .unwrap()
+            .replace(captured_prompt_for_design(messages).1);
         text_response("# Design\n")
     });
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
 
     let (status, _body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/design/generate"), &tok, json!({
-            "artifact_ids": [own_id.clone(), foreign_id],
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/design/generate"),
+            &tok,
+            json!({
+                "artifact_ids": [own_id.clone(), foreign_id],
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     let prompt = captured.lock().unwrap().clone().unwrap();
@@ -1391,7 +2100,15 @@ async fn generate_design_decisions_requires_existing_design_doc() {
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
-    let (status, _) = send(app, req_post(&format!("/projects/{pid}/deployments/{did}/design/decisions"), &tok, json!({}))).await;
+    let (status, _) = send(
+        app,
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/design/decisions"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -1405,13 +2122,29 @@ async fn generate_design_decisions_returns_parsed_decisions() {
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    send(app.clone(), req_post(&format!("/projects/{pid}/deployments/{did}/design/generate"), &tok, json!({}))).await;
+    send(
+        app.clone(),
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/design/generate"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
 
     let decisions_llm = ScriptedLlm::new(vec![text_response(
         "```json\n[{\"id\":\"sizing\",\"text\":\"Confirm VM size\",\"suggested\":\"medium\"}]\n```",
     )]);
     let (app2, _registry2) = deployments_app_with_llm(Arc::clone(&db), decisions_llm);
-    let (status, body) = send(app2, req_post(&format!("/projects/{pid}/deployments/{did}/design/decisions"), &tok, json!({}))).await;
+    let (status, body) = send(
+        app2,
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/design/decisions"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let decisions = body["decisions"].as_array().unwrap();
     assert_eq!(decisions[0]["id"], "sizing");
@@ -1430,8 +2163,13 @@ async fn revise_design_requires_decisions_or_instructions() {
 
     let (status, _) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/design/revise"), &tok, json!({ "decisions": [] })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/design/revise"),
+            &tok,
+            json!({ "decisions": [] }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -1445,23 +2183,35 @@ async fn revise_design_updates_existing_design_doc_in_place() {
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let (_, created) = send(app.clone(), req_post(&format!("/projects/{pid}/deployments/{did}/design/generate"), &tok, json!({}))).await;
+    let (_, created) = send(
+        app.clone(),
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/design/generate"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     let design_id = created["design_doc"]["id"].as_str().unwrap().to_string();
     let design_id_for_closure = design_id.clone();
 
-    let revise_llm = ClosureLlm::new(move |messages| {
-        match tool_result_contents(messages).len() {
-            0 => tool_call_response("generate_artifact", json!({
+    let revise_llm = ClosureLlm::new(move |messages| match tool_result_contents(messages).len() {
+        0 => tool_call_response(
+            "generate_artifact",
+            json!({
                 "title": "Design", "kind": "markdown", "content": "# Design v2\nUse two VMs.",
                 "artifact_id": design_id_for_closure,
-            })),
-            1 => {
-                let result: Value = serde_json::from_str(tool_result_contents(messages)[0]).unwrap();
-                let id = result["id"].as_str().unwrap();
-                tool_call_response("link_deployment_artifact", json!({ "artifact_id": id, "role": "design" }))
-            }
-            _ => text_response("Design revised."),
+            }),
+        ),
+        1 => {
+            let result: Value = serde_json::from_str(tool_result_contents(messages)[0]).unwrap();
+            let id = result["id"].as_str().unwrap();
+            tool_call_response(
+                "link_deployment_artifact",
+                json!({ "artifact_id": id, "role": "design" }),
+            )
         }
+        _ => text_response("Design revised."),
     });
     let (app2, _registry2) = deployments_app_with_llm(Arc::clone(&db), revise_llm);
     let (status, body) = send(
@@ -1474,23 +2224,35 @@ async fn revise_design_updates_existing_design_doc_in_place() {
     assert_eq!(body["design_doc"]["id"], design_id);
 
     let revised = get_artifact_content(&db, &design_id).await;
-    assert!(revised.contains("Design v2"), "expected revised content, got: {revised}");
+    assert!(
+        revised.contains("Design v2"),
+        "expected revised content, got: {revised}"
+    );
 }
 
 async fn get_artifact_content(db: &Db, artifact_id: &str) -> String {
-    let rows = db.query(
-        "SELECT content FROM artifacts WHERE id = $id",
-        json!({ "id": artifact_id }),
-    ).await.unwrap();
+    let rows = db
+        .query(
+            "SELECT content FROM artifacts WHERE id = $id",
+            json!({ "id": artifact_id }),
+        )
+        .await
+        .unwrap();
     rows[0]["content"].as_str().unwrap_or_default().to_string()
 }
 
 async fn get_artifact_updated_at(db: &Db, artifact_id: &str) -> String {
-    let rows = db.query(
-        "SELECT updated_at FROM artifacts WHERE id = $id",
-        json!({ "id": artifact_id }),
-    ).await.unwrap();
-    rows[0]["updated_at"].as_str().unwrap_or_default().to_string()
+    let rows = db
+        .query(
+            "SELECT updated_at FROM artifacts WHERE id = $id",
+            json!({ "id": artifact_id }),
+        )
+        .await
+        .unwrap();
+    rows[0]["updated_at"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
 }
 
 #[tokio::test]
@@ -1504,7 +2266,14 @@ async fn get_design_pdf_returns_bad_request_without_design_doc() {
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
-    let resp = app.clone().oneshot(req_get(&format!("/projects/{pid}/deployments/{did}/design/pdf"), &tok)).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req_get(
+            &format!("/projects/{pid}/deployments/{did}/design/pdf"),
+            &tok,
+        ))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
@@ -1523,12 +2292,26 @@ async fn get_design_pdf_serves_seeded_ready_cache_without_rerendering() {
 
     let fake_bytes = b"%PDF-1.4 not a real render, just a cache probe".to_vec();
     design_cache::store_ready(
-        &db, &pid, &did,
-        &design_cache::DesignVersion { artifact_id: design_id.clone(), updated_at },
+        &db,
+        &pid,
+        &did,
+        &design_cache::DesignVersion {
+            artifact_id: design_id.clone(),
+            updated_at,
+        },
         &fake_bytes,
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
-    let resp = app.clone().oneshot(req_get(&format!("/projects/{pid}/deployments/{did}/design/pdf"), &tok)).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req_get(
+            &format!("/projects/{pid}/deployments/{did}/design/pdf"),
+            &tok,
+        ))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(resp.headers().get("x-design-pdf-status").unwrap(), "ready");
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1548,26 +2331,38 @@ async fn update_design_content_persists_new_content_and_marks_cache_stale() {
     let design_id = seed_design_doc(&db, &pid, &did, "# Design v1").await;
     let old_version = design_cache::DesignVersion {
         artifact_id: design_id.clone(),
-        updated_at:  get_artifact_updated_at(&db, &design_id).await,
+        updated_at: get_artifact_updated_at(&db, &design_id).await,
     };
-    design_cache::store_ready(&db, &pid, &did, &old_version, b"old bytes").await.unwrap();
+    design_cache::store_ready(&db, &pid, &did, &old_version, b"old bytes")
+        .await
+        .unwrap();
 
     let (status, body) = send(
         app.clone(),
-        req_put(&format!("/projects/{pid}/deployments/{did}/design/content"), &tok, json!({
-            "title": "Design", "content": "# Design v2\nUpdated.",
-        })),
-    ).await;
+        req_put(
+            &format!("/projects/{pid}/deployments/{did}/design/content"),
+            &tok,
+            json!({
+                "title": "Design", "content": "# Design v2\nUpdated.",
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["design_doc"]["id"], design_id);
 
     let content = get_artifact_content(&db, &design_id).await;
-    assert!(content.contains("Design v2"), "expected updated content, got: {content}");
+    assert!(
+        content.contains("Design v2"),
+        "expected updated content, got: {content}"
+    );
 
-    let cache = design_cache::load_cache_state(&db, &pid, &did).await.unwrap();
+    let cache = design_cache::load_cache_state(&db, &pid, &did)
+        .await
+        .unwrap();
     let current = design_cache::DesignVersion {
         artifact_id: design_id.clone(),
-        updated_at:  get_artifact_updated_at(&db, &design_id).await,
+        updated_at: get_artifact_updated_at(&db, &design_id).await,
     };
     assert_ne!(cache.ready.unwrap().version, current);
 }
@@ -1584,16 +2379,25 @@ async fn get_design_pdf_generates_and_caches_on_first_request() {
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let design_id = seed_design_doc(&db, &pid, &did, "# Design\n\nSome content.").await;
 
-    let resp = app.clone().oneshot(req_get(&format!("/projects/{pid}/deployments/{did}/design/pdf"), &tok)).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req_get(
+            &format!("/projects/{pid}/deployments/{did}/design/pdf"),
+            &tok,
+        ))
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(resp.headers().get("x-design-pdf-status").unwrap(), "ready");
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     assert!(!bytes.is_empty());
 
-    let cache = design_cache::load_cache_state(&db, &pid, &did).await.unwrap();
+    let cache = design_cache::load_cache_state(&db, &pid, &did)
+        .await
+        .unwrap();
     let current = design_cache::DesignVersion {
         artifact_id: design_id.clone(),
-        updated_at:  get_artifact_updated_at(&db, &design_id).await,
+        updated_at: get_artifact_updated_at(&db, &design_id).await,
     };
     assert_eq!(cache.ready.unwrap().version, current);
 }
@@ -1601,18 +2405,22 @@ async fn get_design_pdf_generates_and_caches_on_first_request() {
 // ---- provision generation / propose-change / apply-change ----
 
 fn provision_generation_llm() -> Arc<ClosureLlm> {
-    ClosureLlm::new(|messages| {
-        match tool_result_contents(messages).len() {
-            0 => tool_call_response("generate_artifact", json!({
+    ClosureLlm::new(|messages| match tool_result_contents(messages).len() {
+        0 => tool_call_response(
+            "generate_artifact",
+            json!({
                 "title": "Infra", "kind": "terraform", "content": "{\"main.tf\":\"resource \\\"x\\\" {}\"}"
-            })),
-            1 => {
-                let result: Value = serde_json::from_str(tool_result_contents(messages)[0]).unwrap();
-                let id = result["id"].as_str().unwrap();
-                tool_call_response("link_deployment_artifact", json!({ "artifact_id": id, "role": "terraform" }))
-            }
-            _ => text_response("Terraform bundle created."),
+            }),
+        ),
+        1 => {
+            let result: Value = serde_json::from_str(tool_result_contents(messages)[0]).unwrap();
+            let id = result["id"].as_str().unwrap();
+            tool_call_response(
+                "link_deployment_artifact",
+                json!({ "artifact_id": id, "role": "terraform" }),
+            )
         }
+        _ => text_response("Terraform bundle created."),
     })
 }
 
@@ -1627,7 +2435,15 @@ async fn generate_provision_requires_existing_design_doc() {
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
-    let (status, _) = send(app, req_post(&format!("/projects/{pid}/deployments/{did}/provision/generate"), &tok, json!({}))).await;
+    let (status, _) = send(
+        app,
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/generate"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -1643,7 +2459,15 @@ async fn generate_provision_creates_and_links_terraform_bundle() {
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     seed_design_doc(&db, &pid, &did, "# Design\nSingle VM.").await;
 
-    let (status, body) = send(app, req_post(&format!("/projects/{pid}/deployments/{did}/provision/generate"), &tok, json!({}))).await;
+    let (status, body) = send(
+        app,
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/generate"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["terraform_bundle"]["id"].is_string());
     assert_eq!(body["terraform_bundle"]["kind"], "terraform");
@@ -1662,8 +2486,13 @@ async fn generate_provision_stream_requires_existing_design_doc() {
 
     let (status, _ct, _body) = send_sse(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/generate/stream"), &tok, json!({})),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/generate/stream"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -1681,8 +2510,13 @@ async fn generate_provision_stream_returns_event_stream_content_type() {
 
     let (status, ct, _body) = send_sse(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/generate/stream"), &tok, json!({})),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/generate/stream"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert!(ct.contains("text/event-stream"), "content-type: {ct}");
 }
@@ -1701,19 +2535,38 @@ async fn generate_provision_stream_emits_text_delta_tool_events_and_done() {
 
     let (status, _ct, body) = send_sse(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/generate/stream"), &tok, json!({})),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/generate/stream"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let events = parse_sse_events(&body);
 
-    let tool_names: Vec<&str> = events.iter()
+    let tool_names: Vec<&str> = events
+        .iter()
         .filter_map(|e| (e["type"] == "tool_call").then(|| e["name"].as_str().unwrap_or("")))
         .collect();
-    assert!(tool_names.contains(&"generate_artifact"), "tool calls: {tool_names:?}");
-    assert!(tool_names.contains(&"link_deployment_artifact"), "tool calls: {tool_names:?}");
-    assert!(events.iter().any(|e| e["type"] == "done"), "missing done event");
+    assert!(
+        tool_names.contains(&"generate_artifact"),
+        "tool calls: {tool_names:?}"
+    );
+    assert!(
+        tool_names.contains(&"link_deployment_artifact"),
+        "tool calls: {tool_names:?}"
+    );
+    assert!(
+        events.iter().any(|e| e["type"] == "done"),
+        "missing done event"
+    );
 
-    let (_, dep) = send(app, req_get(&format!("/projects/{pid}/deployments/{did}"), &tok)).await;
+    let (_, dep) = send(
+        app,
+        req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
+    )
+    .await;
     assert!(dep["terraform_bundle"]["id"].is_string());
     assert_eq!(dep["terraform_bundle"]["kind"], "terraform");
 }
@@ -1731,8 +2584,13 @@ async fn propose_provision_change_requires_instructions_or_error_context() {
 
     let (status, _) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/propose-change"), &tok, json!({})),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/propose-change"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -1749,10 +2607,15 @@ async fn propose_provision_change_requires_existing_bundle() {
 
     let (status, _) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/propose-change"), &tok, json!({
-            "instructions": "add a second VM"
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/propose-change"),
+            &tok,
+            json!({
+                "instructions": "add a second VM"
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -1774,16 +2637,24 @@ async fn propose_provision_change_does_not_modify_the_artifact() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/propose-change"), &tok, json!({
-            "instructions": "rename the resource"
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/propose-change"),
+            &tok,
+            json!({
+                "instructions": "rename the resource"
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["proposed_files"]["main.tf"], "resource \"y\" {}");
     assert_eq!(body["current_files"]["main.tf"], "resource \"x\" {}");
 
     let content = get_artifact_content(&db, &aid).await;
-    assert_eq!(content, r#"{"main.tf":"resource \"x\" {}"}"#, "propose-change must not persist anything");
+    assert_eq!(
+        content, r#"{"main.tf":"resource \"x\" {}"}"#,
+        "propose-change must not persist anything"
+    );
 }
 
 #[tokio::test]
@@ -1802,10 +2673,15 @@ async fn propose_provision_change_returns_422_when_unparseable() {
 
     let (status, _) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/propose-change"), &tok, json!({
-            "error_context": "apply failed: timeout"
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/propose-change"),
+            &tok,
+            json!({
+                "error_context": "apply failed: timeout"
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
 
@@ -1824,10 +2700,15 @@ async fn apply_provision_change_updates_the_artifact_content() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/apply-change"), &tok, json!({
-            "files": { "main.tf": "resource \"y\" {}" }
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/apply-change"),
+            &tok,
+            json!({
+                "files": { "main.tf": "resource \"y\" {}" }
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["terraform_bundle"]["id"], aid);
 
@@ -1851,10 +2732,15 @@ async fn apply_provision_change_rejects_unsafe_paths() {
 
     let (status, _) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/apply-change"), &tok, json!({
-            "files": { "../../etc/passwd": "oops" }
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/apply-change"),
+            &tok,
+            json!({
+                "files": { "../../etc/passwd": "oops" }
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -1872,26 +2758,39 @@ async fn propose_provision_change_for_bash_loads_both_deploy_and_destroy() {
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
-    let deploy_aid = seed_bash_artifact_titled(&db, &pid, "deploy-prep.sh", "#!/bin/bash\necho deploy").await;
-    let destroy_aid = seed_bash_artifact_titled(&db, &pid, "destroy-prep.sh", "#!/bin/bash\necho destroy").await;
+    let deploy_aid =
+        seed_bash_artifact_titled(&db, &pid, "deploy-prep.sh", "#!/bin/bash\necho deploy").await;
+    let destroy_aid =
+        seed_bash_artifact_titled(&db, &pid, "destroy-prep.sh", "#!/bin/bash\necho destroy").await;
     link_bash_step(&db, &did, &deploy_aid, "deploy", "run").await;
     link_bash_step(&db, &did, &destroy_aid, "destroy", "destroy").await;
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/propose-change"), &tok, json!({
-            "instructions": "update the prep script",
-            "artifact_id": deploy_aid,
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/propose-change"),
+            &tok,
+            json!({
+                "instructions": "update the prep script",
+                "artifact_id": deploy_aid,
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["proposed_files"]["deploy-prep.sh"], "new deploy");
     assert_eq!(body["proposed_files"]["destroy-prep.sh"], "new destroy");
 
     let deploy_content = get_artifact_content(&db, &deploy_aid).await;
-    assert_eq!(deploy_content, "#!/bin/bash\necho deploy", "propose must not persist");
+    assert_eq!(
+        deploy_content, "#!/bin/bash\necho deploy",
+        "propose must not persist"
+    );
     let destroy_content = get_artifact_content(&db, &destroy_aid).await;
-    assert_eq!(destroy_content, "#!/bin/bash\necho destroy", "propose must not persist");
+    assert_eq!(
+        destroy_content, "#!/bin/bash\necho destroy",
+        "propose must not persist"
+    );
 }
 
 #[tokio::test]
@@ -1905,21 +2804,34 @@ async fn apply_provision_change_for_bash_updates_both_scripts() {
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
-    let deploy_aid = seed_bash_artifact_titled(&db, &pid, "deploy-prep.sh", "#!/bin/bash\necho old deploy").await;
-    let destroy_aid = seed_bash_artifact_titled(&db, &pid, "destroy-prep.sh", "#!/bin/bash\necho old destroy").await;
+    let deploy_aid =
+        seed_bash_artifact_titled(&db, &pid, "deploy-prep.sh", "#!/bin/bash\necho old deploy")
+            .await;
+    let destroy_aid = seed_bash_artifact_titled(
+        &db,
+        &pid,
+        "destroy-prep.sh",
+        "#!/bin/bash\necho old destroy",
+    )
+    .await;
     link_bash_step(&db, &did, &deploy_aid, "deploy", "run").await;
     link_bash_step(&db, &did, &destroy_aid, "destroy", "destroy").await;
 
     let (status, _) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/apply-change"), &tok, json!({
-            "files": {
-                "deploy-prep.sh": "#!/bin/bash\necho new deploy",
-                "destroy-prep.sh": "#!/bin/bash\necho new destroy"
-            },
-            "artifact_id": deploy_aid,
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/apply-change"),
+            &tok,
+            json!({
+                "files": {
+                    "deploy-prep.sh": "#!/bin/bash\necho new deploy",
+                    "destroy-prep.sh": "#!/bin/bash\necho new destroy"
+                },
+                "artifact_id": deploy_aid,
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     let deploy_content = get_artifact_content(&db, &deploy_aid).await;
@@ -1939,19 +2851,26 @@ async fn apply_provision_change_for_bash_creates_missing_destroy_script() {
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
-    let deploy_aid = seed_bash_artifact_titled(&db, &pid, "deploy-prep.sh", "#!/bin/bash\necho old deploy").await;
+    let deploy_aid =
+        seed_bash_artifact_titled(&db, &pid, "deploy-prep.sh", "#!/bin/bash\necho old deploy")
+            .await;
     link_bash_step(&db, &did, &deploy_aid, "deploy", "run").await;
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/provision/apply-change"), &tok, json!({
-            "files": {
-                "deploy-prep.sh": "#!/bin/bash\necho new deploy",
-                "destroy-prep.sh": "#!/bin/bash\necho new destroy"
-            },
-            "artifact_id": deploy_aid,
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/provision/apply-change"),
+            &tok,
+            json!({
+                "files": {
+                    "deploy-prep.sh": "#!/bin/bash\necho new deploy",
+                    "destroy-prep.sh": "#!/bin/bash\necho new destroy"
+                },
+                "artifact_id": deploy_aid,
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     let deploy_content = get_artifact_content(&db, &deploy_aid).await;
@@ -2000,10 +2919,15 @@ async fn run_dag_executes_steps_in_topological_order_and_sets_infra_up() {
 
     let (status, body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
-            "agent_id": agent_id, "timeout_secs": 30
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/run-dag"),
+            &tok,
+            json!({
+                "agent_id": agent_id, "timeout_secs": 30
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let runs = body["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 2);
@@ -2013,7 +2937,8 @@ async fn run_dag_executes_steps_in_topological_order_and_sets_infra_up() {
     let (status, body) = send(
         app,
         req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["infra_state"], "up");
 }
@@ -2035,7 +2960,11 @@ async fn run_dag_halts_downstream_on_failure_and_sets_infra_broken() {
     let agent_id = "agent-1";
     let _rx = register_agent(&registry, agent_id, &pid);
     spawn_dag_fake_agent(_rx, Arc::clone(&registry), |action| {
-        if action == "run" { 0 } else { 1 }
+        if action == "run" {
+            0
+        } else {
+            1
+        }
     });
 
     let (_, _) = send(
@@ -2054,10 +2983,15 @@ async fn run_dag_halts_downstream_on_failure_and_sets_infra_broken() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
-            "agent_id": agent_id, "timeout_secs": 30
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/run-dag"),
+            &tok,
+            json!({
+                "agent_id": agent_id, "timeout_secs": 30
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let runs = body["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 1);
@@ -2082,10 +3016,15 @@ async fn run_dag_400_when_no_plan_set() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
-            "agent_id": agent_id, "timeout_secs": 30
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/run-dag"),
+            &tok,
+            json!({
+                "agent_id": agent_id, "timeout_secs": 30
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("no deploy steps"));
 }
@@ -2113,10 +3052,15 @@ async fn run_dag_404_when_agent_not_in_project() {
 
     let (status, _body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
-            "agent_id": "nonexistent", "timeout_secs": 30
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/run-dag"),
+            &tok,
+            json!({
+                "agent_id": "nonexistent", "timeout_secs": 30
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -2156,17 +3100,27 @@ async fn run_destroy_dag_executes_destroy_steps_and_sets_infra_destroyed() {
 
     let (_, _) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
-            "agent_id": agent_id, "timeout_secs": 30
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/run-dag"),
+            &tok,
+            json!({
+                "agent_id": agent_id, "timeout_secs": 30
+            }),
+        ),
+    )
+    .await;
 
     let (status, body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/run-destroy-dag"), &tok, json!({
-            "agent_id": agent_id, "timeout_secs": 30
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/run-destroy-dag"),
+            &tok,
+            json!({
+                "agent_id": agent_id, "timeout_secs": 30
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let runs = body["runs"].as_array().unwrap();
     assert_eq!(runs.len(), 2);
@@ -2176,7 +3130,8 @@ async fn run_destroy_dag_executes_destroy_steps_and_sets_infra_destroyed() {
     let (status, body) = send(
         app,
         req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["infra_state"], "destroyed");
 }
@@ -2198,18 +3153,28 @@ async fn run_destroy_dag_400_when_no_destroy_steps() {
 
     let (_, _) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
-            "deploy_steps": [{"artifact_id": bash_aid, "action": "run", "depends_on": []}],
-            "destroy_steps": [{"artifact_id": bash_aid, "action": "destroy", "depends_on": []}]
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/execution-plan"),
+            &tok,
+            json!({
+                "deploy_steps": [{"artifact_id": bash_aid, "action": "run", "depends_on": []}],
+                "destroy_steps": [{"artifact_id": bash_aid, "action": "destroy", "depends_on": []}]
+            }),
+        ),
+    )
+    .await;
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/run-destroy-dag"), &tok, json!({
-            "agent_id": agent_id, "timeout_secs": 30
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/run-destroy-dag"),
+            &tok,
+            json!({
+                "agent_id": agent_id, "timeout_secs": 30
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("no destroy steps"));
 }
@@ -2245,28 +3210,43 @@ async fn deploy_destroy_deploy_cycle_is_idempotent() {
 
     let (status, body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
-            "agent_id": agent_id, "timeout_secs": 30
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/run-dag"),
+            &tok,
+            json!({
+                "agent_id": agent_id, "timeout_secs": 30
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["infra_state"], "up");
 
     let (status, body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/run-destroy-dag"), &tok, json!({
-            "agent_id": agent_id, "timeout_secs": 30
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/run-destroy-dag"),
+            &tok,
+            json!({
+                "agent_id": agent_id, "timeout_secs": 30
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["infra_state"], "destroyed");
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/run-dag"), &tok, json!({
-            "agent_id": agent_id, "timeout_secs": 30
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/run-dag"),
+            &tok,
+            json!({
+                "agent_id": agent_id, "timeout_secs": 30
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["infra_state"], "up");
 }
@@ -2285,11 +3265,16 @@ async fn set_execution_plan_rejects_bash_run_without_destroy() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
-            "deploy_steps": [{"artifact_id": bash_aid, "action": "run", "depends_on": []}],
-            "destroy_steps": []
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/execution-plan"),
+            &tok,
+            json!({
+                "deploy_steps": [{"artifact_id": bash_aid, "action": "run", "depends_on": []}],
+                "destroy_steps": []
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("destroy"));
 }
@@ -2309,15 +3294,20 @@ async fn set_execution_plan_accepts_bash_run_with_bash_destroy() {
 
     let (status, _body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
-            "deploy_steps": [
-                {"artifact_id": bash_deploy_aid, "action": "run", "depends_on": []}
-            ],
-            "destroy_steps": [
-                {"artifact_id": bash_destroy_aid, "action": "destroy", "depends_on": []}
-            ]
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/execution-plan"),
+            &tok,
+            json!({
+                "deploy_steps": [
+                    {"artifact_id": bash_deploy_aid, "action": "run", "depends_on": []}
+                ],
+                "destroy_steps": [
+                    {"artifact_id": bash_destroy_aid, "action": "destroy", "depends_on": []}
+                ]
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
 }
 
@@ -2336,10 +3326,15 @@ async fn add_context_artifact_creates_and_links_and_lists_in_deployment() {
 
     let (status, body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/context-artifacts"), &tok, json!({
-            "title": "Network diagram", "kind": "markdown", "content": "# LAN layout\n..."
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/context-artifacts"),
+            &tok,
+            json!({
+                "title": "Network diagram", "kind": "markdown", "content": "# LAN layout\n..."
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
     let cas = body["context_artifacts"].as_array().unwrap();
     assert_eq!(cas.len(), 1);
@@ -2361,10 +3356,15 @@ async fn add_context_artifact_rejects_empty_title() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/context-artifacts"), &tok, json!({
-            "title": "  ", "kind": "markdown", "content": "hi"
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/context-artifacts"),
+            &tok,
+            json!({
+                "title": "  ", "kind": "markdown", "content": "hi"
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("title"));
 }
@@ -2382,10 +3382,15 @@ async fn add_context_artifact_rejects_unknown_kind() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/context-artifacts"), &tok, json!({
-            "title": "X", "kind": "docx", "content": "hi"
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/context-artifacts"),
+            &tok,
+            json!({
+                "title": "X", "kind": "docx", "content": "hi"
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("kind"));
 }
@@ -2403,10 +3408,15 @@ async fn add_context_artifact_accepts_bash_kind() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/context-artifacts"), &tok, json!({
-            "title": "Prep script", "kind": "bash", "content": "#!/usr/bin/env bash\necho hi"
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/context-artifacts"),
+            &tok,
+            json!({
+                "title": "Prep script", "kind": "bash", "content": "#!/usr/bin/env bash\necho hi"
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["context_artifacts"][0]["kind"], "bash");
 }
@@ -2425,10 +3435,15 @@ async fn link_context_artifact_links_existing_project_artifact() {
 
     let (status, body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/context-artifacts/link"), &tok, json!({
-            "artifact_id": aid
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/context-artifacts/link"),
+            &tok,
+            json!({
+                "artifact_id": aid
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["context_artifacts"].as_array().unwrap().len(), 1);
     assert_eq!(body["context_artifacts"][0]["id"], aid);
@@ -2449,10 +3464,15 @@ async fn link_context_artifact_rejects_artifact_from_other_project() {
 
     let (status, _body) = send(
         app,
-        req_post(&format!("/projects/{pid_b}/deployments/{did_b}/context-artifacts/link"), &tok, json!({
-            "artifact_id": aid
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid_b}/deployments/{did_b}/context-artifacts/link"),
+            &tok,
+            json!({
+                "artifact_id": aid
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -2469,23 +3489,36 @@ async fn remove_context_artifact_unlinks_and_drops_from_list() {
 
     let (_, body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/context-artifacts"), &tok, json!({
-            "title": "Notes", "kind": "markdown", "content": "stuff"
-        })),
-    ).await;
-    let aid = body["context_artifacts"][0]["id"].as_str().unwrap().to_string();
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/context-artifacts"),
+            &tok,
+            json!({
+                "title": "Notes", "kind": "markdown", "content": "stuff"
+            }),
+        ),
+    )
+    .await;
+    let aid = body["context_artifacts"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert_eq!(body["context_artifacts"].as_array().unwrap().len(), 1);
 
     let (status, _body) = send(
         app.clone(),
-        req_del(&format!("/projects/{pid}/deployments/{did}/context-artifacts/{aid}"), &tok),
-    ).await;
+        req_del(
+            &format!("/projects/{pid}/deployments/{did}/context-artifacts/{aid}"),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (status, body) = send(
         app,
         req_get(&format!("/projects/{pid}/deployments/{did}"), &tok),
-    ).await;
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["context_artifacts"].as_array().unwrap().len(), 0);
 }
@@ -2503,8 +3536,12 @@ async fn remove_context_artifact_404_when_not_linked() {
 
     let (status, _body) = send(
         app,
-        req_del(&format!("/projects/{pid}/deployments/{did}/context-artifacts/nonexistent"), &tok),
-    ).await;
+        req_del(
+            &format!("/projects/{pid}/deployments/{did}/context-artifacts/nonexistent"),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -2550,11 +3587,16 @@ async fn propose_artifact_change_rejects_missing_explanation() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/proposals"), &tok, json!({
-            "artifact_id": "a1", "explanation": "  ",
-            "current_content": "x", "proposed_content": "y"
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/proposals"),
+            &tok,
+            json!({
+                "artifact_id": "a1", "explanation": "  ",
+                "current_content": "x", "proposed_content": "y"
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("explanation"));
 }
@@ -2574,11 +3616,16 @@ async fn propose_artifact_change_rejects_artifact_from_other_project() {
 
     let (status, _body) = send(
         app,
-        req_post(&format!("/projects/{pid_b}/deployments/{did_b}/proposals"), &tok, json!({
-            "artifact_id": aid, "explanation": "x",
-            "current_content": "a", "proposed_content": "b"
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid_b}/deployments/{did_b}/proposals"),
+            &tok,
+            json!({
+                "artifact_id": aid, "explanation": "x",
+                "current_content": "a", "proposed_content": "b"
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -2606,8 +3653,12 @@ async fn list_proposals_returns_all_proposals_newest_first() {
 
     let (status, body) = send(
         app,
-        req_get(&format!("/projects/{pid}/deployments/{did}/proposals"), &tok),
-    ).await;
+        req_get(
+            &format!("/projects/{pid}/deployments/{did}/proposals"),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let arr = body.as_array().unwrap();
     assert_eq!(arr.len(), 3);
@@ -2637,12 +3688,20 @@ async fn approve_proposal_applies_content_to_target_artifact_and_sets_approved()
 
     let (status, body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/proposals/{propid}/approve"), &tok, json!({})),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/proposals/{propid}/approve"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "approved");
 
-    let artifact = get_artifact_in_project(&db, &pid, &aid).await.unwrap().unwrap();
+    let artifact = get_artifact_in_project(&db, &pid, &aid)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(artifact["content"], "{\"main.tf\":\"new\"}");
 }
 
@@ -2669,13 +3728,21 @@ async fn approve_proposal_allows_editing_content_before_applying() {
 
     let (status, _body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/proposals/{propid}/approve"), &tok, json!({
-            "edited_content": "{\"main.tf\":\"user-edited\"}"
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/proposals/{propid}/approve"),
+            &tok,
+            json!({
+                "edited_content": "{\"main.tf\":\"user-edited\"}"
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
-    let artifact = get_artifact_in_project(&db, &pid, &aid).await.unwrap().unwrap();
+    let artifact = get_artifact_in_project(&db, &pid, &aid)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(artifact["content"], "{\"main.tf\":\"user-edited\"}");
 }
 
@@ -2702,14 +3769,24 @@ async fn approve_proposal_rejects_already_approved_proposal() {
 
     let (status, _body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/proposals/{propid}/approve"), &tok, json!({})),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/proposals/{propid}/approve"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/proposals/{propid}/approve"), &tok, json!({})),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/proposals/{propid}/approve"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("not pending"));
 }
@@ -2737,20 +3814,32 @@ async fn discard_proposal_sets_status_discarded_without_applying() {
 
     let (status, _body) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/proposals/{propid}/discard"), &tok, json!({})),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/proposals/{propid}/discard"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
     let (status, body) = send(
         app,
-        req_get(&format!("/projects/{pid}/deployments/{did}/proposals"), &tok),
-    ).await;
+        req_get(
+            &format!("/projects/{pid}/deployments/{did}/proposals"),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let arr = body.as_array().unwrap();
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["status"], "discarded");
 
-    let artifact = get_artifact_in_project(&db, &pid, &aid).await.unwrap().unwrap();
+    let artifact = get_artifact_in_project(&db, &pid, &aid)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(artifact["content"], "{\"main.tf\":\"old\"}");
 }
 
@@ -2767,8 +3856,13 @@ async fn discard_proposal_404_for_nonexistent() {
 
     let (status, _body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/proposals/nonexistent/discard"), &tok, json!({})),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/proposals/nonexistent/discard"),
+            &tok,
+            json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -2831,21 +3925,30 @@ async fn get_execution_plan_returns_stored_plan() {
 
     let (_, _) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
-            "deploy_steps": [
-                {"artifact_id": bash_aid, "action": "run", "depends_on": []},
-                {"artifact_id": tf_aid, "action": "apply", "depends_on": [0]}
-            ],
-            "destroy_steps": [
-                {"artifact_id": tf_aid, "action": "destroy", "depends_on": []}
-            ]
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/execution-plan"),
+            &tok,
+            json!({
+                "deploy_steps": [
+                    {"artifact_id": bash_aid, "action": "run", "depends_on": []},
+                    {"artifact_id": tf_aid, "action": "apply", "depends_on": [0]}
+                ],
+                "destroy_steps": [
+                    {"artifact_id": tf_aid, "action": "destroy", "depends_on": []}
+                ]
+            }),
+        ),
+    )
+    .await;
 
     let (status, body) = send(
         app,
-        req_get(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok),
-    ).await;
+        req_get(
+            &format!("/projects/{pid}/deployments/{did}/execution-plan"),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["deploy_steps"].as_array().unwrap().len(), 0);
     assert_eq!(body["destroy_steps"].as_array().unwrap().len(), 0);
@@ -2881,7 +3984,11 @@ async fn get_project_deployment_returns_the_auto_created_deployment() {
 
     let pid = seed_project(&app, &tok, &gid, "ProjectTwo").await;
 
-    let (status, body) = send(app.clone(), req_get(&format!("/projects/{pid}/deployment"), &tok)).await;
+    let (status, body) = send(
+        app.clone(),
+        req_get(&format!("/projects/{pid}/deployment"), &tok),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["infra_state"], "none");
     assert_eq!(body["name"], "ProjectTwo");
@@ -2898,10 +4005,15 @@ async fn create_deployment_is_rejected_when_one_already_exists() {
 
     let pid = seed_project(&app, &tok, &gid, "ProjectThree").await;
 
-    let (status, _body) = send(app.clone(), req_post(
-        &format!("/projects/{pid}/deployments"), &tok,
-        json!({"name":"Second","environment_description":"env"}),
-    )).await;
+    let (status, _body) = send(
+        app.clone(),
+        req_post(
+            &format!("/projects/{pid}/deployments"),
+            &tok,
+            json!({"name":"Second","environment_description":"env"}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(count_rows(&db, "deployments").await, 1);
 }
@@ -2917,7 +4029,11 @@ async fn list_deployments_returns_exactly_one_for_a_project() {
 
     let pid = seed_project(&app, &tok, &gid, "ProjectFour").await;
 
-    let (status, body) = send(app.clone(), req_get(&format!("/projects/{pid}/deployments"), &tok)).await;
+    let (status, body) = send(
+        app.clone(),
+        req_get(&format!("/projects/{pid}/deployments"), &tok),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let deployments = body.as_array().unwrap();
     assert_eq!(deployments.len(), 1);
@@ -2937,8 +4053,12 @@ async fn get_execution_plan_returns_empty_plan_when_none_set() {
 
     let (status, body) = send(
         app,
-        req_get(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok),
-    ).await;
+        req_get(
+            &format!("/projects/{pid}/deployments/{did}/execution-plan"),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["deploy_steps"].as_array().unwrap().len(), 0);
     assert_eq!(body["destroy_steps"].as_array().unwrap().len(), 0);
@@ -2958,11 +4078,16 @@ async fn set_execution_plan_rejects_invalid_action_for_artifact_kind() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
-            "deploy_steps": [{"artifact_id": bash_aid, "action": "apply", "depends_on": []}],
-            "destroy_steps": []
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/execution-plan"),
+            &tok,
+            json!({
+                "deploy_steps": [{"artifact_id": bash_aid, "action": "apply", "depends_on": []}],
+                "destroy_steps": []
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("not valid"));
 }
@@ -2982,14 +4107,19 @@ async fn set_execution_plan_rejects_cycle_in_deploy_steps() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
-            "deploy_steps": [
-                {"artifact_id": aid_a, "action": "run", "depends_on": [1]},
-                {"artifact_id": aid_b, "action": "run", "depends_on": [0]}
-            ],
-            "destroy_steps": []
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/execution-plan"),
+            &tok,
+            json!({
+                "deploy_steps": [
+                    {"artifact_id": aid_a, "action": "run", "depends_on": [1]},
+                    {"artifact_id": aid_b, "action": "run", "depends_on": [0]}
+                ],
+                "destroy_steps": []
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("cycle"));
 }
@@ -3008,13 +4138,18 @@ async fn set_execution_plan_rejects_apply_without_destroy_coverage() {
 
     let (status, body) = send(
         app,
-        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
-            "deploy_steps": [
-                {"artifact_id": tf_aid, "action": "apply", "label": "Apply", "depends_on": []}
-            ],
-            "destroy_steps": []
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/execution-plan"),
+            &tok,
+            json!({
+                "deploy_steps": [
+                    {"artifact_id": tf_aid, "action": "apply", "label": "Apply", "depends_on": []}
+                ],
+                "destroy_steps": []
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["error"].as_str().unwrap().contains("destroy"));
     assert!(body["error"].as_str().unwrap().contains(tf_aid.as_str()));
@@ -3061,11 +4196,16 @@ async fn set_execution_plan_rejects_artifact_from_other_project() {
 
     let (status, _body) = send(
         app,
-        req_post(&format!("/projects/{pid_b}/deployments/{did_b}/execution-plan"), &tok, json!({
-            "deploy_steps": [{"artifact_id": aid, "action": "run", "depends_on": []}],
-            "destroy_steps": [{"artifact_id": aid, "action": "destroy", "depends_on": []}]
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid_b}/deployments/{did_b}/execution-plan"),
+            &tok,
+            json!({
+                "deploy_steps": [{"artifact_id": aid, "action": "run", "depends_on": []}],
+                "destroy_steps": [{"artifact_id": aid, "action": "destroy", "depends_on": []}]
+            }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -3093,16 +4233,25 @@ async fn set_execution_plan_overwrites_previous_plan() {
 
     let (_, _) = send(
         app.clone(),
-        req_post(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok, json!({
-            "deploy_steps": [],
-            "destroy_steps": []
-        })),
-    ).await;
+        req_post(
+            &format!("/projects/{pid}/deployments/{did}/execution-plan"),
+            &tok,
+            json!({
+                "deploy_steps": [],
+                "destroy_steps": []
+            }),
+        ),
+    )
+    .await;
 
     let (status, body) = send(
         app,
-        req_get(&format!("/projects/{pid}/deployments/{did}/execution-plan"), &tok),
-    ).await;
+        req_get(
+            &format!("/projects/{pid}/deployments/{did}/execution-plan"),
+            &tok,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["deploy_steps"].as_array().unwrap().len(), 0);
     assert_eq!(body["destroy_steps"].as_array().unwrap().len(), 0);
