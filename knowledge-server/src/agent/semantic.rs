@@ -1,6 +1,6 @@
 use anyhow::{anyhow, bail, Result};
-use std::sync::Arc;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 pub const SEMANTIC_DIMENSIONS: usize = 768;
 pub const SEMANTIC_MODEL: &str = "text-embedding-004";
@@ -16,7 +16,12 @@ pub trait Embedder: Send + Sync {
     async fn embed(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>>;
 }
 
-pub fn embedding_text(name: &str, signature: Option<&str>, docstring: Option<&str>, source: Option<&str>) -> String {
+pub fn embedding_text(
+    name: &str,
+    signature: Option<&str>,
+    docstring: Option<&str>,
+    source: Option<&str>,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !name.trim().is_empty() {
         parts.push(name.trim().to_string());
@@ -88,10 +93,17 @@ pub fn pending_count(rows: usize, already: usize) -> usize {
 
 pub fn hybrid_score_sql(lexical_weight: f64, semantic_weight: f64) -> Result<String> {
     let (lex, sem) = hybrid_weights(lexical_weight, semantic_weight)?;
-    Ok(format!("({lex}::float8 * $lexical + {sem}::float8 * $semantic)"))
+    Ok(format!(
+        "({lex}::float8 * $lexical + {sem}::float8 * $semantic)"
+    ))
 }
 
-pub fn semantic_params(query_embedding: &[f32], model: &str, lexical: f64, semantic: f64) -> Result<Value> {
+pub fn semantic_params(
+    query_embedding: &[f32],
+    model: &str,
+    lexical: f64,
+    semantic: f64,
+) -> Result<Value> {
     Ok(json!({
         "qvec": to_pgvector(query_embedding)?,
         "qmodel": model,
@@ -119,10 +131,17 @@ impl GeminiEmbedder {
         model: impl Into<String>,
         dimensions: usize,
     ) -> Self {
-        Self { provider, model: model.into(), dimensions }
+        Self {
+            provider,
+            model: model.into(),
+            dimensions,
+        }
     }
 
-    pub fn from_config(provider: std::sync::Arc<crate::llm::gemini::GeminiProvider>, cfg: &crate::config::SemanticConfig) -> Result<Self> {
+    pub fn from_config(
+        provider: std::sync::Arc<crate::llm::gemini::GeminiProvider>,
+        cfg: &crate::config::SemanticConfig,
+    ) -> Result<Self> {
         if cfg.dimensions == 0 {
             bail!("semantic dimensions must be greater than zero");
         }
@@ -147,7 +166,11 @@ impl Embedder for GeminiEmbedder {
             .await?;
         for v in &vectors {
             if v.len() != self.dimensions {
-                bail!("expected {} embedding dimensions, received {}", self.dimensions, v.len());
+                bail!(
+                    "expected {} embedding dimensions, received {}",
+                    self.dimensions,
+                    v.len()
+                );
             }
         }
         Ok(vectors)
@@ -158,19 +181,38 @@ pub struct FnEmbedder {
     model: String,
     dimensions: usize,
     #[allow(clippy::type_complexity)]
-    embed: Box<dyn Fn(&[String]) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Vec<f32>>>> + Send + Sync>> + Send + Sync>,
+    embed: Box<
+        dyn Fn(
+                &[String],
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<Vec<Vec<f32>>>> + Send + Sync>,
+            > + Send
+            + Sync,
+    >,
 }
 
 impl FnEmbedder {
     pub fn new<F>(model: impl Into<String>, dimensions: usize, f: F) -> Self
     where
-        F: Fn(&[String]) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Vec<f32>>>> + Send + Sync>> + Send + Sync + 'static,
+        F: Fn(
+                &[String],
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<Vec<Vec<f32>>>> + Send + Sync>,
+            > + Send
+            + Sync
+            + 'static,
     {
-        Self { model: model.into(), dimensions, embed: Box::new(f) }
+        Self {
+            model: model.into(),
+            dimensions,
+            embed: Box::new(f),
+        }
     }
 
     pub fn failing(model: impl Into<String>, dimensions: usize) -> Self {
-        Self::new(model, dimensions, |_| Box::pin(async { bail!("embedder unavailable") }))
+        Self::new(model, dimensions, |_| {
+            Box::pin(async { bail!("embedder unavailable") })
+        })
     }
 
     pub fn constant(model: impl Into<String>, dimensions: usize, value: f32) -> Self {
@@ -273,7 +315,12 @@ pub struct BackfillRow {
     pub stored_hash: Option<String>,
 }
 
-pub fn backfill_text(row_name: &str, signature: Option<&str>, docstring: Option<&str>, source: Option<&str>) -> String {
+pub fn backfill_text(
+    row_name: &str,
+    signature: Option<&str>,
+    docstring: Option<&str>,
+    source: Option<&str>,
+) -> String {
     embedding_text(row_name, signature, docstring, source)
 }
 
@@ -304,7 +351,12 @@ pub fn should_build_hnsw(pending: usize, embedded: usize, index_already_exists: 
     embedded > 0 && pending == 0 && !index_already_exists
 }
 
-pub async fn pending_rows(db: &harvest_db::Db, model: &str, repo: &str, version: &str) -> Result<usize> {
+pub async fn pending_rows(
+    db: &harvest_db::Db,
+    model: &str,
+    repo: &str,
+    version: &str,
+) -> Result<usize> {
     let rows = db
         .query(
             PENDING_COUNT_SQL,
@@ -319,7 +371,9 @@ pub async fn pending_rows(db: &harvest_db::Db, model: &str, repo: &str, version:
 }
 
 pub async fn hnsw_index_exists(db: &harvest_db::Db) -> Result<bool> {
-    let rows = db.query(HNSW_INDEX_EXISTS_SQL, serde_json::json!({})).await?;
+    let rows = db
+        .query(HNSW_INDEX_EXISTS_SQL, serde_json::json!({}))
+        .await?;
     Ok(rows
         .first()
         .and_then(|r| r["present"].as_bool())
@@ -414,13 +468,21 @@ pub async fn backfill_embeddings(
             .collect();
 
         let (pending, skipped) = plan_batch(&rows, &opts.model);
-        let mut stats = BackfillStats { scanned: rows.len(), skipped, ..Default::default() };
+        let mut stats = BackfillStats {
+            scanned: rows.len(),
+            skipped,
+            ..Default::default()
+        };
 
         for chunk in chunks(&pending, batch_size) {
             let inputs: Vec<String> = chunk.iter().map(|r| r.text.clone()).collect();
             let vectors = embedder.embed(&inputs).await?;
             if vectors.len() != chunk.len() {
-                bail!("embedder returned {} vectors for {} inputs", vectors.len(), chunk.len());
+                bail!(
+                    "embedder returned {} vectors for {} inputs",
+                    vectors.len(),
+                    chunk.len()
+                );
             }
             for (row, vector) in chunk.iter().zip(vectors.iter()) {
                 db.execute(
@@ -465,27 +527,34 @@ pub fn build_handle(
     let provider = providers
         .iter()
         .find(|p| matches!(p, crate::config::LlmProviderConfig::Gemini { .. }))
-        .ok_or_else(|| anyhow!("semantic search is enabled but no gemini provider is configured for embeddings"))?;
+        .ok_or_else(|| {
+            anyhow!(
+                "semantic search is enabled but no gemini provider is configured for embeddings"
+            )
+        })?;
     let (api_key, timeout_secs, max_retries) = match provider {
-        crate::config::LlmProviderConfig::Gemini { api_key, timeout_secs, max_retries, .. } => {
-            (api_key.clone(), *timeout_secs, *max_retries)
-        }
+        crate::config::LlmProviderConfig::Gemini {
+            api_key,
+            timeout_secs,
+            max_retries,
+            ..
+        } => (api_key.clone(), *timeout_secs, *max_retries),
         _ => unreachable!(),
     };
     if api_key.trim().is_empty() {
         bail!("semantic search is enabled but the gemini provider has no api key");
     }
-    let provider = Arc::new(
-        crate::llm::gemini::GeminiProvider::new(
-            cfg.model.clone(),
-            api_key,
-            timeout_secs,
-            max_retries,
-            crate::llm::types::ProviderMeta::new("semantic-embeddings"),
-        ),
-    );
+    let provider = Arc::new(crate::llm::gemini::GeminiProvider::new(
+        cfg.model.clone(),
+        api_key,
+        timeout_secs,
+        max_retries,
+        crate::llm::types::ProviderMeta::new("semantic-embeddings"),
+    ));
     let embedder: Arc<dyn Embedder> = Arc::new(GeminiEmbedder::from_config(provider, cfg)?);
-    Ok(Some(Arc::new(crate::agent::graph_tools::SemanticHandle::configured(embedder, cfg))))
+    Ok(Some(Arc::new(
+        crate::agent::graph_tools::SemanticHandle::configured(embedder, cfg),
+    )))
 }
 
 pub async fn run_backfill_if_configured(
@@ -514,7 +583,12 @@ mod tests {
 
     #[test]
     fn embedding_text_combines_name_signature_and_docstring() {
-        let t = embedding_text("NfsDriver", Some("class NfsDriver(Base)"), Some("NFS driver."), Some("class NfsDriver(Base):\n    pass"));
+        let t = embedding_text(
+            "NfsDriver",
+            Some("class NfsDriver(Base)"),
+            Some("NFS driver."),
+            Some("class NfsDriver(Base):\n    pass"),
+        );
         assert!(t.contains("NfsDriver"));
         assert!(t.contains("class NfsDriver(Base)"));
         assert!(t.contains("NFS driver."));
@@ -528,15 +602,27 @@ mod tests {
 
     #[test]
     fn embedding_text_does_not_append_source_when_prose_exists() {
-        let t = embedding_text("foo", Some("fn foo()"), Some("Does a thing."), Some("fn foo() { body }"));
-        assert!(!t.contains("body"), "source should be skipped when a docstring exists: {t}");
+        let t = embedding_text(
+            "foo",
+            Some("fn foo()"),
+            Some("Does a thing."),
+            Some("fn foo() { body }"),
+        );
+        assert!(
+            !t.contains("body"),
+            "source should be skipped when a docstring exists: {t}"
+        );
     }
 
     #[test]
     fn embedding_text_caps_the_source_excerpt() {
         let long: String = "q".repeat(SOURCE_EXCERPT_CHARS * 3);
         let t = embedding_text("foo", None, None, Some(&long));
-        assert!(t.chars().count() <= SOURCE_EXCERPT_CHARS + 10, "excerpt must be capped: {}", t.chars().count());
+        assert!(
+            t.chars().count() <= SOURCE_EXCERPT_CHARS + 10,
+            "excerpt must be capped: {}",
+            t.chars().count()
+        );
     }
 
     #[test]
@@ -580,7 +666,10 @@ mod tests {
 
     #[test]
     fn chunks_splits_evenly_and_drops_empty_input() {
-        assert_eq!(chunks(&[1, 2, 3, 4, 5], 2), vec![vec![1, 2], vec![3, 4], vec![5]]);
+        assert_eq!(
+            chunks(&[1, 2, 3, 4, 5], 2),
+            vec![vec![1, 2], vec![3, 4], vec![5]]
+        );
         assert!(chunks::<u8>(&[], 2).is_empty());
         assert!(chunks(&[1, 2], 0).is_empty());
     }
@@ -670,7 +759,12 @@ mod tests {
         let text = "A";
         let rows = vec![
             row(1, "A", None, None),
-            BackfillRow { id: 2, text: text.into(), stored_model: Some(SEMANTIC_MODEL.into()), stored_hash: Some(source_hash(text)) },
+            BackfillRow {
+                id: 2,
+                text: text.into(),
+                stored_model: Some(SEMANTIC_MODEL.into()),
+                stored_hash: Some(source_hash(text)),
+            },
             row(3, "B", Some("other"), None),
         ];
         let (pending, skipped) = plan_batch(&rows, SEMANTIC_MODEL);
@@ -681,9 +775,27 @@ mod tests {
 
     #[test]
     fn backfill_stats_merge_additively() {
-        let mut a = BackfillStats { scanned: 5, embedded: 3, skipped: 2, batches: 1 };
-        a.merged(BackfillStats { scanned: 4, embedded: 4, skipped: 0, batches: 1 });
-        assert_eq!(a, BackfillStats { scanned: 9, embedded: 7, skipped: 2, batches: 2 });
+        let mut a = BackfillStats {
+            scanned: 5,
+            embedded: 3,
+            skipped: 2,
+            batches: 1,
+        };
+        a.merged(BackfillStats {
+            scanned: 4,
+            embedded: 4,
+            skipped: 0,
+            batches: 1,
+        });
+        assert_eq!(
+            a,
+            BackfillStats {
+                scanned: 9,
+                embedded: 7,
+                skipped: 2,
+                batches: 2
+            }
+        );
     }
 
     #[test]
@@ -767,7 +879,11 @@ mod tests {
 
     #[test]
     fn backfill_options_respect_the_configured_batch_size() {
-        let cfg = crate::config::SemanticConfig { model: "m".into(), batch_size: 5_000, ..Default::default() };
+        let cfg = crate::config::SemanticConfig {
+            model: "m".into(),
+            batch_size: 5_000,
+            ..Default::default()
+        };
         let opts = BackfillOptions::from_config(&cfg);
         assert_eq!(opts.batch_size, BACKFILL_BATCH);
         assert_eq!(opts.model, "m");
@@ -782,20 +898,34 @@ mod tests {
 
     #[test]
     fn backfill_rejects_a_blank_model() {
-        let opts = BackfillOptions { model: "  ".into(), ..Default::default() };
+        let opts = BackfillOptions {
+            model: "  ".into(),
+            ..Default::default()
+        };
         let db = harvest_db::Db::connect_without_migrating("postgres://127.0.0.1:1/none").unwrap();
         let embedder = NoopEmbedder;
-        let err = futures::executor::block_on(backfill_embeddings(&db, &embedder, &opts)).unwrap_err().to_string();
-        assert!(err.contains("requires an embedding model"), "unexpected error: {err}");
+        let err = futures::executor::block_on(backfill_embeddings(&db, &embedder, &opts))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("requires an embedding model"),
+            "unexpected error: {err}"
+        );
     }
 
     struct NoopEmbedder;
 
     #[async_trait::async_trait]
     impl Embedder for NoopEmbedder {
-        fn model(&self) -> &str { SEMANTIC_MODEL }
-        fn dimensions(&self) -> usize { SEMANTIC_DIMENSIONS }
-        async fn embed(&self, _inputs: &[String]) -> Result<Vec<Vec<f32>>> { Ok(Vec::new()) }
+        fn model(&self) -> &str {
+            SEMANTIC_MODEL
+        }
+        fn dimensions(&self) -> usize {
+            SEMANTIC_DIMENSIONS
+        }
+        async fn embed(&self, _inputs: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(Vec::new())
+        }
     }
 
     fn gemini_providers() -> Vec<crate::config::LlmProviderConfig> {
@@ -816,10 +946,16 @@ mod tests {
     }
 
     fn enabled_cfg() -> crate::config::SemanticConfig {
-        crate::config::SemanticConfig { enabled: true, ..Default::default() }
+        crate::config::SemanticConfig {
+            enabled: true,
+            ..Default::default()
+        }
     }
 
-    fn build_handle_err(cfg: &crate::config::SemanticConfig, providers: &[crate::config::LlmProviderConfig]) -> String {
+    fn build_handle_err(
+        cfg: &crate::config::SemanticConfig,
+        providers: &[crate::config::LlmProviderConfig],
+    ) -> String {
         match build_handle(cfg, providers) {
             Ok(_) => panic!("expected an error"),
             Err(err) => err.to_string(),
@@ -828,12 +964,19 @@ mod tests {
 
     #[test]
     fn build_handle_returns_nothing_when_semantic_is_disabled() {
-        assert!(build_handle(&crate::config::SemanticConfig::default(), &gemini_providers()).unwrap().is_none());
+        assert!(build_handle(
+            &crate::config::SemanticConfig::default(),
+            &gemini_providers()
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
     fn build_handle_creates_a_ready_handle_when_enabled() {
-        let handle = build_handle(&enabled_cfg(), &gemini_providers()).unwrap().expect("handle");
+        let handle = build_handle(&enabled_cfg(), &gemini_providers())
+            .unwrap()
+            .expect("handle");
         assert!(handle.is_ready());
         assert_eq!(handle.model, "text-embedding-004");
     }
@@ -841,7 +984,10 @@ mod tests {
     #[test]
     fn build_handle_requires_a_gemini_provider() {
         let err = build_handle_err(&enabled_cfg(), &[]);
-        assert!(err.contains("no gemini provider"), "unexpected error: {err}");
+        assert!(
+            err.contains("no gemini provider"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -857,7 +1003,11 @@ mod tests {
 
     #[test]
     fn build_handle_rejects_zero_dimensions() {
-        let cfg = crate::config::SemanticConfig { enabled: true, dimensions: 0, ..Default::default() };
+        let cfg = crate::config::SemanticConfig {
+            enabled: true,
+            dimensions: 0,
+            ..Default::default()
+        };
         let err = build_handle_err(&cfg, &gemini_providers());
         assert!(err.contains("greater than zero"), "unexpected error: {err}");
     }

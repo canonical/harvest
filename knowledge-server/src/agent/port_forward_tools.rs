@@ -3,16 +3,17 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use super::tool::Tool;
 use crate::llm::types::ToolDefinition;
 use crate::machines::port_forwards;
 use harvest_db::Db;
-use super::tool::Tool;
 
-const LIST_PREVIEW_CHARS:   usize = 1000;
+const LIST_PREVIEW_CHARS: usize = 1000;
 const MUTATE_PREVIEW_CHARS: usize = 500;
 
 fn required_str(params: &Value, key: &str) -> Result<String> {
-    params[key].as_str()
+    params[key]
+        .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
@@ -25,7 +26,9 @@ fn validate_list_params(params: &Value) -> Result<String> {
 
 fn validate_create_params(params: &Value) -> Result<(String, u16, String)> {
     let agent_id = required_str(params, "agent_id")?;
-    let port = params["port"].as_u64().ok_or_else(|| anyhow!("port is required"))?;
+    let port = params["port"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("port is required"))?;
     let port = port_forwards::validate_port(port).map_err(|e| anyhow!(e))?;
     let route_name = required_str(params, "route_name")?;
     Ok((agent_id, port, route_name))
@@ -54,7 +57,7 @@ fn validate_delete_params(params: &Value) -> Result<(String, String)> {
 }
 
 pub struct ListPortForwardsTool {
-    pub db:      Arc<Db>,
+    pub db: Arc<Db>,
     pub project_id: String,
 }
 
@@ -93,7 +96,7 @@ impl Tool for ListPortForwardsTool {
 }
 
 pub struct CreatePortForwardTool {
-    pub db:      Arc<Db>,
+    pub db: Arc<Db>,
     pub project_id: String,
 }
 
@@ -134,9 +137,10 @@ impl Tool for CreatePortForwardTool {
 
     async fn execute(&self, params: Value) -> Result<String> {
         let (agent_id, port, route_name) = validate_create_params(&params)?;
-        let forward = port_forwards::create(&self.db, &self.project_id, &agent_id, port, &route_name)
-            .await
-            .map_err(|e| anyhow!(e.to_string()))?;
+        let forward =
+            port_forwards::create(&self.db, &self.project_id, &agent_id, port, &route_name)
+                .await
+                .map_err(|e| anyhow!(e.to_string()))?;
         Ok(format!(
             "Port forward '{}' created for agent '{agent_id}' (port {}).",
             forward.route_name, forward.port
@@ -149,7 +153,7 @@ impl Tool for CreatePortForwardTool {
 }
 
 pub struct UpdatePortForwardTool {
-    pub db:      Arc<Db>,
+    pub db: Arc<Db>,
     pub project_id: String,
 }
 
@@ -194,9 +198,16 @@ impl Tool for UpdatePortForwardTool {
 
     async fn execute(&self, params: Value) -> Result<String> {
         let (agent_id, forward_id, port, route_name) = validate_update_params(&params)?;
-        let forward = port_forwards::update(&self.db, &self.project_id, &agent_id, &forward_id, port, route_name)
-            .await
-            .map_err(|e| anyhow!(e.to_string()))?;
+        let forward = port_forwards::update(
+            &self.db,
+            &self.project_id,
+            &agent_id,
+            &forward_id,
+            port,
+            route_name,
+        )
+        .await
+        .map_err(|e| anyhow!(e.to_string()))?;
         Ok(format!(
             "Port forward '{}' updated (port {}).",
             forward.route_name, forward.port
@@ -209,7 +220,7 @@ impl Tool for UpdatePortForwardTool {
 }
 
 pub struct DeletePortForwardTool {
-    pub db:      Arc<Db>,
+    pub db: Arc<Db>,
     pub project_id: String,
 }
 
@@ -268,24 +279,32 @@ mod tests {
 
     #[test]
     fn list_params_accepts_valid_input() {
-        assert_eq!(validate_list_params(&json!({ "agent_id": "a1" })).unwrap(), "a1");
+        assert_eq!(
+            validate_list_params(&json!({ "agent_id": "a1" })).unwrap(),
+            "a1"
+        );
     }
 
     #[test]
     fn create_params_requires_agent_id() {
-        let err = validate_create_params(&json!({ "port": 8080, "route_name": "app" })).unwrap_err();
+        let err =
+            validate_create_params(&json!({ "port": 8080, "route_name": "app" })).unwrap_err();
         assert!(err.to_string().contains("agent_id"));
     }
 
     #[test]
     fn create_params_requires_port() {
-        let err = validate_create_params(&json!({ "agent_id": "a1", "route_name": "app" })).unwrap_err();
+        let err =
+            validate_create_params(&json!({ "agent_id": "a1", "route_name": "app" })).unwrap_err();
         assert!(err.to_string().contains("port"));
     }
 
     #[test]
     fn create_params_rejects_invalid_port() {
-        let err = validate_create_params(&json!({ "agent_id": "a1", "port": 99999, "route_name": "app" })).unwrap_err();
+        let err = validate_create_params(
+            &json!({ "agent_id": "a1", "port": 99999, "route_name": "app" }),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("port"));
     }
 
@@ -299,7 +318,8 @@ mod tests {
     fn create_params_accepts_valid_input() {
         let (agent_id, port, route_name) = validate_create_params(&json!({
             "agent_id": "a1", "port": 8080, "route_name": "app"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(agent_id, "a1");
         assert_eq!(port, 8080);
         assert_eq!(route_name, "app");
@@ -315,7 +335,8 @@ mod tests {
     fn update_params_allows_omitting_port_and_route_name() {
         let (agent_id, forward_id, port, route_name) = validate_update_params(&json!({
             "agent_id": "a1", "forward_id": "f1"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(agent_id, "a1");
         assert_eq!(forward_id, "f1");
         assert_eq!(port, None);
@@ -326,7 +347,8 @@ mod tests {
     fn update_params_rejects_invalid_port() {
         let err = validate_update_params(&json!({
             "agent_id": "a1", "forward_id": "f1", "port": 0
-        })).unwrap_err();
+        }))
+        .unwrap_err();
         assert!(err.to_string().contains("port"));
     }
 
@@ -334,7 +356,8 @@ mod tests {
     fn update_params_accepts_new_port_and_route_name() {
         let (_, _, port, route_name) = validate_update_params(&json!({
             "agent_id": "a1", "forward_id": "f1", "port": 9090, "route_name": "app2"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(port, Some(9090));
         assert_eq!(route_name, Some("app2".to_string()));
     }
@@ -349,7 +372,8 @@ mod tests {
     fn delete_params_accepts_valid_input() {
         let (agent_id, forward_id) = validate_delete_params(&json!({
             "agent_id": "a1", "forward_id": "f1"
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(agent_id, "a1");
         assert_eq!(forward_id, "f1");
     }

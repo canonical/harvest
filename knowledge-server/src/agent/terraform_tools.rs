@@ -3,19 +3,23 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::artifacts::{bundle, handlers::{get_artifact_in_project, ArtifactKind}};
+use super::tool::Tool;
+use crate::artifacts::{
+    bundle,
+    handlers::{get_artifact_in_project, ArtifactKind},
+};
 use crate::deployments;
 use crate::llm::types::ToolDefinition;
 use crate::machines::{MachineRegistry, TerraformAction, TerraformFlavor};
 use harvest_db::Db;
-use super::tool::Tool;
 
 const RUN_TERRAFORM_PREVIEW_CHARS: usize = 2000;
 const DEFAULT_TERRAFORM_TIMEOUT_SECS: u64 = 300;
 const MAX_TERRAFORM_TIMEOUT_SECS: u64 = 1800;
 
 fn required_str(params: &Value, key: &str) -> Result<String> {
-    params[key].as_str()
+    params[key]
+        .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
@@ -33,7 +37,8 @@ fn validate_run_params(params: &Value) -> Result<(String, String, u64)> {
 }
 
 fn agent_belongs_to_project(registry: &MachineRegistry, agent_id: &str, project_id: &str) -> bool {
-    registry.agents
+    registry
+        .agents
         .get(agent_id)
         .map(|a| a.project_id == project_id)
         .unwrap_or(false)
@@ -57,33 +62,58 @@ async fn run_terraform(
         .ok_or_else(|| anyhow!("artifact {artifact_id} not found in this project"))?;
 
     let flavor = match ArtifactKind::parse(artifact["kind"].as_str().unwrap_or("")) {
-        Some(ArtifactKind::Terraform)  => TerraformFlavor::Terraform,
+        Some(ArtifactKind::Terraform) => TerraformFlavor::Terraform,
         Some(ArtifactKind::Terragrunt) => TerraformFlavor::Terragrunt,
         _ => anyhow::bail!("artifact {artifact_id} is not a terraform or terragrunt artifact"),
     };
 
     let live_content = artifact["content"].as_str().unwrap_or("");
-    let content = deployments::resolve_run_content(db, project_id, &artifact_id, action, live_content).await?;
+    let content =
+        deployments::resolve_run_content(db, project_id, &artifact_id, action, live_content)
+            .await?;
 
     let files = bundle::parse_bundle(&content).map_err(|e| anyhow!(e))?;
     let files_json = serde_json::to_string(&files)?;
 
-    let result = registry.execute_terraform(&agent_id, artifact_id.clone(), flavor, action, files, timeout_secs, None).await;
+    let result = registry
+        .execute_terraform(
+            &agent_id,
+            artifact_id.clone(),
+            flavor,
+            action,
+            files,
+            timeout_secs,
+            None,
+        )
+        .await;
 
     let (exit_code, stdout, stderr) = match &result {
-        Ok(r)  => (Some(r.exit_code), r.stdout.clone(), r.stderr.clone()),
+        Ok(r) => (Some(r.exit_code), r.stdout.clone(), r.stderr.clone()),
         Err(e) => (None, String::new(), e.clone()),
     };
-    let success          = exit_code == Some(0);
-    let applied_content  = (action == TerraformAction::Apply && success).then_some(files_json.as_str());
+    let success = exit_code == Some(0);
+    let applied_content =
+        (action == TerraformAction::Apply && success).then_some(files_json.as_str());
     let infra_state = deployments::record_run_and_update_state(
-        db, project_id, &artifact_id, action, exit_code, &stdout, &stderr,
-        applied_content, "agent", None,
-    ).await.ok().flatten();
+        db,
+        project_id,
+        &artifact_id,
+        action,
+        exit_code,
+        &stdout,
+        &stderr,
+        applied_content,
+        "agent",
+        None,
+    )
+    .await
+    .ok()
+    .flatten();
 
     match result {
         Ok(r) => {
-            let mut value = json!({ "stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code });
+            let mut value =
+                json!({ "stdout": r.stdout, "stderr": r.stderr, "exit_code": r.exit_code });
             if let Some(state) = infra_state {
                 value["infra_state"] = json!(state);
             }
@@ -116,8 +146,8 @@ fn terraform_run_parameters() -> Value {
 }
 
 pub struct RunTerraformPlanTool {
-    pub db:      Arc<Db>,
-    pub registry:   Arc<MachineRegistry>,
+    pub db: Arc<Db>,
+    pub registry: Arc<MachineRegistry>,
     pub project_id: String,
 }
 
@@ -137,7 +167,14 @@ impl Tool for RunTerraformPlanTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        run_terraform(&self.db, &self.registry, &self.project_id, params, TerraformAction::Plan).await
+        run_terraform(
+            &self.db,
+            &self.registry,
+            &self.project_id,
+            params,
+            TerraformAction::Plan,
+        )
+        .await
     }
 
     fn preview(&self, result: &str) -> String {
@@ -146,8 +183,8 @@ impl Tool for RunTerraformPlanTool {
 }
 
 pub struct RunTerraformApplyTool {
-    pub db:      Arc<Db>,
-    pub registry:   Arc<MachineRegistry>,
+    pub db: Arc<Db>,
+    pub registry: Arc<MachineRegistry>,
     pub project_id: String,
 }
 
@@ -170,7 +207,14 @@ impl Tool for RunTerraformApplyTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        run_terraform(&self.db, &self.registry, &self.project_id, params, TerraformAction::Apply).await
+        run_terraform(
+            &self.db,
+            &self.registry,
+            &self.project_id,
+            params,
+            TerraformAction::Apply,
+        )
+        .await
     }
 
     fn preview(&self, result: &str) -> String {
@@ -179,8 +223,8 @@ impl Tool for RunTerraformApplyTool {
 }
 
 pub struct RunTerraformDestroyTool {
-    pub db:      Arc<Db>,
-    pub registry:   Arc<MachineRegistry>,
+    pub db: Arc<Db>,
+    pub registry: Arc<MachineRegistry>,
     pub project_id: String,
 }
 
@@ -189,11 +233,12 @@ impl Tool for RunTerraformDestroyTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "run_terraform_destroy".into(),
-            description: "Run 'terraform destroy' (or 'terragrunt destroy') for a Terraform/Terragrunt \
+            description:
+                "Run 'terraform destroy' (or 'terragrunt destroy') for a Terraform/Terragrunt \
                           artifact on a connected agent machine. This permanently destroys real \
                           infrastructure and cannot be undone; must only be called after the user \
                           has explicitly confirmed."
-                .into(),
+                    .into(),
             parameters: terraform_run_parameters(),
         }
     }
@@ -203,7 +248,14 @@ impl Tool for RunTerraformDestroyTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        run_terraform(&self.db, &self.registry, &self.project_id, params, TerraformAction::Destroy).await
+        run_terraform(
+            &self.db,
+            &self.registry,
+            &self.project_id,
+            params,
+            TerraformAction::Destroy,
+        )
+        .await
     }
 
     fn preview(&self, result: &str) -> String {
@@ -233,7 +285,8 @@ mod tests {
 
     #[test]
     fn validate_run_params_defaults_timeout() {
-        let (_, _, timeout) = validate_run_params(&json!({ "artifact_id": "art1", "agent_id": "a1" })).unwrap();
+        let (_, _, timeout) =
+            validate_run_params(&json!({ "artifact_id": "art1", "agent_id": "a1" })).unwrap();
         assert_eq!(timeout, DEFAULT_TERRAFORM_TIMEOUT_SECS);
     }
 
@@ -241,31 +294,39 @@ mod tests {
     fn validate_run_params_clamps_timeout_to_max() {
         let (_, _, timeout) = validate_run_params(&json!({
             "artifact_id": "art1", "agent_id": "a1", "timeout_secs": 999_999
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(timeout, MAX_TERRAFORM_TIMEOUT_SECS);
     }
 
     #[test]
     fn agent_belongs_to_project_false_for_unknown_agent() {
         let registry = make_registry();
-        assert!(!agent_belongs_to_project(&registry, "nonexistent", "proj-1"));
+        assert!(!agent_belongs_to_project(
+            &registry,
+            "nonexistent",
+            "proj-1"
+        ));
     }
 
     #[test]
     fn agent_belongs_to_project_false_for_cross_project_agent() {
         use crate::machines::{ConnectedAgent, ServerToAgent};
-        use tokio::sync::mpsc;
         use chrono::Utc;
+        use tokio::sync::mpsc;
 
         let registry = make_registry();
         let (tx, _rx) = mpsc::channel::<ServerToAgent>(8);
-        registry.agents.insert("agent-x".into(), ConnectedAgent {
-            id:           "agent-x".into(),
-            project_id:   "proj-2".into(),
-            hostname:     "other-host".into(),
-            connected_at: Utc::now(),
-            sender:       tx,
-        });
+        registry.agents.insert(
+            "agent-x".into(),
+            ConnectedAgent {
+                id: "agent-x".into(),
+                project_id: "proj-2".into(),
+                hostname: "other-host".into(),
+                connected_at: Utc::now(),
+                sender: tx,
+            },
+        );
 
         assert!(!agent_belongs_to_project(&registry, "agent-x", "proj-1"));
     }
@@ -273,18 +334,21 @@ mod tests {
     #[test]
     fn agent_belongs_to_project_true_for_matching_project() {
         use crate::machines::{ConnectedAgent, ServerToAgent};
-        use tokio::sync::mpsc;
         use chrono::Utc;
+        use tokio::sync::mpsc;
 
         let registry = make_registry();
         let (tx, _rx) = mpsc::channel::<ServerToAgent>(8);
-        registry.agents.insert("agent-x".into(), ConnectedAgent {
-            id:           "agent-x".into(),
-            project_id:   "proj-1".into(),
-            hostname:     "host".into(),
-            connected_at: Utc::now(),
-            sender:       tx,
-        });
+        registry.agents.insert(
+            "agent-x".into(),
+            ConnectedAgent {
+                id: "agent-x".into(),
+                project_id: "proj-1".into(),
+                hostname: "host".into(),
+                connected_at: Utc::now(),
+                sender: tx,
+            },
+        );
 
         assert!(agent_belongs_to_project(&registry, "agent-x", "proj-1"));
     }

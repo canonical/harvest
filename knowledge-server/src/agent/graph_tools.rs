@@ -5,9 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use super::tool::Tool;
 use crate::llm::types::ToolDefinition;
 use harvest_db::{Db, GRAPH_READER_ROLE};
-use super::tool::Tool;
 
 pub struct ListRepositoriesTool(pub Arc<Db>);
 
@@ -39,14 +39,20 @@ impl Tool for ListRepositoriesTool {
              GROUP BY r.name ORDER BY r.name",
             json!({ "parser_version": knowledge_harvester::parser::PARSER_VERSION }),
         ).await?;
-        let rows: Vec<Value> = rows.into_iter().map(|mut row| {
-            if row["stale_versions"].as_array().is_some_and(|a| a.is_empty()) {
-                if let Some(obj) = row.as_object_mut() {
-                    obj.remove("stale_versions");
+        let rows: Vec<Value> = rows
+            .into_iter()
+            .map(|mut row| {
+                if row["stale_versions"]
+                    .as_array()
+                    .is_some_and(|a| a.is_empty())
+                {
+                    if let Some(obj) = row.as_object_mut() {
+                        obj.remove("stale_versions");
+                    }
                 }
-            }
-            row
-        }).collect();
+                row
+            })
+            .collect();
         Ok(serde_json::to_string_pretty(&rows)?)
     }
 }
@@ -160,7 +166,9 @@ pub fn format_sources_for_budget(output: &str, budget: usize) -> String {
     }
     let omitted = output.chars().count() - budget;
     let mut capped: String = output.chars().take(budget).collect();
-    capped.push_str(&format!("\n\n[truncated, {omitted} more characters omitted]"));
+    capped.push_str(&format!(
+        "\n\n[truncated, {omitted} more characters omitted]"
+    ));
     capped
 }
 
@@ -199,14 +207,16 @@ impl Tool for ReadSourcesTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        let repo    = params["repo"].as_str().unwrap_or("").trim().to_string();
+        let repo = params["repo"].as_str().unwrap_or("").trim().to_string();
         let version = params["version"].as_str().unwrap_or("").trim().to_string();
         if repo.is_empty() || version.is_empty() {
             anyhow::bail!("read_sources requires repo and version");
         }
         let targets = source_targets(&params);
         if targets.files.is_empty() && targets.names.is_empty() {
-            anyhow::bail!("read_sources requires at least one file path in `files` or symbol name in `names`");
+            anyhow::bail!(
+                "read_sources requires at least one file path in `files` or symbol name in `names`"
+            );
         }
 
         let rows = self.0.query(
@@ -220,8 +230,12 @@ impl Tool for ReadSourcesTool {
 
         if rows.is_empty() {
             let mut missing = Vec::new();
-            for f in &targets.files { missing.push(format!("file {f}")); }
-            for n in &targets.names { missing.push(format!("symbol {n}")); }
+            for f in &targets.files {
+                missing.push(format!("file {f}"));
+            }
+            for n in &targets.names {
+                missing.push(format!("symbol {n}"));
+            }
             return Ok(format!(
                 "No symbols found for {} in {repo}:{version}. Use search_symbols to find the exact file path or name.",
                 missing.join(", ")
@@ -229,17 +243,21 @@ impl Tool for ReadSourcesTool {
         }
 
         let limit = clamp_limit(&params).min(READ_SOURCES_MAX_SYMBOLS);
-        let results: Vec<Value> = rows.iter().take(limit).map(|row| {
-            json!({
-                "file": row["file"],
-                "name": row["name"],
-                "kind": row["kind"],
-                "signature": row["signature"],
-                "start_line": row["start_line"],
-                "end_line": row["end_line"],
-                "source": row["source"],
+        let results: Vec<Value> = rows
+            .iter()
+            .take(limit)
+            .map(|row| {
+                json!({
+                    "file": row["file"],
+                    "name": row["name"],
+                    "kind": row["kind"],
+                    "signature": row["signature"],
+                    "start_line": row["start_line"],
+                    "end_line": row["end_line"],
+                    "source": row["source"],
+                })
             })
-        }).collect();
+            .collect();
 
         let serialized = serde_json::to_string_pretty(&results)?;
         Ok(truncate_to(&serialized, READ_SOURCES_BUDGET_CHARS).0)
@@ -432,7 +450,10 @@ impl Default for SemanticHandle {
 }
 
 impl SemanticHandle {
-    pub fn configured(embedder: Arc<dyn super::semantic::Embedder>, cfg: &crate::config::SemanticConfig) -> Self {
+    pub fn configured(
+        embedder: Arc<dyn super::semantic::Embedder>,
+        cfg: &crate::config::SemanticConfig,
+    ) -> Self {
         let (lexical_weight, semantic_weight) = cfg.effective_weights();
         Self {
             embedder: Some(embedder),
@@ -450,31 +471,49 @@ impl SemanticHandle {
     pub async fn available(&self, db: &Db) -> bool {
         *self
             .availability
-            .get_or_init(|| async { super::semantic::semantic_available(db).await.unwrap_or(false) })
+            .get_or_init(|| async {
+                super::semantic::semantic_available(db)
+                    .await
+                    .unwrap_or(false)
+            })
             .await
     }
 }
 
 #[async_trait]
 impl Tool for SearchSymbolsTool {
-
     fn definition(&self) -> ToolDefinition {
         search_symbols_definition()
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
         let q = params["query"].as_str().unwrap_or("").trim().to_string();
-        let path_prefix = params["path_prefix"].as_str().unwrap_or("").trim().to_string();
-        let decorator = params["decorator"].as_str().unwrap_or("").trim().trim_start_matches('@').to_string();
+        let path_prefix = params["path_prefix"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let decorator = params["decorator"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .trim_start_matches('@')
+            .to_string();
         if q.is_empty() && path_prefix.is_empty() && decorator.is_empty() {
-            anyhow::bail!("search_symbols requires a non-empty query, a path_prefix or a decorator");
+            anyhow::bail!(
+                "search_symbols requires a non-empty query, a path_prefix or a decorator"
+            );
         }
-        let repo    = params["repo"].as_str().unwrap_or("").trim().to_string();
+        let repo = params["repo"].as_str().unwrap_or("").trim().to_string();
         let version = params["version"].as_str().unwrap_or("").trim().to_string();
-        let kind    = params["kind"].as_str().unwrap_or("any").trim().to_string();
-        let kind    = if kind.is_empty() { "any".to_string() } else { kind };
-        let limit   = clamp_limit(&params);
-        let offset  = params["offset"].as_i64().unwrap_or(0).max(0);
+        let kind = params["kind"].as_str().unwrap_or("any").trim().to_string();
+        let kind = if kind.is_empty() {
+            "any".to_string()
+        } else {
+            kind
+        };
+        let limit = clamp_limit(&params);
+        let offset = params["offset"].as_i64().unwrap_or(0).max(0);
 
         let mut params = json!({
             "query": q,
@@ -487,7 +526,11 @@ impl Tool for SearchSymbolsTool {
             "offset": offset,
         });
 
-        let embed = if q.is_empty() { None } else { self.semantic_query_embedding(&q).await };
+        let embed = if q.is_empty() {
+            None
+        } else {
+            self.semantic_query_embedding(&q).await
+        };
         let hybrid = match embed {
             Some(v) => {
                 params["qvec"] = json!(v);
@@ -509,7 +552,11 @@ impl Tool for SearchSymbolsTool {
             } else {
                 " Try a shorter fragment, a file path fragment, or a term from a class body."
             };
-            let scope = if path_prefix.is_empty() { String::new() } else { format!(" under {path_prefix:?}") };
+            let scope = if path_prefix.is_empty() {
+                String::new()
+            } else {
+                format!(" under {path_prefix:?}")
+            };
             return Ok(format!("No symbols found for {q:?}{scope}.{hint}"));
         }
         let has_more = rows.len() > limit;
@@ -519,7 +566,11 @@ impl Tool for SearchSymbolsTool {
         for row in &rows {
             let signature = row["signature"].as_str().unwrap_or_default();
             let source = row["source"].as_str().unwrap_or_default();
-            let basis = if !signature.is_empty() { signature } else { source };
+            let basis = if !signature.is_empty() {
+                signature
+            } else {
+                source
+            };
             let mut result = json!({
                 "repo": row["repo"],
                 "version": row["version"],
@@ -569,13 +620,16 @@ impl Tool for GetSymbolSourceTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        let rows = self.0.query(
-            "SELECT name, start_line, end_line, signature, source
+        let rows = self
+            .0
+            .query(
+                "SELECT name, start_line, end_line, signature, source
              FROM code_symbols
              WHERE repo = $repo AND version = $version AND file = $file AND name = $name
              LIMIT 1",
-            params,
-        ).await?;
+                params,
+            )
+            .await?;
         Ok(serde_json::to_string_pretty(&rows)?)
     }
 
@@ -606,13 +660,16 @@ impl Tool for GetFileSymbolsTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        let rows = self.0.query(
-            "SELECT label AS kind, name, start_line, end_line, signature
+        let rows = self
+            .0
+            .query(
+                "SELECT label AS kind, name, start_line, end_line, signature
              FROM code_symbols
              WHERE repo = $repo AND version = $version AND file = $file
              ORDER BY start_line",
-            params,
-        ).await?;
+                params,
+            )
+            .await?;
         Ok(serde_json::to_string_pretty(&rows)?)
     }
 }
@@ -638,13 +695,16 @@ impl Tool for FindCallersTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        let rows = self.0.query(
-            "SELECT src_file AS file, src_name AS caller, line AS call_site_line
+        let rows = self
+            .0
+            .query(
+                "SELECT src_file AS file, src_name AS caller, line AS call_site_line
                   FROM code_edges
                   WHERE relation = 'CALLS' AND repo = $repo AND version = $version
                     AND dst_name = $function_name AND dst_label = 'Function'",
-            params,
-        ).await?;
+                params,
+            )
+            .await?;
         Ok(serde_json::to_string_pretty(&rows)?)
     }
 }
@@ -703,12 +763,15 @@ impl Tool for GetImportsTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        let rows = self.0.query(
-            "SELECT target, line FROM code_imports
+        let rows = self
+            .0
+            .query(
+                "SELECT target, line FROM code_imports
              WHERE repo = $repo AND version = $version AND file = $file
              ORDER BY line",
-            params,
-        ).await?;
+                params,
+            )
+            .await?;
         Ok(serde_json::to_string_pretty(&rows)?)
     }
 }
@@ -721,7 +784,8 @@ impl Tool for CompareSymbolAcrossVersionsTool {
         ToolDefinition {
             name: "compare_symbol_across_versions".into(),
             description: "Return the source text of a named symbol in two versions side-by-side, \
-                          useful for answering 'what changed between vA and vB'.".into(),
+                          useful for answering 'what changed between vA and vB'."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -737,14 +801,17 @@ impl Tool for CompareSymbolAcrossVersionsTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        let rows = self.0.query(
-            "SELECT version, start_line, end_line, source
+        let rows = self
+            .0
+            .query(
+                "SELECT version, start_line, end_line, source
              FROM code_symbols
              WHERE repo = $repo AND file = $file AND name = $name
                AND version IN ($version_a, $version_b)
              ORDER BY version",
-            params,
-        ).await?;
+                params,
+            )
+            .await?;
         Ok(serde_json::to_string_pretty(&rows)?)
     }
 
@@ -766,14 +833,18 @@ pub fn set_run_sql_available(available: bool) {
 pub async fn probe_run_sql(db: &Db) -> bool {
     let probe = async {
         let tx = db.begin().await?;
-        tx.batch_execute(&format!("SET LOCAL ROLE {GRAPH_READER_ROLE}")).await?;
+        tx.batch_execute(&format!("SET LOCAL ROLE {GRAPH_READER_ROLE}"))
+            .await?;
         tx.rollback().await?;
         anyhow::Ok(())
     };
     match probe.await {
         Ok(()) => true,
         Err(e) => {
-            let user = db.query("SELECT current_user AS u", json!({})).await.ok()
+            let user = db
+                .query("SELECT current_user AS u", json!({}))
+                .await
+                .ok()
                 .and_then(|rows| rows.first().and_then(|r| r["u"].as_str().map(String::from)))
                 .unwrap_or_else(|| "<harvest database user>".to_string());
             tracing::error!(
@@ -821,9 +892,9 @@ impl Tool for RunSqlTool {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AncestorVisit {
-    pub root:  String,
-    pub name:  String,
-    pub file:  String,
+    pub root: String,
+    pub name: String,
+    pub file: String,
     pub depth: usize,
     pub value: Option<String>,
     pub bases: Vec<String>,
@@ -831,13 +902,13 @@ pub struct AncestorVisit {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EffectiveCapability {
-    pub class:      String,
-    pub value:      Option<String>,
+    pub class: String,
+    pub value: Option<String>,
     pub defined_on: Option<String>,
     pub defined_in: Option<String>,
-    pub depth:      Option<usize>,
-    pub inherited:  bool,
-    pub ambiguous:  bool,
+    pub depth: Option<usize>,
+    pub inherited: bool,
+    pub ambiguous: bool,
 }
 
 pub fn validate_capability_name(name: &str) -> Result<()> {
@@ -853,7 +924,9 @@ pub fn validate_capability_name(name: &str) -> Result<()> {
 pub fn extract_capability_value(source: &str, capability: &str) -> Option<String> {
     for line in source.lines() {
         let trimmed = line.trim_start();
-        let Some(rest) = trimmed.strip_prefix(capability) else { continue };
+        let Some(rest) = trimmed.strip_prefix(capability) else {
+            continue;
+        };
         let rest = rest.trim_start_matches([' ', '\t']);
         let assigned = match rest.strip_prefix(':') {
             Some(after_annotation) => match after_annotation.find('=') {
@@ -880,55 +953,67 @@ pub fn resolve_effective_capabilities(visits: &[AncestorVisit]) -> Vec<Effective
             order.push(v.root.clone());
         }
     }
-    order.iter().map(|root| {
-        let mut definitions: HashMap<&str, Vec<&AncestorVisit>> = HashMap::new();
-        for v in visits.iter().filter(|v| &v.root == root) {
-            let same_name = definitions.entry(v.name.as_str()).or_default();
-            match same_name.iter_mut().find(|d| d.file == v.file) {
-                Some(existing) if v.depth < existing.depth => *existing = v,
-                Some(_) => {}
-                None => same_name.push(v),
+    order
+        .iter()
+        .map(|root| {
+            let mut definitions: HashMap<&str, Vec<&AncestorVisit>> = HashMap::new();
+            for v in visits.iter().filter(|v| &v.root == root) {
+                let same_name = definitions.entry(v.name.as_str()).or_default();
+                match same_name.iter_mut().find(|d| d.file == v.file) {
+                    Some(existing) if v.depth < existing.depth => *existing = v,
+                    Some(_) => {}
+                    None => same_name.push(v),
+                }
             }
-        }
-        for same_name in definitions.values_mut() {
-            if same_name.iter().any(|d| !is_test_path(&d.file)) {
-                same_name.retain(|d| !is_test_path(&d.file));
+            for same_name in definitions.values_mut() {
+                if same_name.iter().any(|d| !is_test_path(&d.file)) {
+                    same_name.retain(|d| !is_test_path(&d.file));
+                }
+                same_name.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.file.cmp(&b.file)));
             }
-            same_name.sort_by(|a, b| a.depth.cmp(&b.depth).then_with(|| a.file.cmp(&b.file)));
-        }
 
-        let mro = linearize(root, &definitions, &mut Vec::new());
-        let mut resolved = EffectiveCapability {
-            class: root.clone(),
-            value: None,
-            defined_on: None,
-            defined_in: None,
-            depth: None,
-            inherited: false,
-            ambiguous: false,
-        };
-        for name in &mro {
-            let Some(same_name) = definitions.get(name.as_str()) else { continue };
-            let declaring: Vec<&&AncestorVisit> = same_name.iter().filter(|d| d.value.is_some()).collect();
-            let Some(first) = declaring.first() else { continue };
-            let disagree = declaring.iter().any(|d| d.value != first.value)
-                || (declaring.len() < same_name.len());
-            if same_name.len() > 1 && disagree {
-                resolved.ambiguous = true;
+            let mro = linearize(root, &definitions, &mut Vec::new());
+            let mut resolved = EffectiveCapability {
+                class: root.clone(),
+                value: None,
+                defined_on: None,
+                defined_in: None,
+                depth: None,
+                inherited: false,
+                ambiguous: false,
+            };
+            for name in &mro {
+                let Some(same_name) = definitions.get(name.as_str()) else {
+                    continue;
+                };
+                let declaring: Vec<&&AncestorVisit> =
+                    same_name.iter().filter(|d| d.value.is_some()).collect();
+                let Some(first) = declaring.first() else {
+                    continue;
+                };
+                let disagree = declaring.iter().any(|d| d.value != first.value)
+                    || (declaring.len() < same_name.len());
+                if same_name.len() > 1 && disagree {
+                    resolved.ambiguous = true;
+                    break;
+                }
+                resolved.value = first.value.clone();
+                resolved.defined_on = Some(first.name.clone());
+                resolved.defined_in = Some(first.file.clone());
+                resolved.depth = Some(first.depth);
+                resolved.inherited = first.depth > 0;
                 break;
             }
-            resolved.value = first.value.clone();
-            resolved.defined_on = Some(first.name.clone());
-            resolved.defined_in = Some(first.file.clone());
-            resolved.depth = Some(first.depth);
-            resolved.inherited = first.depth > 0;
-            break;
-        }
-        resolved
-    }).collect()
+            resolved
+        })
+        .collect()
 }
 
-fn linearize(name: &str, definitions: &HashMap<&str, Vec<&AncestorVisit>>, stack: &mut Vec<String>) -> Vec<String> {
+fn linearize(
+    name: &str,
+    definitions: &HashMap<&str, Vec<&AncestorVisit>>,
+    stack: &mut Vec<String>,
+) -> Vec<String> {
     let Some(definition) = definitions.get(name).and_then(|d| d.first()) else {
         return vec![name.to_string()];
     };
@@ -936,7 +1021,9 @@ fn linearize(name: &str, definitions: &HashMap<&str, Vec<&AncestorVisit>>, stack
         return vec![name.to_string()];
     }
     stack.push(name.to_string());
-    let parents: Vec<Vec<String>> = definition.bases.iter()
+    let parents: Vec<Vec<String>> = definition
+        .bases
+        .iter()
         .map(|base| linearize(base, definitions, stack))
         .collect();
     stack.pop();
@@ -959,9 +1046,13 @@ fn linearize(name: &str, definitions: &HashMap<&str, Vec<&AncestorVisit>>, stack
 
 pub fn is_test_path(file: &str) -> bool {
     let file_name = file.rsplit('/').next().unwrap_or(file);
-    file.starts_with("tests/") || file.starts_with("test/")
-        || file.contains("/tests/") || file.contains("/test/")
-        || file_name.starts_with("test_") || file_name.ends_with("_test.py") || file_name == "conftest.py"
+    file.starts_with("tests/")
+        || file.starts_with("test/")
+        || file.contains("/tests/")
+        || file.contains("/test/")
+        || file_name.starts_with("test_")
+        || file_name.ends_with("_test.py")
+        || file_name == "conftest.py"
 }
 
 fn c3_merge(mut sequences: Vec<Vec<String>>) -> Option<Vec<String>> {
@@ -971,7 +1062,8 @@ fn c3_merge(mut sequences: Vec<Vec<String>>) -> Option<Vec<String>> {
         if sequences.is_empty() {
             return Some(merged);
         }
-        let head = sequences.iter()
+        let head = sequences
+            .iter()
             .map(|s| &s[0])
             .find(|candidate| !sequences.iter().any(|s| s[1..].contains(candidate)))?
             .clone();
@@ -997,7 +1089,8 @@ fn strings_from_param(params: &Value, keys: &[&str]) -> Vec<String> {
     for key in keys {
         let candidates: Vec<String> = match params.get(*key) {
             Some(Value::String(s)) => s.split(',').map(|p| p.trim().to_string()).collect(),
-            Some(Value::Array(items)) => items.iter()
+            Some(Value::Array(items)) => items
+                .iter()
                 .filter_map(|v| v.as_str())
                 .map(|s| s.trim().to_string())
                 .collect(),
@@ -1047,12 +1140,12 @@ pub fn capability_matrix_definition() -> ToolDefinition {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WalkedClass {
-    pub root:           String,
-    pub name:           String,
-    pub file:           String,
-    pub depth:          usize,
+    pub root: String,
+    pub name: String,
+    pub file: String,
+    pub depth: usize,
     pub recorded_bases: Vec<String>,
-    pub header:         String,
+    pub header: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1074,7 +1167,10 @@ pub fn inheritance_gaps(walked: &[WalkedClass]) -> Vec<InheritanceGap> {
     for class in walked {
         if class.recorded_bases.is_empty() {
             if class.file.ends_with(".py") && !python_declared_bases(&class.header).is_empty() {
-                gaps.push(InheritanceGap::BasesNotRecorded { root: class.root.clone(), class: class.name.clone() });
+                gaps.push(InheritanceGap::BasesNotRecorded {
+                    root: class.root.clone(),
+                    class: class.name.clone(),
+                });
             }
             continue;
         }
@@ -1085,9 +1181,14 @@ pub fn inheritance_gaps(walked: &[WalkedClass]) -> Vec<InheritanceGap> {
             if IMPLICIT_PYTHON_BASES.contains(&base.as_str()) {
                 continue;
             }
-            let reached = walked.iter().any(|w| w.root == class.root && &w.name == base);
+            let reached = walked
+                .iter()
+                .any(|w| w.root == class.root && &w.name == base);
             if !reached {
-                gaps.push(InheritanceGap::ParentNotIndexed { root: class.root.clone(), parent: base.clone() });
+                gaps.push(InheritanceGap::ParentNotIndexed {
+                    root: class.root.clone(),
+                    parent: base.clone(),
+                });
             }
         }
     }
@@ -1095,11 +1196,17 @@ pub fn inheritance_gaps(walked: &[WalkedClass]) -> Vec<InheritanceGap> {
 }
 
 pub fn python_declared_bases(source: &str) -> Vec<String> {
-    let Some(class_at) = source.find("class ") else { return Vec::new() };
+    let Some(class_at) = source.find("class ") else {
+        return Vec::new();
+    };
     let statement = &source[class_at..];
-    let Some(colon) = statement.find(':') else { return Vec::new() };
+    let Some(colon) = statement.find(':') else {
+        return Vec::new();
+    };
     let head = &statement[..colon];
-    let (Some(open), Some(close)) = (head.find('('), head.rfind(')')) else { return Vec::new() };
+    let (Some(open), Some(close)) = (head.find('('), head.rfind(')')) else {
+        return Vec::new();
+    };
     if close <= open {
         return Vec::new();
     }
@@ -1108,20 +1215,36 @@ pub fn python_declared_bases(source: &str) -> Vec<String> {
     let mut current = String::new();
     for c in head[open + 1..close].chars() {
         match c {
-            '(' | '[' => { depth += 1; current.push(c); }
-            ')' | ']' => { depth = depth.saturating_sub(1); current.push(c); }
-            ',' if depth == 0 => { bases.push(std::mem::take(&mut current)); }
+            '(' | '[' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' | ']' => {
+                depth = depth.saturating_sub(1);
+                current.push(c);
+            }
+            ',' if depth == 0 => {
+                bases.push(std::mem::take(&mut current));
+            }
             _ => current.push(c),
         }
     }
     bases.push(current);
-    bases.into_iter()
+    bases
+        .into_iter()
         .map(|b| b.split_whitespace().collect::<String>())
         .filter(|b| !b.is_empty() && !b.contains('=') && b != "object")
         .collect()
 }
 
-const IMPLICIT_PYTHON_BASES: &[&str] = &["object", "ABC", "Generic", "Protocol", "Exception", "BaseException"];
+const IMPLICIT_PYTHON_BASES: &[&str] = &[
+    "object",
+    "ABC",
+    "Generic",
+    "Protocol",
+    "Exception",
+    "BaseException",
+];
 
 const CAPABILITY_HEADER_CHARS: i32 = 400;
 const CAPABILITY_MAX_DEPTH: i32 = 12;
@@ -1137,7 +1260,7 @@ impl Tool for GetCapabilityMatrixTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        let repo    = params["repo"].as_str().unwrap_or("").trim().to_string();
+        let repo = params["repo"].as_str().unwrap_or("").trim().to_string();
         let version = params["version"].as_str().unwrap_or("").trim().to_string();
         let classes = class_names_from_params(&params);
         let capabilities = capability_names_from_params(&params);
@@ -1149,7 +1272,9 @@ impl Tool for GetCapabilityMatrixTool {
             anyhow::bail!("get_capability_matrix requires at least one class name in `classes`");
         }
         if capabilities.is_empty() {
-            anyhow::bail!("get_capability_matrix requires at least one capability name in `capability`");
+            anyhow::bail!(
+                "get_capability_matrix requires at least one capability name in `capability`"
+            );
         }
         for name in &capabilities {
             validate_capability_name(name)?;
@@ -1160,19 +1285,22 @@ impl Tool for GetCapabilityMatrixTool {
         let mut bases_not_recorded: Vec<String> = Vec::new();
         let mut parents_not_indexed: Vec<String> = Vec::new();
         for capability in &capabilities {
-            let rows = self.0.query(
-                CAPABILITY_WALK_SQL,
-                json!({
-                    "repo": repo,
-                    "version": version,
-                    "classes": classes,
-                    "capability": capability,
-                    "max_depth": CAPABILITY_MAX_DEPTH,
-                    "window": CAPABILITY_WINDOW_CHARS,
-                    "lead": CAPABILITY_WINDOW_LEAD,
-                    "header": CAPABILITY_HEADER_CHARS,
-                }),
-            ).await?;
+            let rows = self
+                .0
+                .query(
+                    CAPABILITY_WALK_SQL,
+                    json!({
+                        "repo": repo,
+                        "version": version,
+                        "classes": classes,
+                        "capability": capability,
+                        "max_depth": CAPABILITY_MAX_DEPTH,
+                        "window": CAPABILITY_WINDOW_CHARS,
+                        "lead": CAPABILITY_WINDOW_LEAD,
+                        "header": CAPABILITY_HEADER_CHARS,
+                    }),
+                )
+                .await?;
 
             let mut visits: Vec<AncestorVisit> = Vec::new();
             let mut found: Vec<String> = Vec::new();
@@ -1187,8 +1315,13 @@ impl Tool for GetCapabilityMatrixTool {
                 let depth = row["depth"].as_i64().unwrap_or(0).max(0) as usize;
                 let window = row["source_window"].as_str().unwrap_or_default();
                 let value = extract_capability_value(window, capability);
-                let bases: Vec<String> = row["bases"].as_array()
-                    .map(|a| a.iter().filter_map(|b| b.as_str().map(String::from)).collect())
+                let bases: Vec<String> = row["bases"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|b| b.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 walked.push(WalkedClass {
                     root: root.clone(),
@@ -1198,10 +1331,18 @@ impl Tool for GetCapabilityMatrixTool {
                     recorded_bases: bases.clone(),
                     header: row["header"].as_str().unwrap_or_default().to_string(),
                 });
-                visits.push(AncestorVisit { root, name, file, depth, value, bases });
+                visits.push(AncestorVisit {
+                    root,
+                    name,
+                    file,
+                    depth,
+                    value,
+                    bases,
+                });
             }
             let effective = resolve_effective_capabilities(&visits);
-            let unresolved: Vec<&str> = effective.iter()
+            let unresolved: Vec<&str> = effective
+                .iter()
                 .filter(|e| e.value.is_none())
                 .map(|e| e.class.as_str())
                 .collect();
@@ -1211,10 +1352,14 @@ impl Tool for GetCapabilityMatrixTool {
                 }
                 match gap {
                     InheritanceGap::BasesNotRecorded { class, .. } => {
-                        if !bases_not_recorded.contains(&class) { bases_not_recorded.push(class); }
+                        if !bases_not_recorded.contains(&class) {
+                            bases_not_recorded.push(class);
+                        }
                     }
                     InheritanceGap::ParentNotIndexed { parent, .. } => {
-                        if !parents_not_indexed.contains(&parent) { parents_not_indexed.push(parent); }
+                        if !parents_not_indexed.contains(&parent) {
+                            parents_not_indexed.push(parent);
+                        }
                     }
                 }
             }
@@ -1308,7 +1453,8 @@ ORDER BY root, depth, name
 "#;
 
 pub fn reject_non_select(sql: &str) -> Result<()> {
-    let first_word: String = sql.trim_start()
+    let first_word: String = sql
+        .trim_start()
         .trim_start_matches('(')
         .chars()
         .take_while(|c| c.is_ascii_alphabetic())
@@ -1323,8 +1469,12 @@ pub fn reject_non_select(sql: &str) -> Result<()> {
 pub async fn run_read_only_sql(db: &Db, sql: &str, params: Value) -> Result<Vec<Value>> {
     reject_non_select(sql)?;
     let tx = db.begin().await?;
-    tx.batch_execute("SET TRANSACTION READ ONLY; SET LOCAL statement_timeout = '10s'").await?;
-    if let Err(e) = tx.batch_execute(&format!("SET LOCAL ROLE {GRAPH_READER_ROLE}")).await {
+    tx.batch_execute("SET TRANSACTION READ ONLY; SET LOCAL statement_timeout = '10s'")
+        .await?;
+    if let Err(e) = tx
+        .batch_execute(&format!("SET LOCAL ROLE {GRAPH_READER_ROLE}"))
+        .await
+    {
         tracing::error!(error = %e, "run_sql: cannot switch to the read-only role");
         anyhow::bail!(
             "run_sql is unavailable: the database role {GRAPH_READER_ROLE} is missing or not granted \
@@ -1440,7 +1590,7 @@ impl Tool for GetEvidencePackTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        let repo    = params["repo"].as_str().unwrap_or("").trim().to_string();
+        let repo = params["repo"].as_str().unwrap_or("").trim().to_string();
         let version = params["version"].as_str().unwrap_or("").trim().to_string();
         if repo.is_empty() || version.is_empty() {
             anyhow::bail!("get_evidence_pack requires repo and version");
@@ -1455,14 +1605,17 @@ impl Tool for GetEvidencePackTool {
         let mut matrix_rows: Vec<Value> = Vec::new();
         if !classes.is_empty() && !capabilities.is_empty() {
             let matrix = GetCapabilityMatrixTool(Arc::clone(&self.0));
-            let rendered = matrix.execute(json!({
-                "repo": repo,
-                "version": version,
-                "classes": classes,
-                "capability": capabilities,
-            })).await?;
-            matrix_rows = serde_json::from_str::<Vec<Value>>(&rendered)
-                .unwrap_or_else(|_| vec![json!({ "note": truncate_to(&rendered, EVIDENCE_MATRIX_MAX_CHARS).0 })]);
+            let rendered = matrix
+                .execute(json!({
+                    "repo": repo,
+                    "version": version,
+                    "classes": classes,
+                    "capability": capabilities,
+                }))
+                .await?;
+            matrix_rows = serde_json::from_str::<Vec<Value>>(&rendered).unwrap_or_else(|_| {
+                vec![json!({ "note": truncate_to(&rendered, EVIDENCE_MATRIX_MAX_CHARS).0 })]
+            });
         }
 
         let mut symbols = SourceTargets::default();
@@ -1474,28 +1627,37 @@ impl Tool for GetEvidencePackTool {
         let sources = ReadSourcesTool(Arc::clone(&self.0));
         let mut fetched: Vec<(String, String, String)> = Vec::new();
         if max_symbols > 0 && !(symbols.files.is_empty() && symbols.names.is_empty()) {
-            let rendered = sources.execute(json!({
-                "repo": repo,
-                "version": version,
-                "files": symbols.files,
-                "names": symbols.names,
-                "limit": max_symbols,
-            })).await?;
+            let rendered = sources
+                .execute(json!({
+                    "repo": repo,
+                    "version": version,
+                    "files": symbols.files,
+                    "names": symbols.names,
+                    "limit": max_symbols,
+                }))
+                .await?;
             if let Ok(parsed) = serde_json::from_str::<Vec<Value>>(&rendered) {
                 for row in parsed {
                     let name = row["name"].as_str().unwrap_or_default().to_string();
                     let file = row["file"].as_str().unwrap_or_default().to_string();
-                    let src  = row["source"].as_str().unwrap_or_default().to_string();
+                    let src = row["source"].as_str().unwrap_or_default().to_string();
                     fetched.push((name, file, src));
                 }
             }
         }
 
-        let requested = if symbols.names.is_empty() { symbols.files.clone() } else { symbols.names.clone() };
+        let requested = if symbols.names.is_empty() {
+            symbols.files.clone()
+        } else {
+            symbols.names.clone()
+        };
         let refs: Vec<(&str, &str, &str)> = if fetched.is_empty() {
             requested.iter().map(|n| (n.as_str(), "", "")).collect()
         } else {
-            fetched.iter().map(|(n, f, s)| (n.as_str(), f.as_str(), s.as_str())).collect()
+            fetched
+                .iter()
+                .map(|(n, f, s)| (n.as_str(), f.as_str(), s.as_str()))
+                .collect()
         };
 
         Ok(render_evidence_pack(&Value::Array(matrix_rows), &refs))
@@ -1597,32 +1759,50 @@ struct SubclassQuery<'a> {
 
 impl FindSubclassesTool {
     async fn subclasses(&self, query: &SubclassQuery<'_>, class: &str) -> Result<Vec<Value>> {
-        self.0.query(SUBCLASSES_SQL, json!({
-            "repo": query.repo,
-            "version": query.version,
-            "class": class,
-            "path_prefix": query.path_prefix,
-            "decorator": query.decorator,
-            "max_depth": SUBCLASSES_MAX_DEPTH,
-        })).await
+        self.0
+            .query(
+                SUBCLASSES_SQL,
+                json!({
+                    "repo": query.repo,
+                    "version": query.version,
+                    "class": class,
+                    "path_prefix": query.path_prefix,
+                    "decorator": query.decorator,
+                    "max_depth": SUBCLASSES_MAX_DEPTH,
+                }),
+            )
+            .await
     }
 
-    async fn broader_ancestor(&self, query: &SubclassQuery<'_>, class: &str, found: &[Value]) -> Result<Option<(String, usize)>> {
-        let ancestors = self.0.query(ANCESTORS_SQL, json!({
-            "repo": query.repo,
-            "version": query.version,
-            "class": class,
-            "max_depth": SUBCLASSES_MAX_DEPTH,
-        })).await?;
+    async fn broader_ancestor(
+        &self,
+        query: &SubclassQuery<'_>,
+        class: &str,
+        found: &[Value],
+    ) -> Result<Option<(String, usize)>> {
+        let ancestors = self
+            .0
+            .query(
+                ANCESTORS_SQL,
+                json!({
+                    "repo": query.repo,
+                    "version": query.version,
+                    "class": class,
+                    "max_depth": SUBCLASSES_MAX_DEPTH,
+                }),
+            )
+            .await?;
         let known: HashSet<(String, String)> = found.iter().map(subclass_key).collect();
         let mut best: Option<(String, usize)> = None;
-        let candidates = ancestors.iter()
+        let candidates = ancestors
+            .iter()
             .filter_map(|row| row["name"].as_str())
             .filter(|name| !IMPLICIT_PYTHON_BASES.contains(name))
             .take(SUBCLASSES_MAX_ANCESTORS_CHECKED);
         for ancestor in candidates {
             let rows = self.subclasses(query, ancestor).await?;
-            let extra = rows.iter()
+            let extra = rows
+                .iter()
                 .filter(|row| row["name"].as_str() != Some(class))
                 .filter(|row| !known.contains(&subclass_key(row)))
                 .count();
@@ -1642,9 +1822,18 @@ fn subclass_key(row: &Value) -> (String, String) {
 }
 
 pub fn render_subclass_line(row: &Value) -> String {
-    let marker = if row["has_subclasses"].as_bool().unwrap_or(false) { "+" } else { "" };
-    let decorators: Vec<String> = row["decorators"].as_array()
-        .map(|a| a.iter().filter_map(|d| d.as_str().map(|d| format!("@{d}"))).collect())
+    let marker = if row["has_subclasses"].as_bool().unwrap_or(false) {
+        "+"
+    } else {
+        ""
+    };
+    let decorators: Vec<String> = row["decorators"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|d| d.as_str().map(|d| format!("@{d}")))
+                .collect()
+        })
         .unwrap_or_default();
     let mut line = format!(
         "{}:{} {}{} <- {}",
@@ -1668,12 +1857,21 @@ impl Tool for FindSubclassesTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        let repo    = params["repo"].as_str().unwrap_or("").trim().to_string();
+        let repo = params["repo"].as_str().unwrap_or("").trim().to_string();
         let version = params["version"].as_str().unwrap_or("").trim().to_string();
-        let class   = params["class"].as_str().unwrap_or("").trim();
-        let class   = class.rsplit('.').next().unwrap_or(class).to_string();
-        let path_prefix = params["path_prefix"].as_str().unwrap_or("").trim().to_string();
-        let decorator = params["decorator"].as_str().unwrap_or("").trim().trim_start_matches('@').to_string();
+        let class = params["class"].as_str().unwrap_or("").trim();
+        let class = class.rsplit('.').next().unwrap_or(class).to_string();
+        let path_prefix = params["path_prefix"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let decorator = params["decorator"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .trim_start_matches('@')
+            .to_string();
         if repo.is_empty() || version.is_empty() || class.is_empty() {
             anyhow::bail!("find_subclasses requires repo, version and class");
         }
@@ -1682,7 +1880,12 @@ impl Tool for FindSubclassesTool {
             Some(n) if n > 0 => (n as usize).min(SUBCLASSES_PAGE_MAX),
             _ => SUBCLASSES_PAGE_DEFAULT,
         };
-        let query = SubclassQuery { repo: &repo, version: &version, path_prefix: &path_prefix, decorator: &decorator };
+        let query = SubclassQuery {
+            repo: &repo,
+            version: &version,
+            path_prefix: &path_prefix,
+            decorator: &decorator,
+        };
 
         let rows = self.subclasses(&query, &class).await?;
         let mut scope = String::new();
@@ -1739,7 +1942,10 @@ impl Tool for FindSubclassesTool {
             )
         };
         if shown_end < total {
-            out.push_str(&format!("\nMore: {} subclasses not shown; call again with offset={shown_end}.", total - shown_end));
+            out.push_str(&format!(
+                "\nMore: {} subclasses not shown; call again with offset={shown_end}.",
+                total - shown_end
+            ));
         }
         if let Some(hint) = hint {
             out.push('\n');
@@ -1753,7 +1959,10 @@ pub fn all_tools(db: Arc<Db>) -> Vec<Box<dyn Tool>> {
     all_tools_with_semantic(db, None)
 }
 
-pub fn all_tools_with_semantic(db: Arc<Db>, semantic: Option<Arc<SemanticHandle>>) -> Vec<Box<dyn Tool>> {
+pub fn all_tools_with_semantic(
+    db: Arc<Db>,
+    semantic: Option<Arc<SemanticHandle>>,
+) -> Vec<Box<dyn Tool>> {
     let search = match semantic {
         Some(handle) => SearchSymbolsTool::with_semantic(Arc::clone(&db), handle),
         None => SearchSymbolsTool::new(Arc::clone(&db)),
@@ -1785,40 +1994,89 @@ mod tests {
 
     #[test]
     fn python_declared_bases_reads_dotted_and_multiple_parents() {
-        assert_eq!(python_declared_bases("class LVMVolumeDriver(driver.VolumeDriver):\n    pass"), vec!["driver.VolumeDriver"]);
+        assert_eq!(
+            python_declared_bases("class LVMVolumeDriver(driver.VolumeDriver):\n    pass"),
+            vec!["driver.VolumeDriver"]
+        );
         assert_eq!(
             python_declared_bases("class TatlinFCVolumeDriver(tatlin_common.TatlinCommonVolumeDriver,\n                           driver.FibreChannelDriver):\n"),
             vec!["tatlin_common.TatlinCommonVolumeDriver", "driver.FibreChannelDriver"],
         );
-        assert_eq!(python_declared_bases("class BaseVD(object, metaclass=abc.ABCMeta):\n"), Vec::<String>::new());
-        assert_eq!(python_declared_bases("class Plain:\n    x = 1"), Vec::<String>::new());
-        assert_eq!(python_declared_bases("class G(Generic[T, U], Base):\n"), vec!["Generic[T,U]", "Base"]);
+        assert_eq!(
+            python_declared_bases("class BaseVD(object, metaclass=abc.ABCMeta):\n"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            python_declared_bases("class Plain:\n    x = 1"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            python_declared_bases("class G(Generic[T, U], Base):\n"),
+            vec!["Generic[T,U]", "Base"]
+        );
     }
 
-    fn walked(root: &str, name: &str, depth: usize, file: &str, bases: &[&str], header: &str) -> WalkedClass {
+    fn walked(
+        root: &str,
+        name: &str,
+        depth: usize,
+        file: &str,
+        bases: &[&str],
+        header: &str,
+    ) -> WalkedClass {
         WalkedClass {
-            root: root.into(), name: name.into(), file: file.into(), depth,
-            recorded_bases: bases.iter().map(|b| b.to_string()).collect(), header: header.into(),
+            root: root.into(),
+            name: name.into(),
+            file: file.into(),
+            depth,
+            recorded_bases: bases.iter().map(|b| b.to_string()).collect(),
+            header: header.into(),
         }
     }
 
     #[test]
     fn inheritance_gaps_flag_unrecorded_bases_only_for_python_classes_with_parents() {
         let classes = vec![
-            walked("LVM", "LVM", 0, "drivers/lvm.py", &[], "class LVM(driver.VolumeDriver):"),
+            walked(
+                "LVM",
+                "LVM",
+                0,
+                "drivers/lvm.py",
+                &[],
+                "class LVM(driver.VolumeDriver):",
+            ),
             walked("Root", "Root", 0, "root.py", &[], "class Root(object):"),
             walked("Rs", "Rs", 0, "src/lib.rs", &[], "struct Rs(u8);"),
         ];
-        assert_eq!(inheritance_gaps(&classes), vec![InheritanceGap::BasesNotRecorded { root: "LVM".into(), class: "LVM".into() }]);
+        assert_eq!(
+            inheritance_gaps(&classes),
+            vec![InheritanceGap::BasesNotRecorded {
+                root: "LVM".into(),
+                class: "LVM".into()
+            }]
+        );
     }
 
     #[test]
     fn inheritance_gaps_flag_parents_missing_from_the_walk() {
         let classes = vec![
-            walked("A", "A", 0, "a.py", &["B", "External", "object"], "class A(B, External, object):"),
+            walked(
+                "A",
+                "A",
+                0,
+                "a.py",
+                &["B", "External", "object"],
+                "class A(B, External, object):",
+            ),
             walked("A", "B", 1, "b.py", &[], "class B:"),
         ];
-        assert_eq!(inheritance_gaps(&classes), vec![InheritanceGap::ParentNotIndexed { root: "A".into(), parent: "External".into() }]);
+        assert_eq!(
+            inheritance_gaps(&classes),
+            vec![InheritanceGap::ParentNotIndexed {
+                root: "A".into(),
+                parent: "External".into()
+            }]
+        );
     }
 
     #[test]
@@ -1854,7 +2112,13 @@ mod tests {
         visit_with_bases(root, name, depth, value, &[])
     }
 
-    fn visit_with_bases(root: &str, name: &str, depth: usize, value: Option<&str>, bases: &[&str]) -> AncestorVisit {
+    fn visit_with_bases(
+        root: &str,
+        name: &str,
+        depth: usize,
+        value: Option<&str>,
+        bases: &[&str],
+    ) -> AncestorVisit {
         AncestorVisit {
             root: root.into(),
             name: name.into(),
@@ -1868,13 +2132,19 @@ mod tests {
     #[test]
     fn extract_capability_value_finds_class_level_assignment() {
         let src = "class NfsDriver(BaseDriver):\n    SUPPORTS_ACTIVE_ACTIVE = True\n    VERSION = '1.0'\n";
-        assert_eq!(extract_capability_value(src, "SUPPORTS_ACTIVE_ACTIVE"), Some("True".into()));
+        assert_eq!(
+            extract_capability_value(src, "SUPPORTS_ACTIVE_ACTIVE"),
+            Some("True".into())
+        );
     }
 
     #[test]
     fn extract_capability_value_handles_type_annotation() {
         let src = "class A:\n    SUPPORTS_X: bool = False\n";
-        assert_eq!(extract_capability_value(src, "SUPPORTS_X"), Some("False".into()));
+        assert_eq!(
+            extract_capability_value(src, "SUPPORTS_X"),
+            Some("False".into())
+        );
     }
 
     #[test]
@@ -1904,20 +2174,29 @@ mod tests {
     #[test]
     fn extract_capability_value_strips_trailing_comment() {
         let src = "class A:\n    SUPPORTS_X = True  # only for one protocol\n";
-        assert_eq!(extract_capability_value(src, "SUPPORTS_X"), Some("True".into()));
+        assert_eq!(
+            extract_capability_value(src, "SUPPORTS_X"),
+            Some("True".into())
+        );
     }
 
     #[test]
     fn extract_capability_value_finds_collection_values() {
         let src = "class A:\n    PROTOCOLS = ['iscsi', 'fc']\n";
-        assert_eq!(extract_capability_value(src, "PROTOCOLS"), Some("['iscsi', 'fc']".into()));
+        assert_eq!(
+            extract_capability_value(src, "PROTOCOLS"),
+            Some("['iscsi', 'fc']".into())
+        );
     }
 
     #[test]
     fn extract_capability_value_works_on_bounded_window() {
         let src = "class A:\n    SUPPORTS_X = True\n";
         let window: String = src.chars().skip(10).take(20).collect();
-        assert_eq!(extract_capability_value(&window, "SUPPORTS_X"), Some("True".into()));
+        assert_eq!(
+            extract_capability_value(&window, "SUPPORTS_X"),
+            Some("True".into())
+        );
     }
 
     #[test]
@@ -2019,7 +2298,10 @@ mod tests {
             other,
         ];
         let resolved = resolve_effective_capabilities(&visits);
-        assert!(resolved[0].ambiguous, "two different classes named Base disagree");
+        assert!(
+            resolved[0].ambiguous,
+            "two different classes named Base disagree"
+        );
         assert_eq!(resolved[0].value, None);
     }
 
@@ -2039,22 +2321,48 @@ mod tests {
 
     #[test]
     fn test_doubles_do_not_make_the_real_class_ambiguous() {
-        let mut mock = visit_with_bases("PowerFlexDriver", "PowerFlexDriver", 0, None, &["PowerFlexDriver"]);
+        let mut mock = visit_with_bases(
+            "PowerFlexDriver",
+            "PowerFlexDriver",
+            0,
+            None,
+            &["PowerFlexDriver"],
+        );
         mock.file = "cinder/tests/unit/volume/drivers/dell_emc/powerflex/mocks.py".into();
-        let mut real = visit_with_bases("PowerFlexDriver", "PowerFlexDriver", 0, Some("True"), &["VolumeDriver"]);
+        let mut real = visit_with_bases(
+            "PowerFlexDriver",
+            "PowerFlexDriver",
+            0,
+            Some("True"),
+            &["VolumeDriver"],
+        );
         real.file = "cinder/volume/drivers/dell_emc/powerflex/driver.py".into();
         let resolved = resolve_effective_capabilities(&[mock, real]);
         assert!(!resolved[0].ambiguous);
         assert_eq!(resolved[0].value.as_deref(), Some("True"));
-        assert_eq!(resolved[0].defined_in.as_deref(), Some("cinder/volume/drivers/dell_emc/powerflex/driver.py"));
+        assert_eq!(
+            resolved[0].defined_in.as_deref(),
+            Some("cinder/volume/drivers/dell_emc/powerflex/driver.py")
+        );
     }
 
     #[test]
     fn test_paths_are_recognised() {
-        for path in ["tests/a.py", "cinder/tests/unit/x.py", "pkg/test/x.py", "pkg/test_x.py", "pkg/x_test.py", "conftest.py"] {
+        for path in [
+            "tests/a.py",
+            "cinder/tests/unit/x.py",
+            "pkg/test/x.py",
+            "pkg/test_x.py",
+            "pkg/x_test.py",
+            "conftest.py",
+        ] {
             assert!(is_test_path(path), "{path}");
         }
-        for path in ["cinder/volume/drivers/lvm.py", "pkg/contest.py", "pkg/testing_utils.py"] {
+        for path in [
+            "cinder/volume/drivers/lvm.py",
+            "pkg/contest.py",
+            "pkg/testing_utils.py",
+        ] {
             assert!(!is_test_path(path), "{path}");
         }
     }
@@ -2082,10 +2390,7 @@ mod tests {
 
     #[test]
     fn resolve_keeps_roots_in_first_seen_order() {
-        let visits = vec![
-            visit("B", "B", 0, Some("1")),
-            visit("A", "A", 0, Some("2")),
-        ];
+        let visits = vec![visit("B", "B", 0, Some("1")), visit("A", "A", 0, Some("2"))];
         let resolved = resolve_effective_capabilities(&visits);
         assert_eq!(resolved[0].class, "B");
         assert_eq!(resolved[1].class, "A");
@@ -2116,7 +2421,10 @@ mod tests {
     #[test]
     fn capability_name_validation_rejects_non_identifiers() {
         for bad in ["", "has space", "1LEADING", "drop; table", "a-b", "(x)"] {
-            assert!(validate_capability_name(bad).is_err(), "should reject: {bad}");
+            assert!(
+                validate_capability_name(bad).is_err(),
+                "should reject: {bad}"
+            );
         }
     }
 
@@ -2128,18 +2436,31 @@ mod tests {
         assert_eq!(params["type"], "object");
         for required in ["repo", "version", "classes", "capability"] {
             assert!(
-                params["required"].as_array().unwrap().iter().any(|v| v == required),
+                params["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|v| v == required),
                 "{required} should be required"
             );
-            assert!(params["properties"].get(required).is_some(), "{required} should have a schema");
+            assert!(
+                params["properties"].get(required).is_some(),
+                "{required} should have a schema"
+            );
         }
     }
 
     #[test]
     fn capability_matrix_definition_documents_inheritance() {
         let desc = capability_matrix_definition().description.to_lowercase();
-        assert!(desc.contains("inherit"), "description should mention inheritance: {desc}");
-        assert!(desc.contains("effective"), "description should mention effective values: {desc}");
+        assert!(
+            desc.contains("inherit"),
+            "description should mention inheritance: {desc}"
+        );
+        assert!(
+            desc.contains("effective"),
+            "description should mention effective values: {desc}"
+        );
     }
 
     #[test]
@@ -2148,7 +2469,10 @@ mod tests {
         assert_eq!(capability_names_from_params(&p), vec!["FLAG_A".to_string()]);
 
         let p = json!({ "capability": ["FLAG_A", "FLAG_B"] });
-        assert_eq!(capability_names_from_params(&p), vec!["FLAG_A".to_string(), "FLAG_B".to_string()]);
+        assert_eq!(
+            capability_names_from_params(&p),
+            vec!["FLAG_A".to_string(), "FLAG_B".to_string()]
+        );
 
         let p = json!({ "capabilities": ["FLAG_C"] });
         assert_eq!(capability_names_from_params(&p), vec!["FLAG_C".to_string()]);
@@ -2166,7 +2490,10 @@ mod tests {
         assert_eq!(class_names_from_params(&p), vec!["Alias".to_string()]);
 
         let p = json!({ "classes": ["A", "B"] });
-        assert_eq!(class_names_from_params(&p), vec!["A".to_string(), "B".to_string()]);
+        assert_eq!(
+            class_names_from_params(&p),
+            vec!["A".to_string(), "B".to_string()]
+        );
 
         let p = json!({});
         assert!(class_names_from_params(&p).is_empty());
@@ -2189,7 +2516,10 @@ mod search_tests {
 
     #[test]
     fn search_sql_matches_docstrings() {
-        assert!(SEARCH_SQL.contains("docstring"), "search should match prose documentation");
+        assert!(
+            SEARCH_SQL.contains("docstring"),
+            "search should match prose documentation"
+        );
     }
 
     #[test]
@@ -2214,14 +2544,21 @@ mod search_tests {
     #[test]
     fn search_definition_mentions_capability_constants() {
         let desc = search_symbols_definition().description.to_lowercase();
-        assert!(desc.contains("capabilit"), "should mention capability constants: {desc}");
+        assert!(
+            desc.contains("capabilit"),
+            "should mention capability constants: {desc}"
+        );
     }
 
     #[test]
     fn search_preview_truncates_long_source_and_keeps_line_count() {
         let long = "x".repeat(5_000);
         let preview = source_preview(&long, 100);
-        assert!(preview.chars().count() <= 140, "preview too long: {}", preview.chars().count());
+        assert!(
+            preview.chars().count() <= 140,
+            "preview too long: {}",
+            preview.chars().count()
+        );
         assert!(preview.contains('…'));
     }
 
@@ -2237,7 +2574,7 @@ mod search_tests {
         assert_eq!(clamp_limit(&json!({ "limit": 25 })), 25);
         assert_eq!(clamp_limit(&json!({ "limit": 10_000 })), SEARCH_LIMIT_MAX);
         assert_eq!(clamp_limit(&json!({ "limit": 0 })), 1);
-        assert_eq!(clamp_limit(&json!({})) , SEARCH_LIMIT_DEFAULT);
+        assert_eq!(clamp_limit(&json!({})), SEARCH_LIMIT_DEFAULT);
     }
 
     #[test]
@@ -2253,7 +2590,10 @@ mod search_tests {
     #[test]
     fn read_sources_definition_advertises_batching() {
         let desc = read_sources_definition().description.to_lowercase();
-        assert!(desc.contains("single call"), "should encourage batching: {desc}");
+        assert!(
+            desc.contains("single call"),
+            "should encourage batching: {desc}"
+        );
     }
 
     #[test]
@@ -2265,7 +2605,10 @@ mod search_tests {
         });
         let targets = source_targets(&params);
         assert_eq!(targets.files, vec!["a.py".to_string(), "b.py".to_string()]);
-        assert_eq!(targets.names, vec!["Foo".to_string(), "Bar".to_string(), "Baz".to_string()]);
+        assert_eq!(
+            targets.names,
+            vec!["Foo".to_string(), "Bar".to_string(), "Baz".to_string()]
+        );
     }
 
     #[test]
@@ -2295,7 +2638,11 @@ mod search_tests {
 
     fn stub_handle() -> Arc<SemanticHandle> {
         Arc::new(SemanticHandle::configured(
-            Arc::new(super::super::semantic::FnEmbedder::constant("text-embedding-004", 4, 0.1)),
+            Arc::new(super::super::semantic::FnEmbedder::constant(
+                "text-embedding-004",
+                4,
+                0.1,
+            )),
             &crate::config::SemanticConfig::default(),
         ))
     }
@@ -2312,15 +2659,25 @@ mod search_tests {
 
     #[test]
     fn semantic_handle_is_not_ready_when_the_model_is_blank() {
-        let mut h = SemanticHandle::configured(Arc::new(super::super::semantic::FnEmbedder::constant("m", 4, 0.1)), &crate::config::SemanticConfig::default());
+        let mut h = SemanticHandle::configured(
+            Arc::new(super::super::semantic::FnEmbedder::constant("m", 4, 0.1)),
+            &crate::config::SemanticConfig::default(),
+        );
         h.model = String::new();
         assert!(!h.is_ready());
     }
 
     #[test]
     fn semantic_handle_uses_the_normalised_config_weights() {
-        let cfg = crate::config::SemanticConfig { lexical_weight: 1.0, semantic_weight: 3.0, ..Default::default() };
-        let h = SemanticHandle::configured(Arc::new(super::super::semantic::FnEmbedder::constant("m", 4, 0.1)), &cfg);
+        let cfg = crate::config::SemanticConfig {
+            lexical_weight: 1.0,
+            semantic_weight: 3.0,
+            ..Default::default()
+        };
+        let h = SemanticHandle::configured(
+            Arc::new(super::super::semantic::FnEmbedder::constant("m", 4, 0.1)),
+            &cfg,
+        );
         assert!((h.lexical_weight - 0.25).abs() < 1e-9);
         assert!((h.semantic_weight - 0.75).abs() < 1e-9);
         assert_eq!(h.model, "text-embedding-004");
@@ -2328,7 +2685,9 @@ mod search_tests {
 
     #[tokio::test]
     async fn search_stays_lexical_when_no_embedder_is_configured() {
-        let tool = SearchSymbolsTool::new(Arc::new(Db::connect_without_migrating("postgres://127.0.0.1:1/none").unwrap()));
+        let tool = SearchSymbolsTool::new(Arc::new(
+            Db::connect_without_migrating("postgres://127.0.0.1:1/none").unwrap(),
+        ));
         assert!(tool.semantic_query_embedding("hello").await.is_none());
     }
 
@@ -2364,7 +2723,8 @@ mod search_tests {
 
     #[test]
     fn hybrid_sql_keeps_lexical_only_matches() {
-        assert!(HYBRID_SEARCH_SQL.contains("WHERE ls.lexical_score > 0 OR ss.semantic_score IS NOT NULL"));
+        assert!(HYBRID_SEARCH_SQL
+            .contains("WHERE ls.lexical_score > 0 OR ss.semantic_score IS NOT NULL"));
     }
 
     #[test]
@@ -2374,15 +2734,27 @@ mod search_tests {
 
     #[test]
     fn hybrid_sql_applies_the_same_filters_as_the_lexical_query() {
-        for needle in ["$repo = ''", "$version = ''", "$kind = 'any'", "LIMIT $limit", "ORDER BY score DESC"] {
-            assert!(HYBRID_SEARCH_SQL.contains(needle), "hybrid search is missing {needle}");
+        for needle in [
+            "$repo = ''",
+            "$version = ''",
+            "$kind = 'any'",
+            "LIMIT $limit",
+            "ORDER BY score DESC",
+        ] {
+            assert!(
+                HYBRID_SEARCH_SQL.contains(needle),
+                "hybrid search is missing {needle}"
+            );
         }
     }
 
     #[test]
     fn hybrid_sql_shares_the_lexical_signal_definition() {
         for needle in ["q_literal", "name_trgm", "sig_sub", "doc_trgm", "cap_match"] {
-            assert!(HYBRID_SEARCH_SQL.contains(needle), "hybrid search is missing {needle}");
+            assert!(
+                HYBRID_SEARCH_SQL.contains(needle),
+                "hybrid search is missing {needle}"
+            );
         }
     }
 
@@ -2403,7 +2775,10 @@ mod search_tests {
     async fn search_falls_back_to_lexical_when_the_embedder_fails() {
         let db = Arc::new(Db::connect_without_migrating("postgres://127.0.0.1:1/none").unwrap());
         let handle = Arc::new(SemanticHandle::configured(
-            Arc::new(super::super::semantic::FnEmbedder::failing("text-embedding-004", 4)),
+            Arc::new(super::super::semantic::FnEmbedder::failing(
+                "text-embedding-004",
+                4,
+            )),
             &crate::config::SemanticConfig::default(),
         ));
         let tool = SearchSymbolsTool::with_semantic(db, handle);
@@ -2413,25 +2788,43 @@ mod search_tests {
     #[tokio::test]
     async fn a_configured_embedder_produces_a_query_embedding() {
         let handle = SemanticHandle::configured(
-            Arc::new(super::super::semantic::FnEmbedder::constant("text-embedding-004", 4, 0.25)),
+            Arc::new(super::super::semantic::FnEmbedder::constant(
+                "text-embedding-004",
+                4,
+                0.25,
+            )),
             &crate::config::SemanticConfig::default(),
         );
-        assert_eq!(SearchSymbolsTool::embed_query(&handle, "hello").await.unwrap(), vec![0.25; 4]);
+        assert_eq!(
+            SearchSymbolsTool::embed_query(&handle, "hello")
+                .await
+                .unwrap(),
+            vec![0.25; 4]
+        );
     }
 
     #[tokio::test]
     async fn a_failing_embedder_produces_no_query_embedding() {
         let handle = SemanticHandle::configured(
-            Arc::new(super::super::semantic::FnEmbedder::failing("text-embedding-004", 4)),
+            Arc::new(super::super::semantic::FnEmbedder::failing(
+                "text-embedding-004",
+                4,
+            )),
             &crate::config::SemanticConfig::default(),
         );
-        assert!(SearchSymbolsTool::embed_query(&handle, "hello").await.is_none());
+        assert!(SearchSymbolsTool::embed_query(&handle, "hello")
+            .await
+            .is_none());
     }
 
     #[test]
     fn a_constant_embedder_returns_one_vector_per_input() {
         let e = super::super::semantic::FnEmbedder::constant("m", 3, 1.0);
-        let out = futures::executor::block_on(super::super::semantic::Embedder::embed(&e, &["a".to_string(), "b".to_string()])).unwrap();
+        let out = futures::executor::block_on(super::super::semantic::Embedder::embed(
+            &e,
+            &["a".to_string(), "b".to_string()],
+        ))
+        .unwrap();
         assert_eq!(out, vec![vec![1.0; 3], vec![1.0; 3]]);
         assert_eq!(super::super::semantic::Embedder::dimensions(&e), 3);
         assert_eq!(super::super::semantic::Embedder::model(&e), "m");
@@ -2440,7 +2833,12 @@ mod search_tests {
     #[test]
     fn a_failing_embedder_surfaces_its_error() {
         let e = super::super::semantic::FnEmbedder::failing("m", 3);
-        let err = futures::executor::block_on(super::super::semantic::Embedder::embed(&e, &["a".to_string()])).unwrap_err().to_string();
+        let err = futures::executor::block_on(super::super::semantic::Embedder::embed(
+            &e,
+            &["a".to_string()],
+        ))
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("unavailable"), "unexpected error: {err}");
     }
 
@@ -2478,7 +2876,10 @@ mod search_tests {
             })
             .collect();
         for pair in scores.windows(2) {
-            assert!(pair[0] > pair[1], "the chain must be strictly descending, got {pair:?}");
+            assert!(
+                pair[0] > pair[1],
+                "the chain must be strictly descending, got {pair:?}"
+            );
         }
     }
 
@@ -2486,7 +2887,10 @@ mod search_tests {
     fn fallback_chain_covers_every_ranking_signal() {
         let chain: Vec<&str> = fallback_chain().to_vec();
         let ranking: Vec<&str> = SEARCH_RANKING.iter().map(|(n, _)| *n).collect();
-        assert_eq!(chain, ranking, "the chain and the ranking must stay in sync");
+        assert_eq!(
+            chain, ranking,
+            "the chain and the ranking must stay in sync"
+        );
     }
 
     #[test]
@@ -2494,7 +2898,8 @@ mod search_tests {
         for sql in [SEARCH_SQL, HYBRID_SEARCH_SQL] {
             for (signal, score) in SEARCH_RANKING {
                 assert!(
-                    sql.contains(&format!("{score} ELSE 0 END")) || sql.contains(&format!("{score},")),
+                    sql.contains(&format!("{score} ELSE 0 END"))
+                        || sql.contains(&format!("{score},")),
                     "ranking weight {score} for {signal} must appear in the SQL"
                 );
             }
@@ -2511,9 +2916,19 @@ mod evidence_pack_tests {
         let d = evidence_pack_definition();
         assert_eq!(d.name, "get_evidence_pack");
         let text = d.description.to_lowercase();
-        assert!(text.contains("one call"), "should promise a single call: {}", d.description);
-        assert!(text.contains("capabilit"), "should mention capability resolution");
-        assert!(text.contains("evidence"), "should mention evidence/citations");
+        assert!(
+            text.contains("one call"),
+            "should promise a single call: {}",
+            d.description
+        );
+        assert!(
+            text.contains("capabilit"),
+            "should mention capability resolution"
+        );
+        assert!(
+            text.contains("evidence"),
+            "should mention evidence/citations"
+        );
     }
 
     #[test]
@@ -2522,17 +2937,25 @@ mod evidence_pack_tests {
         let required = d.parameters["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "repo"));
         assert!(required.iter().any(|v| v == "version"));
-        assert!(!required.iter().any(|v| v == "capability"),
-            "capability should be optional");
+        assert!(
+            !required.iter().any(|v| v == "capability"),
+            "capability should be optional"
+        );
     }
 
     #[test]
     fn evidence_pack_declares_capability_and_symbol_params() {
         let d = evidence_pack_definition();
         let props = &d.parameters["properties"];
-        assert!(props.get("capability").is_some(), "capability param missing");
+        assert!(
+            props.get("capability").is_some(),
+            "capability param missing"
+        );
         assert!(props.get("symbols").is_some(), "symbols param missing");
-        assert!(props.get("max_symbols").is_some(), "max_symbols param missing");
+        assert!(
+            props.get("max_symbols").is_some(),
+            "max_symbols param missing"
+        );
     }
 
     #[test]
@@ -2540,7 +2963,10 @@ mod evidence_pack_tests {
         let budget = std::hint::black_box(EVIDENCE_PACK_BUDGET_CHARS);
         let cap = std::hint::black_box(MAX_SINGLE_TOOL_RESULT_CHARS);
         assert!(budget > 0);
-        assert!(budget <= cap, "an evidence pack must fit inside a single tool result");
+        assert!(
+            budget <= cap,
+            "an evidence pack must fit inside a single tool result"
+        );
     }
 
     #[test]
@@ -2550,7 +2976,10 @@ mod evidence_pack_tests {
         let budget = std::hint::black_box(EVIDENCE_PACK_BUDGET_CHARS);
         assert!(matrix > 0);
         assert!(symbols > 0);
-        assert!(matrix + symbols <= budget, "sections must fit in the pack budget");
+        assert!(
+            matrix + symbols <= budget,
+            "sections must fit in the pack budget"
+        );
     }
 
     #[test]
@@ -2562,7 +2991,11 @@ mod evidence_pack_tests {
         );
         assert!(out.contains("capability_matrix"), "matrix section missing");
         assert!(out.contains("helper"), "symbol section missing");
-        assert!(out.len() <= EVIDENCE_PACK_BUDGET_CHARS + 400, "pack too large: {}", out.len());
+        assert!(
+            out.len() <= EVIDENCE_PACK_BUDGET_CHARS + 400,
+            "pack too large: {}",
+            out.len()
+        );
         assert!(out.contains("truncated"), "truncation must be signalled");
     }
 
@@ -2573,17 +3006,23 @@ mod evidence_pack_tests {
             &[("helper", "src/a.py", "def helper():\n    return 1")],
         );
         assert!(out.contains("def helper():\n    return 1"));
-        assert!(!out.contains("truncated"), "small packs must not be marked truncated");
+        assert!(
+            !out.contains("truncated"),
+            "small packs must not be marked truncated"
+        );
     }
 
     #[test]
     fn evidence_pack_marks_missing_symbols() {
-        let out = render_evidence_pack(
-            &serde_json::json!([]),
-            &[("ghost", "src/nope.py", "")],
+        let out = render_evidence_pack(&serde_json::json!([]), &[("ghost", "src/nope.py", "")]);
+        assert!(
+            out.contains("ghost"),
+            "requested symbol should still be listed"
         );
-        assert!(out.contains("ghost"), "requested symbol should still be listed");
-        assert!(out.to_lowercase().contains("not found"), "missing symbol must be reported");
+        assert!(
+            out.to_lowercase().contains("not found"),
+            "missing symbol must be reported"
+        );
     }
 
     #[test]
@@ -2615,6 +3054,9 @@ mod clamp_key_tests {
 
     #[test]
     fn clamp_limit_never_exceeds_the_maximum() {
-        assert_eq!(clamp_limit(&json!({ "limit": 1_000_000 })), SEARCH_LIMIT_MAX);
+        assert_eq!(
+            clamp_limit(&json!({ "limit": 1_000_000 })),
+            SEARCH_LIMIT_MAX
+        );
     }
 }

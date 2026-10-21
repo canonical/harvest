@@ -8,7 +8,11 @@ pub struct ChainBuilder {
 
 impl ChainBuilder {
     pub fn new() -> Self {
-        Self { chain: Vec::new(), pending_thinking: String::new(), pending_thinking_delta: String::new() }
+        Self {
+            chain: Vec::new(),
+            pending_thinking: String::new(),
+            pending_thinking_delta: String::new(),
+        }
     }
 
     pub fn text_delta(&mut self, text: &str) {
@@ -26,7 +30,13 @@ impl ChainBuilder {
         }
     }
 
-    pub fn tool_call(&mut self, name: &str, input: &Value, description: Option<&str>, hostname: Option<&str>) {
+    pub fn tool_call(
+        &mut self,
+        name: &str,
+        input: &Value,
+        description: Option<&str>,
+        hostname: Option<&str>,
+    ) {
         self.flush_pending();
         let mut entry = json!({
             "type": "tool_call",
@@ -59,7 +69,9 @@ impl ChainBuilder {
     }
 
     pub fn tool_result(&mut self, name: &str, preview: &str) {
-        if let Some(entry) = self.chain.iter_mut()
+        if let Some(entry) = self
+            .chain
+            .iter_mut()
             .find(|e| e["type"] == "tool_call" && e["name"] == name && e["preview"].is_null())
         {
             entry["preview"] = json!(preview);
@@ -74,7 +86,13 @@ impl ChainBuilder {
         }));
     }
 
-    pub fn parallel_research_lead_done(&mut self, index: usize, iterations: usize, preview: &str, duration_ms: u64) {
+    pub fn parallel_research_lead_done(
+        &mut self,
+        index: usize,
+        iterations: usize,
+        preview: &str,
+        duration_ms: u64,
+    ) {
         self.chain.push(json!({
             "type": "parallel_research_lead_done",
             "index": index,
@@ -117,8 +135,10 @@ impl ChainBuilder {
 }
 
 pub fn split_enumerations(chain: Vec<Value>) -> (Vec<Value>, Vec<Value>) {
-    let (enumerations, steps): (Vec<Value>, Vec<Value>) = chain.into_iter().partition(|e| e["type"] == "enumeration");
-    let enumerations = enumerations.into_iter()
+    let (enumerations, steps): (Vec<Value>, Vec<Value>) =
+        chain.into_iter().partition(|e| e["type"] == "enumeration");
+    let enumerations = enumerations
+        .into_iter()
         .map(|e| json!({ "tool": e["tool"], "input": e["input"], "result": e["result"] }))
         .collect();
     (steps, enumerations)
@@ -137,15 +157,22 @@ mod tests {
         let mut b = ChainBuilder::new();
         b.tool_call("find_subclasses", &json!({ "class": "BaseVD" }), None, None);
         b.tool_result("find_subclasses", "127 subclasses");
-        b.enumeration("find_subclasses", &json!({ "class": "BaseVD" }), "127 subclasses\nfull list");
+        b.enumeration(
+            "find_subclasses",
+            &json!({ "class": "BaseVD" }),
+            "127 subclasses\nfull list",
+        );
         let (steps, enumerations) = split_enumerations(b.finish());
         assert!(steps.iter().all(|e| e["type"] != "enumeration"));
         assert_eq!(steps.len(), 1);
-        assert_eq!(enumerations, vec![json!({
-            "tool": "find_subclasses",
-            "input": { "class": "BaseVD" },
-            "result": "127 subclasses\nfull list",
-        })]);
+        assert_eq!(
+            enumerations,
+            vec![json!({
+                "tool": "find_subclasses",
+                "input": { "class": "BaseVD" },
+                "result": "127 subclasses\nfull list",
+            })]
+        );
     }
 
     use super::*;
@@ -167,7 +194,10 @@ mod tests {
     fn thinking_pushes_immediately() {
         let mut b = ChainBuilder::new();
         b.thinking("reasoning");
-        assert_eq!(b.finish(), vec![json!({"type": "thinking", "text": "reasoning"})]);
+        assert_eq!(
+            b.finish(),
+            vec![json!({"type": "thinking", "text": "reasoning"})]
+        );
     }
 
     #[test]
@@ -182,19 +212,25 @@ mod tests {
         let mut b = ChainBuilder::new();
         b.text_delta("let me check");
         b.tool_call("search", &json!({}), None, None);
-        assert_eq!(b.finish(), vec![
-            json!({"type": "thinking", "text": "let me check"}),
-            json!({"type": "tool_call", "name": "search", "input": {}, "status": "done", "preview": null}),
-        ]);
+        assert_eq!(
+            b.finish(),
+            vec![
+                json!({"type": "thinking", "text": "let me check"}),
+                json!({"type": "tool_call", "name": "search", "input": {}, "status": "done", "preview": null}),
+            ]
+        );
     }
 
     #[test]
     fn tool_call_without_preamble_has_no_thinking_before_it() {
         let mut b = ChainBuilder::new();
         b.tool_call("search", &json!({}), None, None);
-        assert_eq!(b.finish(), vec![
-            json!({"type": "tool_call", "name": "search", "input": {}, "status": "done", "preview": null}),
-        ]);
+        assert_eq!(
+            b.finish(),
+            vec![
+                json!({"type": "tool_call", "name": "search", "input": {}, "status": "done", "preview": null}),
+            ]
+        );
     }
 
     #[test]
@@ -203,7 +239,10 @@ mod tests {
         b.text_delta("Hello ");
         b.text_delta("world");
         b.tool_call("search", &json!({}), None, None);
-        assert_eq!(b.finish()[0], json!({"type": "thinking", "text": "Hello world"}));
+        assert_eq!(
+            b.finish()[0],
+            json!({"type": "thinking", "text": "Hello world"})
+        );
     }
 
     #[test]
@@ -211,9 +250,12 @@ mod tests {
         let mut b = ChainBuilder::new();
         b.tool_call("search", &json!({"q": "x"}), None, None);
         b.tool_result("search", "found 3 results");
-        assert_eq!(b.finish(), vec![
-            json!({"type": "tool_call", "name": "search", "input": {"q": "x"}, "status": "done", "preview": "found 3 results"}),
-        ]);
+        assert_eq!(
+            b.finish(),
+            vec![
+                json!({"type": "tool_call", "name": "search", "input": {"q": "x"}, "status": "done", "preview": "found 3 results"}),
+            ]
+        );
     }
 
     #[test]
@@ -248,15 +290,26 @@ mod tests {
         let chain = b.finish();
         assert_eq!(chain.len(), 4);
         assert_eq!(chain[0], json!({"type": "thinking", "text": "a"}));
-        assert_eq!(chain[1], json!({"type": "tool_call", "name": "t1", "input": {}, "status": "done", "preview": "r1"}));
+        assert_eq!(
+            chain[1],
+            json!({"type": "tool_call", "name": "t1", "input": {}, "status": "done", "preview": "r1"})
+        );
         assert_eq!(chain[2], json!({"type": "thinking", "text": "b"}));
-        assert_eq!(chain[3], json!({"type": "tool_call", "name": "t2", "input": {}, "status": "done", "preview": "r2"}));
+        assert_eq!(
+            chain[3],
+            json!({"type": "tool_call", "name": "t2", "input": {}, "status": "done", "preview": "r2"})
+        );
     }
 
     #[test]
     fn tool_call_includes_description_and_hostname_when_provided() {
         let mut b = ChainBuilder::new();
-        b.tool_call("run_command", &json!({"agent_id": "a1"}), Some("Running ls"), Some("build-box"));
+        b.tool_call(
+            "run_command",
+            &json!({"agent_id": "a1"}),
+            Some("Running ls"),
+            Some("build-box"),
+        );
         let chain = b.finish();
         assert_eq!(chain[0]["description"], json!("Running ls"));
         assert_eq!(chain[0]["hostname"], json!("build-box"));
@@ -276,14 +329,22 @@ mod tests {
         let mut b = ChainBuilder::new();
         b.tool_call("list_agents", &json!({}), None, None);
         b.tool_result("list_agents", "[]");
-        b.confirm_action("tc1", "create_lxd_agent", &json!({"name": "x"}), "Create agent x");
+        b.confirm_action(
+            "tc1",
+            "create_lxd_agent",
+            &json!({"name": "x"}),
+            "Create agent x",
+        );
         let chain = b.finish();
         assert_eq!(chain.len(), 2);
-        assert_eq!(chain[1], json!({
-            "type": "confirm_action", "id": "tc1", "name": "create_lxd_agent",
-            "input": {"name": "x"}, "description": "Create agent x",
-            "status": "pending", "steps": [], "result_text": "",
-        }));
+        assert_eq!(
+            chain[1],
+            json!({
+                "type": "confirm_action", "id": "tc1", "name": "create_lxd_agent",
+                "input": {"name": "x"}, "description": "Create agent x",
+                "status": "pending", "steps": [], "result_text": "",
+            })
+        );
     }
 
     #[test]
@@ -292,7 +353,10 @@ mod tests {
         b.text_delta("Let me create that agent");
         b.confirm_action("tc1", "create_lxd_agent", &json!({}), "desc");
         let chain = b.finish();
-        assert_eq!(chain[0], json!({"type": "thinking", "text": "Let me create that agent"}));
+        assert_eq!(
+            chain[0],
+            json!({"type": "thinking", "text": "Let me create that agent"})
+        );
         assert_eq!(chain[1]["type"], json!("confirm_action"));
     }
 
@@ -313,7 +377,10 @@ mod tests {
         b.tool_call("search", &json!({}), None, None);
         let chain = b.finish();
         assert_eq!(chain.len(), 2);
-        assert_eq!(chain[0], json!({"type": "thinking", "text": "I should search"}));
+        assert_eq!(
+            chain[0],
+            json!({"type": "thinking", "text": "I should search"})
+        );
         assert_eq!(chain[1]["type"], json!("tool_call"));
     }
 
@@ -325,8 +392,14 @@ mod tests {
         b.tool_call("search", &json!({}), None, None);
         let chain = b.finish();
         assert_eq!(chain.len(), 3);
-        assert_eq!(chain[0], json!({"type": "thinking", "text": "reasoning here"}));
-        assert_eq!(chain[1], json!({"type": "thinking", "text": "preamble text"}));
+        assert_eq!(
+            chain[0],
+            json!({"type": "thinking", "text": "reasoning here"})
+        );
+        assert_eq!(
+            chain[1],
+            json!({"type": "thinking", "text": "preamble text"})
+        );
         assert_eq!(chain[2]["type"], json!("tool_call"));
     }
 

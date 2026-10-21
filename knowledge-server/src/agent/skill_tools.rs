@@ -3,17 +3,17 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use super::tool::{self, Tool};
 use crate::llm::types::ToolDefinition;
 use crate::skills::SkillStore;
-use super::tool::{self, Tool};
 
 pub struct ListSkillsTool {
-    pub store:      Arc<SkillStore>,
+    pub store: Arc<SkillStore>,
     pub project_id: String,
 }
 
 pub struct LoadSkillTool {
-    pub store:      Arc<SkillStore>,
+    pub store: Arc<SkillStore>,
     pub project_id: String,
 }
 
@@ -36,11 +36,18 @@ impl Tool for ListSkillsTool {
     }
 
     async fn execute(&self, _params: Value) -> Result<String> {
-        let summaries: Vec<Value> = self.store.list_for_project(&self.project_id).await
-            .into_iter().map(|s| json!({
-                "name":        s.name,
-                "description": s.description,
-            })).collect();
+        let summaries: Vec<Value> = self
+            .store
+            .list_for_project(&self.project_id)
+            .await
+            .into_iter()
+            .map(|s| {
+                json!({
+                    "name":        s.name,
+                    "description": s.description,
+                })
+            })
+            .collect();
         Ok(serde_json::to_string_pretty(&summaries)?)
     }
 }
@@ -77,7 +84,10 @@ impl Tool for LoadSkillTool {
     }
 
     fn preview(&self, result: &str) -> String {
-        let truncated: String = result.chars().take(tool::DEFAULT_PREVIEW_CHARS * 4).collect();
+        let truncated: String = result
+            .chars()
+            .take(tool::DEFAULT_PREVIEW_CHARS * 4)
+            .collect();
         serde_json::to_string(&json!({ "__type": "markdown", "content": truncated }))
             .unwrap_or_else(|_| result.chars().take(tool::DEFAULT_PREVIEW_CHARS).collect())
     }

@@ -4,20 +4,24 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::artifacts::handlers::{ArtifactKind};
-use crate::artifacts::{bundle, handlers::{get_artifact_in_project}};
+use super::tool::Tool;
+use crate::artifacts::handlers::ArtifactKind;
+use crate::artifacts::{bundle, handlers::get_artifact_in_project};
 use crate::deployments::handlers::{load_runnable_bundle, ApiError};
-use crate::deployments::{StepNode, topological_sort};
+use crate::deployments::{topological_sort, StepNode};
 use crate::llm::types::ToolDefinition;
 use harvest_db::Db;
-use super::tool::Tool;
 
 fn map_api_err((_, body): ApiError) -> anyhow::Error {
-    anyhow!(body.0["error"].as_str().unwrap_or("deployment action failed").to_string())
+    anyhow!(body.0["error"]
+        .as_str()
+        .unwrap_or("deployment action failed")
+        .to_string())
 }
 
 fn required_str(params: &Value, key: &str) -> Result<String> {
-    params[key].as_str()
+    params[key]
+        .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
@@ -26,18 +30,18 @@ fn required_str(params: &Value, key: &str) -> Result<String> {
 
 fn artifact_role_column(role: &str) -> Result<&'static str> {
     match role {
-        "design"    => Ok("design_doc_id"),
+        "design" => Ok("design_doc_id"),
         "terraform" => Ok("terraform_bundle_id"),
-        "guide"     => Ok("guide_id"),
-        _           => Err(anyhow!("role must be 'design', 'terraform', or 'guide'")),
+        "guide" => Ok("guide_id"),
+        _ => Err(anyhow!("role must be 'design', 'terraform', or 'guide'")),
     }
 }
 
 fn role_accepts_kind(role: &str, kind: ArtifactKind) -> bool {
     match role {
         "design" | "guide" => matches!(kind, ArtifactKind::Markdown | ArtifactKind::Pdf),
-        "terraform"         => matches!(kind, ArtifactKind::Terraform | ArtifactKind::Terragrunt),
-        _                   => false,
+        "terraform" => matches!(kind, ArtifactKind::Terraform | ArtifactKind::Terragrunt),
+        _ => false,
     }
 }
 
@@ -49,7 +53,8 @@ fn validate_link_params(params: &Value) -> Result<(String, String)> {
 }
 
 fn validate_update_template_params(params: &Value) -> Result<String> {
-    params["content"].as_str()
+    params["content"]
+        .as_str()
         .filter(|s| !s.trim().is_empty())
         .map(String::from)
         .ok_or_else(|| anyhow!("content is required"))
@@ -66,14 +71,14 @@ pub fn action_valid_for_kind(kind: ArtifactKind, action: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct ParsedStep {
     pub artifact_id: String,
-    pub action:      String,
-    pub label:       String,
-    pub depends_on:  Vec<usize>,
+    pub action: String,
+    pub label: String,
+    pub depends_on: Vec<usize>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ParsedExecutionPlan {
-    pub deploy_steps:  Vec<ParsedStep>,
+    pub deploy_steps: Vec<ParsedStep>,
     pub destroy_steps: Vec<ParsedStep>,
 }
 
@@ -83,19 +88,28 @@ fn parse_step(entry: &Value) -> Result<ParsedStep> {
     if crate::deployments::StepAction::parse(&action).is_none() {
         anyhow::bail!("action must be 'run', 'plan', 'apply', or 'destroy'");
     }
-    let label = entry.get("label")
+    let label = entry
+        .get("label")
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
         .unwrap_or_else(|| format!("{} {}", action, artifact_id));
-    let depends_on: Vec<usize> = entry.get("depends_on")
+    let depends_on: Vec<usize> = entry
+        .get("depends_on")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter()
-            .filter_map(|d| d.as_u64().map(|n| n as usize))
-            .collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|d| d.as_u64().map(|n| n as usize))
+                .collect()
+        })
         .unwrap_or_default();
-    Ok(ParsedStep { artifact_id, action, label, depends_on })
+    Ok(ParsedStep {
+        artifact_id,
+        action,
+        label,
+        depends_on,
+    })
 }
 
 fn validate_step_list(steps: &[ParsedStep], label: &str) -> Result<()> {
@@ -106,10 +120,13 @@ fn validate_step_list(steps: &[ParsedStep], label: &str) -> Result<()> {
             }
         }
     }
-    let nodes: Vec<StepNode> = steps.iter()
+    let nodes: Vec<StepNode> = steps
+        .iter()
         .map(|s| StepNode {
-            id:         s.artifact_id.clone(),
-            depends_on: s.depends_on.iter()
+            id: s.artifact_id.clone(),
+            depends_on: s
+                .depends_on
+                .iter()
                 .map(|&idx| steps[idx].artifact_id.clone())
                 .collect(),
         })
@@ -119,17 +136,21 @@ fn validate_step_list(steps: &[ParsedStep], label: &str) -> Result<()> {
 }
 
 pub fn validate_execution_plan_input(params: &Value) -> Result<ParsedExecutionPlan> {
-    let deploy_steps = params.get("deploy_steps")
+    let deploy_steps = params
+        .get("deploy_steps")
         .and_then(|v| v.as_array())
         .ok_or_else(|| anyhow!("deploy_steps is required"))?;
-    let destroy_steps = params.get("destroy_steps")
+    let destroy_steps = params
+        .get("destroy_steps")
         .and_then(|v| v.as_array())
         .ok_or_else(|| anyhow!("destroy_steps is required"))?;
 
-    let deploy_parsed: Vec<ParsedStep> = deploy_steps.iter()
+    let deploy_parsed: Vec<ParsedStep> = deploy_steps
+        .iter()
         .map(parse_step)
         .collect::<Result<Vec<_>>>()?;
-    let destroy_parsed: Vec<ParsedStep> = destroy_steps.iter()
+    let destroy_parsed: Vec<ParsedStep> = destroy_steps
+        .iter()
         .map(parse_step)
         .collect::<Result<Vec<_>>>()?;
 
@@ -137,21 +158,28 @@ pub fn validate_execution_plan_input(params: &Value) -> Result<ParsedExecutionPl
     validate_step_list(&destroy_parsed, "destroy")?;
 
     Ok(ParsedExecutionPlan {
-        deploy_steps:  deploy_parsed,
+        deploy_steps: deploy_parsed,
         destroy_steps: destroy_parsed,
     })
 }
 
 pub fn validate_destroy_coverage(plan: &ParsedExecutionPlan) -> Result<()> {
-    let apply_artifacts: std::collections::HashSet<&str> = plan.deploy_steps.iter()
+    let apply_artifacts: std::collections::HashSet<&str> = plan
+        .deploy_steps
+        .iter()
         .filter(|s| s.action == "apply")
         .map(|s| s.artifact_id.as_str())
         .collect();
-    let destroy_artifacts: std::collections::HashSet<&str> = plan.destroy_steps.iter()
+    let destroy_artifacts: std::collections::HashSet<&str> = plan
+        .destroy_steps
+        .iter()
         .filter(|s| s.action == "destroy")
         .map(|s| s.artifact_id.as_str())
         .collect();
-    let missing: Vec<&str> = apply_artifacts.difference(&destroy_artifacts).copied().collect();
+    let missing: Vec<&str> = apply_artifacts
+        .difference(&destroy_artifacts)
+        .copied()
+        .collect();
     if !missing.is_empty() {
         return Err(anyhow!(
             "every artifact with a deploy step must have a matching destroy step in destroy_steps — missing destroy for: {}",
@@ -159,10 +187,14 @@ pub fn validate_destroy_coverage(plan: &ParsedExecutionPlan) -> Result<()> {
         ));
     }
 
-    let deploy_count = plan.deploy_steps.iter()
+    let deploy_count = plan
+        .deploy_steps
+        .iter()
         .filter(|s| s.action == "apply" || s.action == "run")
         .count();
-    let destroy_count = plan.destroy_steps.iter()
+    let destroy_count = plan
+        .destroy_steps
+        .iter()
         .filter(|s| s.action == "destroy")
         .count();
     if deploy_count > 0 && destroy_count < deploy_count {
@@ -176,8 +208,8 @@ pub fn validate_destroy_coverage(plan: &ParsedExecutionPlan) -> Result<()> {
 }
 
 pub struct LinkDeploymentArtifactTool {
-    pub db:         Arc<Db>,
-    pub project_id:    String,
+    pub db: Arc<Db>,
+    pub project_id: String,
     pub deployment_id: String,
 }
 
@@ -222,29 +254,35 @@ impl Tool for LinkDeploymentArtifactTool {
             anyhow::bail!("a '{role}' artifact must be markdown/pdf (design, guide) or terraform/terragrunt (terraform)");
         }
 
-        self.db.query(
-            &format!(
-                "UPDATE deployments d SET {column} = a.id
+        self.db
+            .query(
+                &format!(
+                    "UPDATE deployments d SET {column} = a.id
                  FROM artifacts a
                  WHERE d.id = $did AND d.project_id = $pid
                    AND a.id = $aid AND a.project_id = $pid"
-            ),
-            json!({ "pid": self.project_id, "did": self.deployment_id, "aid": artifact_id }),
-        ).await?;
+                ),
+                json!({ "pid": self.project_id, "did": self.deployment_id, "aid": artifact_id }),
+            )
+            .await?;
 
         if role == "design" {
             crate::deployments::design_cache::schedule_regeneration(
-                self.db.clone(), self.project_id.clone(), self.deployment_id.clone(),
+                self.db.clone(),
+                self.project_id.clone(),
+                self.deployment_id.clone(),
             );
         }
 
-        Ok(serde_json::to_string(&json!({ "linked": true, "artifact_id": artifact_id, "role": role }))?)
+        Ok(serde_json::to_string(
+            &json!({ "linked": true, "artifact_id": artifact_id, "role": role }),
+        )?)
     }
 }
 
 pub struct UpdateProductTemplateTool {
-    pub db:         Arc<Db>,
-    pub group_id:      String,
+    pub db: Arc<Db>,
+    pub group_id: String,
     pub deployment_id: String,
 }
 
@@ -281,18 +319,29 @@ impl Tool for UpdateProductTemplateTool {
             json!({ "did": self.deployment_id }),
         ).await?;
 
-        if let Some(template_id) = existing.into_iter().next().and_then(|r| r["id"].as_str().map(str::to_string)) {
+        if let Some(template_id) = existing
+            .into_iter()
+            .next()
+            .and_then(|r| r["id"].as_str().map(str::to_string))
+        {
             self.db.query(
                 "UPDATE product_templates SET content = $content, updated_at = $now WHERE id = $tid",
                 json!({ "tid": template_id, "content": content, "now": now }),
             ).await?;
-            Ok(serde_json::to_string(&json!({ "template_id": template_id, "action": "updated" }))?)
+            Ok(serde_json::to_string(
+                &json!({ "template_id": template_id, "action": "updated" }),
+            )?)
         } else {
-            let deployment = self.db.query(
-                "SELECT name FROM deployments WHERE id = $did",
-                json!({ "did": self.deployment_id }),
-            ).await?;
-            let name = deployment.into_iter().next()
+            let deployment = self
+                .db
+                .query(
+                    "SELECT name FROM deployments WHERE id = $did",
+                    json!({ "did": self.deployment_id }),
+                )
+                .await?;
+            let name = deployment
+                .into_iter()
+                .next()
                 .and_then(|r| r["name"].as_str().map(str::to_string))
                 .unwrap_or_else(|| "Untitled product".to_string());
 
@@ -307,14 +356,16 @@ impl Tool for UpdateProductTemplateTool {
                  UPDATE deployments SET template_id = t.id FROM t WHERE deployments.id = $did",
                 json!({ "did": self.deployment_id, "tid": template_id, "name": name, "content": content, "now": now }),
             ).await?;
-            Ok(serde_json::to_string(&json!({ "template_id": template_id, "action": "created" }))?)
+            Ok(serde_json::to_string(
+                &json!({ "template_id": template_id, "action": "created" }),
+            )?)
         }
     }
 }
 
 pub struct ReadProvisionBundleTool {
-    pub db:         Arc<Db>,
-    pub project_id:    String,
+    pub db: Arc<Db>,
+    pub project_id: String,
     pub deployment_id: String,
 }
 
@@ -331,15 +382,17 @@ impl Tool for ReadProvisionBundleTool {
     }
 
     async fn execute(&self, _params: Value) -> Result<String> {
-        let run = load_runnable_bundle(&self.db, &self.project_id, &self.deployment_id).await.map_err(map_api_err)?;
+        let run = load_runnable_bundle(&self.db, &self.project_id, &self.deployment_id)
+            .await
+            .map_err(map_api_err)?;
         let files = bundle::parse_bundle(&run.artifact_content).map_err(|e| anyhow!(e))?;
         Ok(serde_json::to_string(&files)?)
     }
 }
 
 pub struct SetExecutionPlanTool {
-    pub db:         Arc<Db>,
-    pub project_id:    String,
+    pub db: Arc<Db>,
+    pub project_id: String,
     pub deployment_id: String,
 }
 
@@ -404,35 +457,56 @@ impl Tool for SetExecutionPlanTool {
         for step in plan.deploy_steps.iter().chain(plan.destroy_steps.iter()) {
             let artifact = get_artifact_in_project(&self.db, &self.project_id, &step.artifact_id)
                 .await?
-                .ok_or_else(|| anyhow!("artifact {} not found in this project", step.artifact_id))?;
+                .ok_or_else(|| {
+                    anyhow!("artifact {} not found in this project", step.artifact_id)
+                })?;
             let kind_str = artifact["kind"].as_str().unwrap_or("");
             let kind = ArtifactKind::parse(kind_str).unwrap_or(ArtifactKind::Markdown);
             if !action_valid_for_kind(kind, &step.action) {
-                anyhow::bail!("action '{}' is not valid for artifact {} of kind '{}'", step.action, step.artifact_id, kind_str);
+                anyhow::bail!(
+                    "action '{}' is not valid for artifact {} of kind '{}'",
+                    step.action,
+                    step.artifact_id,
+                    kind_str
+                );
             }
         }
 
-        let deploy_steps: Vec<crate::deployments::handlers::ParsedStepInput> = plan.deploy_steps.iter()
+        let deploy_steps: Vec<crate::deployments::handlers::ParsedStepInput> = plan
+            .deploy_steps
+            .iter()
             .map(|s| crate::deployments::handlers::ParsedStepInput {
                 artifact_id: s.artifact_id.clone(),
-                action:      s.action.clone(),
-                label:       s.label.clone(),
-                depends_on:  s.depends_on.clone(),
+                action: s.action.clone(),
+                label: s.label.clone(),
+                depends_on: s.depends_on.clone(),
             })
             .collect();
-        let destroy_steps: Vec<crate::deployments::handlers::ParsedStepInput> = plan.destroy_steps.iter()
+        let destroy_steps: Vec<crate::deployments::handlers::ParsedStepInput> = plan
+            .destroy_steps
+            .iter()
             .map(|s| crate::deployments::handlers::ParsedStepInput {
                 artifact_id: s.artifact_id.clone(),
-                action:      s.action.clone(),
-                label:       s.label.clone(),
+                action: s.action.clone(),
+                label: s.label.clone(),
                 depends_on: s.depends_on.clone(),
             })
             .collect();
 
         crate::deployments::handlers::set_execution_plan_core(
-            &self.db, &self.project_id, &self.deployment_id,
-            &deploy_steps, &destroy_steps,
-        ).await.map_err(|e| anyhow!(e.1.0["error"].as_str().unwrap_or("set_execution_plan failed").to_string()))?;
+            &self.db,
+            &self.project_id,
+            &self.deployment_id,
+            &deploy_steps,
+            &destroy_steps,
+        )
+        .await
+        .map_err(|e| {
+            anyhow!(e.1 .0["error"]
+                .as_str()
+                .unwrap_or("set_execution_plan failed")
+                .to_string())
+        })?;
 
         Ok(serde_json::to_string(&json!({
             "deployed": true,
@@ -460,13 +534,15 @@ mod tests {
 
     #[test]
     fn validate_link_params_rejects_unknown_role() {
-        let e = validate_link_params(&json!({ "artifact_id": "a1", "role": "banana" })).unwrap_err();
+        let e =
+            validate_link_params(&json!({ "artifact_id": "a1", "role": "banana" })).unwrap_err();
         assert!(e.to_string().contains("role"));
     }
 
     #[test]
     fn validate_link_params_accepts_valid_input() {
-        let (artifact_id, role) = validate_link_params(&json!({ "artifact_id": "a1", "role": "terraform" })).unwrap();
+        let (artifact_id, role) =
+            validate_link_params(&json!({ "artifact_id": "a1", "role": "terraform" })).unwrap();
         assert_eq!(artifact_id, "a1");
         assert_eq!(role, "terraform");
     }
@@ -502,7 +578,10 @@ mod tests {
     #[test]
     fn map_api_err_extracts_error_message_from_body() {
         use axum::{http::StatusCode, Json};
-        let api_err: ApiError = (StatusCode::BAD_REQUEST, Json(json!({ "error": "nothing to destroy" })));
+        let api_err: ApiError = (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "nothing to destroy" })),
+        );
         let e = map_api_err(api_err);
         assert_eq!(e.to_string(), "nothing to destroy");
     }
@@ -644,12 +723,18 @@ mod tests {
     #[test]
     fn validate_destroy_coverage_passes_when_apply_has_destroy() {
         let plan = ParsedExecutionPlan {
-            deploy_steps:  vec![
-                ParsedStep { artifact_id: "a1".into(), action: "apply".into(),   label: "Apply".into(),  depends_on: vec![] },
-            ],
-            destroy_steps: vec![
-                ParsedStep { artifact_id: "a1".into(), action: "destroy".into(), label: "Destroy".into(), depends_on: vec![] },
-            ],
+            deploy_steps: vec![ParsedStep {
+                artifact_id: "a1".into(),
+                action: "apply".into(),
+                label: "Apply".into(),
+                depends_on: vec![],
+            }],
+            destroy_steps: vec![ParsedStep {
+                artifact_id: "a1".into(),
+                action: "destroy".into(),
+                label: "Destroy".into(),
+                depends_on: vec![],
+            }],
         };
         assert!(validate_destroy_coverage(&plan).is_ok());
     }
@@ -657,12 +742,18 @@ mod tests {
     #[test]
     fn validate_destroy_coverage_passes_when_no_apply_steps() {
         let plan = ParsedExecutionPlan {
-            deploy_steps:  vec![
-                ParsedStep { artifact_id: "a1".into(), action: "run".into(), label: "Prep".into(), depends_on: vec![] },
-            ],
-            destroy_steps: vec![
-                ParsedStep { artifact_id: "a2".into(), action: "destroy".into(), label: "Teardown".into(), depends_on: vec![] },
-            ],
+            deploy_steps: vec![ParsedStep {
+                artifact_id: "a1".into(),
+                action: "run".into(),
+                label: "Prep".into(),
+                depends_on: vec![],
+            }],
+            destroy_steps: vec![ParsedStep {
+                artifact_id: "a2".into(),
+                action: "destroy".into(),
+                label: "Teardown".into(),
+                depends_on: vec![],
+            }],
         };
         assert!(validate_destroy_coverage(&plan).is_ok());
     }
@@ -670,7 +761,7 @@ mod tests {
     #[test]
     fn validate_destroy_coverage_passes_when_empty_plan() {
         let plan = ParsedExecutionPlan {
-            deploy_steps:  vec![],
+            deploy_steps: vec![],
             destroy_steps: vec![],
         };
         assert!(validate_destroy_coverage(&plan).is_ok());
@@ -679,9 +770,12 @@ mod tests {
     #[test]
     fn validate_destroy_coverage_fails_when_apply_missing_destroy() {
         let plan = ParsedExecutionPlan {
-            deploy_steps:  vec![
-                ParsedStep { artifact_id: "a1".into(), action: "apply".into(), label: "Apply".into(), depends_on: vec![] },
-            ],
+            deploy_steps: vec![ParsedStep {
+                artifact_id: "a1".into(),
+                action: "apply".into(),
+                label: "Apply".into(),
+                depends_on: vec![],
+            }],
             destroy_steps: vec![],
         };
         let e = validate_destroy_coverage(&plan).unwrap_err();
@@ -692,13 +786,26 @@ mod tests {
     #[test]
     fn validate_destroy_coverage_fails_when_one_of_two_applies_missing_destroy() {
         let plan = ParsedExecutionPlan {
-            deploy_steps:  vec![
-                ParsedStep { artifact_id: "a1".into(), action: "apply".into(), label: "Apply 1".into(), depends_on: vec![] },
-                ParsedStep { artifact_id: "a2".into(), action: "apply".into(), label: "Apply 2".into(), depends_on: vec![] },
+            deploy_steps: vec![
+                ParsedStep {
+                    artifact_id: "a1".into(),
+                    action: "apply".into(),
+                    label: "Apply 1".into(),
+                    depends_on: vec![],
+                },
+                ParsedStep {
+                    artifact_id: "a2".into(),
+                    action: "apply".into(),
+                    label: "Apply 2".into(),
+                    depends_on: vec![],
+                },
             ],
-            destroy_steps: vec![
-                ParsedStep { artifact_id: "a1".into(), action: "destroy".into(), label: "Destroy 1".into(), depends_on: vec![] },
-            ],
+            destroy_steps: vec![ParsedStep {
+                artifact_id: "a1".into(),
+                action: "destroy".into(),
+                label: "Destroy 1".into(),
+                depends_on: vec![],
+            }],
         };
         let e = validate_destroy_coverage(&plan).unwrap_err();
         assert!(e.to_string().contains("a2"));
@@ -708,9 +815,12 @@ mod tests {
     #[test]
     fn validate_destroy_coverage_fails_when_bash_run_has_no_destroy() {
         let plan = ParsedExecutionPlan {
-            deploy_steps:  vec![
-                ParsedStep { artifact_id: "b1".into(), action: "run".into(), label: "Deploy prep".into(), depends_on: vec![] },
-            ],
+            deploy_steps: vec![ParsedStep {
+                artifact_id: "b1".into(),
+                action: "run".into(),
+                label: "Deploy prep".into(),
+                depends_on: vec![],
+            }],
             destroy_steps: vec![],
         };
         assert!(validate_destroy_coverage(&plan).is_err());
@@ -719,12 +829,18 @@ mod tests {
     #[test]
     fn validate_destroy_coverage_passes_when_bash_run_has_bash_destroy() {
         let plan = ParsedExecutionPlan {
-            deploy_steps:  vec![
-                ParsedStep { artifact_id: "b1".into(), action: "run".into(), label: "Deploy prep".into(), depends_on: vec![] },
-            ],
-            destroy_steps: vec![
-                ParsedStep { artifact_id: "b2".into(), action: "destroy".into(), label: "Teardown prep".into(), depends_on: vec![] },
-            ],
+            deploy_steps: vec![ParsedStep {
+                artifact_id: "b1".into(),
+                action: "run".into(),
+                label: "Deploy prep".into(),
+                depends_on: vec![],
+            }],
+            destroy_steps: vec![ParsedStep {
+                artifact_id: "b2".into(),
+                action: "destroy".into(),
+                label: "Teardown prep".into(),
+                depends_on: vec![],
+            }],
         };
         assert!(validate_destroy_coverage(&plan).is_ok());
     }
@@ -732,13 +848,33 @@ mod tests {
     #[test]
     fn validate_destroy_coverage_passes_when_mixed_terraform_and_bash_with_destroy() {
         let plan = ParsedExecutionPlan {
-            deploy_steps:  vec![
-                ParsedStep { artifact_id: "b1".into(), action: "run".into(),     label: "Deploy prep".into(),  depends_on: vec![] },
-                ParsedStep { artifact_id: "t1".into(), action: "apply".into(),   label: "Apply infra".into(),  depends_on: vec![0] },
+            deploy_steps: vec![
+                ParsedStep {
+                    artifact_id: "b1".into(),
+                    action: "run".into(),
+                    label: "Deploy prep".into(),
+                    depends_on: vec![],
+                },
+                ParsedStep {
+                    artifact_id: "t1".into(),
+                    action: "apply".into(),
+                    label: "Apply infra".into(),
+                    depends_on: vec![0],
+                },
             ],
             destroy_steps: vec![
-                ParsedStep { artifact_id: "t1".into(), action: "destroy".into(), label: "Destroy infra".into(), depends_on: vec![] },
-                ParsedStep { artifact_id: "b2".into(), action: "destroy".into(), label: "Teardown prep".into(), depends_on: vec![] },
+                ParsedStep {
+                    artifact_id: "t1".into(),
+                    action: "destroy".into(),
+                    label: "Destroy infra".into(),
+                    depends_on: vec![],
+                },
+                ParsedStep {
+                    artifact_id: "b2".into(),
+                    action: "destroy".into(),
+                    label: "Teardown prep".into(),
+                    depends_on: vec![],
+                },
             ],
         };
         assert!(validate_destroy_coverage(&plan).is_ok());
@@ -747,13 +883,26 @@ mod tests {
     #[test]
     fn validate_destroy_coverage_fails_when_bash_run_destroy_count_mismatched() {
         let plan = ParsedExecutionPlan {
-            deploy_steps:  vec![
-                ParsedStep { artifact_id: "b1".into(), action: "run".into(),   label: "Deploy 1".into(), depends_on: vec![] },
-                ParsedStep { artifact_id: "b2".into(), action: "run".into(),   label: "Deploy 2".into(), depends_on: vec![] },
+            deploy_steps: vec![
+                ParsedStep {
+                    artifact_id: "b1".into(),
+                    action: "run".into(),
+                    label: "Deploy 1".into(),
+                    depends_on: vec![],
+                },
+                ParsedStep {
+                    artifact_id: "b2".into(),
+                    action: "run".into(),
+                    label: "Deploy 2".into(),
+                    depends_on: vec![],
+                },
             ],
-            destroy_steps: vec![
-                ParsedStep { artifact_id: "b3".into(), action: "destroy".into(), label: "Teardown".into(), depends_on: vec![] },
-            ],
+            destroy_steps: vec![ParsedStep {
+                artifact_id: "b3".into(),
+                action: "destroy".into(),
+                label: "Teardown".into(),
+                depends_on: vec![],
+            }],
         };
         assert!(validate_destroy_coverage(&plan).is_err());
     }
@@ -761,12 +910,14 @@ mod tests {
     #[test]
     fn validate_destroy_coverage_ignores_plan_and_run_actions_for_apply_coverage() {
         let plan = ParsedExecutionPlan {
-            deploy_steps:  vec![
-                ParsedStep { artifact_id: "a1".into(), action: "plan".into(), label: "Plan".into(), depends_on: vec![] },
-            ],
+            deploy_steps: vec![ParsedStep {
+                artifact_id: "a1".into(),
+                action: "plan".into(),
+                label: "Plan".into(),
+                depends_on: vec![],
+            }],
             destroy_steps: vec![],
         };
         assert!(validate_destroy_coverage(&plan).is_ok());
     }
-
 }
