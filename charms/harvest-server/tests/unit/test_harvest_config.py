@@ -132,7 +132,7 @@ def test_extra_toml_is_appended_verbatim():
 
 
 def test_api_paths_cover_every_server_route_prefix():
-    for prefix in ["/auth", "/projects", "/agent", "/agents", "/health", "/version", "/metrics", "/llm",
+    for prefix in ["/auth", "/api-keys", "/v1", "/projects", "/agent", "/agents", "/health", "/version", "/metrics", "/llm",
                    "/repositories", "/graph", "/conversations", "/admin", "/skills", "/artifacts"]:
         assert prefix in API_PATHS
     assert all(p.startswith("/") and not p.endswith("/") for p in API_PATHS)

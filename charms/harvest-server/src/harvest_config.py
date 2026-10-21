@@ -11,6 +11,7 @@ API_PATHS = [
     "/agents",
     "/artifacts",
     "/auth",
+    "/api-keys",
     "/chat-layouts",
     "/conversations",
     "/docs",
@@ -27,6 +28,7 @@ API_PATHS = [
     "/templates",
     "/tool-description",
     "/version",
+    "/v1",
 ]
 
 @dataclass(frozen=True)
