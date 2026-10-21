@@ -75,6 +75,11 @@ grade: devel
 confinement: strict
 
 apps:
+  harvest:
+    command: bin/harvest
+    plugs:
+      - network
+
   server:
     command: bin/wrapper-server
     daemon: simple
@@ -109,7 +114,6 @@ parts:
   rust-binaries:
     plugin: nil
     source: .
-    source-type: git
     build-packages:
       - rustc
       - cargo
@@ -122,9 +126,11 @@ parts:
       rm -f rust-toolchain.toml
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
       export PATH="$HOME/.cargo/bin:$PATH"
-      cargo build --release --workspace
+      cargo build --release -p knowledge-server -p harvest-cli -p agent -p knowledge-harvester
       install -Dm755 target/release/knowledge-server \
         "$SNAPCRAFT_PART_INSTALL/bin/knowledge-server"
+      install -Dm755 target/release/harvest \
+        "$SNAPCRAFT_PART_INSTALL/bin/harvest"
       install -Dm755 target/release/harvest-agent \
         "$SNAPCRAFT_PART_INSTALL/bin/harvest-agent"
       install -Dm755 target/release/knowledge-harvester \
