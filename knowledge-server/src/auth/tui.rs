@@ -31,9 +31,20 @@ pub async fn create_auth_request(
         .unwrap_or_else(|| format!("http://{}:{}", "localhost", "8080"));
     let auth_url = format!("{}/#/authenticate/{}", public_url, uuid);
 
-    ephemeral::put(&state.db, ephemeral::TUI_KIND, &uuid, &json!({ "status": "pending" }), TUI_AUTH_TTL)
-        .await
-        .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "could not create the auth request"))?;
+    ephemeral::put(
+        &state.db,
+        ephemeral::TUI_KIND,
+        &uuid,
+        &json!({ "status": "pending" }),
+        TUI_AUTH_TTL,
+    )
+    .await
+    .map_err(|_| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "could not create the auth request",
+        )
+    })?;
 
     Ok(Json(json!({
         "uuid": uuid,
@@ -118,6 +129,9 @@ pub async fn authorize_request(
 
     match updated {
         Some(value) => Ok(Json(json!({ "status": value["status"] }))),
-        None => Err(err(StatusCode::NOT_FOUND, "auth request not found or expired")),
+        None => Err(err(
+            StatusCode::NOT_FOUND,
+            "auth request not found or expired",
+        )),
     }
 }

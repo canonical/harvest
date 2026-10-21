@@ -18,10 +18,12 @@ pub async fn put(db: &Db, kind: &str, key: &str, data: &Value, ttl: Duration) ->
 }
 
 pub async fn get(db: &Db, kind: &str, key: &str) -> Result<Option<Value>> {
-    let rows = db.query(
-        "SELECT data FROM auth_ephemeral WHERE key = $key AND expires_at > now()",
-        json!({ "key": format!("{kind}:{key}") }),
-    ).await?;
+    let rows = db
+        .query(
+            "SELECT data FROM auth_ephemeral WHERE key = $key AND expires_at > now()",
+            json!({ "key": format!("{kind}:{key}") }),
+        )
+        .await?;
     Ok(rows.into_iter().next().map(|r| r["data"].clone()))
 }
 
@@ -30,7 +32,11 @@ pub async fn take(db: &Db, kind: &str, key: &str) -> Result<Option<Value>> {
         "DELETE FROM auth_ephemeral WHERE key = $key RETURNING data, expires_at > now() AS live",
         json!({ "key": format!("{kind}:{key}") }),
     ).await?;
-    Ok(rows.into_iter().next().filter(|r| r["live"].as_bool() == Some(true)).map(|r| r["data"].clone()))
+    Ok(rows
+        .into_iter()
+        .next()
+        .filter(|r| r["live"].as_bool() == Some(true))
+        .map(|r| r["data"].clone()))
 }
 
 pub async fn replace_if<F>(db: &Db, kind: &str, key: &str, update: F) -> Result<Option<Value>>
@@ -38,10 +44,12 @@ where
     F: FnOnce(&Value) -> Option<Value>,
 {
     let tx = db.begin().await?;
-    let rows = tx.query(
-        "SELECT data FROM auth_ephemeral WHERE key = $key AND expires_at > now() FOR UPDATE",
-        json!({ "key": format!("{kind}:{key}") }),
-    ).await?;
+    let rows = tx
+        .query(
+            "SELECT data FROM auth_ephemeral WHERE key = $key AND expires_at > now() FOR UPDATE",
+            json!({ "key": format!("{kind}:{key}") }),
+        )
+        .await?;
     let Some(current) = rows.into_iter().next().map(|r| r["data"].clone()) else {
         tx.rollback().await?;
         return Ok(None);
@@ -53,11 +61,16 @@ where
     tx.execute(
         "UPDATE auth_ephemeral SET data = $data WHERE key = $key",
         json!({ "key": format!("{kind}:{key}"), "data": next }),
-    ).await?;
+    )
+    .await?;
     tx.commit().await?;
     Ok(Some(next))
 }
 
 pub async fn purge_expired(db: &Db) -> Result<u64> {
-    db.execute("DELETE FROM auth_ephemeral WHERE expires_at <= now()", json!({})).await
+    db.execute(
+        "DELETE FROM auth_ephemeral WHERE expires_at <= now()",
+        json!({}),
+    )
+    .await
 }

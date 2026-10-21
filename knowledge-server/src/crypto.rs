@@ -1,8 +1,8 @@
-use anyhow::{Context, Result};
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
+use anyhow::{Context, Result};
 use base64::Engine;
 
 pub struct Crypto {
@@ -11,8 +11,8 @@ pub struct Crypto {
 
 impl Crypto {
     pub fn from_hex(hex_str: &str) -> Result<Self> {
-        let bytes = hex::decode(hex_str.trim())
-            .context("user_key_encryption_key must be valid hex")?;
+        let bytes =
+            hex::decode(hex_str.trim()).context("user_key_encryption_key must be valid hex")?;
         if bytes.len() != 32 {
             anyhow::bail!(
                 "user_key_encryption_key must be exactly 32 bytes (64 hex characters), got {} bytes",
@@ -79,7 +79,10 @@ mod tests {
     #[test]
     fn decrypt_with_wrong_key_fails() {
         let crypto1 = Crypto::from_hex(&test_key()).unwrap();
-        let crypto2 = Crypto::from_hex(&"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string()).unwrap();
+        let crypto2 = Crypto::from_hex(
+            &"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(),
+        )
+        .unwrap();
         let (ct, nonce) = crypto1.encrypt("secret").unwrap();
         assert!(crypto2.decrypt(&ct, &nonce).is_err());
     }

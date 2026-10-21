@@ -1,3 +1,4 @@
+pub mod api_keys;
 pub mod ephemeral;
 pub mod handlers;
 pub mod jwt;
@@ -19,12 +20,12 @@ pub const TOKEN_COOKIE: &str = "token";
 
 #[derive(Clone)]
 pub struct AuthState {
-    pub db:          Arc<Db>,
-    pub config:         Arc<AuthConfig>,
-    pub ui:             Arc<UiConfig>,
-    pub http:           reqwest::Client,
+    pub db: Arc<Db>,
+    pub config: Arc<AuthConfig>,
+    pub ui: Arc<UiConfig>,
+    pub http: reqwest::Client,
     pub oidc_endpoints: Option<Arc<OidcEndpoints>>,
-    pub lxd_enabled:    bool,
+    pub lxd_enabled: bool,
 }
 
 fn token_from_request(req: &Request) -> Option<String> {
@@ -58,7 +59,11 @@ pub async fn require_auth(
             req.extensions_mut().insert(claims);
             next.run(req).await.into_response()
         }
-        None => (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response(),
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response(),
     }
 }
 
@@ -70,6 +75,10 @@ pub async fn require_admin(
     match token_from_request(&req).and_then(|t| jwt::validate(&secret, &t).ok()) {
         Some(claims) if claims.role == "admin" => next.run(req).await.into_response(),
         Some(_) => (StatusCode::FORBIDDEN, Json(json!({ "error": "forbidden" }))).into_response(),
-        None => (StatusCode::UNAUTHORIZED, Json(json!({ "error": "unauthorized" }))).into_response(),
+        None => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response(),
     }
 }

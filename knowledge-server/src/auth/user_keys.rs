@@ -37,11 +37,14 @@ impl UserKeyStore {
     }
 
     pub async fn get(&self, user_id: &str, provider_id: &str) -> Result<Option<String>> {
-        let rows = self.db.query(
-            "SELECT key_ciphertext AS ct, key_nonce AS nonce
+        let rows = self
+            .db
+            .query(
+                "SELECT key_ciphertext AS ct, key_nonce AS nonce
              FROM user_llm_keys WHERE user_id = $uid AND provider_id = $pid",
-            json!({ "uid": user_id, "pid": provider_id }),
-        ).await?;
+                json!({ "uid": user_id, "pid": provider_id }),
+            )
+            .await?;
         if rows.is_empty() {
             return Ok(None);
         }
@@ -56,40 +59,58 @@ impl UserKeyStore {
     }
 
     pub async fn list_set_keys(&self, user_id: &str) -> Result<Vec<String>> {
-        let rows = self.db.query(
-            "SELECT provider_id AS pid FROM user_llm_keys WHERE user_id = $uid",
-            json!({ "uid": user_id }),
-        ).await?;
-        Ok(rows.iter()
+        let rows = self
+            .db
+            .query(
+                "SELECT provider_id AS pid FROM user_llm_keys WHERE user_id = $uid",
+                json!({ "uid": user_id }),
+            )
+            .await?;
+        Ok(rows
+            .iter()
             .filter_map(|r| r["pid"].as_str().map(String::from))
             .collect())
     }
 
     pub async fn list_with_status(&self, user_id: &str) -> Result<Vec<UserKeyStatus>> {
-        let rows = self.db.query(
-            "SELECT provider_id AS pid, updated_at FROM user_llm_keys WHERE user_id = $uid",
-            json!({ "uid": user_id }),
-        ).await?;
-        Ok(rows.iter().map(|r| UserKeyStatus {
-            provider_id: r["pid"].as_str().unwrap_or("").to_string(),
-            updated_at: r["updated_at"].as_str().map(String::from),
-        }).collect())
+        let rows = self
+            .db
+            .query(
+                "SELECT provider_id AS pid, updated_at FROM user_llm_keys WHERE user_id = $uid",
+                json!({ "uid": user_id }),
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| UserKeyStatus {
+                provider_id: r["pid"].as_str().unwrap_or("").to_string(),
+                updated_at: r["updated_at"].as_str().map(String::from),
+            })
+            .collect())
     }
 
     pub async fn delete(&self, user_id: &str, provider_id: &str) -> Result<()> {
-        self.db.query(
-            "DELETE FROM user_llm_keys WHERE user_id = $uid AND provider_id = $pid",
-            json!({ "uid": user_id, "pid": provider_id }),
-        ).await?;
+        self.db
+            .query(
+                "DELETE FROM user_llm_keys WHERE user_id = $uid AND provider_id = $pid",
+                json!({ "uid": user_id, "pid": provider_id }),
+            )
+            .await?;
         Ok(())
     }
 
-    pub async fn resolve_all(&self, user_id: &str) -> Result<std::collections::HashMap<String, String>> {
-        let rows = self.db.query(
-            "SELECT provider_id AS pid, key_ciphertext AS ct, key_nonce AS nonce
+    pub async fn resolve_all(
+        &self,
+        user_id: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let rows = self
+            .db
+            .query(
+                "SELECT provider_id AS pid, key_ciphertext AS ct, key_nonce AS nonce
              FROM user_llm_keys WHERE user_id = $uid",
-            json!({ "uid": user_id }),
-        ).await?;
+                json!({ "uid": user_id }),
+            )
+            .await?;
         let mut keys = std::collections::HashMap::new();
         for row in &rows {
             let pid = match row["pid"].as_str() {
@@ -102,7 +123,9 @@ impl UserKeyStore {
                 continue;
             }
             match self.crypto.decrypt(ct, nonce) {
-                Ok(plaintext) => { keys.insert(pid, plaintext); }
+                Ok(plaintext) => {
+                    keys.insert(pid, plaintext);
+                }
                 Err(e) => tracing::warn!(error = %e, "failed to decrypt user key, skipping"),
             }
         }
