@@ -7,6 +7,7 @@ const DOCS_URL = '/docs';
 const PROJECTS_URL = '/projects';
 const CONVERSATIONS_URL = '/conversations';
 const LLM_PROVIDERS_URL = '/llm/providers';
+const API_KEYS_URL = '/api-keys';
 
 async function convFetch(url, options = {}) {
   const res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...options });
@@ -144,6 +145,30 @@ export async function deleteLlmUserKey(providerId) {
     throw new Error(data.error || `Request failed (${res.status})`);
   }
   return res.json();
+}
+
+export async function fetchApiKeys() {
+  return convFetch(API_KEYS_URL);
+}
+
+export async function createApiKey(name) {
+  return convFetch(API_KEYS_URL, {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function renameApiKey(keyId, name) {
+  return convFetch(`${API_KEYS_URL}/${encodeURIComponent(keyId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function revokeApiKey(keyId) {
+  return convFetch(`${API_KEYS_URL}/${encodeURIComponent(keyId)}`, {
+    method: 'DELETE',
+  });
 }
 
 export async function queryOnce(query) {

@@ -9,36 +9,42 @@ const monacoStub = fileURLToPath(new URL('./tests/stubs/monaco-editor.js', impor
 const backend = process.env.HARVEST_BACKEND_URL || 'http://localhost:8080';
 const extraAllowedHosts = (process.env.HARVEST_ALLOWED_HOSTS || '')
   .split(',').map((h) => h.trim()).filter(Boolean);
+const proxy = {
+  '/auth':             backend,
+  '/api-keys':         backend,
+  '/query':            backend,
+  '/v1':               backend,
+  '/projects':         { target: backend, ws: true },
+  '/admin':            backend,
+  '/graph':            backend,
+  '/docs':             backend,
+  '/repositories':     backend,
+  '/machines':         backend,
+  '/health':           backend,
+  '/conversations':    backend,
+  '/chat-layouts':     backend,
+  '/groups':           backend,
+  '/templates':        backend,
+  '/skills':           backend,
+  '/agents':           backend,
+  '/agent':            { target: backend, ws: true },
+  '/tool-description': backend,
+  '/llm':              backend,
+  '/artifacts':        backend,
+};
 
 export default defineConfig({
   plugins: [vue()],
   server: {
-    proxy: {
-      '/auth':             backend,
-      '/query':            backend,
-      '/projects':         { target: backend, ws: true },
-      '/admin':            backend,
-      '/graph':            backend,
-      '/docs':             backend,
-      '/repositories':     backend,
-      '/machines':         backend,
-      '/health':           backend,
-      '/conversations':    backend,
-      '/chat-layouts':     backend,
-      '/groups':           backend,
-      '/templates':        backend,
-      '/skills':           backend,
-      '/agents':           backend,
-      '/agent':            { target: backend, ws: true },
-      '/tool-description': backend,
-      '/llm':              backend,
-      '/artifacts':        backend,
-    },
+    proxy,
     allowedHosts: [
       "harvest-development.thinking-dragon.net",
       "harvest-development-vue.thinking-dragon.net",
       ...extraAllowedHosts,
     ],
+  },
+  preview: {
+    proxy,
   },
   test: {
     environment: 'jsdom',
