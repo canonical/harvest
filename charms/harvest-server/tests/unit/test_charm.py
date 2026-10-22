@@ -84,6 +84,19 @@ class FakeWorkload:
         return "harvest-server-0-abc"
 
 
+class ActionCapture:
+    def __init__(self, params=None):
+        self.params = params or {}
+        self.results = None
+        self.failed = None
+
+    def set_results(self, values):
+        self.results = values
+
+    def fail(self, message):
+        self.failed = message
+
+
 @pytest.fixture
 def workload(monkeypatch):
     holder = {}
@@ -466,3 +479,65 @@ def test_disabling_local_login_requires_auth_provider_relation(ctx, workload):
         ),
     )
     assert out.unit_status == testing.BlockedStatus("allow-local-login is false but no auth-provider relation is configured")
+
+
+def test_cluster_status_action_reports_peer_state(ctx, workload):
+    llm = llm_secret()
+    with ctx(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm])) as manager:
+        manager.run()
+        event = ActionCapture()
+        manager.charm._on_cluster_status(event)
+        assert event.failed is None
+        assert event.results["managed"] is True
+        assert event.results["local-unit"]
+        assert event.results["node-id"] == "harvest-server-0-abc"
+
+
+def test_cluster_evacuate_action_requires_leader(ctx, workload):
+    llm = llm_secret()
+    with ctx(
+        ctx.on.config_changed(),
+        base_state(leader=False, relations=[database(), llm_relation(llm.id)], secrets=[llm]),
+    ) as manager:
+        manager.run()
+        event = ActionCapture({"unit": "harvest-server/1"})
+        manager.charm._on_cluster_evacuate(event)
+        assert event.failed == "cluster-evacuate must run on the leader"
+
+
+def test_cluster_evacuate_action_updates_peer_state(ctx, workload):
+    llm = llm_secret()
+    with ctx(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm])) as manager:
+        manager.run()
+        event = ActionCapture({"unit": "harvest-server/1"})
+        manager.charm._on_cluster_evacuate(event)
+        assert event.failed is None
+        assert event.results == {"evacuated": "harvest-server/1"}
+        assert "harvest-server/1" in manager.charm._evacuated_units()
+
+
+def test_cluster_remove_action_clears_evacuation_entry(ctx, workload):
+    llm = llm_secret()
+    with ctx(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm])) as manager:
+        manager.run()
+        manager.charm._on_cluster_evacuate(ActionCapture({"unit": "harvest-server/1"}))
+        event = ActionCapture({"unit": "harvest-server/1"})
+        manager.charm._on_cluster_remove(event)
+        assert event.failed is None
+        assert event.results == {"removed": "harvest-server/1"}
+        assert "harvest-server/1" not in manager.charm._evacuated_units()
+
+
+def test_cluster_rotate_secrets_action_updates_secret(ctx, workload):
+    llm = llm_secret()
+    with ctx(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm])) as manager:
+        manager.run()
+        relation = manager.charm._peer
+        secret_id = relation.data[manager.charm.app]["cluster-secret-id"]
+        before = manager.charm.model.get_secret(id=secret_id).get_content(refresh=True)["cluster-secret"]
+        event = ActionCapture()
+        manager.charm._on_cluster_rotate_secrets(event)
+        after = manager.charm.model.get_secret(id=secret_id).get_content(refresh=True)["cluster-secret"]
+        assert event.failed is None
+        assert event.results == {"rotated": True}
+        assert before != after
