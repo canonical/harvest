@@ -30,6 +30,7 @@ PEER = "harvest-peers"
 SECRET_LABEL = "harvest-cluster"
 SECRET_ID_KEY = "cluster-secret-id"
 SCHEMA_KEY = "schema-version"
+EVACUATED_KEY = "evacuated-units"
 READY_TIMEOUT = 240
 MEMBER_WAIT = 600
 
@@ -100,6 +101,11 @@ class HarvestServerCharm(ops.CharmBase):
             framework.observe(event, self._reconcile)
         framework.observe(self.on.run_migrations_action, self._on_run_migrations)
         framework.observe(self.on.show_status_action, self._on_show_status)
+        framework.observe(self.on.cluster_status_action, self._on_cluster_status)
+        framework.observe(self.on.cluster_rebalance_action, self._on_cluster_rebalance)
+        framework.observe(self.on.cluster_evacuate_action, self._on_cluster_evacuate)
+        framework.observe(self.on.cluster_remove_action, self._on_cluster_remove)
+        framework.observe(self.on.cluster_rotate_secrets_action, self._on_cluster_rotate_secrets)
         framework.observe(self.on.stop, self._on_stop)
 
     @property
@@ -454,6 +460,84 @@ class HarvestServerCharm(ops.CharmBase):
             "binary-schema": binary,
             "version": self.workload.version(),
         })
+
+    def _peer_units(self) -> list[str]:
+        relation = self._peer
+        if relation is None:
+            return []
+        return sorted(unit.name for unit in relation.units)
+
+    def _evacuated_units(self) -> set[str]:
+        relation = self._peer
+        if relation is None:
+            return set()
+        raw = relation.data[self.app].get(EVACUATED_KEY, "")
+        return {name for name in raw.split(",") if name}
+
+    def _set_evacuated_units(self, units: set[str]) -> None:
+        relation = self._peer
+        if relation is None:
+            return
+        relation.data[self.app][EVACUATED_KEY] = ",".join(sorted(units))
+
+    def _on_cluster_status(self, event: ops.ActionEvent) -> None:
+        event.set_results({
+            "managed": True,
+            "local-unit": self.unit.name,
+            "node-id": self.workload.node_id() or "",
+            "peer-units": json.dumps(self._peer_units()),
+            "evacuated-units": json.dumps(sorted(self._evacuated_units())),
+            "active-active": bool(self.config.get("active-active", True)),
+        })
+
+    def _on_cluster_rebalance(self, event: ops.ActionEvent) -> None:
+        self._reconcile(event)
+        event.set_results({"status": "reconciled"})
+
+    def _on_cluster_evacuate(self, event: ops.ActionEvent) -> None:
+        if not self.unit.is_leader():
+            event.fail("cluster-evacuate must run on the leader")
+            return
+        target = str(event.params.get("unit") or "").strip()
+        if not target:
+            event.fail("unit is required")
+            return
+        units = self._evacuated_units()
+        units.add(target)
+        self._set_evacuated_units(units)
+        event.set_results({"evacuated": target})
+
+    def _on_cluster_remove(self, event: ops.ActionEvent) -> None:
+        if not self.unit.is_leader():
+            event.fail("cluster-remove must run on the leader")
+            return
+        target = str(event.params.get("unit") or "").strip()
+        if not target:
+            event.fail("unit is required")
+            return
+        units = self._evacuated_units()
+        units.discard(target)
+        self._set_evacuated_units(units)
+        event.set_results({"removed": target})
+
+    def _on_cluster_rotate_secrets(self, event: ops.ActionEvent) -> None:
+        if not self.unit.is_leader():
+            event.fail("cluster-rotate-secrets must run on the leader")
+            return
+        peer = self._peer
+        if peer is None:
+            event.fail("waiting for peer relation")
+            return
+        secret_id = peer.data[self.app].get(SECRET_ID_KEY)
+        if not secret_id:
+            event.fail("cluster secret is not initialized yet")
+            return
+        secret = self.model.get_secret(id=secret_id)
+        content = secret.get_content(refresh=True)
+        content["cluster-secret"] = secrets.token_urlsafe(32)
+        secret.set_content(content)
+        self._reconcile(event)
+        event.set_results({"rotated": True})
 
 
 if __name__ == "__main__":
