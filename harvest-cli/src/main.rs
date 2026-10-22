@@ -1,7 +1,7 @@
 use std::collections::{hash_map::DefaultHasher, BTreeSet, HashMap};
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -28,6 +28,109 @@ enum Commands {
     PrepareDbScript(PrepareDbScriptArgs),
     Status(StatusArgs),
     ShowPublicUrl(ShowPublicUrlArgs),
+    Cluster(ClusterArgs),
+}
+
+#[derive(Parser)]
+struct ClusterArgs {
+    #[command(subcommand)]
+    command: ClusterCommand,
+}
+
+#[derive(Subcommand)]
+enum ClusterCommand {
+    Init(ClusterInitArgs),
+    Join(ClusterJoinArgs),
+    Preseed(ClusterPreseedArgs),
+    Status(ClusterStatusArgs),
+    List(ClusterListArgs),
+    Remove(ClusterNodeArgs),
+    Evacuate(ClusterNodeArgs),
+    Restore(ClusterNodeArgs),
+    RotateSecrets,
+    Token(ClusterTokenArgs),
+}
+
+#[derive(Parser)]
+struct ClusterInitArgs {
+    #[arg(long)]
+    node_name: Option<String>,
+    #[arg(long, default_value = "0.0.0.0:8081")]
+    internal_listen: String,
+    #[arg(long)]
+    internal_url: Option<String>,
+    #[arg(long)]
+    shared_secret: Option<String>,
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Parser)]
+struct ClusterJoinArgs {
+    #[arg(long)]
+    node_name: Option<String>,
+    #[arg(long, default_value = "0.0.0.0:8081")]
+    internal_listen: String,
+    #[arg(long)]
+    internal_url: Option<String>,
+    #[arg(long)]
+    shared_secret: Option<String>,
+    #[arg(long)]
+    token: Option<String>,
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Parser)]
+struct ClusterPreseedArgs {
+    #[arg(long)]
+    file: Option<PathBuf>,
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Parser, Default)]
+struct ClusterStatusArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser, Default)]
+struct ClusterListArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct ClusterNodeArgs {
+    node: String,
+}
+
+#[derive(Parser)]
+struct ClusterTokenArgs {
+    #[command(subcommand)]
+    command: ClusterTokenCommand,
+}
+
+#[derive(Subcommand)]
+enum ClusterTokenCommand {
+    Create(ClusterTokenCreateArgs),
+    List(ClusterTokenListArgs),
+    Revoke,
+}
+
+#[derive(Parser)]
+struct ClusterTokenCreateArgs {
+    #[arg(long, default_value_t = 1800)]
+    ttl_secs: u64,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser, Default)]
+struct ClusterTokenListArgs {
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Parser, Default)]
@@ -149,6 +252,46 @@ struct ModelCacheEntry {
     models: Vec<String>,
 }
 
+#[derive(Serialize)]
+struct ClusterStatusReport {
+    managed: bool,
+    node_name: String,
+    internal_listen: String,
+    internal_url: String,
+    healthy: bool,
+    members: Vec<ClusterMember>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Debug)]
+struct ClusterMember {
+    name: String,
+    url: String,
+}
+
+#[derive(Serialize)]
+struct ClusterTokenReport {
+    token: String,
+    expires_unix: u64,
+}
+
+#[derive(Deserialize)]
+struct ClusterPreseed {
+    cluster: Option<ClusterPreseedCluster>,
+    systems: Option<Vec<ClusterPreseedSystem>>,
+}
+
+#[derive(Deserialize)]
+struct ClusterPreseedCluster {
+    internal_listen: Option<String>,
+    shared_secret: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ClusterPreseedSystem {
+    name: String,
+    address: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -157,6 +300,7 @@ async fn main() -> Result<()> {
         Commands::PrepareDbScript(args) => run_prepare_db_script(args),
         Commands::Status(args) => run_status(args).await,
         Commands::ShowPublicUrl(args) => run_show_public_url(args),
+        Commands::Cluster(args) => run_cluster(args).await,
     }
 }
 
@@ -812,6 +956,410 @@ fn run_show_public_url(args: ShowPublicUrlArgs) -> Result<()> {
     Ok(())
 }
 
+async fn run_cluster(args: ClusterArgs) -> Result<()> {
+    require_snapctl()?;
+    match args.command {
+        ClusterCommand::Status(args) => run_cluster_status(args).await,
+        ClusterCommand::List(args) => run_cluster_list(args),
+        ClusterCommand::Token(args) => run_cluster_token(args),
+        ClusterCommand::Init(args) => run_cluster_init(args),
+        ClusterCommand::Join(args) => run_cluster_join(args),
+        ClusterCommand::Preseed(args) => run_cluster_preseed(args),
+        ClusterCommand::Remove(args) => run_cluster_remove(args),
+        ClusterCommand::Evacuate(args) => run_cluster_evacuate(args),
+        ClusterCommand::Restore(args) => run_cluster_restore(args),
+        ClusterCommand::RotateSecrets => run_cluster_rotate_secrets(),
+    }
+}
+
+fn is_cluster_managed() -> Result<bool> {
+    Ok(snapctl_get("config.managed")?
+        .trim()
+        .eq_ignore_ascii_case("true"))
+}
+
+fn ensure_cluster_mutable() -> Result<()> {
+    if is_cluster_managed()? {
+        bail!(
+            "cluster is charm-managed. Use juju add-unit/remove-unit/actions for cluster changes"
+        );
+    }
+    Ok(())
+}
+
+async fn run_cluster_status(args: ClusterStatusArgs) -> Result<()> {
+    let managed = is_cluster_managed()?;
+    let node_name = snapctl_get("cluster.node-name")?;
+    let internal_listen = non_empty_or(snapctl_get("cluster.internal-listen")?, "0.0.0.0:8081");
+    let internal_url = snapctl_get("cluster.internal-url")?;
+    let server_host = non_empty_or(snapctl_get("server.host")?, "127.0.0.1");
+    let server_port = non_empty_or(snapctl_get("server.port")?, "8080");
+    let host = to_local_probe_host(&server_host);
+    let healthy = check_http_ok(&format!("http://{host}:{server_port}/health/ready"))
+        .await
+        .unwrap_or(false);
+    let members = parse_cluster_members(&snapctl_get("cluster.members")?);
+    let report = ClusterStatusReport {
+        managed,
+        node_name,
+        internal_listen,
+        internal_url,
+        healthy,
+        members,
+    };
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    println!(
+        "managed={} healthy={} node={} internal_url={}",
+        report.managed, report.healthy, report.node_name, report.internal_url
+    );
+    Ok(())
+}
+
+fn run_cluster_list(args: ClusterListArgs) -> Result<()> {
+    let members = parse_cluster_members(&snapctl_get("cluster.members")?);
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&members)?);
+        return Ok(());
+    }
+    for member in members {
+        println!("{}\t{}", member.name, member.url);
+    }
+    Ok(())
+}
+
+fn run_cluster_token(args: ClusterTokenArgs) -> Result<()> {
+    match args.command {
+        ClusterTokenCommand::Create(args) => run_cluster_token_create(args),
+        ClusterTokenCommand::List(args) => run_cluster_token_list(args),
+        ClusterTokenCommand::Revoke => run_cluster_token_revoke(),
+    }
+}
+
+fn run_cluster_token_create(args: ClusterTokenCreateArgs) -> Result<()> {
+    ensure_cluster_mutable()?;
+    let token = generate_secret(48);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let expires_unix = now.saturating_add(args.ttl_secs.max(1));
+    apply_snap_settings(&[
+        ("cluster.join-token".to_string(), token.clone()),
+        (
+            "cluster.join-token-expiry".to_string(),
+            expires_unix.to_string(),
+        ),
+    ])?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ClusterTokenReport {
+                token,
+                expires_unix,
+            })?
+        );
+        return Ok(());
+    }
+    println!("{token}");
+    Ok(())
+}
+
+fn run_cluster_token_list(args: ClusterTokenListArgs) -> Result<()> {
+    let token = snapctl_get("cluster.join-token")?;
+    let expiry = snapctl_get("cluster.join-token-expiry")?
+        .parse::<u64>()
+        .unwrap_or(0);
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ClusterTokenReport {
+                token,
+                expires_unix: expiry,
+            })?
+        );
+        return Ok(());
+    }
+    if token.is_empty() {
+        println!("no token");
+        return Ok(());
+    }
+    println!("{token}\texpires_unix={expiry}");
+    Ok(())
+}
+
+fn run_cluster_token_revoke() -> Result<()> {
+    ensure_cluster_mutable()?;
+    apply_snap_settings(&[
+        ("cluster.join-token".to_string(), String::new()),
+        ("cluster.join-token-expiry".to_string(), "0".to_string()),
+    ])?;
+    Ok(())
+}
+
+fn run_cluster_init(args: ClusterInitArgs) -> Result<()> {
+    ensure_cluster_mutable()?;
+    let node_name = cluster_node_name(args.node_name)?;
+    let internal_url = cluster_internal_url(args.internal_url)?;
+    let shared_secret = args.shared_secret.unwrap_or_else(|| generate_secret(48));
+    let mut settings = vec![
+        ("cluster.node-name".to_string(), node_name.clone()),
+        (
+            "cluster.internal-listen".to_string(),
+            args.internal_listen.clone(),
+        ),
+        ("cluster.internal-url".to_string(), internal_url.clone()),
+        ("cluster.shared-secret".to_string(), shared_secret),
+        ("cluster.backend".to_string(), "quorium".to_string()),
+        (
+            "cluster.members".to_string(),
+            format_cluster_members(&[ClusterMember {
+                name: node_name,
+                url: internal_url,
+            }]),
+        ),
+    ];
+    settings.sort_by(|a, b| a.0.cmp(&b.0));
+    if args.dry_run {
+        for (k, v) in settings {
+            println!("{k}={v}");
+        }
+        return Ok(());
+    }
+    apply_snap_settings(&settings)?;
+    run_configure_hook()?;
+    Ok(())
+}
+
+fn run_cluster_join(args: ClusterJoinArgs) -> Result<()> {
+    ensure_cluster_mutable()?;
+    let token = args.token.unwrap_or_default();
+    let stored_token = snapctl_get("cluster.join-token")?;
+    let expiry = snapctl_get("cluster.join-token-expiry")?
+        .parse::<u64>()
+        .unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if !stored_token.is_empty() {
+        if token != stored_token {
+            bail!("join token does not match cluster token");
+        }
+        if expiry > 0 && now > expiry {
+            bail!("join token has expired");
+        }
+    }
+    let node_name = cluster_node_name(args.node_name)?;
+    let internal_url = cluster_internal_url(args.internal_url)?;
+    let secret = match args.shared_secret {
+        Some(value) => value,
+        None => snapctl_get("cluster.shared-secret")?,
+    };
+    if secret.trim().is_empty() {
+        bail!("cluster.shared-secret is required to join");
+    }
+    let mut members = parse_cluster_members(&snapctl_get("cluster.members")?);
+    upsert_cluster_member(
+        &mut members,
+        ClusterMember {
+            name: node_name.clone(),
+            url: internal_url.clone(),
+        },
+    );
+    let settings = vec![
+        ("cluster.node-name".to_string(), node_name),
+        (
+            "cluster.internal-listen".to_string(),
+            args.internal_listen.clone(),
+        ),
+        ("cluster.internal-url".to_string(), internal_url),
+        ("cluster.shared-secret".to_string(), secret),
+        ("cluster.backend".to_string(), "quorium".to_string()),
+        (
+            "cluster.members".to_string(),
+            format_cluster_members(&members),
+        ),
+    ];
+    if args.dry_run {
+        for (k, v) in settings {
+            println!("{k}={v}");
+        }
+        return Ok(());
+    }
+    apply_snap_settings(&settings)?;
+    run_configure_hook()?;
+    Ok(())
+}
+
+fn run_cluster_preseed(args: ClusterPreseedArgs) -> Result<()> {
+    ensure_cluster_mutable()?;
+    let input = match args.file {
+        Some(path) => std::fs::read_to_string(path)?,
+        None => {
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf)?;
+            buf
+        }
+    };
+    let parsed: ClusterPreseed = serde_yaml::from_str(&input)?;
+    let node_name = cluster_node_name(None)?;
+    let systems = parsed.systems.unwrap_or_default();
+    let system = systems
+        .iter()
+        .find(|s| s.name == node_name)
+        .ok_or_else(|| anyhow!("preseed does not include local node {node_name}"))?;
+    let internal_url = system
+        .address
+        .clone()
+        .ok_or_else(|| anyhow!("preseed entry for {node_name} is missing address"))?;
+    let cluster = parsed
+        .cluster
+        .ok_or_else(|| anyhow!("preseed is missing cluster section"))?;
+    let shared_secret = cluster
+        .shared_secret
+        .ok_or_else(|| anyhow!("preseed cluster.shared_secret is required"))?;
+    let internal_listen = cluster
+        .internal_listen
+        .unwrap_or_else(|| "0.0.0.0:8081".to_string());
+    let members = systems
+        .into_iter()
+        .filter_map(|s| s.address.map(|url| ClusterMember { name: s.name, url }))
+        .collect::<Vec<_>>();
+    let settings = vec![
+        ("cluster.node-name".to_string(), node_name),
+        ("cluster.internal-listen".to_string(), internal_listen),
+        ("cluster.internal-url".to_string(), internal_url),
+        ("cluster.shared-secret".to_string(), shared_secret),
+        ("cluster.backend".to_string(), "quorium".to_string()),
+        (
+            "cluster.members".to_string(),
+            format_cluster_members(&members),
+        ),
+    ];
+    if args.dry_run {
+        for (k, v) in settings {
+            println!("{k}={v}");
+        }
+        return Ok(());
+    }
+    apply_snap_settings(&settings)?;
+    run_configure_hook()?;
+    Ok(())
+}
+
+fn run_cluster_remove(args: ClusterNodeArgs) -> Result<()> {
+    ensure_cluster_mutable()?;
+    let mut members = parse_cluster_members(&snapctl_get("cluster.members")?);
+    members.retain(|m| m.name != args.node);
+    apply_snap_settings(&[(
+        "cluster.members".to_string(),
+        format_cluster_members(&members),
+    )])?;
+    Ok(())
+}
+
+fn run_cluster_evacuate(args: ClusterNodeArgs) -> Result<()> {
+    ensure_cluster_mutable()?;
+    let key = format!("cluster.evacuated.{}", args.node);
+    apply_snap_settings(&[(key, "true".to_string())])?;
+    Ok(())
+}
+
+fn run_cluster_restore(args: ClusterNodeArgs) -> Result<()> {
+    ensure_cluster_mutable()?;
+    let key = format!("cluster.evacuated.{}", args.node);
+    apply_snap_settings(&[(key, "false".to_string())])?;
+    Ok(())
+}
+
+fn run_cluster_rotate_secrets() -> Result<()> {
+    ensure_cluster_mutable()?;
+    apply_snap_settings(&[("cluster.shared-secret".to_string(), generate_secret(48))])?;
+    run_configure_hook()?;
+    Ok(())
+}
+
+fn cluster_node_name(input: Option<String>) -> Result<String> {
+    if let Some(value) = input {
+        validate_identifier("cluster node name", &value)?;
+        return Ok(value);
+    }
+    if let Ok(value) = snapctl_get("cluster.node-name") {
+        if !value.trim().is_empty() {
+            return Ok(value);
+        }
+    }
+    if let Ok(value) = std::env::var("HOSTNAME") {
+        let normalized = value.replace('-', "_");
+        validate_identifier("cluster node name", &normalized)?;
+        return Ok(normalized);
+    }
+    Ok("harvest_node".to_string())
+}
+
+fn cluster_internal_url(input: Option<String>) -> Result<String> {
+    if let Some(value) = input {
+        validate_cluster_url(&value)?;
+        return Ok(value);
+    }
+    let existing = snapctl_get("cluster.internal-url")?;
+    if !existing.trim().is_empty() {
+        validate_cluster_url(&existing)?;
+        return Ok(existing);
+    }
+    bail!("cluster internal URL is required (pass --internal-url)")
+}
+
+fn validate_cluster_url(value: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(value).context("invalid cluster URL")?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        bail!("cluster URL must be http or https");
+    }
+    if parsed.host_str().is_none() {
+        bail!("cluster URL must include a host");
+    }
+    Ok(())
+}
+
+fn parse_cluster_members(raw: &str) -> Vec<ClusterMember> {
+    raw.split(',')
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let (name, url) = trimmed.split_once('@')?;
+            if name.is_empty() || url.is_empty() {
+                return None;
+            }
+            Some(ClusterMember {
+                name: name.to_string(),
+                url: url.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn format_cluster_members(members: &[ClusterMember]) -> String {
+    members
+        .iter()
+        .map(|m| format!("{}@{}", m.name, m.url))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn upsert_cluster_member(members: &mut Vec<ClusterMember>, member: ClusterMember) {
+    if let Some(existing) = members.iter_mut().find(|m| m.name == member.name) {
+        *existing = member;
+        return;
+    }
+    members.push(member);
+    members.sort_by(|a, b| a.name.cmp(&b.name));
+}
+
 fn apply_snap_settings(settings: &[(String, String)]) -> Result<()> {
     let mut args = vec!["set".to_string()];
     for (k, v) in settings {
@@ -1117,5 +1665,84 @@ mod tests {
             .expect("models");
         assert_eq!(loaded, models);
         std::env::remove_var("SNAP_COMMON");
+    }
+
+    #[test]
+    fn cluster_members_roundtrip() {
+        let members = vec![
+            ClusterMember {
+                name: "n1".to_string(),
+                url: "http://10.0.0.1:8081".to_string(),
+            },
+            ClusterMember {
+                name: "n2".to_string(),
+                url: "http://10.0.0.2:8081".to_string(),
+            },
+        ];
+        let encoded = format_cluster_members(&members);
+        let decoded = parse_cluster_members(&encoded);
+        assert_eq!(decoded, members);
+    }
+
+    #[test]
+    fn cluster_member_upsert_replaces_existing() {
+        let mut members = vec![ClusterMember {
+            name: "n1".to_string(),
+            url: "http://10.0.0.1:8081".to_string(),
+        }];
+        upsert_cluster_member(
+            &mut members,
+            ClusterMember {
+                name: "n1".to_string(),
+                url: "http://10.0.0.11:8081".to_string(),
+            },
+        );
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].url, "http://10.0.0.11:8081");
+    }
+
+    #[test]
+    fn cluster_member_upsert_adds_and_sorts() {
+        let mut members = vec![ClusterMember {
+            name: "n2".to_string(),
+            url: "http://10.0.0.2:8081".to_string(),
+        }];
+        upsert_cluster_member(
+            &mut members,
+            ClusterMember {
+                name: "n1".to_string(),
+                url: "http://10.0.0.1:8081".to_string(),
+            },
+        );
+        assert_eq!(members[0].name, "n1");
+        assert_eq!(members[1].name, "n2");
+    }
+
+    #[test]
+    fn cluster_url_validation_rejects_invalid_schemes() {
+        assert!(validate_cluster_url("ftp://example.com").is_err());
+        assert!(validate_cluster_url("http://example.com:8081").is_ok());
+    }
+
+    #[test]
+    fn cluster_preseed_parses_yaml() {
+        let yaml = r#"
+cluster:
+  internal_listen: "0.0.0.0:8081"
+  shared_secret: "secret"
+systems:
+  - name: n1
+    address: "http://10.0.0.1:8081"
+"#;
+        let parsed: ClusterPreseed = serde_yaml::from_str(yaml).expect("preseed");
+        assert_eq!(
+            parsed
+                .cluster
+                .expect("cluster")
+                .shared_secret
+                .expect("secret"),
+            "secret"
+        );
+        assert_eq!(parsed.systems.expect("systems").len(), 1);
     }
 }
