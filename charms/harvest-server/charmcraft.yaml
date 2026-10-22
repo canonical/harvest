@@ -100,3 +100,25 @@ actions:
     description: Apply pending database migrations now.
   show-status:
     description: Report the node id, schema versions and readiness of this unit.
+  cluster-status:
+    description: Report cluster mode, local node id, and discovered peer units.
+  cluster-rebalance:
+    description: Trigger a configuration reconcile on all units.
+  cluster-evacuate:
+    description: Mark a unit as evacuated in peer state.
+    params:
+      unit:
+        type: string
+        description: Unit name to evacuate, for example harvest-server/1.
+    required:
+      - unit
+  cluster-remove:
+    description: Remove a unit from peer cluster membership records.
+    params:
+      unit:
+        type: string
+        description: Unit name to remove, for example harvest-server/1.
+    required:
+      - unit
+  cluster-rotate-secrets:
+    description: Rotate the cluster shared secret and reconcile configuration.
