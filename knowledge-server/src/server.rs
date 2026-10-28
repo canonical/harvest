@@ -30,6 +30,7 @@ use harvest_db::Db;
 
 const SCHEMA_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const SERVE_GRACE: Duration = Duration::from_secs(5);
+const TURN_REQUEST_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub struct RunningServer {
     pub public_addr: SocketAddr,
@@ -134,6 +135,7 @@ async fn reap(db: &Db, live: &ProjectLive, directory: &AgentDirectory) {
         tracing::warn!(error = %e, "reaping ingestion jobs of lost nodes failed");
     }
     let _ = crate::auth::ephemeral::purge_expired(db).await;
+    let _ = crate::turns::idempotency::purge(db, TURN_REQUEST_RETENTION).await;
     let _ = db
         .execute(
             "DELETE FROM bus_payloads WHERE created_at < now() - interval '10 minutes'",
@@ -465,6 +467,10 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         pricing,
         semantic: semantic_handle,
         live: Arc::clone(&live),
+        admission: crate::turns::admission::TurnAdmission::new(
+            config.agent.max_active_turns,
+            config.agent.max_active_turns_per_user,
+        ),
     };
 
     let cache: Arc<GraphCache> = Arc::new(RwLock::new(HashMap::new()));

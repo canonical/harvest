@@ -31,6 +31,9 @@ use crate::conversations::store::{self, ConversationContext, Guard, Owner, Page}
 use crate::conversations::summary::refresh as refresh_summary;
 use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::llm::types::{Message, ProviderSelection, Usage, UsedProvider};
+use crate::turns::admission::TurnAdmission;
+use crate::turns::idempotency::{self, Reservation};
+use crate::turns::metrics::TURNS;
 use harvest_db::Db;
 
 const PROJECT_NAME_MAX_CHARS: usize = 100;
@@ -76,6 +79,7 @@ pub struct ProjectState {
     pub pricing: Arc<crate::cost::PricingTable>,
     pub collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
     pub live: Arc<ProjectLive>,
+    pub admission: Arc<TurnAdmission>,
 }
 
 impl ProjectState {
@@ -130,7 +134,13 @@ impl ProjectState {
             pricing,
             collocate_registry,
             live,
+            admission: TurnAdmission::unlimited(),
         }
+    }
+
+    pub fn with_admission(mut self, admission: Arc<TurnAdmission>) -> Self {
+        self.admission = admission;
+        self
     }
 
     async fn broadcast(&self, project_id: &str, msg: String) {
@@ -561,6 +571,7 @@ async fn drive_turn(
     pricing: Arc<crate::cost::PricingTable>,
     turn_id: String,
 ) {
+    let started_at = std::time::Instant::now();
     let mut chain_builder = crate::agent::chain::ChainBuilder::new();
     let mut pending_question: Option<Value> = None;
     let mut confirmation_requested = false;
@@ -655,6 +666,7 @@ async fn drive_turn(
             ..
         } = &event
         {
+            TURNS.completed(started_at.elapsed());
             let save_now = harvest_db::now_rfc3339();
             let outcome = TurnOutcome {
                 answer,
@@ -896,12 +908,12 @@ pub async fn project_query_stream(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
     Path(project_id): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<ProjectQueryStreamBody>,
 ) -> impl IntoResponse {
     if let Err(e) = require_project_access(&state.db, &user.sub, &user.role, &project_id).await {
         return e.into_response();
     }
-
     if state.live.node().is_draining() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -909,7 +921,44 @@ pub async fn project_query_stream(
         )
             .into_response();
     }
+    let idempotency_key = idempotency::key_from(&headers);
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    if let Some(key) = &idempotency_key {
+        match idempotency::reserve(&state.db, &user.sub, key, &body.conversation_id, &turn_id).await
+        {
+            Ok(Reservation::Fresh) => {}
+            Ok(Reservation::Replay { turn_id }) => {
+                TURNS.replayed();
+                return Json(json!({ "ok": true, "turn_id": turn_id, "replayed": true }))
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not reserve the turn request");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": "could not register the request, retry" })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    let response = start_project_turn(&user, &state, &project_id, body, turn_id).await;
+    if let Some(key) = idempotency_key.filter(|_| !response.status().is_success()) {
+        idempotency::release(&state.db, &user.sub, &key).await;
+    }
+    response
+}
 
+async fn start_project_turn(
+    user: &Claims,
+    state: &Arc<ProjectState>,
+    project_id: &str,
+    body: ProjectQueryStreamBody,
+    turn_id: String,
+) -> axum::response::Response {
+    let project_id = project_id.to_string();
+    let conversation_id = body.conversation_id.clone();
+    let turn_id_for_response = turn_id.clone();
     let attachments_for_broadcast: Vec<serde_json::Value> = body
         .attachments
         .as_ref()
@@ -931,9 +980,13 @@ pub async fn project_query_stream(
                 .collect()
         })
         .unwrap_or_default();
-    let turn_id = uuid::Uuid::new_v4().to_string();
+    let permit = match state.admission.admit(&user.sub) {
+        Ok(permit) => permit,
+        Err(rejection) => return rejection.into_response(),
+    };
 
-    match state
+    let lock_started = std::time::Instant::now();
+    let locked = state
         .live
         .try_lock(
             &project_id,
@@ -944,9 +997,10 @@ pub async fn project_query_stream(
             &body.query,
             &attachments_for_broadcast,
         )
-        .await
-    {
-        Ok(true) => {}
+        .await;
+    TURNS.lock.observe(lock_started.elapsed());
+    match locked {
+        Ok(true) => state.live.hold_permit(&body.conversation_id, permit).await,
         Ok(false) => {
             return (
                 StatusCode::CONFLICT,
@@ -996,6 +1050,7 @@ pub async fn project_query_stream(
     };
     let context = load_project_context(&state.db, &project_id, &body.conversation_id).await;
     let history = context.history();
+    TURNS.started(context.recent.len());
 
     state
         .broadcast(
@@ -1095,10 +1150,10 @@ pub async fn project_query_stream(
     });
     state
         .live
-        .set_abort_handle(&body.conversation_id, task.abort_handle())
+        .set_abort_handle(&conversation_id, task.abort_handle())
         .await;
 
-    Json(json!({"ok": true})).into_response()
+    Json(json!({ "ok": true, "turn_id": turn_id_for_response })).into_response()
 }
 
 struct AbortOnDrop(tokio::task::AbortHandle);
@@ -1558,6 +1613,17 @@ pub async fn resume_confirm_action(
         .unwrap_or_default();
 
     let turn_id = uuid::Uuid::new_v4().to_string();
+    let permit = match state.admission.admit(&user.sub) {
+        Ok(permit) => permit,
+        Err(rejection) => {
+            let _ = state
+                .live
+                .save_paused(&project_id, &conv_id, &payload)
+                .await;
+            return Err(rejection.as_api_error());
+        }
+    };
+    let lock_started = std::time::Instant::now();
     let locked = state
         .live
         .try_lock(
@@ -1576,6 +1642,7 @@ pub async fn resume_confirm_action(
                 "could not lock the conversation",
             )
         })?;
+    TURNS.lock.observe(lock_started.elapsed());
     if !locked {
         let _ = state
             .live
@@ -1583,6 +1650,7 @@ pub async fn resume_confirm_action(
             .await;
         return Err(err(StatusCode::CONFLICT, "chat is locked"));
     }
+    state.live.hold_permit(&conv_id, permit).await;
     state
         .broadcast(
             &project_id,
