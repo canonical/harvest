@@ -216,6 +216,11 @@ impl ClusterNode {
         self.heartbeat().await
     }
 
+    pub async fn restore(&self) -> Result<()> {
+        self.draining.store(false, Ordering::SeqCst);
+        self.heartbeat().await
+    }
+
     pub async fn deregister(&self) -> Result<()> {
         self.membership.withdraw(&self.node_id).await
     }
