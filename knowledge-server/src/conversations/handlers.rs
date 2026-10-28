@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -9,9 +9,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::agent::HistoryMessage;
 use crate::auth::jwt::Claims;
-use crate::conversations::summary::{effective_history, StoredSummary};
+use crate::conversations::store::{self, ConversationContext, Owner, Page};
 use crate::llm::types::{Usage, UsedProvider};
 use harvest_db::Db;
 
@@ -20,40 +19,12 @@ const CONVERSATION_TITLE_TRUNCATE_CHARS: usize = 57;
 
 type ApiError = (StatusCode, Json<Value>);
 
-async fn load_user_conversation(
-    db: &Db,
-    user_id: &str,
-    conv_id: &str,
-) -> anyhow::Result<(Vec<Value>, Option<StoredSummary>)> {
-    let rows = db.query(
-        "SELECT messages, summary, summary_upto FROM conversations WHERE id = $cid AND user_id = $uid",
-        json!({ "uid": user_id, "cid": conv_id }),
-    ).await?;
-    let Some(row) = rows.into_iter().next() else {
-        return Ok((vec![], None));
-    };
-    let messages = row
-        .get("messages")
-        .and_then(|v| v.as_str())
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-    Ok((messages, StoredSummary::from_row(&row)))
-}
-
-pub fn history_messages_from_raw(raw: &[Value]) -> Vec<HistoryMessage> {
-    raw.iter()
-        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-        .collect()
-}
-
 pub async fn load_conversation_context(
     db: &Db,
     user_id: &str,
     conv_id: &str,
-) -> anyhow::Result<(Vec<Value>, Vec<HistoryMessage>)> {
-    let (raw, stored_summary) = load_user_conversation(db, user_id, conv_id).await?;
-    let history = effective_history(&history_messages_from_raw(&raw), stored_summary.as_ref());
-    Ok((raw, history))
+) -> anyhow::Result<ConversationContext> {
+    store::load_context(db, Owner::User(user_id), conv_id).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -113,7 +84,6 @@ pub async fn append_user_turn(
     user_text: &str,
     username: &str,
     attachments_meta: &[Value],
-    prior_messages: Vec<Value>,
     assistant_text: &str,
     sources: &[crate::agent::Source],
     tool_calls_made: usize,
@@ -142,47 +112,32 @@ pub async fn append_user_turn(
         provider_used.map(|p| p.model.as_str()).unwrap_or(""),
     );
 
-    let mut messages = prior_messages;
-    messages.push(json!({
-        "role": "user",
-        "text": user_text,
-        "username": username,
-        "attachments": attachments_meta,
-    }));
-    messages.push(build_assistant_message(
-        assistant_text,
-        sources,
-        tool_calls_made,
-        tool_errors,
-        turns,
-        chain,
-        question,
-        confirm_action,
-        provider_used,
-        duration_ms,
-        usage,
-        llm_call_count,
-        cost_microusd,
-    ));
-
-    let messages_json = serde_json::to_string(&messages)?;
-    let message_count = messages.len() as i64;
-
-    db.query(
-        "INSERT INTO conversations (id, user_id, title, messages, message_count, created_at, updated_at)
-         VALUES ($cid, $uid, $title, $messages, $count, $now, $now)
-         ON CONFLICT (id) DO UPDATE SET
-             messages      = EXCLUDED.messages,
-             message_count = EXCLUDED.message_count,
-             updated_at    = EXCLUDED.updated_at
-         WHERE conversations.user_id = $uid
-         RETURNING id",
+    let messages = [
         json!({
-            "uid": user_id, "cid": conv_id,
-            "title": title, "messages": messages_json,
-            "count": message_count, "now": now,
+            "role": "user",
+            "text": user_text,
+            "username": username,
+            "attachments": attachments_meta,
         }),
-    ).await?;
+        build_assistant_message(
+            assistant_text,
+            sources,
+            tool_calls_made,
+            tool_errors,
+            turns,
+            chain,
+            question,
+            confirm_action,
+            provider_used,
+            duration_ms,
+            usage,
+            llm_call_count,
+            cost_microusd,
+        ),
+    ];
+
+    store::ensure_user_conversation(db, user_id, conv_id, &title, &now).await?;
+    store::append(db, Owner::User(user_id), conv_id, &messages, &now).await?;
 
     if let Some(record) = crate::cost::build_turn_record(
         crate::cost::CostScope::Chat,
@@ -249,12 +204,16 @@ pub async fn create(
     let now = harvest_db::now_rfc3339();
     let title = body.title.unwrap_or_else(|| "New conversation".to_string());
 
-    state.db.query(
-        "INSERT INTO conversations (id, user_id, title, messages, message_count, created_at, updated_at)
-         VALUES ($id, $uid, $title, '[]', 0, $now, $now)
+    state
+        .db
+        .query(
+            "INSERT INTO conversations (id, user_id, title, message_count, created_at, updated_at)
+         VALUES ($id, $uid, $title, 0, $now, $now)
          RETURNING id",
-        json!({ "uid": user.sub, "id": id, "title": title, "now": now }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+            json!({ "uid": user.sub, "id": id, "title": title, "now": now }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     Ok((
         StatusCode::CREATED,
@@ -266,11 +225,12 @@ pub async fn get(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ConvState>>,
     Path(conv_id): Path<String>,
+    Query(page): Query<Page>,
 ) -> Result<impl IntoResponse, ApiError> {
     let rows = state
         .db
         .query(
-            "SELECT c.id, c.title, c.messages, c.created_at, c.updated_at,
+            "SELECT c.id, c.title, c.message_count, c.created_at, c.updated_at,
                 c.origin_type, c.origin_tracking_id,
                 k.name AS origin_api_key_name,
                 k.revoked_at AS origin_api_key_revoked_at
@@ -287,13 +247,11 @@ pub async fn get(
         .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
 
+    let messages = store::load_page(&state.db, Owner::User(&user.sub), &conv_id, page)
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let mut obj = row.as_object().cloned().unwrap_or_default();
-    if let Some(Value::String(s)) = obj.get("messages") {
-        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-            obj.insert("messages".to_string(), parsed);
-        }
-    }
-
+    obj.insert("messages".to_string(), Value::Array(messages));
     Ok(Json(Value::Object(obj)))
 }
 
@@ -310,29 +268,17 @@ pub async fn update(
     Json(body): Json<UpdateBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let now = harvest_db::now_rfc3339();
-    let message_count = body
-        .messages
-        .as_array()
-        .map(|a| a.len() as i64)
-        .unwrap_or(0);
-    let messages_json = body.messages.to_string();
-
-    state
-        .db
-        .query(
-            "UPDATE conversations
-         SET title = $title, messages = $messages, message_count = $count, updated_at = $now,
-             summary = NULL, summary_upto = 0
-         WHERE id = $cid AND user_id = $uid
-         RETURNING id",
-            json!({
-                "uid": user.sub, "cid": conv_id,
-                "title": body.title, "messages": messages_json,
-                "count": message_count, "now": now,
-            }),
-        )
-        .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let messages = body.messages.as_array().cloned().unwrap_or_default();
+    store::replace_all(
+        &state.db,
+        Owner::User(&user.sub),
+        &conv_id,
+        &body.title,
+        &messages,
+        &now,
+    )
+    .await
+    .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     Ok(Json(json!({ "ok": true })))
 }
@@ -379,7 +325,7 @@ mod tests {
         );
         assert_eq!(msg["chain"].as_array().unwrap().len(), 1);
         assert_eq!(msg["enumerations"][0]["result"], "full");
-        let history = history_messages_from_raw(&[msg]);
+        let history = crate::conversations::store::history_messages_from_raw(&[msg]);
         assert_eq!(history[0].enumerations.len(), 1);
         assert_eq!(history[0].enumerations[0].tool, "find_subclasses");
         assert_eq!(history[0].enumerations[0].result, "full");

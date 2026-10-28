@@ -9,10 +9,11 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::agent::{Agent, HistoryMessage};
+use crate::agent::Agent;
 use crate::api::{resolve_user_llm, QueryState};
 use crate::auth::api_keys::ApiKeyPrincipal;
 use crate::conversations::handlers::{append_user_turn, load_conversation_context};
+use crate::conversations::store::{self, Owner, Page};
 use crate::llm::types::ProviderSelection;
 
 type ApiError = (StatusCode, Json<Value>);
@@ -234,10 +235,8 @@ async fn history_for_thread(
 ) -> anyhow::Result<(String, Vec<Value>)> {
     let rows = db
         .query(
-            "SELECT t.conversation_id AS cid, c.messages
-         FROM api_chat_threads t
-         JOIN conversations c ON c.id = t.conversation_id
-         WHERE t.api_key_id = $kid AND t.tracking_id = $tid",
+            "SELECT conversation_id AS cid FROM api_chat_threads
+         WHERE api_key_id = $kid AND tracking_id = $tid",
             json!({ "kid": api_key_id, "tid": tracking_id }),
         )
         .await?;
@@ -245,13 +244,9 @@ async fn history_for_thread(
         anyhow::bail!("not found");
     };
     let conversation_id = row["cid"].as_str().unwrap_or_default().to_string();
-    let all: Vec<Value> = row["messages"]
-        .as_str()
-        .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
-        .unwrap_or_default();
-    let take = limit.min(all.len());
-    let start = all.len().saturating_sub(take);
-    Ok((conversation_id, all[start..].to_vec()))
+    let messages =
+        store::load_page(db, Owner::Unscoped, &conversation_id, Page::last(limit)).await?;
+    Ok((conversation_id, messages))
 }
 
 pub async fn chat(
@@ -277,10 +272,10 @@ pub async fn chat(
         .await
         .unwrap_or_else(conversation_id);
 
-    let (raw_messages, history): (Vec<Value>, Vec<HistoryMessage>) =
-        load_conversation_context(db, &principal.user_id, &conv_id)
-            .await
-            .unwrap_or_default();
+    let history = load_conversation_context(db, &principal.user_id, &conv_id)
+        .await
+        .unwrap_or_default()
+        .history();
 
     let selection = selection_from(&req);
     let user_llm = resolve_user_llm(
@@ -328,7 +323,6 @@ pub async fn chat(
         &req.message,
         &username,
         &[],
-        raw_messages,
         &response.answer,
         &response.sources,
         response.tool_calls_made,

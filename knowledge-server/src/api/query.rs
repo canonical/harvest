@@ -17,6 +17,7 @@ use crate::agent::{chain::ChainBuilder, Agent, AgentEvent, Attachment};
 use crate::api::{resolve_user_llm, QueryState};
 use crate::auth::jwt::Claims;
 use crate::conversations::handlers::{append_user_turn, load_conversation_context};
+use crate::conversations::store::ConversationContext;
 use crate::conversations::summary::spawn_refresh as spawn_summary_refresh;
 use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::llm::types::ProviderSelection;
@@ -48,8 +49,8 @@ pub async fn handle_query(
     Json(req): Json<QueryRequest>,
 ) -> impl IntoResponse {
     let attachments = req.attachments.as_deref().unwrap_or(&[]);
-    let (raw_messages, history) =
-        load_context_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
+    let context = load_context_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
+    let history = context.history();
     let selection = selection_from(&req);
     let user_llm = resolve_user_llm(&qs.llm, &qs.llm_configs, &qs.user_key_store, &user.sub).await;
     let agent = if Arc::ptr_eq(&user_llm, &qs.llm) {
@@ -79,7 +80,7 @@ pub async fn handle_query(
                     .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
                     .collect();
                 let turn_id = uuid::Uuid::new_v4().to_string();
-                let msg_count = raw_messages.len() + 2;
+                let msg_count = context.message_count + 2;
                 let _ = append_user_turn(
                     db,
                     &user.sub,
@@ -87,7 +88,6 @@ pub async fn handle_query(
                     &req.query,
                     &user.name,
                     &att_meta,
-                    raw_messages,
                     &response.answer,
                     &response.sources,
                     response.tool_calls_made,
@@ -181,8 +181,8 @@ pub async fn handle_query_stream(
         .collect();
 
     tokio::spawn(async move {
-        let (raw_messages, history) =
-            load_context_if_needed(&qs_ctx, &user_id, conv_id.as_deref()).await;
+        let context = load_context_if_needed(&qs_ctx, &user_id, conv_id.as_deref()).await;
+        let history = context.history();
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         let query_for_agent = query.clone();
         let history_for_agent = history.clone();
@@ -282,7 +282,6 @@ pub async fn handle_query_stream(
                     &query,
                     &username,
                     &att_meta,
-                    raw_messages.clone(),
                     answer,
                     sources,
                     *tool_calls_made,
@@ -301,7 +300,7 @@ pub async fn handle_query_stream(
                 .await;
                 spawn_summary_refresh(Arc::clone(db), Arc::clone(&agent), cid.clone());
 
-                let msg_count = raw_messages.len() + 2;
+                let msg_count = context.message_count + 2;
                 let db_t = Arc::clone(db);
                 let llm_t = Arc::clone(&llm);
                 let cid_t = cid.clone();
@@ -369,11 +368,11 @@ async fn load_context_if_needed(
     qs: &QueryState,
     user_id: &str,
     conv_id: Option<&str>,
-) -> (Vec<Value>, Vec<crate::agent::HistoryMessage>) {
+) -> ConversationContext {
     match (conv_id, &qs.db) {
         (Some(cid), Some(db)) => load_conversation_context(db, user_id, cid)
             .await
             .unwrap_or_default(),
-        _ => (vec![], vec![]),
+        _ => ConversationContext::default(),
     }
 }

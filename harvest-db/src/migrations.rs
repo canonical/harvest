@@ -16,6 +16,10 @@ const MIGRATIONS: &[(i32, &str)] = &[
     ),
     (7, include_str!("../migrations/0007_cluster.sql")),
     (8, include_str!("../migrations/0008_external_api.sql")),
+    (
+        9,
+        include_str!("../migrations/0009_conversation_messages.sql"),
+    ),
 ];
 
 pub fn fingerprint() -> u64 {
