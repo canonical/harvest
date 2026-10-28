@@ -942,6 +942,8 @@ mod tests {
             models: None,
             user_provided_key: false,
             pricing: None,
+            max_concurrency: 0,
+            context_window: None,
         }]
     }
 

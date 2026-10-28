@@ -703,6 +703,10 @@ pub enum LlmProviderConfig {
         user_provided_key: bool,
         #[serde(default)]
         pricing: Option<PricingConfig>,
+        #[serde(default)]
+        max_concurrency: usize,
+        #[serde(default)]
+        context_window: Option<usize>,
     },
     Gemini {
         model: String,
@@ -725,6 +729,10 @@ pub enum LlmProviderConfig {
         user_provided_key: bool,
         #[serde(default)]
         pricing: Option<PricingConfig>,
+        #[serde(default)]
+        max_concurrency: usize,
+        #[serde(default)]
+        context_window: Option<usize>,
     },
     #[serde(rename = "openai-compatible")]
     OpenAiCompat {
@@ -751,7 +759,68 @@ pub enum LlmProviderConfig {
         pricing: Option<PricingConfig>,
         #[serde(default)]
         enable_prompt_caching: bool,
+        #[serde(default)]
+        max_concurrency: usize,
+        #[serde(default)]
+        context_window: Option<usize>,
     },
+    Mock {
+        #[serde(default = "default_mock_model")]
+        model: String,
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        priority: u32,
+        #[serde(default = "default_true")]
+        expose_to_ui: bool,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(flatten)]
+        behaviour: MockBehaviour,
+        #[serde(default)]
+        max_concurrency: usize,
+        #[serde(default)]
+        context_window: Option<usize>,
+    },
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MockBehaviour {
+    #[serde(default = "default_mock_chunks")]
+    pub chunks: usize,
+    #[serde(default = "default_mock_chunk_delay_ms")]
+    pub chunk_delay_ms: u64,
+    #[serde(default = "default_mock_first_token_ms")]
+    pub first_token_ms: u64,
+    #[serde(default)]
+    pub reply: Option<String>,
+}
+
+impl Default for MockBehaviour {
+    fn default() -> Self {
+        Self {
+            chunks: default_mock_chunks(),
+            chunk_delay_ms: default_mock_chunk_delay_ms(),
+            first_token_ms: default_mock_first_token_ms(),
+            reply: None,
+        }
+    }
+}
+
+fn default_mock_model() -> String {
+    "mock".to_string()
+}
+
+fn default_mock_chunks() -> usize {
+    8
+}
+
+fn default_mock_chunk_delay_ms() -> u64 {
+    20
+}
+
+fn default_mock_first_token_ms() -> u64 {
+    100
 }
 
 impl LlmProviderConfig {
@@ -760,6 +829,7 @@ impl LlmProviderConfig {
             Self::Anthropic { priority, .. } => *priority,
             Self::Gemini { priority, .. } => *priority,
             Self::OpenAiCompat { priority, .. } => *priority,
+            Self::Mock { priority, .. } => *priority,
         }
     }
 
@@ -768,6 +838,7 @@ impl LlmProviderConfig {
             Self::Anthropic { id, .. } => id,
             Self::Gemini { id, .. } => id,
             Self::OpenAiCompat { id, .. } => id,
+            Self::Mock { id, .. } => id,
         }
     }
 
@@ -776,6 +847,7 @@ impl LlmProviderConfig {
             Self::Anthropic { id, .. } => id,
             Self::Gemini { id, .. } => id,
             Self::OpenAiCompat { id, .. } => id,
+            Self::Mock { id, .. } => id,
         }
     }
 
@@ -784,6 +856,7 @@ impl LlmProviderConfig {
             Self::Anthropic { .. } => "anthropic",
             Self::Gemini { .. } => "gemini",
             Self::OpenAiCompat { .. } => "openai-compatible",
+            Self::Mock { .. } => "mock",
         }
     }
 
@@ -792,6 +865,7 @@ impl LlmProviderConfig {
             Self::Anthropic { expose_to_ui, .. } => *expose_to_ui,
             Self::Gemini { expose_to_ui, .. } => *expose_to_ui,
             Self::OpenAiCompat { expose_to_ui, .. } => *expose_to_ui,
+            Self::Mock { expose_to_ui, .. } => *expose_to_ui,
         }
     }
 
@@ -800,6 +874,7 @@ impl LlmProviderConfig {
             Self::Anthropic { name, .. } => name.as_deref(),
             Self::Gemini { name, .. } => name.as_deref(),
             Self::OpenAiCompat { name, .. } => name.as_deref(),
+            Self::Mock { name, .. } => name.as_deref(),
         }
     }
 
@@ -808,6 +883,7 @@ impl LlmProviderConfig {
             Self::Anthropic { models, .. } => models.as_deref(),
             Self::Gemini { models, .. } => models.as_deref(),
             Self::OpenAiCompat { models, .. } => models.as_deref(),
+            Self::Mock { .. } => None,
         }
     }
 
@@ -822,6 +898,7 @@ impl LlmProviderConfig {
             Self::OpenAiCompat {
                 user_provided_key, ..
             } => *user_provided_key,
+            Self::Mock { .. } => false,
         }
     }
 
@@ -830,6 +907,7 @@ impl LlmProviderConfig {
             Self::Anthropic { api_key, .. } => api_key,
             Self::Gemini { api_key, .. } => api_key,
             Self::OpenAiCompat { api_key, .. } => api_key,
+            Self::Mock { .. } => "",
         }
     }
 
@@ -838,6 +916,7 @@ impl LlmProviderConfig {
             Self::Anthropic { timeout_secs, .. } => *timeout_secs,
             Self::Gemini { timeout_secs, .. } => *timeout_secs,
             Self::OpenAiCompat { timeout_secs, .. } => *timeout_secs,
+            Self::Mock { .. } => default_timeout_secs(),
         }
     }
 
@@ -846,6 +925,7 @@ impl LlmProviderConfig {
             Self::Anthropic { max_retries, .. } => *max_retries,
             Self::Gemini { max_retries, .. } => *max_retries,
             Self::OpenAiCompat { max_retries, .. } => *max_retries,
+            Self::Mock { .. } => 0,
         }
     }
 
@@ -871,6 +951,33 @@ impl LlmProviderConfig {
             Self::Anthropic { pricing, .. } => pricing.as_ref(),
             Self::Gemini { pricing, .. } => pricing.as_ref(),
             Self::OpenAiCompat { pricing, .. } => pricing.as_ref(),
+            Self::Mock { .. } => None,
+        }
+    }
+
+    pub fn max_concurrency(&self) -> usize {
+        match self {
+            Self::Anthropic {
+                max_concurrency, ..
+            }
+            | Self::Gemini {
+                max_concurrency, ..
+            }
+            | Self::OpenAiCompat {
+                max_concurrency, ..
+            }
+            | Self::Mock {
+                max_concurrency, ..
+            } => *max_concurrency,
+        }
+    }
+
+    pub fn context_window(&self) -> Option<usize> {
+        match self {
+            Self::Anthropic { context_window, .. }
+            | Self::Gemini { context_window, .. }
+            | Self::OpenAiCompat { context_window, .. }
+            | Self::Mock { context_window, .. } => *context_window,
         }
     }
 
@@ -879,6 +986,7 @@ impl LlmProviderConfig {
             Self::Anthropic { model, .. } => model,
             Self::Gemini { model, .. } => model,
             Self::OpenAiCompat { model, .. } => model,
+            Self::Mock { model, .. } => model,
         }
     }
 }
@@ -2103,6 +2211,37 @@ mod cluster_config_tests {
             Some("from-token")
         );
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn a_mock_provider_parses_with_defaults_and_overrides() {
+        let cfg = toml::from_str::<Config>(
+            r#"
+            [server]
+            [database]
+            url = "postgres://harvest:pw@localhost:5432/harvest"
+            [auth]
+            jwt_secret = "secret"
+            [[llm]]
+            provider = "mock"
+            chunks = 40
+            first_token_ms = 250
+            max_concurrency = 8
+            context_window = 32000
+        "#,
+        )
+        .unwrap();
+        let llm = &cfg.llm[0];
+        assert_eq!(llm.kind(), "mock");
+        assert_eq!(llm.model(), "mock");
+        assert_eq!(llm.max_concurrency(), 8);
+        assert_eq!(llm.context_window(), Some(32_000));
+        let LlmProviderConfig::Mock { behaviour, .. } = llm else {
+            panic!("expected a mock provider");
+        };
+        assert_eq!(behaviour.chunks, 40);
+        assert_eq!(behaviour.first_token_ms, 250);
+        assert_eq!(behaviour.chunk_delay_ms, 20);
     }
 
     #[test]

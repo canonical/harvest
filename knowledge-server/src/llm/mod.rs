@@ -1,6 +1,8 @@
 pub mod anthropic;
 pub mod breaker;
 pub mod gemini;
+pub mod limited;
+pub mod mock;
 pub mod openai_compat;
 pub mod pricing;
 mod retry;
@@ -402,6 +404,16 @@ fn build_provider_with_key(
     config: &LlmProviderConfig,
     api_key_override: Option<&str>,
 ) -> Arc<dyn LlmProvider> {
+    limited::ConcurrencyLimited::wrap(
+        build_bare_provider(config, api_key_override),
+        config.max_concurrency(),
+    )
+}
+
+fn build_bare_provider(
+    config: &LlmProviderConfig,
+    api_key_override: Option<&str>,
+) -> Arc<dyn LlmProvider> {
     let meta = build_meta(config);
     let api_key = api_key_override.unwrap_or_else(|| config.api_key());
     match config {
@@ -446,6 +458,13 @@ fn build_provider_with_key(
             )
             .with_prompt_caching(config.enable_prompt_caching()),
         ),
+        LlmProviderConfig::Mock {
+            model, behaviour, ..
+        } => Arc::new(mock::MockProvider::new(
+            model.clone(),
+            behaviour.clone(),
+            meta,
+        )),
     }
 }
 
@@ -721,6 +740,8 @@ mod tests {
             models: None,
             user_provided_key: false,
             pricing: None,
+            max_concurrency: 0,
+            context_window: None,
         }];
         let _ = from_config(&cfg);
     }
@@ -915,6 +936,8 @@ mod tests {
             user_provided_key: false,
             pricing: None,
             enable_prompt_caching: false,
+            max_concurrency: 0,
+            context_window: None,
         }];
         let _ = from_config(&cfg);
     }
@@ -935,6 +958,8 @@ mod tests {
             user_provided_key: false,
             pricing: None,
             enable_prompt_caching: true,
+            max_concurrency: 0,
+            context_window: None,
         }];
         let _ = from_config(&cfg);
     }
