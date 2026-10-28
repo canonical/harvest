@@ -28,6 +28,16 @@ CLUSTER_INTERNAL_LISTEN=$(snapctl get cluster.internal-listen)
 CLUSTER_INTERNAL_URL=$(snapctl get cluster.internal-url)
 CLUSTER_SHARED_SECRET=$(snapctl get cluster.shared-secret)
 CLUSTER_NODE_NAME=$(snapctl get cluster.node-name)
+CLUSTER_BACKEND=$(snapctl get cluster.backend)
+CLUSTER_BUS=$(snapctl get cluster.bus)
+CLUSTER_BOOTSTRAP=$(snapctl get cluster.bootstrap)
+CLUSTER_JOIN_TOKEN=$(snapctl get cluster.join-token)
+CLUSTER_JOIN_ADDRESSES=$(snapctl get cluster.join-addresses)
+CLUSTER_ACCEPTED_SECRETS=$(snapctl get cluster.accepted-secrets)
+CLUSTER_DATA_DIR=$(snapctl get cluster.data-dir)
+CLUSTER_HEARTBEAT_MS=$(snapctl get cluster.heartbeat-interval-ms)
+CLUSTER_NODE_TIMEOUT_MS=$(snapctl get cluster.node-timeout-ms)
+CLUSTER_ELECTION_MS=$(snapctl get cluster.election-timeout-ms)
 
 AGENT_MAX_ITER=$(snapctl get agent.max-iterations)
 AGENT_COMPACT_CHARS=$(snapctl get agent.compaction-threshold-chars)
@@ -157,6 +167,17 @@ else
   llm_blocks=""
 fi
 
+toml_list() {
+  local out="" item
+  IFS=',' read -ra items <<< "$1"
+  for item in "${items[@]}"; do
+    item="$(echo "$item" | xargs)"
+    [ -z "$item" ] && continue
+    out="${out:+$out, }\"${item}\""
+  done
+  echo "[${out}]"
+}
+
 {
   cat << TOML
 [server]
@@ -178,6 +199,21 @@ TOML
     [ -n "${CLUSTER_INTERNAL_URL:-}" ]  && echo "internal_url = \"${CLUSTER_INTERNAL_URL}\""
     [ -n "${CLUSTER_SHARED_SECRET:-}" ] && echo "shared_secret = \"${CLUSTER_SHARED_SECRET}\""
     [ -n "${CLUSTER_NODE_NAME:-}" ]     && echo "node_name = \"${CLUSTER_NODE_NAME}\""
+    [ -n "${CLUSTER_BUS:-}" ]           && echo "bus = \"${CLUSTER_BUS}\""
+    [ -n "${CLUSTER_ACCEPTED_SECRETS:-}" ] && echo "accepted_secrets = $(toml_list "$CLUSTER_ACCEPTED_SECRETS")"
+    if [ "${CLUSTER_BACKEND:-postgres}" = "quorium" ]; then
+      echo "backend = \"quorium\""
+      echo "data_dir = \"${CLUSTER_DATA_DIR:-$SNAP_COMMON/quorium}\""
+      echo "heartbeat_interval_ms = ${CLUSTER_HEARTBEAT_MS:-1000}"
+      echo "node_timeout_ms = ${CLUSTER_NODE_TIMEOUT_MS:-5000}"
+      echo "election_timeout_ms = ${CLUSTER_ELECTION_MS:-1000}"
+      [ -n "${CLUSTER_BOOTSTRAP:-}" ]      && echo "bootstrap = \"${CLUSTER_BOOTSTRAP}\""
+      [ -n "${CLUSTER_JOIN_TOKEN:-}" ]     && echo "join_token = \"${CLUSTER_JOIN_TOKEN}\""
+      [ -n "${CLUSTER_JOIN_ADDRESSES:-}" ] && echo "join_addresses = $(toml_list "$CLUSTER_JOIN_ADDRESSES")"
+    else
+      [ -n "${CLUSTER_HEARTBEAT_MS:-}" ]    && echo "heartbeat_interval_ms = ${CLUSTER_HEARTBEAT_MS}"
+      [ -n "${CLUSTER_NODE_TIMEOUT_MS:-}" ] && echo "node_timeout_ms = ${CLUSTER_NODE_TIMEOUT_MS}"
+    fi
   fi
 
   if [ -n "$llm_blocks" ]; then
