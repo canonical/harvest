@@ -54,6 +54,7 @@ pub struct ClusterNode {
     db: Arc<Db>,
     confirmed_at: Mutex<Option<Instant>>,
     standing: watch::Sender<NodeStanding>,
+    lapses: watch::Sender<u64>,
 }
 
 impl ClusterNode {
@@ -78,6 +79,7 @@ impl ClusterNode {
             db,
             confirmed_at: Mutex::new(None),
             standing: watch::channel(NodeStanding::Confirmed).0,
+            lapses: watch::channel(0).0,
         })
     }
 
@@ -125,6 +127,14 @@ impl ClusterNode {
         self.standing.subscribe()
     }
 
+    pub fn watch_lapses(&self) -> watch::Receiver<u64> {
+        self.lapses.subscribe()
+    }
+
+    fn record_lapse(&self) {
+        self.lapses.send_modify(|count| *count += 1);
+    }
+
     fn fence_after(&self) -> Duration {
         self.node_timeout.saturating_sub(self.heartbeat_interval)
     }
@@ -152,7 +162,16 @@ impl ClusterNode {
         });
         match outcome {
             Ok(()) => {
-                *self.confirmed_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(sent_at);
+                let previous = self
+                    .confirmed_at
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .replace(sent_at);
+                let unnoticed_lapse = self.standing() == NodeStanding::Confirmed
+                    && previous.is_some_and(|p| sent_at.duration_since(p) >= self.fence_after());
+                if unnoticed_lapse {
+                    self.record_lapse();
+                }
                 self.standing.send_if_modified(|s| {
                     let changed = *s == NodeStanding::Fenced;
                     if changed {
@@ -178,13 +197,16 @@ impl ClusterNode {
         if confirmed_at.elapsed() < self.fence_after() {
             return;
         }
-        self.standing.send_if_modified(|s| {
+        let fenced = self.standing.send_if_modified(|s| {
             let changed = *s == NodeStanding::Confirmed;
             if changed {
                 *s = NodeStanding::Fenced;
             }
             changed
         });
+        if fenced {
+            self.record_lapse();
+        }
     }
 
     pub fn spawn_heartbeat(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
@@ -360,6 +382,20 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_heartbeat_after_a_long_pause_reports_the_lapse() {
+        let membership = scripted();
+        let node = node(Arc::clone(&membership));
+        node.heartbeat().await.unwrap();
+        let lapses = node.watch_lapses();
+        tokio::time::sleep(node.node_timeout()).await;
+        node.heartbeat().await.unwrap();
+        assert_eq!(*lapses.borrow(), 1);
+        assert_eq!(node.standing(), NodeStanding::Confirmed);
+        node.heartbeat().await.unwrap();
+        assert_eq!(*lapses.borrow(), 1);
     }
 
     #[tokio::test]

@@ -145,26 +145,31 @@ async fn reap(db: &Db, live: &ProjectLive, directory: &AgentDirectory) {
 
 fn spawn_fence_guard(node: Arc<ClusterNode>, live: Arc<ProjectLive>, evicted: Shutdown) {
     let mut standing = node.watch_standing();
+    let mut lapses = node.watch_lapses();
     tokio::spawn(async move {
-        while standing.changed().await.is_ok() {
-            let current = *standing.borrow_and_update();
-            if current == NodeStanding::Confirmed {
-                tracing::info!(
-                    node_id = node.node_id(),
-                    "cluster membership confirmed again"
-                );
-                continue;
-            }
-            let aborted = live.abort_local_turns().await;
-            tracing::error!(
-                node_id = node.node_id(),
-                ?current,
-                aborted,
-                "node fenced: aborted local turns"
-            );
-            if current == NodeStanding::Evicted {
-                evicted.trigger();
-                return;
+        loop {
+            tokio::select! {
+                changed = lapses.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    lapses.borrow_and_update();
+                    let aborted = live.abort_local_turns().await;
+                    tracing::error!(node_id = node.node_id(), aborted, "cluster membership lapsed: aborted local turns");
+                }
+                changed = standing.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    let current = *standing.borrow_and_update();
+                    tracing::warn!(node_id = node.node_id(), ?current, "cluster standing changed");
+                    if current == NodeStanding::Evicted {
+                        let aborted = live.abort_local_turns().await;
+                        tracing::error!(node_id = node.node_id(), aborted, "node evicted from the cluster: shutting down");
+                        evicted.trigger();
+                        return;
+                    }
+                }
             }
         }
     });
