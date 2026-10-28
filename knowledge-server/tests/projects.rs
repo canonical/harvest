@@ -569,7 +569,7 @@ async fn delete_project_removes_it_for_group_member() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn admin_can_list_all_projects() {
+async fn admins_list_only_the_projects_of_their_groups() {
     db!(c, db);
     let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, admin_tok) = make_user(&db, "z@x.com", "Admin", "admin").await;
@@ -583,9 +583,13 @@ async fn admin_can_list_all_projects() {
     )
     .await;
 
-    let (status, body) = send(app, req_get("/projects", &admin_tok)).await;
+    let (status, body) = send(app.clone(), req_get("/projects", &admin_tok)).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!body.as_array().unwrap().is_empty());
+    assert!(body.as_array().unwrap().is_empty());
+
+    let (status, body) = send(app, req_get("/projects", &alice_tok)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
