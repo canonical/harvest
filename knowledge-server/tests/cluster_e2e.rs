@@ -15,6 +15,39 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 const SECRET: &str = "e2e-cluster-secret";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Backend {
+    Postgres,
+    Quorium,
+}
+
+impl Backend {
+    fn smallest_cluster(self, wanted: usize) -> usize {
+        match self {
+            Backend::Postgres => wanted,
+            Backend::Quorium => wanted.max(3),
+        }
+    }
+}
+
+enum Bootstrap {
+    Init,
+    Join(String),
+}
+
+impl Bootstrap {
+    fn settings(&self, data_dir: &std::path::Path) -> String {
+        let (mode, token) = match self {
+            Bootstrap::Init => ("init", String::new()),
+            Bootstrap::Join(token) => ("join", format!("join_token = \"{token}\"\n")),
+        };
+        format!(
+            "backend = \"quorium\"\ndata_dir = \"{}\"\nbootstrap = \"{mode}\"\nelection_timeout_ms = 300\n{token}",
+            data_dir.display()
+        )
+    }
+}
 const JWT_SECRET: &str = "e2e-jwt-secret-that-is-long-enough-for-hs256";
 
 struct MockLlm {
@@ -86,6 +119,7 @@ struct Node {
     name: String,
     child: Option<Child>,
     base: String,
+    internal: String,
     config_path: PathBuf,
     log_path: PathBuf,
 }
@@ -93,6 +127,10 @@ struct Node {
 impl Node {
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path)
+    }
+
+    fn internal_url(&self, path: &str) -> String {
+        format!("{}{}", self.internal, path)
     }
 
     fn kill(&mut self) {
@@ -138,9 +176,18 @@ impl Drop for Node {
     }
 }
 
-fn start_node(name: &str, db_url: &str, llm_url: &str, dir: &std::path::Path) -> Node {
+fn start_node(
+    name: &str,
+    db_url: &str,
+    llm_url: &str,
+    dir: &std::path::Path,
+    bootstrap: Option<Bootstrap>,
+) -> Node {
     let port = free_port();
     let internal_port = free_port();
+    let quorium = bootstrap
+        .map(|b| b.settings(&dir.join(format!("{name}-quorium"))))
+        .unwrap_or_default();
     let config = format!(
         r#"
 [server]
@@ -160,6 +207,7 @@ node_timeout_ms = 1500
 bus_batch_window_ms = 10
 drain_grace_secs = 1
 drain_timeout_secs = 5
+{quorium}
 
 [auth]
 jwt_secret = "{JWT_SECRET}"
@@ -193,9 +241,39 @@ max_retries = 0
         name: name.to_string(),
         child: Some(child),
         base: format!("http://127.0.0.1:{port}"),
+        internal: format!("http://127.0.0.1:{internal_port}"),
         config_path,
         log_path,
     }
+}
+
+fn node_name(index: usize) -> String {
+    format!("node-{}", (b'a' + index as u8) as char)
+}
+
+async fn join_token(http: &reqwest::Client, seed: &Node) -> String {
+    let response: Value = http
+        .post(seed.internal_url("/internal/cluster/tokens"))
+        .header("x-harvest-cluster-secret", SECRET)
+        .json(&json!({ "ttl_secs": 600 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    response["token"].as_str().expect("join token").to_string()
+}
+
+async fn cluster_status(http: &reqwest::Client, node: &Node) -> Value {
+    http.get(node.internal_url("/internal/cluster/status"))
+        .header("x-harvest-cluster-secret", SECRET)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
 }
 
 async fn wait_ready(http: &reqwest::Client, node: &Node) {
@@ -225,28 +303,51 @@ struct Cluster {
 }
 
 impl Cluster {
-    async fn start(count: usize) -> Self {
+    async fn start(backend: Backend, wanted: usize) -> Self {
+        let count = backend.smallest_cluster(wanted);
         let db = TestDb::new().await;
         let db_url = db.url.clone();
         let (llm_url, mock) = start_mock_llm().await;
         let dir = tempfile::tempdir().unwrap();
-        let nodes: Vec<Node> = (0..count)
-            .map(|i| {
-                start_node(
-                    &format!("node-{}", (b'a' + i as u8) as char),
-                    &db_url,
-                    &llm_url,
-                    dir.path(),
-                )
-            })
-            .collect();
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
             .unwrap();
-        for node in &nodes {
-            wait_ready(&http, node).await;
-        }
+        let nodes = match backend {
+            Backend::Postgres => {
+                let nodes: Vec<Node> = (0..count)
+                    .map(|i| start_node(&node_name(i), &db_url, &llm_url, dir.path(), None))
+                    .collect();
+                for node in &nodes {
+                    wait_ready(&http, node).await;
+                }
+                nodes
+            }
+            Backend::Quorium => {
+                let seed = start_node(
+                    &node_name(0),
+                    &db_url,
+                    &llm_url,
+                    dir.path(),
+                    Some(Bootstrap::Init),
+                );
+                wait_ready(&http, &seed).await;
+                let mut nodes = vec![seed];
+                for i in 1..count {
+                    let token = join_token(&http, &nodes[0]).await;
+                    let node = start_node(
+                        &node_name(i),
+                        &db_url,
+                        &llm_url,
+                        dir.path(),
+                        Some(Bootstrap::Join(token)),
+                    );
+                    wait_ready(&http, &node).await;
+                    nodes.push(node);
+                }
+                nodes
+            }
+        };
 
         let response = http.post(nodes[0].url("/auth/register"))
             .json(&json!({ "email": "admin@example.com", "name": "Admin", "password": "correct-horse" }))
@@ -406,10 +507,8 @@ fn expected_answer(chunks: usize) -> String {
     (0..chunks).map(|i| format!("chunk{i} ")).collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn three_nodes_serve_one_cluster() {
-    let cluster = Cluster::start(3).await;
+async fn three_nodes_serve_one_cluster(backend: Backend) {
+    let cluster = Cluster::start(backend, 3).await;
     let nodes: Value = cluster
         .http
         .get(cluster.nodes[0].url("/version"))
@@ -420,15 +519,15 @@ async fn three_nodes_serve_one_cluster() {
         .await
         .unwrap();
     assert_eq!(nodes["schema_version"], harvest_db::LATEST_SCHEMA_VERSION);
-    let db = cluster.db().await;
-    let alive = db.query("SELECT count(*) AS n FROM cluster_nodes WHERE heartbeat_at > now() - interval '2 seconds'", json!({})).await.unwrap();
-    assert_eq!(alive[0]["n"], 3);
+    for node in &cluster.nodes {
+        let status = cluster_status(&cluster.http, node).await;
+        assert_eq!(status["members"].as_array().unwrap().len(), 3, "{status}");
+        assert_eq!(status["membership"]["quorum"], true);
+    }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn a_turn_started_on_one_node_streams_to_watchers_on_every_node() {
-    let cluster = Cluster::start(3).await;
+async fn a_turn_started_on_one_node_streams_to_watchers_on_every_node(backend: Backend) {
+    let cluster = Cluster::start(backend, 3).await;
     cluster.mock.chunks.store(8, Ordering::SeqCst);
     let conv = cluster.new_conversation(1).await;
     let mut on_b = cluster.events(1, Some(&conv)).await;
@@ -492,10 +591,8 @@ async fn a_turn_started_on_one_node_streams_to_watchers_on_every_node() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn a_conversation_lock_is_enforced_across_nodes() {
-    let cluster = Cluster::start(3).await;
+async fn a_conversation_lock_is_enforced_across_nodes(backend: Backend) {
+    let cluster = Cluster::start(backend, 3).await;
     cluster.mock.chunks.store(30, Ordering::SeqCst);
     cluster.mock.chunk_delay_ms.store(100, Ordering::SeqCst);
     let conv = cluster.new_conversation(0).await;
@@ -524,10 +621,10 @@ async fn a_conversation_lock_is_enforced_across_nodes() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn a_watcher_joining_mid_turn_on_another_node_catches_up_without_gaps_or_duplicates() {
-    let cluster = Cluster::start(3).await;
+async fn a_watcher_joining_mid_turn_on_another_node_catches_up_without_gaps_or_duplicates(
+    backend: Backend,
+) {
+    let cluster = Cluster::start(backend, 3).await;
     cluster.mock.chunks.store(40, Ordering::SeqCst);
     cluster.mock.chunk_delay_ms.store(50, Ordering::SeqCst);
     let conv = cluster.new_conversation(0).await;
@@ -557,10 +654,8 @@ async fn a_watcher_joining_mid_turn_on_another_node_catches_up_without_gaps_or_d
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn presence_is_shared_across_nodes() {
-    let cluster = Cluster::start(2).await;
+async fn presence_is_shared_across_nodes(backend: Backend) {
+    let cluster = Cluster::start(backend, 2).await;
     let conv = cluster.new_conversation(0).await;
     let mut on_a = cluster.events(0, Some(&conv)).await;
     wait_for(&mut on_a, Duration::from_secs(10), |e| {
@@ -593,10 +688,8 @@ async fn presence_is_shared_across_nodes() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn a_crashed_node_aborts_its_turn_and_releases_the_lock() {
-    let mut cluster = Cluster::start(3).await;
+async fn a_crashed_node_aborts_its_turn_and_releases_the_lock(backend: Backend) {
+    let mut cluster = Cluster::start(backend, 3).await;
     cluster.mock.chunks.store(200, Ordering::SeqCst);
     cluster.mock.chunk_delay_ms.store(100, Ordering::SeqCst);
     let conv = cluster.new_conversation(1).await;
@@ -633,10 +726,8 @@ async fn a_crashed_node_aborts_its_turn_and_releases_the_lock() {
     .await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn a_drained_node_fails_readiness_refuses_turns_and_exits_cleanly() {
-    let mut cluster = Cluster::start(2).await;
+async fn a_drained_node_fails_readiness_refuses_turns_and_exits_cleanly(backend: Backend) {
+    let mut cluster = Cluster::start(backend, 2).await;
     let conv = cluster.new_conversation(0).await;
     let mut watch = cluster.events(1, Some(&conv)).await;
     wait_for(&mut watch, Duration::from_secs(10), |e| {
@@ -670,15 +761,15 @@ async fn a_drained_node_fails_readiness_refuses_turns_and_exits_cleanly() {
         cluster.nodes[0].log()
     );
 
-    let db = cluster.db().await;
-    let rows = db
-        .query(
-            "SELECT count(*) AS n FROM cluster_nodes WHERE node_id LIKE 'node-a-%'",
-            json!({}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows[0]["n"], 0, "a drained node deregisters itself");
+    let status = cluster_status(&cluster.http, &cluster.nodes[1]).await;
+    assert!(
+        status["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| !m["node_id"].as_str().unwrap().starts_with("node-a-")),
+        "a drained node deregisters itself: {status}"
+    );
 
     assert_eq!(cluster.send(1, &conv, "served by the survivor").await, 200);
     wait_for(&mut watch, Duration::from_secs(30), |e| {
@@ -725,10 +816,8 @@ async fn connect_fake_agent(
     (agent_id, agent_token, events)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn an_agent_connected_to_one_node_runs_commands_requested_on_another() {
-    let cluster = Cluster::start(3).await;
+async fn an_agent_connected_to_one_node_runs_commands_requested_on_another(backend: Backend) {
+    let cluster = Cluster::start(backend, 3).await;
     let (agent_id, agent_token, mut agent_events) = connect_fake_agent(&cluster, 0).await;
 
     let agents: Value = cluster
@@ -779,10 +868,8 @@ async fn an_agent_connected_to_one_node_runs_commands_requested_on_another() {
     assert_eq!(response["exit_code"], 0);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn an_agent_reconnects_to_a_survivor_when_its_node_crashes() {
-    let mut cluster = Cluster::start(2).await;
+async fn an_agent_reconnects_to_a_survivor_when_its_node_crashes(backend: Backend) {
+    let mut cluster = Cluster::start(backend, 2).await;
     let (agent_id, _token, _events) = connect_fake_agent(&cluster, 0).await;
     cluster.nodes[0].kill();
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -847,3 +934,35 @@ async fn connect_fake_agent_with_token(
     .await;
     (String::new(), token.to_string(), events)
 }
+
+macro_rules! on_every_backend {
+    ($($scenario:ident),* $(,)?) => {
+        $(
+            mod $scenario {
+                #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+                #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts server processes"]
+                async fn postgres() {
+                    super::$scenario(super::Backend::Postgres).await
+                }
+
+                #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+                #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts server processes"]
+                async fn quorium() {
+                    super::$scenario(super::Backend::Quorium).await
+                }
+            }
+        )*
+    };
+}
+
+on_every_backend!(
+    three_nodes_serve_one_cluster,
+    a_turn_started_on_one_node_streams_to_watchers_on_every_node,
+    a_conversation_lock_is_enforced_across_nodes,
+    a_watcher_joining_mid_turn_on_another_node_catches_up_without_gaps_or_duplicates,
+    presence_is_shared_across_nodes,
+    a_crashed_node_aborts_its_turn_and_releases_the_lock,
+    a_drained_node_fails_readiness_refuses_turns_and_exits_cleanly,
+    an_agent_connected_to_one_node_runs_commands_requested_on_another,
+    an_agent_reconnects_to_a_survivor_when_its_node_crashes,
+);
