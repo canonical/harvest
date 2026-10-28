@@ -10,7 +10,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::auth::jwt::Claims;
-use crate::conversations::store::{self, ConversationContext, Owner, Page};
+use crate::conversations::store::{self, ConversationContext, Guard, Owner, Page};
 use crate::llm::types::{Usage, UsedProvider};
 use harvest_db::Db;
 
@@ -137,7 +137,15 @@ pub async fn append_user_turn(
     ];
 
     store::ensure_user_conversation(db, user_id, conv_id, &title, &now).await?;
-    store::append(db, Owner::User(user_id), conv_id, &messages, &now).await?;
+    store::append(
+        db,
+        Owner::User(user_id),
+        Guard::Unguarded,
+        conv_id,
+        &messages,
+        &now,
+    )
+    .await?;
 
     if let Some(record) = crate::cost::build_turn_record(
         crate::cost::CostScope::Chat,

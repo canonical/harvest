@@ -29,6 +29,30 @@ impl<'a> Owner<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum Guard<'a> {
+    Unguarded,
+    HoldingTurn(&'a str),
+}
+
+impl<'a> Guard<'a> {
+    fn clause(self) -> &'static str {
+        match self {
+            Guard::Unguarded => "TRUE",
+            Guard::HoldingTurn(_) => {
+                "EXISTS (SELECT 1 FROM active_turns t WHERE t.conv_id = c.id AND t.turn_id = $turn)"
+            }
+        }
+    }
+
+    fn turn(self) -> &'a str {
+        match self {
+            Guard::Unguarded => "",
+            Guard::HoldingTurn(turn_id) => turn_id,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ConversationContext {
     pub summary: Option<StoredSummary>,
@@ -141,6 +165,7 @@ impl Page {
 pub async fn append(
     db: &Db,
     owner: Owner<'_>,
+    guard: Guard<'_>,
     conv_id: &str,
     messages: &[Value],
     now: &str,
@@ -149,14 +174,15 @@ pub async fn append(
         "WITH bumped AS (
              UPDATE conversations c
              SET message_count = c.message_count + $n, updated_at = $now
-             WHERE c.id = $cid AND {}
+             WHERE c.id = $cid AND {} AND {}
              RETURNING c.message_count - $n AS start
          )
          INSERT INTO conversation_messages (conv_id, seq, payload)
          SELECT $cid, (bumped.start + m.ord - 1)::integer, m.value
          FROM bumped, jsonb_array_elements($messages::jsonb) WITH ORDINALITY AS m(value, ord)
          RETURNING seq",
-        owner.clause()
+        owner.clause(),
+        guard.clause()
     );
     let inserted = db
         .query(
@@ -164,6 +190,7 @@ pub async fn append(
             json!({
                 "cid": conv_id,
                 "owner": owner.id(),
+                "turn": guard.turn(),
                 "n": messages.len() as i64,
                 "now": now,
                 "messages": messages,
@@ -177,6 +204,7 @@ pub async fn append(
 pub async fn update_last<F>(
     db: &Db,
     owner: Owner<'_>,
+    guard: Guard<'_>,
     conv_id: &str,
     now: &str,
     edit: F,
@@ -189,12 +217,16 @@ where
         "SELECT m.seq, m.payload
          FROM conversation_messages m
          JOIN conversations c ON c.id = m.conv_id
-         WHERE c.id = $cid AND {} AND m.seq = c.message_count - 1
-         FOR UPDATE",
-        owner.clause()
+         WHERE c.id = $cid AND {} AND {} AND m.seq = c.message_count - 1
+         FOR UPDATE OF c, m",
+        owner.clause(),
+        guard.clause()
     );
     let rows = tx
-        .query(&sql, json!({ "cid": conv_id, "owner": owner.id() }))
+        .query(
+            &sql,
+            json!({ "cid": conv_id, "owner": owner.id(), "turn": guard.turn() }),
+        )
         .await
         .context("locking the last conversation message")?;
     let Some(mut row) = rows.into_iter().next() else {
@@ -340,6 +372,7 @@ mod tests {
         assert!(append(
             &test_db.db,
             Owner::User(&uid),
+            Guard::Unguarded,
             &cid,
             &[message("user", "1"), message("assistant", "2")],
             &now
@@ -349,6 +382,7 @@ mod tests {
         assert!(append(
             &test_db.db,
             Owner::User(&uid),
+            Guard::Unguarded,
             &cid,
             &[message("user", "3")],
             &now
@@ -372,6 +406,7 @@ mod tests {
         assert!(!append(
             &test_db.db,
             Owner::User("someone-else"),
+            Guard::Unguarded,
             &cid,
             &[message("user", "x")],
             &now
@@ -391,9 +426,16 @@ mod tests {
         let (uid, cid) = user_conversation(&test_db.db).await;
         let now = harvest_db::now_rfc3339();
         let messages: Vec<Value> = (0..6).map(|i| message("user", &i.to_string())).collect();
-        append(&test_db.db, Owner::User(&uid), &cid, &messages, &now)
-            .await
-            .unwrap();
+        append(
+            &test_db.db,
+            Owner::User(&uid),
+            Guard::Unguarded,
+            &cid,
+            &messages,
+            &now,
+        )
+        .await
+        .unwrap();
         crate::conversations::summary::store(
             &test_db.db,
             &cid,
@@ -418,9 +460,16 @@ mod tests {
         let (uid, cid) = user_conversation(&test_db.db).await;
         let now = harvest_db::now_rfc3339();
         let messages: Vec<Value> = (0..5).map(|i| message("user", &i.to_string())).collect();
-        append(&test_db.db, Owner::User(&uid), &cid, &messages, &now)
-            .await
-            .unwrap();
+        append(
+            &test_db.db,
+            Owner::User(&uid),
+            Guard::Unguarded,
+            &cid,
+            &messages,
+            &now,
+        )
+        .await
+        .unwrap();
 
         let last = load_page(&test_db.db, Owner::User(&uid), &cid, Page::last(2))
             .await
@@ -453,6 +502,7 @@ mod tests {
         append(
             &test_db.db,
             Owner::User(&uid),
+            Guard::Unguarded,
             &cid,
             &[message("user", "q"), message("assistant", "a")],
             &now,
@@ -460,12 +510,16 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
-            update_last(&test_db.db, Owner::User(&uid), &cid, &now, |m| m["text"] =
-                json!("edited"))
-            .await
-            .unwrap()
-        );
+        assert!(update_last(
+            &test_db.db,
+            Owner::User(&uid),
+            Guard::Unguarded,
+            &cid,
+            &now,
+            |m| m["text"] = json!("edited")
+        )
+        .await
+        .unwrap());
 
         let all = load_page(&test_db.db, Owner::User(&uid), &cid, Page::all())
             .await
@@ -475,14 +529,82 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs HARVEST_TEST_DATABASE_URL"]
+    async fn a_turn_that_lost_its_lock_cannot_write() {
+        let test_db = TestDb::new().await;
+        let db = &test_db.db;
+        db.execute("INSERT INTO groups (id, name) VALUES ('g', 'g')", json!({}))
+            .await
+            .unwrap();
+        db.execute(
+            "INSERT INTO projects (id, name, group_id, created_at) VALUES ('p', 'p', 'g', now())",
+            json!({}),
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO conversations (id, project_id, title, message_count, created_at, updated_at)
+             VALUES ('c', 'p', 't', 0, now(), now())",
+            json!({}),
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO active_turns (conv_id, project_id, turn_id, node_id, locked_by)
+             VALUES ('c', 'p', 'new-turn', 'n', 'u')",
+            json!({}),
+        )
+        .await
+        .unwrap();
+        let now = harvest_db::now_rfc3339();
+        let owner = Owner::Project("p");
+        assert!(!append(
+            db,
+            owner,
+            Guard::HoldingTurn("old-turn"),
+            "c",
+            &[message("user", "stale")],
+            &now
+        )
+        .await
+        .unwrap());
+        assert!(append(
+            db,
+            owner,
+            Guard::HoldingTurn("new-turn"),
+            "c",
+            &[message("user", "fresh")],
+            &now
+        )
+        .await
+        .unwrap());
+        assert!(
+            !update_last(db, owner, Guard::HoldingTurn("old-turn"), "c", &now, |m| {
+                m["text"] = json!("x")
+            })
+            .await
+            .unwrap()
+        );
+        let all = load_page(db, owner, "c", Page::all()).await.unwrap();
+        assert_eq!(texts(&all), vec!["fresh"]);
+    }
+
+    #[tokio::test]
+    #[ignore = "needs HARVEST_TEST_DATABASE_URL"]
     async fn replace_all_resets_messages_and_summary() {
         let test_db = TestDb::new().await;
         let (uid, cid) = user_conversation(&test_db.db).await;
         let now = harvest_db::now_rfc3339();
         let messages: Vec<Value> = (0..4).map(|i| message("user", &i.to_string())).collect();
-        append(&test_db.db, Owner::User(&uid), &cid, &messages, &now)
-            .await
-            .unwrap();
+        append(
+            &test_db.db,
+            Owner::User(&uid),
+            Guard::Unguarded,
+            &cid,
+            &messages,
+            &now,
+        )
+        .await
+        .unwrap();
         crate::conversations::summary::store(
             &test_db.db,
             &cid,
