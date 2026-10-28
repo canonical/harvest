@@ -23,8 +23,13 @@ pub struct ClusterAdmin {
 pub fn router(admin: Arc<ClusterAdmin>) -> Router {
     Router::new()
         .route("/internal/cluster/status", get(status))
-        .route("/internal/cluster/tokens", post(issue_token))
+        .route(
+            "/internal/cluster/tokens",
+            post(issue_token).delete(revoke_tokens),
+        )
         .route("/internal/cluster/servers/:id", delete(remove_server))
+        .route("/internal/cluster/evacuate", post(evacuate))
+        .route("/internal/cluster/restore", post(restore))
         .with_state(admin)
 }
 
@@ -74,6 +79,35 @@ async fn issue_token(
         Ok(mut token) => {
             token.shared_secret = admin.shared_secret.clone();
             Json(json!({ "token": token.encode(), "expires_in_secs": ttl })).into_response()
+        }
+        Err(e) => failure(StatusCode::SERVICE_UNAVAILABLE, e),
+    }
+}
+
+async fn revoke_tokens(State(admin): State<Arc<ClusterAdmin>>) -> Response {
+    let quorium = match require_quorium(&admin) {
+        Ok(q) => q,
+        Err(response) => return response,
+    };
+    match quorium.revoke_tokens().await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => failure(StatusCode::SERVICE_UNAVAILABLE, e),
+    }
+}
+
+async fn evacuate(State(admin): State<Arc<ClusterAdmin>>) -> Response {
+    match admin.node.set_draining().await {
+        Ok(()) => {
+            Json(json!({ "node_id": admin.node.node_id(), "draining": true })).into_response()
+        }
+        Err(e) => failure(StatusCode::SERVICE_UNAVAILABLE, e),
+    }
+}
+
+async fn restore(State(admin): State<Arc<ClusterAdmin>>) -> Response {
+    match admin.node.restore().await {
+        Ok(()) => {
+            Json(json!({ "node_id": admin.node.node_id(), "draining": false })).into_response()
         }
         Err(e) => failure(StatusCode::SERVICE_UNAVAILABLE, e),
     }
