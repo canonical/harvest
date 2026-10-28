@@ -79,6 +79,35 @@ describe('projectQueryStart', () => {
   });
 });
 
+describe('projectQueryStart retries', () => {
+  beforeEach(() => { vi.restoreAllMocks(); });
+
+  it('sends an idempotency key and reuses it when retrying a failed connection', async () => {
+    global.fetch = vi.fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce(mockJsonResponse({ ok: true, turn_id: 't1' }));
+    const result = await projectQueryStart('proj1', 'hi', 'conv1', [], null, { retryMs: 0 });
+    expect(result.turn_id).toBe('t1');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    const first = global.fetch.mock.calls[0][1].headers['Idempotency-Key'];
+    const second = global.fetch.mock.calls[1][1].headers['Idempotency-Key'];
+    expect(first).toBeTruthy();
+    expect(second).toBe(first);
+  });
+
+  it('retries a draining server and gives up after three attempts', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ error: 'server is shutting down, retry' }, false, 503)));
+    await expect(projectQueryStart('proj1', 'hi', 'conv1', [], null, { retryMs: 0 })).rejects.toThrow('server is shutting down');
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not retry a locked conversation', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(mockJsonResponse({ error: 'chat is locked' }, false, 409)));
+    await expect(projectQueryStart('proj1', 'hi', 'conv1', [], null, { retryMs: 0 })).rejects.toMatchObject({ status: 409 });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('runTerraformArtifact', () => {
   beforeEach(() => { vi.restoreAllMocks(); });
 
