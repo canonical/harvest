@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod breaker;
 pub mod gemini;
 pub mod openai_compat;
 pub mod pricing;
@@ -12,6 +13,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::config::LlmProviderConfig;
+use breaker::{CircuitBreaker, Failure};
 use types::{
     LlmResponse, Message, ModelInfo, ProviderMeta, ProviderSelection, StreamEvent, ToolDefinition,
     Usage, UsedProvider,
@@ -158,6 +160,7 @@ pub trait LlmProvider: Send + Sync {
 
 pub struct FallbackProvider {
     providers: Vec<Arc<dyn LlmProvider>>,
+    breakers: Vec<CircuitBreaker>,
 }
 
 impl FallbackProvider {
@@ -166,32 +169,125 @@ impl FallbackProvider {
             !providers.is_empty(),
             "FallbackProvider requires at least one provider"
         );
-        Self { providers }
+        let breakers = providers
+            .iter()
+            .map(|_| CircuitBreaker::default())
+            .collect();
+        Self {
+            providers,
+            breakers,
+        }
     }
 
-    fn is_rate_limited(err: &anyhow::Error) -> bool {
-        let msg = err.to_string().to_lowercase();
-        msg.contains("429") || msg.contains("resource_exhausted")
-    }
-
-    fn ordered_for(
-        &self,
-        selection: Option<&ProviderSelection>,
-    ) -> Vec<(&Arc<dyn LlmProvider>, Option<String>)> {
-        match selection {
-            Some(sel) if self.providers.iter().any(|p| p.id() == sel.provider_id) => {
-                let (matched, rest): (Vec<_>, Vec<_>) = self
-                    .providers
-                    .iter()
-                    .partition(|p| p.id() == sel.provider_id);
+    fn ordered_for(&self, selection: Option<&ProviderSelection>) -> Vec<(usize, Option<String>)> {
+        let preferred =
+            selection.filter(|sel| self.providers.iter().any(|p| p.id() == sel.provider_id));
+        let mut order: Vec<(usize, Option<String>)> = match preferred {
+            Some(sel) => {
+                let (matched, rest): (Vec<usize>, Vec<usize>) = (0..self.providers.len())
+                    .partition(|&i| self.providers[i].id() == sel.provider_id);
                 matched
                     .into_iter()
-                    .map(|p| (p, sel.model.clone()))
-                    .chain(rest.into_iter().map(|p| (p, None)))
+                    .map(|i| (i, sel.model.clone()))
+                    .chain(rest.into_iter().map(|i| (i, None)))
                     .collect()
             }
-            _ => self.providers.iter().map(|p| (p, None)).collect(),
+            None => (0..self.providers.len()).map(|i| (i, None)).collect(),
+        };
+        order.sort_by_key(|(i, _)| self.breakers[*i].is_open());
+        order
+    }
+
+    fn record(&self, index: usize, outcome: &Result<impl Sized>) -> Option<Failure> {
+        match outcome {
+            Ok(_) => {
+                self.breakers[index].succeeded();
+                None
+            }
+            Err(e) => {
+                let failure = Failure::of(e);
+                self.breakers[index].failed(failure);
+                tracing::warn!(error = %e, provider = self.providers[index].id(), ?failure, "LLM provider call failed");
+                Some(failure)
+            }
         }
+    }
+
+    async fn first_success<T, F, Fut>(
+        &self,
+        order: Vec<(usize, Option<String>)>,
+        mut call: F,
+    ) -> Result<T>
+    where
+        F: FnMut(usize, Option<String>) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let mut last_err = anyhow::anyhow!("no LLM providers configured");
+        for (index, model) in order {
+            let outcome = call(index, model).await;
+            match self.record(index, &outcome) {
+                None => return outcome,
+                Some(failure) if failure.moves_on() => {
+                    last_err = outcome.err().expect("a failed call")
+                }
+                Some(_) => return outcome,
+            }
+        }
+        Err(last_err)
+    }
+
+    async fn stream_once(
+        &self,
+        index: usize,
+        model: Option<&str>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> (Result<()>, bool) {
+        let (relay_tx, mut relay_rx) = mpsc::channel::<StreamEvent>(64);
+        let relay = tokio::spawn(async move {
+            let mut emitted = false;
+            while let Some(event) = relay_rx.recv().await {
+                emitted = true;
+                if tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+            emitted
+        });
+        let provider = &self.providers[index];
+        let outcome = match model {
+            Some(_) => {
+                provider
+                    .chat_stream_with(model, messages, tools, relay_tx)
+                    .await
+            }
+            None => provider.chat_stream(messages, tools, relay_tx).await,
+        };
+        (outcome, relay.await.unwrap_or(true))
+    }
+
+    async fn stream_first_success(
+        &self,
+        order: Vec<(usize, Option<String>)>,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        tx: mpsc::Sender<StreamEvent>,
+    ) -> Result<UsedProvider> {
+        let mut last_err = anyhow::anyhow!("no LLM providers configured");
+        for (index, model) in order {
+            let (outcome, emitted) = self
+                .stream_once(index, model.as_deref(), messages, tools, tx.clone())
+                .await;
+            match self.record(index, &outcome) {
+                None => return Ok(self.providers[index].used(model.as_deref())),
+                Some(failure) if failure.moves_on() && !emitted => {
+                    last_err = outcome.err().expect("a failed call")
+                }
+                Some(_) => return Err(outcome.err().expect("a failed call")),
+            }
+        }
+        Err(last_err)
     }
 }
 
@@ -226,18 +322,10 @@ impl LlmProvider for FallbackProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<LlmResponse> {
-        let mut last_err = anyhow::anyhow!("no LLM providers configured");
-        for provider in &self.providers {
-            match provider.chat(messages, tools).await {
-                Ok(response) => return Ok(response),
-                Err(e) if Self::is_rate_limited(&e) => {
-                    tracing::warn!(error = %e, "LLM provider rate limited — trying next provider");
-                    last_err = e;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Err(last_err)
+        self.first_success(self.ordered_for(None), |index, _| {
+            self.providers[index].chat(messages, tools)
+        })
+        .await
     }
 
     async fn chat_stream_with(
@@ -247,18 +335,9 @@ impl LlmProvider for FallbackProvider {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
-        let mut last_err = anyhow::anyhow!("no LLM providers configured");
-        for provider in &self.providers {
-            match provider.chat_stream(messages, tools, tx.clone()).await {
-                Ok(()) => return Ok(()),
-                Err(e) if Self::is_rate_limited(&e) => {
-                    tracing::warn!(error = %e, "LLM provider stream rate limited — trying next provider");
-                    last_err = e;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Err(last_err)
+        self.stream_first_success(self.ordered_for(None), messages, tools, tx)
+            .await
+            .map(|_| ())
     }
 
     async fn chat_routed(
@@ -267,28 +346,18 @@ impl LlmProvider for FallbackProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<(LlmResponse, UsedProvider, Usage)> {
-        let order = self.ordered_for(selection);
-        let mut last_err = anyhow::anyhow!("no LLM providers configured");
-        for (provider, model_override) in order {
-            match provider
-                .chat_with(model_override.as_deref(), messages, tools)
-                .await
-            {
-                Ok(response) => {
-                    let usage = match &response {
-                        LlmResponse::Message { usage, .. } => usage.clone(),
-                        LlmResponse::ToolCalls { usage, .. } => usage.clone(),
-                    };
-                    return Ok((response, provider.used(model_override.as_deref()), usage));
-                }
-                Err(e) if Self::is_rate_limited(&e) => {
-                    tracing::warn!(error = %e, provider = provider.id(), "LLM provider rate limited — trying next provider");
-                    last_err = e;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Err(last_err)
+        self.first_success(self.ordered_for(selection), |index, model| async move {
+            let provider = &self.providers[index];
+            let response = provider
+                .chat_with(model.as_deref(), messages, tools)
+                .await?;
+            let usage = match &response {
+                LlmResponse::Message { usage, .. } => usage.clone(),
+                LlmResponse::ToolCalls { usage, .. } => usage.clone(),
+            };
+            Ok((response, provider.used(model.as_deref()), usage))
+        })
+        .await
     }
 
     async fn chat_stream_routed(
@@ -298,22 +367,8 @@ impl LlmProvider for FallbackProvider {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<UsedProvider> {
-        let order = self.ordered_for(selection);
-        let mut last_err = anyhow::anyhow!("no LLM providers configured");
-        for (provider, model_override) in order {
-            match provider
-                .chat_stream_with(model_override.as_deref(), messages, tools, tx.clone())
-                .await
-            {
-                Ok(()) => return Ok(provider.used(model_override.as_deref())),
-                Err(e) if Self::is_rate_limited(&e) => {
-                    tracing::warn!(error = %e, provider = provider.id(), "LLM provider stream rate limited — trying next provider");
-                    last_err = e;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Err(last_err)
+        self.stream_first_success(self.ordered_for(selection), messages, tools, tx)
+            .await
     }
 }
 
@@ -479,6 +534,9 @@ mod tests {
         fn auth_error() -> Result<LlmResponse> {
             Err(anyhow!("provider error 401 Unauthorized"))
         }
+        fn overloaded() -> Result<LlmResponse> {
+            Err(anyhow!("provider error 503 overloaded"))
+        }
         fn last_model(&self) -> Option<String> {
             self.last_model.lock().unwrap().clone()
         }
@@ -525,31 +583,44 @@ mod tests {
         FallbackProvider::new(providers)
     }
 
-    #[test]
-    fn detects_429_in_error_message() {
-        assert!(FallbackProvider::is_rate_limited(&anyhow!(
-            "error 429 Too Many Requests"
-        )));
+    #[tokio::test]
+    async fn a_transient_error_falls_back_to_the_next_provider() {
+        let p1 = MockProvider::new(vec![MockProvider::overloaded()]);
+        let p2 = MockProvider::new(vec![MockProvider::ok("from second")]);
+        let fb = fallback(vec![p1, p2]);
+        let r = fb.chat(&[], &[]).await.unwrap();
+        assert!(matches!(r, LlmResponse::Message { text, .. } if text == "from second"));
     }
 
-    #[test]
-    fn detects_resource_exhausted_case_insensitive() {
-        assert!(FallbackProvider::is_rate_limited(&anyhow!(
-            "Gemini RESOURCE_EXHAUSTED quota"
-        )));
-    }
-
-    #[test]
-    fn non_rate_limit_error_not_detected() {
-        assert!(!FallbackProvider::is_rate_limited(&anyhow!(
-            "401 Unauthorized"
-        )));
-        assert!(!FallbackProvider::is_rate_limited(&anyhow!(
-            "network timeout"
-        )));
-        assert!(!FallbackProvider::is_rate_limited(&anyhow!(
-            "500 Internal Server Error"
-        )));
+    #[tokio::test]
+    async fn a_provider_whose_breaker_is_open_is_tried_last() {
+        let p1 = MockProvider::with_id(
+            "flaky",
+            vec![
+                MockProvider::overloaded(),
+                MockProvider::overloaded(),
+                MockProvider::overloaded(),
+                MockProvider::ok("flaky recovered"),
+            ],
+        );
+        let p2 = MockProvider::with_id(
+            "steady",
+            vec![
+                MockProvider::ok("steady 1"),
+                MockProvider::ok("steady 2"),
+                MockProvider::ok("steady 3"),
+                MockProvider::ok("steady 4"),
+            ],
+        );
+        let fb = fallback(vec![p1, p2]);
+        for _ in 0..3 {
+            fb.chat(&[], &[]).await.unwrap();
+        }
+        let r = fb.chat(&[], &[]).await.unwrap();
+        assert!(
+            matches!(r, LlmResponse::Message { text, .. } if text == "steady 4"),
+            "an open breaker sends traffic to the healthy provider first"
+        );
     }
 
     #[tokio::test]
