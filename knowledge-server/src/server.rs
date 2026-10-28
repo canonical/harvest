@@ -274,21 +274,14 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         cluster_config.internal_url = Some(cluster_config.advertised_url(addr)?);
     }
 
-    let node = ClusterNode::new(Arc::clone(&db), &cluster_config);
-    node.heartbeat()
-        .await
-        .context("registering this node in the cluster")?;
-    node.spawn_heartbeat();
-    tracing::info!(node_id = node.node_id(), internal_url = ?node.internal_url(), "cluster node registered");
-
     let shutdown = Shutdown::new();
-    let bus = ClusterBus::start(
-        Arc::clone(&db),
-        node.node_id().to_string(),
-        Duration::from_millis(cluster_config.bus_batch_window_ms),
-    );
-    let peers = match (&cluster_config.shared_secret, internal_addr) {
-        (Some(secret), Some(_)) => Some(PeerClient::new(node.node_id(), secret.clone())),
+    let mut cluster =
+        crate::cluster::runtime::start(&cluster_config, &db, internal_listener, &shutdown).await?;
+    let node = Arc::clone(&cluster.node);
+    let bus = Arc::clone(&cluster.bus);
+    let quorium = cluster.quorium.clone();
+    let peers = match (cluster_config.effective_shared_secret(), internal_addr) {
+        (Some(secret), Some(_)) => Some(PeerClient::new(node.node_id(), secret)),
         _ => None,
     };
     let live = ProjectLive::new(
@@ -438,7 +431,7 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     let reap_interval = node.heartbeat_interval().max(Duration::from_millis(200)) * 2;
     let drain_grace = Duration::from_secs(cluster_config.drain_grace_secs);
     let drain_timeout = Duration::from_secs(cluster_config.drain_timeout_secs);
-    let secret = Arc::new(cluster_config.shared_secret.clone().unwrap_or_default());
+    let secret = Arc::new(cluster_config.effective_shared_secret().unwrap_or_default());
 
     let collocate_reaper = Arc::clone(&collocate_registry);
     let state = AppState {
@@ -495,22 +488,11 @@ pub async fn start(config: Config) -> Result<RunningServer> {
             .await;
         }
     });
-    let internal = internal_listener.map(|listener| {
-        let app = app.clone().merge(internal_router(
-            Arc::clone(&live),
-            Arc::clone(&machine_registry),
-            secret,
-        ));
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            let _ = axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(shutdown.wait())
-            .await;
-        })
-    });
+    let internal = cluster.serve(app.clone().merge(internal_router(
+        Arc::clone(&live),
+        Arc::clone(&machine_registry),
+        secret,
+    )));
 
     let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
     let finished = tokio::spawn({
@@ -530,6 +512,9 @@ pub async fn start(config: Config) -> Result<RunningServer> {
             let _ = tokio::time::timeout(SERVE_GRACE, public).await;
             if let Some(internal) = internal {
                 let _ = tokio::time::timeout(SERVE_GRACE, internal).await;
+            }
+            if let Some(quorium) = quorium {
+                quorium.shutdown().await;
             }
         }
     });
