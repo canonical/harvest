@@ -1019,7 +1019,11 @@ async fn a_frozen_node_is_fenced_and_cannot_overwrite_the_takeover(backend: Back
         .await
         .unwrap();
     let messages = saved["messages"].as_array().unwrap();
-    assert_eq!(messages.len(), 2, "only the takeover turn is saved: {messages:?}");
+    assert_eq!(
+        messages.len(),
+        2,
+        "only the takeover turn is saved: {messages:?}"
+    );
     assert_eq!(messages[0]["text"], "taken over");
     assert_eq!(
         messages[1]["text"].as_str().unwrap().trim(),
