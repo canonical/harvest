@@ -150,16 +150,7 @@ impl ClusterNode {
 
     pub async fn heartbeat(&self) -> Result<()> {
         let sent_at = Instant::now();
-        let outcome = tokio::time::timeout(
-            self.heartbeat_interval.max(Duration::from_millis(500)),
-            self.membership.announce(&self.announcement()),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(MembershipError::Unavailable(anyhow::anyhow!(
-                "heartbeat timed out"
-            )))
-        });
+        let outcome = self.membership.announce(&self.announcement()).await;
         match outcome {
             Ok(()) => {
                 let previous = self
@@ -210,24 +201,19 @@ impl ClusterNode {
     }
 
     pub fn spawn_heartbeat(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+        let watchdog = tokio::spawn(run_watchdog(Arc::downgrade(self)));
         let node = Arc::clone(self);
         tokio::spawn(async move {
+            let _watchdog = AbortOnDrop(watchdog);
             let mut beat = tokio::time::interval(node.heartbeat_interval);
             beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut watchdog =
-                tokio::time::interval((node.heartbeat_interval / 4).max(Duration::from_millis(5)));
-            watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                tokio::select! {
-                    _ = beat.tick() => {
-                        if let Err(e) = node.heartbeat().await {
-                            tracing::warn!(error = %e, node_id = %node.node_id, "cluster heartbeat failed");
-                        }
-                        if node.standing() == NodeStanding::Evicted {
-                            return;
-                        }
-                    }
-                    _ = watchdog.tick() => node.check_fence(),
+                beat.tick().await;
+                if let Err(e) = node.heartbeat().await {
+                    tracing::warn!(error = %e, node_id = %node.node_id, "cluster heartbeat failed");
+                }
+                if node.standing() == NodeStanding::Evicted {
+                    return;
                 }
             }
         })
@@ -293,6 +279,30 @@ impl ClusterNode {
             .into_iter()
             .map(|m| serde_json::to_value(m).unwrap_or_default())
             .collect())
+    }
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn run_watchdog(node: std::sync::Weak<ClusterNode>) {
+    let period = match node.upgrade() {
+        Some(node) => (node.heartbeat_interval / 4).max(Duration::from_millis(5)),
+        None => return,
+    };
+    let mut ticker = tokio::time::interval(period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        let Some(node) = node.upgrade() else {
+            return;
+        };
+        node.check_fence();
     }
 }
 
@@ -396,6 +406,55 @@ mod tests {
         assert_eq!(node.standing(), NodeStanding::Confirmed);
         node.heartbeat().await.unwrap();
         assert_eq!(*lapses.borrow(), 1);
+    }
+
+    struct Hanging;
+
+    #[async_trait]
+    impl Membership for Hanging {
+        async fn announce(&self, _: &Announcement) -> Result<(), MembershipError> {
+            std::future::pending().await
+        }
+        async fn withdraw(&self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn alive(&self, _: Duration) -> Result<Vec<Member>> {
+            Ok(vec![])
+        }
+        async fn prune(&self) -> Result<()> {
+            Ok(())
+        }
+        fn health(&self) -> MembershipHealth {
+            MembershipHealth::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hanging_heartbeat_still_fences_the_node_in_time() {
+        let config = ClusterConfig {
+            heartbeat_interval_ms: 20,
+            node_timeout_ms: 80,
+            ..ClusterConfig::default()
+        };
+        let db = Arc::new(
+            Db::connect_without_migrating("postgres://unused@127.0.0.1:1/unused").unwrap(),
+        );
+        let node = ClusterNode::assemble(
+            NodeIdentity::from_config(&config),
+            &config,
+            Arc::new(Hanging),
+            db,
+        );
+        *node.confirmed_at.lock().unwrap() = Some(Instant::now());
+        node.spawn_heartbeat();
+        let mut standing = node.watch_standing();
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            standing.wait_for(|s| *s == NodeStanding::Fenced),
+        )
+        .await
+        .expect("the watchdog fences while the heartbeat hangs")
+        .unwrap();
     }
 
     #[tokio::test]
