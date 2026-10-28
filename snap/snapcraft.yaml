@@ -40,6 +40,13 @@ description: |
   cluster.internal-url        Address other nodes use to reach this one
   cluster.shared-secret       Secret shared by every node of the cluster
   cluster.node-name           Name prefix for this node
+  cluster.backend             postgres (default) or quorium
+  cluster.bootstrap           init or join, for a new quorium server
+  cluster.join-token          Token from `harvest cluster token create`
+  cluster.join-addresses      Comma-separated peers to join without a token
+  cluster.accepted-secrets    Extra secrets accepted while rotating
+  cluster.data-dir            Quorium state  (default: $SNAP_COMMON/quorium)
+  cluster.bus                 notify or mesh (default follows the backend)
   config.managed              true when a charm writes server.toml itself
   server.host / server.port   API address        (default: 127.0.0.1:8080)
   ui.host / ui.port           Web UI address     (default: 127.0.0.1:3000)
