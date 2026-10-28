@@ -27,7 +27,7 @@ use crate::agent::{
 };
 use crate::api::ProjectAgentBuilder;
 use crate::auth::jwt::Claims;
-use crate::conversations::store::{self, ConversationContext, Owner, Page};
+use crate::conversations::store::{self, ConversationContext, Guard, Owner, Page};
 use crate::conversations::summary::refresh as refresh_summary;
 use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::llm::types::{Message, ProviderSelection, Usage, UsedProvider};
@@ -419,7 +419,16 @@ async fn save_project_turn(
         }),
         assistant_message,
     ];
-    if let Err(e) = store::append(db, Owner::Project(project_id), conv_id, &messages, now).await {
+    if let Err(e) = store::append(
+        db,
+        Owner::Project(project_id),
+        Guard::HoldingTurn(turn_id),
+        conv_id,
+        &messages,
+        now,
+    )
+    .await
+    {
         tracing::error!(error = %e, conv_id, "failed to save the turn");
     }
     record_turn_cost(db, project_id, conv_id, &turn, turn_id, user_id, pricing).await;
@@ -437,29 +446,36 @@ async fn update_last_assistant_turn(
     pricing: &crate::cost::PricingTable,
 ) {
     let cost_microusd = turn.cost_microusd(pricing);
-    let edited = store::update_last(db, Owner::Project(project_id), conv_id, now, |last| {
-        let mut chain = last["chain"].as_array().cloned().unwrap_or_default();
-        chain.extend(turn.chain.iter().cloned());
-        last["text"] = json!(turn.answer);
-        last["sources"] = json!(turn.sources);
-        last["chain"] = json!(chain);
-        last["tool_calls_made"] = json!(turn.tool_calls_made);
-        last["duration_ms"] = json!(turn.duration_ms);
-        last["usage"] = json!(turn.usage);
-        last["llm_call_count"] = json!(turn.llm_call_count);
-        last["cost_microusd"] = json!(cost_microusd);
-        match &turn.question {
-            Some(question) => last["question"] = question.clone(),
-            None => {
-                if let Some(obj) = last.as_object_mut() {
-                    obj.remove("question");
+    let edited = store::update_last(
+        db,
+        Owner::Project(project_id),
+        Guard::HoldingTurn(turn_id),
+        conv_id,
+        now,
+        |last| {
+            let mut chain = last["chain"].as_array().cloned().unwrap_or_default();
+            chain.extend(turn.chain.iter().cloned());
+            last["text"] = json!(turn.answer);
+            last["sources"] = json!(turn.sources);
+            last["chain"] = json!(chain);
+            last["tool_calls_made"] = json!(turn.tool_calls_made);
+            last["duration_ms"] = json!(turn.duration_ms);
+            last["usage"] = json!(turn.usage);
+            last["llm_call_count"] = json!(turn.llm_call_count);
+            last["cost_microusd"] = json!(cost_microusd);
+            match &turn.question {
+                Some(question) => last["question"] = question.clone(),
+                None => {
+                    if let Some(obj) = last.as_object_mut() {
+                        obj.remove("question");
+                    }
                 }
             }
-        }
-        if let Some(provider_used) = turn.provider_used {
-            last["provider"] = provider_json(provider_used);
-        }
-    })
+            if let Some(provider_used) = turn.provider_used {
+                last["provider"] = provider_json(provider_used);
+            }
+        },
+    )
     .await;
     if let Err(e) = edited {
         tracing::error!(error = %e, conv_id, "failed to update the continued turn");
@@ -474,20 +490,27 @@ async fn mark_confirm_action_statuses(
     results: &[ResumeConfirmItem],
 ) {
     let now = harvest_db::now_rfc3339();
-    let edited = store::update_last(db, Owner::Project(project_id), conv_id, &now, |last| {
-        let Some(chain) = last["chain"].as_array_mut() else {
-            return;
-        };
-        for entry in chain.iter_mut().filter(|e| e["type"] == "confirm_action") {
-            let Some(id) = entry["id"].as_str() else {
-                continue;
+    let edited = store::update_last(
+        db,
+        Owner::Project(project_id),
+        Guard::Unguarded,
+        conv_id,
+        &now,
+        |last| {
+            let Some(chain) = last["chain"].as_array_mut() else {
+                return;
             };
-            if let Some(item) = results.iter().find(|r| r.tool_call_id == id) {
-                entry["status"] = json!(item.status);
-                entry["result_text"] = json!(item.result_text);
+            for entry in chain.iter_mut().filter(|e| e["type"] == "confirm_action") {
+                let Some(id) = entry["id"].as_str() else {
+                    continue;
+                };
+                if let Some(item) = results.iter().find(|r| r.tool_call_id == id) {
+                    entry["status"] = json!(item.status);
+                    entry["result_text"] = json!(item.result_text);
+                }
             }
-        }
-    })
+        },
+    )
     .await;
     if let Err(e) = edited {
         tracing::error!(error = %e, conv_id, "failed to record confirmation statuses");

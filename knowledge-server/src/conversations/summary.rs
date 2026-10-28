@@ -314,9 +314,16 @@ mod tests {
         crate::conversations::store::ensure_user_conversation(db, &uid, &cid, "t", &now)
             .await
             .unwrap();
-        crate::conversations::store::append(db, Owner::User(&uid), &cid, &raw, &now)
-            .await
-            .unwrap();
+        crate::conversations::store::append(
+            db,
+            Owner::User(&uid),
+            crate::conversations::store::Guard::Unguarded,
+            &cid,
+            &raw,
+            &now,
+        )
+        .await
+        .unwrap();
         (uid, cid)
     }
 
