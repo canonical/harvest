@@ -11,11 +11,14 @@ use serde_json::json;
 use crate::cluster::node::VERSION;
 use crate::machines::MachineRegistry;
 use crate::projects::live::ProjectLive;
+use crate::turns::admission::TurnAdmission;
+use crate::turns::metrics::TURNS;
 
 pub struct HealthState {
     pub db: Arc<Db>,
     pub live: Arc<ProjectLive>,
     pub registry: Arc<MachineRegistry>,
+    pub admission: Arc<TurnAdmission>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -117,6 +120,9 @@ pub async fn metrics(State(state): State<Arc<HealthState>>) -> Response {
     let _ = writeln!(out, "harvest_local_connected_agents {local_agents}");
     let _ = writeln!(out, "# TYPE harvest_db_pool_max_size gauge");
     let _ = writeln!(out, "harvest_db_pool_max_size {pool_size}");
+    let _ = writeln!(out, "# TYPE harvest_admitted_turns gauge");
+    let _ = writeln!(out, "harvest_admitted_turns {}", state.admission.active());
+    TURNS.render(&mut out);
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response()
 }
 

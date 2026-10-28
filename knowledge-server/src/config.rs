@@ -627,6 +627,10 @@ pub struct AgentBehaviorConfig {
     pub compaction_threshold_chars: usize,
     #[serde(default = "default_compaction_keep_last")]
     pub compaction_keep_last: usize,
+    #[serde(default = "default_max_active_turns")]
+    pub max_active_turns: usize,
+    #[serde(default = "default_max_active_turns_per_user")]
+    pub max_active_turns_per_user: usize,
 }
 
 impl Default for AgentBehaviorConfig {
@@ -635,8 +639,18 @@ impl Default for AgentBehaviorConfig {
             max_iterations: default_max_iterations(),
             compaction_threshold_chars: default_compaction_threshold_chars(),
             compaction_keep_last: default_compaction_keep_last(),
+            max_active_turns: default_max_active_turns(),
+            max_active_turns_per_user: default_max_active_turns_per_user(),
         }
     }
+}
+
+fn default_max_active_turns() -> usize {
+    200
+}
+
+fn default_max_active_turns_per_user() -> usize {
+    10
 }
 
 #[derive(Deserialize, Clone, Default)]
