@@ -50,6 +50,7 @@ pub struct ClusterNode {
     heartbeat_interval: Duration,
     node_timeout: Duration,
     draining: AtomicBool,
+    withdrawn: AtomicBool,
     membership: Arc<dyn Membership>,
     db: Arc<Db>,
     confirmed_at: Mutex<Option<Instant>>,
@@ -75,6 +76,7 @@ impl ClusterNode {
             heartbeat_interval: Duration::from_millis(config.heartbeat_interval_ms.max(10)),
             node_timeout: Duration::from_millis(config.node_timeout_ms.max(20)),
             draining: AtomicBool::new(false),
+            withdrawn: AtomicBool::new(false),
             membership,
             db,
             confirmed_at: Mutex::new(None),
@@ -149,6 +151,9 @@ impl ClusterNode {
     }
 
     pub async fn heartbeat(&self) -> Result<()> {
+        if self.withdrawn.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let sent_at = Instant::now();
         let outcome = self.membership.announce(&self.announcement()).await;
         match outcome {
@@ -230,6 +235,7 @@ impl ClusterNode {
     }
 
     pub async fn deregister(&self) -> Result<()> {
+        self.withdrawn.store(true, Ordering::SeqCst);
         self.membership.withdraw(&self.node_id).await
     }
 
