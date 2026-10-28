@@ -202,6 +202,34 @@ fn default_drain_grace_secs() -> u64 {
 fn default_drain_timeout_secs() -> u64 {
     120
 }
+fn default_election_timeout_ms() -> u64 {
+    1_000
+}
+fn default_join_timeout_secs() -> u64 {
+    60
+}
+
+#[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClusterBackend {
+    #[default]
+    Postgres,
+    Quorium,
+}
+
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BusTransport {
+    Notify,
+    Mesh,
+}
+
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClusterBootstrap {
+    Init,
+    Join,
+}
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct ClusterConfig {
@@ -223,6 +251,20 @@ pub struct ClusterConfig {
     pub drain_grace_secs: u64,
     #[serde(default = "default_drain_timeout_secs")]
     pub drain_timeout_secs: u64,
+    #[serde(default)]
+    pub backend: ClusterBackend,
+    #[serde(default)]
+    pub bus: Option<BusTransport>,
+    #[serde(default)]
+    pub data_dir: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub bootstrap: Option<ClusterBootstrap>,
+    #[serde(default)]
+    pub join_token: Option<String>,
+    #[serde(default = "default_election_timeout_ms")]
+    pub election_timeout_ms: u64,
+    #[serde(default = "default_join_timeout_secs")]
+    pub join_timeout_secs: u64,
 }
 
 impl Default for ClusterConfig {
@@ -237,6 +279,13 @@ impl Default for ClusterConfig {
             bus_batch_window_ms: default_bus_batch_window_ms(),
             drain_grace_secs: default_drain_grace_secs(),
             drain_timeout_secs: default_drain_timeout_secs(),
+            backend: ClusterBackend::default(),
+            bus: None,
+            data_dir: None,
+            bootstrap: None,
+            join_token: None,
+            election_timeout_ms: default_election_timeout_ms(),
+            join_timeout_secs: default_join_timeout_secs(),
         }
     }
 }
@@ -252,10 +301,21 @@ impl ClusterConfig {
         Ok(format!("http://{bound}"))
     }
 
+    pub fn effective_shared_secret(&self) -> Option<String> {
+        self.shared_secret
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                let token = self.join_token.as_deref().filter(|t| !t.is_empty())?;
+                quorium::JoinToken::decode(token)
+                    .ok()
+                    .map(|t| t.shared_secret)
+                    .filter(|s| !s.is_empty())
+            })
+    }
+
     pub fn validate(&self) -> Result<()> {
-        if self.internal_listen.is_some()
-            && self.shared_secret.as_deref().map_or(true, str::is_empty)
-        {
+        if self.internal_listen.is_some() && self.effective_shared_secret().is_none() {
             anyhow::bail!("cluster.shared_secret is required when cluster.internal_listen is set");
         }
         if self.node_timeout_ms < self.heartbeat_interval_ms.saturating_mul(2) {
@@ -263,7 +323,44 @@ impl ClusterConfig {
                 "cluster.node_timeout_ms must be at least twice cluster.heartbeat_interval_ms"
             );
         }
+        if self.backend == ClusterBackend::Quorium {
+            self.validate_quorium()?;
+        }
+        if self.bus_transport() == BusTransport::Mesh && self.internal_listen.is_none() {
+            anyhow::bail!("cluster.bus = \"mesh\" requires cluster.internal_listen");
+        }
         Ok(())
+    }
+
+    fn validate_quorium(&self) -> Result<()> {
+        if self.internal_listen.is_none() {
+            anyhow::bail!("cluster.backend = \"quorium\" requires cluster.internal_listen");
+        }
+        if self.data_dir.is_none() {
+            anyhow::bail!("cluster.backend = \"quorium\" requires cluster.data_dir");
+        }
+        if self.bootstrap == Some(ClusterBootstrap::Join)
+            && self.join_token.as_deref().map_or(true, str::is_empty)
+        {
+            anyhow::bail!("cluster.bootstrap = \"join\" requires cluster.join_token");
+        }
+        let election_worst_case = self
+            .election_timeout_ms
+            .saturating_mul(2)
+            .saturating_add(self.heartbeat_interval_ms);
+        if self.node_timeout_ms <= election_worst_case {
+            anyhow::bail!(
+                "cluster.node_timeout_ms must exceed twice cluster.election_timeout_ms plus cluster.heartbeat_interval_ms"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn bus_transport(&self) -> BusTransport {
+        self.bus.unwrap_or(match self.backend {
+            ClusterBackend::Postgres => BusTransport::Notify,
+            ClusterBackend::Quorium => BusTransport::Mesh,
+        })
     }
 }
 
@@ -1907,6 +2004,85 @@ mod cluster_config_tests {
         let mut cfg = with_sections("");
         cfg.cluster.heartbeat_interval_ms = 5_000;
         cfg.cluster.node_timeout_ms = 6_000;
+        assert!(cfg.validate().is_err());
+    }
+
+    fn quorium_config() -> Config {
+        with_sections(
+            r#"
+            [cluster]
+            backend = "quorium"
+            internal_listen = "0.0.0.0:8081"
+            internal_url = "http://10.0.0.11:8081"
+            shared_secret = "s"
+            data_dir = "/var/snap/harvest/common/quorium"
+            bootstrap = "init"
+            heartbeat_interval_ms = 1000
+            node_timeout_ms = 5000
+            "#,
+        )
+    }
+
+    #[test]
+    fn the_postgres_backend_and_notify_bus_are_the_defaults() {
+        let cfg = with_sections("");
+        assert_eq!(cfg.cluster.backend, ClusterBackend::Postgres);
+        assert_eq!(cfg.cluster.bus_transport(), BusTransport::Notify);
+    }
+
+    #[test]
+    fn quorium_defaults_to_the_mesh_bus_and_validates() {
+        let cfg = quorium_config();
+        assert_eq!(cfg.cluster.backend, ClusterBackend::Quorium);
+        assert_eq!(cfg.cluster.bootstrap, Some(ClusterBootstrap::Init));
+        assert_eq!(cfg.cluster.bus_transport(), BusTransport::Mesh);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn quorium_requires_a_data_dir_and_a_token_to_join() {
+        let mut cfg = quorium_config();
+        cfg.cluster.data_dir = None;
+        assert!(cfg.validate().is_err());
+        let mut cfg = quorium_config();
+        cfg.cluster.bootstrap = Some(ClusterBootstrap::Join);
+        assert!(cfg.validate().is_err());
+        cfg.cluster.join_token = Some("token".into());
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn quorium_sessions_must_outlive_an_election() {
+        let mut cfg = quorium_config();
+        cfg.cluster.election_timeout_ms = 2_000;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn a_join_token_supplies_the_shared_secret() {
+        let mut cfg = quorium_config();
+        cfg.cluster.shared_secret = None;
+        cfg.cluster.bootstrap = Some(ClusterBootstrap::Join);
+        cfg.cluster.join_token = Some(
+            quorium::JoinToken {
+                cluster_id: "c".into(),
+                addresses: vec![],
+                secret: "once".into(),
+                shared_secret: "from-token".into(),
+            }
+            .encode(),
+        );
+        assert_eq!(
+            cfg.cluster.effective_shared_secret().as_deref(),
+            Some("from-token")
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn the_mesh_bus_needs_the_internal_listener() {
+        let mut cfg = with_sections("");
+        cfg.cluster.bus = Some(BusTransport::Mesh);
         assert!(cfg.validate().is_err());
     }
 
