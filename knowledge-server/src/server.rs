@@ -17,7 +17,7 @@ use crate::agent::{graph_tools, Agent};
 use crate::api::{AppState, GraphCache, ProjectAgentBuilder};
 use crate::auth::{api_keys::ApiKeyStore, user_keys::UserKeyStore};
 use crate::cluster::bus::ClusterBus;
-use crate::cluster::node::ClusterNode;
+use crate::cluster::node::{ClusterNode, NodeStanding};
 use crate::cluster::peer::{require_secret, PeerClient};
 use crate::cluster::{singleton, Shutdown};
 use crate::config::Config;
@@ -36,6 +36,7 @@ pub struct RunningServer {
     pub internal_addr: Option<SocketAddr>,
     pub node: Arc<ClusterNode>,
     pub live: Arc<ProjectLive>,
+    evicted: Shutdown,
     drain: Option<tokio::sync::oneshot::Sender<()>>,
     finished: tokio::task::JoinHandle<()>,
 }
@@ -54,6 +55,14 @@ impl RunningServer {
 
     pub async fn wait(self) {
         let _ = self.finished.await;
+    }
+
+    pub fn evicted(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.evicted.wait()
+    }
+
+    pub fn was_evicted(&self) -> bool {
+        self.evicted.is_triggered()
     }
 }
 
@@ -128,12 +137,34 @@ async fn reap(db: &Db, live: &ProjectLive, directory: &AgentDirectory) {
             json!({}),
         )
         .await;
-    let _ = db
-        .execute(
-            "DELETE FROM cluster_nodes WHERE heartbeat_at < now() - interval '1 hour'",
-            json!({}),
-        )
-        .await;
+    let _ = live.node().prune().await;
+}
+
+fn spawn_fence_guard(node: Arc<ClusterNode>, live: Arc<ProjectLive>, evicted: Shutdown) {
+    let mut standing = node.watch_standing();
+    tokio::spawn(async move {
+        while standing.changed().await.is_ok() {
+            let current = *standing.borrow_and_update();
+            if current == NodeStanding::Confirmed {
+                tracing::info!(
+                    node_id = node.node_id(),
+                    "cluster membership confirmed again"
+                );
+                continue;
+            }
+            let aborted = live.abort_local_turns().await;
+            tracing::error!(
+                node_id = node.node_id(),
+                ?current,
+                aborted,
+                "node fenced: aborted local turns"
+            );
+            if current == NodeStanding::Evicted {
+                evicted.trigger();
+                return;
+            }
+        }
+    });
 }
 
 fn spawn_reaper(
@@ -150,7 +181,9 @@ fn spawn_reaper(
             ticker.tick().await;
             let result = singleton::run_exclusive(&db, "reaper", || async {
                 reap(&db, &live, &directory).await;
-                collocate.reap_dead_nodes(live.node().timeout_secs()).await;
+                if let Ok(alive) = live.node().live_node_ids().await {
+                    collocate.reap_dead_nodes(&alive).await;
+                }
             })
             .await;
             if let Err(e) = result {
@@ -501,11 +534,15 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         }
     });
 
+    let evicted = Shutdown::new();
+    spawn_fence_guard(Arc::clone(&node), Arc::clone(&live), evicted.clone());
+
     Ok(RunningServer {
         public_addr,
         internal_addr,
         node,
         live,
+        evicted,
         drain: Some(drain_tx),
         finished,
     })
@@ -535,8 +572,15 @@ pub async fn wait_for_termination() {
 
 pub async fn run(config: Config) -> Result<()> {
     let mut server = start(config).await?;
-    wait_for_termination().await;
+    tokio::select! {
+        _ = wait_for_termination() => {}
+        _ = server.evicted() => {}
+    }
+    let evicted = server.was_evicted();
     server.request_drain();
     server.wait().await;
+    if evicted {
+        anyhow::bail!("this node was evicted from the cluster; restart it to rejoin");
+    }
     Ok(())
 }

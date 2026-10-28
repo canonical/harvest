@@ -1,6 +1,8 @@
 pub mod bus;
+pub mod membership;
 pub mod node;
 pub mod peer;
+pub mod postgres;
 pub mod singleton;
 
 use std::future::Future;

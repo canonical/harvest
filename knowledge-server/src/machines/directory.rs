@@ -32,10 +32,6 @@ fn location_from_row(row: &Value) -> AgentLocation {
     }
 }
 
-const ALIVE: &str = "EXISTS (SELECT 1 FROM cluster_nodes n
-                      WHERE n.node_id = c.node_id
-                        AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8))";
-
 impl AgentDirectory {
     pub fn new(db: Arc<Db>, node: Arc<ClusterNode>, peers: Option<Arc<PeerClient>>) -> Arc<Self> {
         Arc::new(Self { db, node, peers })
@@ -82,24 +78,24 @@ impl AgentDirectory {
     }
 
     pub async fn locate(&self, agent_id: &str) -> Option<AgentLocation> {
+        let alive = self.node.live_node_ids().await.ok()?;
         let rows = self.db.query(
-            &format!(
-                "SELECT c.agent_id, c.node_id, c.project_id, c.hostname, c.connected_at FROM agent_connections c
-                 WHERE c.agent_id = $aid AND (c.node_id = $node OR {ALIVE})"
-            ),
-            json!({ "aid": agent_id, "node": self.node.node_id(), "timeout": self.node.timeout_secs() }),
+            "SELECT c.agent_id, c.node_id, c.project_id, c.hostname, c.connected_at FROM agent_connections c
+             WHERE c.agent_id = $aid AND c.node_id = ANY($alive::text[])",
+            json!({ "aid": agent_id, "alive": alive }),
         ).await.ok()?;
         rows.first().map(location_from_row)
     }
 
     pub async fn online_in_project(&self, project_id: &str) -> Vec<AgentLocation> {
+        let Ok(alive) = self.node.live_node_ids().await else {
+            return vec![];
+        };
         self.db.query(
-            &format!(
-                "SELECT c.agent_id, c.node_id, c.project_id, c.hostname, c.connected_at FROM agent_connections c
-                 WHERE c.project_id = $pid AND (c.node_id = $node OR {ALIVE})
-                 ORDER BY c.connected_at"
-            ),
-            json!({ "pid": project_id, "node": self.node.node_id(), "timeout": self.node.timeout_secs() }),
+            "SELECT c.agent_id, c.node_id, c.project_id, c.hostname, c.connected_at FROM agent_connections c
+             WHERE c.project_id = $pid AND c.node_id = ANY($alive::text[])
+             ORDER BY c.connected_at",
+            json!({ "pid": project_id, "alive": alive }),
         ).await.map(|rows| rows.iter().map(location_from_row).collect()).unwrap_or_default()
     }
 
@@ -157,12 +153,11 @@ impl AgentDirectory {
     }
 
     pub async fn reap_dead_nodes(&self) -> Result<u64> {
+        let alive = self.node.live_node_ids().await?;
         self.db
             .execute(
-                &format!(
-                    "DELETE FROM agent_connections c WHERE c.node_id <> $node AND NOT {ALIVE}"
-                ),
-                json!({ "node": self.node.node_id(), "timeout": self.node.timeout_secs() }),
+                "DELETE FROM agent_connections c WHERE NOT (c.node_id = ANY($alive::text[]))",
+                json!({ "alive": alive }),
             )
             .await
     }

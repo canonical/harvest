@@ -226,14 +226,12 @@ impl IngestionJobs {
 }
 
 pub async fn reap_dead_nodes(db: &Db, node: &ClusterNode) -> Result<u64> {
+    let alive = node.live_node_ids().await?;
     db.execute(
         "UPDATE ingestion_jobs j
          SET status = 'failed', error = 'interrupted: the server node running this ingestion was lost', finished_at = now()
-         WHERE j.status IN ('pending', 'running') AND j.node_id <> $node AND NOT EXISTS (
-             SELECT 1 FROM cluster_nodes n
-             WHERE n.node_id = j.node_id
-               AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8))",
-        json!({ "node": node.node_id(), "timeout": node.timeout_secs() }),
+         WHERE j.status IN ('pending', 'running') AND NOT (j.node_id = ANY($alive::text[]))",
+        json!({ "alive": alive }),
     ).await
 }
 
