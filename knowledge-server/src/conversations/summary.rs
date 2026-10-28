@@ -84,7 +84,6 @@ pub fn spawn_refresh(db: Arc<Db>, agent: Arc<Agent>, conv_id: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use crate::agent::HistoryMessage;
     use crate::llm::types::{
         LlmResponse, Message, MessageContent, ModelInfo, ToolDefinition, Usage,
@@ -92,6 +91,7 @@ mod tests {
     use crate::llm::LlmProvider;
     use anyhow::Result;
     use async_trait::async_trait;
+    use std::sync::Mutex;
 
     struct RecordingLlm {
         reply: Option<String>,

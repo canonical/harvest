@@ -1,5 +1,6 @@
 pub mod artifact_tools;
 pub mod chain;
+pub mod context_budget;
 pub mod deployment_tools;
 pub mod graph_tools;
 pub mod lxd_tools;
@@ -12,6 +13,7 @@ pub mod terraform_tools;
 pub mod tool;
 
 use anyhow::Result;
+use context_budget::ContextBudget;
 use futures::future::join_all;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -57,6 +59,7 @@ pub struct EnumerationRecord {
 
 const ENUMERATION_RESULT_MAX_CHARS: usize = 12_500;
 const ENUMERATION_TURNS_REPLAYED: usize = 2;
+const ATTACHMENT_TURNS_REPLAYED: usize = 2;
 
 pub fn is_enumeration_call(name: &str, input: &serde_json::Value) -> bool {
     match name {
@@ -836,9 +839,13 @@ impl Agent {
         };
 
         let system_prompt = self.effective_system_prompt_for_query(user_query).await;
+        let question = build_user_message(user_query, attachments);
+        let fixed_tokens = context_budget::text_tokens(&system_prompt)
+            + context_budget::tools_tokens(&tool_defs)
+            + context_budget::message_tokens(&question);
         let mut messages = vec![Message::system(system_prompt)];
-        messages.extend(history_to_messages(history));
-        messages.push(build_user_message(user_query, attachments));
+        messages.extend(self.fit_history(history, fixed_tokens));
+        messages.push(question);
 
         let is_first_turn = history.is_empty();
         let outcome = self
@@ -2817,6 +2824,28 @@ fn describe_message_for_compaction(message: &Message) -> String {
     }
 }
 
+impl Agent {
+    fn fit_history(&self, history: &[HistoryMessage], fixed_tokens: usize) -> Vec<Message> {
+        let split = history.iter().take_while(|m| m.role == "summary").count();
+        let (summaries, recent) = history.split_at(split);
+        let pinned = history_to_messages(summaries);
+        let rest = history_to_messages(recent);
+        let Some(budget) = ContextBudget::for_window(self.llm.context_window()) else {
+            return pinned.into_iter().chain(rest).collect();
+        };
+        let fitted = budget.fit(fixed_tokens, pinned, rest);
+        crate::turns::metrics::TURNS.context_tokens(fitted.tokens);
+        if fitted.dropped > 0 {
+            tracing::info!(
+                dropped = fitted.dropped,
+                tokens = fitted.tokens,
+                "history trimmed to the context window"
+            );
+        }
+        fitted.messages
+    }
+}
+
 fn history_to_messages(history: &[HistoryMessage]) -> Vec<Message> {
     let replayed: Vec<usize> = history
         .iter()
@@ -2826,11 +2855,20 @@ fn history_to_messages(history: &[HistoryMessage]) -> Vec<Message> {
         .map(|(i, _)| i)
         .take(ENUMERATION_TURNS_REPLAYED)
         .collect();
+    let recent_attachments: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, m)| m.attachments.as_ref().is_some_and(|a| !a.is_empty()))
+        .map(|(i, _)| i)
+        .take(ATTACHMENT_TURNS_REPLAYED)
+        .collect();
     history
         .iter()
         .enumerate()
         .map(|(index, entry)| {
             let attachments = entry.attachments.as_deref().unwrap_or(&[]);
+            let replay_attachments = recent_attachments.contains(&index);
             match entry.role.as_str() {
                 "assistant" if replayed.contains(&index) => Message::assistant_text(format!(
                     "{}{}",
@@ -2841,10 +2879,19 @@ fn history_to_messages(history: &[HistoryMessage]) -> Vec<Message> {
                 "summary" => {
                     Message::user(format!("[Summary of prior conversation]\n{}", entry.text))
                 }
-                _ => build_user_message(&entry.text, attachments),
+                _ if replay_attachments => build_user_message(&entry.text, attachments),
+                _ => Message::user(with_attachment_names(&entry.text, attachments)),
             }
         })
         .collect()
+}
+
+fn with_attachment_names(text: &str, attachments: &[Attachment]) -> String {
+    if attachments.is_empty() {
+        return text.to_string();
+    }
+    let names: Vec<&str> = attachments.iter().map(|a| a.name.as_str()).collect();
+    format!("{text}\n[attached earlier: {}]", names.join(", "))
 }
 
 fn parse_line_range(raw: &str) -> (u32, Option<u32>) {

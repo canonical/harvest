@@ -10,27 +10,36 @@ use crate::llm::LlmProvider;
 
 const QUEUE_PATIENCE: Duration = Duration::from_secs(2);
 
-pub struct ConcurrencyLimited {
+pub struct ProviderLimits {
     inner: Arc<dyn LlmProvider>,
-    permits: Arc<Semaphore>,
+    permits: Option<Arc<Semaphore>>,
+    context_window: Option<usize>,
     patience: Duration,
 }
 
-impl ConcurrencyLimited {
-    pub fn wrap(inner: Arc<dyn LlmProvider>, max_concurrency: usize) -> Arc<dyn LlmProvider> {
-        if max_concurrency == 0 {
+impl ProviderLimits {
+    pub fn wrap(
+        inner: Arc<dyn LlmProvider>,
+        max_concurrency: usize,
+        context_window: Option<usize>,
+    ) -> Arc<dyn LlmProvider> {
+        if max_concurrency == 0 && context_window.is_none() {
             return inner;
         }
         Arc::new(Self {
             inner,
-            permits: Arc::new(Semaphore::new(max_concurrency)),
+            permits: (max_concurrency > 0).then(|| Arc::new(Semaphore::new(max_concurrency))),
+            context_window,
             patience: QUEUE_PATIENCE,
         })
     }
 
-    async fn permit(&self) -> Result<OwnedSemaphorePermit> {
-        match tokio::time::timeout(self.patience, Arc::clone(&self.permits).acquire_owned()).await {
-            Ok(Ok(permit)) => Ok(permit),
+    async fn permit(&self) -> Result<Option<OwnedSemaphorePermit>> {
+        let Some(permits) = &self.permits else {
+            return Ok(None);
+        };
+        match tokio::time::timeout(self.patience, Arc::clone(permits).acquire_owned()).await {
+            Ok(Ok(permit)) => Ok(Some(permit)),
             _ => Err(anyhow!(
                 "provider {} is unavailable: every concurrent request slot is busy",
                 self.inner.id()
@@ -40,7 +49,7 @@ impl ConcurrencyLimited {
 }
 
 #[async_trait]
-impl LlmProvider for ConcurrencyLimited {
+impl LlmProvider for ProviderLimits {
     fn id(&self) -> &str {
         self.inner.id()
     }
@@ -67,6 +76,10 @@ impl LlmProvider for ConcurrencyLimited {
 
     fn configured_models(&self) -> Option<&[String]> {
         self.inner.configured_models()
+    }
+
+    fn context_window(&self) -> Option<usize> {
+        self.context_window.or_else(|| self.inner.context_window())
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
@@ -127,15 +140,18 @@ mod tests {
     #[tokio::test]
     async fn zero_means_no_limit() {
         let inner = slow_mock();
-        let wrapped = ConcurrencyLimited::wrap(Arc::clone(&inner), 0);
+        let wrapped = ProviderLimits::wrap(Arc::clone(&inner), 0, None);
         assert!(Arc::ptr_eq(&inner, &wrapped));
+        let windowed = ProviderLimits::wrap(Arc::clone(&inner), 0, Some(32_000));
+        assert_eq!(windowed.context_window(), Some(32_000));
     }
 
     #[tokio::test]
     async fn a_saturated_provider_fails_fast_with_a_transient_error() {
-        let limited = Arc::new(ConcurrencyLimited {
+        let limited = Arc::new(ProviderLimits {
             inner: slow_mock(),
-            permits: Arc::new(Semaphore::new(1)),
+            permits: Some(Arc::new(Semaphore::new(1))),
+            context_window: None,
             patience: Duration::from_millis(20),
         });
         let busy = {
