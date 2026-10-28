@@ -3174,6 +3174,7 @@ pub async fn discard_proposal(
 pub struct ParsedStepInput {
     pub artifact_id: String,
     pub action: String,
+    #[serde(default)]
     pub label: String,
     pub depends_on: Vec<usize>,
 }
