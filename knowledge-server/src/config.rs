@@ -261,6 +261,10 @@ pub struct ClusterConfig {
     pub bootstrap: Option<ClusterBootstrap>,
     #[serde(default)]
     pub join_token: Option<String>,
+    #[serde(default)]
+    pub join_addresses: Vec<String>,
+    #[serde(default)]
+    pub accepted_secrets: Vec<String>,
     #[serde(default = "default_election_timeout_ms")]
     pub election_timeout_ms: u64,
     #[serde(default = "default_join_timeout_secs")]
@@ -284,6 +288,8 @@ impl Default for ClusterConfig {
             data_dir: None,
             bootstrap: None,
             join_token: None,
+            join_addresses: Vec::new(),
+            accepted_secrets: Vec::new(),
             election_timeout_ms: default_election_timeout_ms(),
             join_timeout_secs: default_join_timeout_secs(),
         }
@@ -341,8 +347,11 @@ impl ClusterConfig {
         }
         if self.bootstrap == Some(ClusterBootstrap::Join)
             && self.join_token.as_deref().map_or(true, str::is_empty)
+            && self.join_addresses.is_empty()
         {
-            anyhow::bail!("cluster.bootstrap = \"join\" requires cluster.join_token");
+            anyhow::bail!(
+                "cluster.bootstrap = \"join\" requires cluster.join_token or cluster.join_addresses"
+            );
         }
         let election_worst_case = self
             .election_timeout_ms
@@ -2048,6 +2057,9 @@ mod cluster_config_tests {
         cfg.cluster.bootstrap = Some(ClusterBootstrap::Join);
         assert!(cfg.validate().is_err());
         cfg.cluster.join_token = Some("token".into());
+        assert!(cfg.validate().is_ok());
+        cfg.cluster.join_token = None;
+        cfg.cluster.join_addresses = vec!["http://10.0.0.10:8081".into()];
         assert!(cfg.validate().is_ok());
     }
 

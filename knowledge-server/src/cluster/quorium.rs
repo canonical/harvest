@@ -147,8 +147,21 @@ pub async fn start(
         election_timeout: Duration::from_millis(config.election_timeout_ms),
         session_ttl: Duration::from_millis(config.node_timeout_ms),
         http: peer_http_client(node_id, &secret)?,
+        admit_without_token: true,
     })
     .await
+}
+
+fn join_token(config: &ClusterConfig) -> Result<JoinToken> {
+    match config.join_token.as_deref().filter(|t| !t.is_empty()) {
+        Some(token) => JoinToken::decode(token),
+        None => Ok(JoinToken {
+            cluster_id: String::new(),
+            addresses: config.join_addresses.clone(),
+            secret: String::new(),
+            shared_secret: String::new(),
+        }),
+    }
 }
 
 pub async fn bootstrap(quorium: &Quorium, config: &ClusterConfig) -> Result<()> {
@@ -158,9 +171,8 @@ pub async fn bootstrap(quorium: &Quorium, config: &ClusterConfig) -> Result<()> 
     match config.bootstrap {
         Some(ClusterBootstrap::Init) => quorium.initialize().await,
         Some(ClusterBootstrap::Join) => {
-            let token = JoinToken::decode(config.join_token.as_deref().unwrap_or_default())?;
             quorium
-                .join(&token, Duration::from_secs(config.join_timeout_secs))
+                .join(&join_token(config)?, Duration::from_secs(config.join_timeout_secs))
                 .await
         }
         None => bail!(

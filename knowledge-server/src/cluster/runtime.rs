@@ -16,7 +16,7 @@ use crate::cluster::admin::{self, ClusterAdmin};
 use crate::cluster::bus::ClusterBus;
 use crate::cluster::membership::Membership;
 use crate::cluster::node::{ClusterNode, NodeIdentity};
-use crate::cluster::peer::require_secret;
+use crate::cluster::peer::{require_secret, ClusterSecrets};
 use crate::cluster::postgres::PostgresMembership;
 use crate::cluster::quorium::QuoriumMembership;
 use crate::cluster::{mesh, quorium as quorium_backend, Shutdown};
@@ -65,7 +65,7 @@ async fn late_bound(State(late): State<Arc<OnceLock<Router>>>, request: Request)
 fn serve_internal(
     listener: TcpListener,
     early: Router,
-    secret: Arc<String>,
+    secrets: Arc<ClusterSecrets>,
     shutdown: &Shutdown,
 ) -> Result<InternalServer> {
     let addr = listener.local_addr()?;
@@ -74,7 +74,10 @@ fn serve_internal(
         .fallback(late_bound)
         .with_state(Arc::clone(&late));
     let app = early
-        .layer(axum::middleware::from_fn_with_state(secret, require_secret))
+        .layer(axum::middleware::from_fn_with_state(
+            secrets,
+            require_secret,
+        ))
         .merge(fallback);
     let shutdown = shutdown.clone();
     let handle = tokio::spawn(async move {
@@ -109,7 +112,8 @@ pub async fn start(
     shutdown: &Shutdown,
 ) -> Result<ClusterRuntime> {
     let identity = NodeIdentity::from_config(config);
-    let secret = Arc::new(config.effective_shared_secret().unwrap_or_default());
+    let secret = config.effective_shared_secret().unwrap_or_default();
+    let secrets = ClusterSecrets::new(Some(secret.clone()), &config.accepted_secrets);
     let (membership, quorium, early): (Arc<dyn Membership>, Option<Arc<Quorium>>, Router) =
         match config.backend {
             ClusterBackend::Postgres => {
@@ -130,7 +134,7 @@ pub async fn start(
             }
         };
     let internal = internal_listener
-        .map(|listener| serve_internal(listener, early, Arc::clone(&secret), shutdown))
+        .map(|listener| serve_internal(listener, early, Arc::clone(&secrets), shutdown))
         .transpose()?;
     if let Some(quorium) = &quorium {
         quorium_backend::bootstrap(quorium, config)
@@ -155,18 +159,22 @@ pub async fn start(
             Router::new(),
         ),
         BusTransport::Mesh => {
-            let (bus, mesh) = mesh::start(Arc::clone(&node), secret.to_string(), batch_window);
+            let (bus, mesh) = mesh::start(Arc::clone(&node), secret.clone(), batch_window);
             (bus, mesh::router(mesh))
         }
     };
     let admin = Arc::new(ClusterAdmin {
         node: Arc::clone(&node),
         quorium: quorium.clone(),
-        shared_secret: secret.to_string(),
+        shared_secret: secret,
     });
-    let cluster_routes = mesh_routes
-        .merge(admin::router(admin))
-        .layer(axum::middleware::from_fn_with_state(secret, require_secret));
+    let cluster_routes =
+        mesh_routes
+            .merge(admin::router(admin))
+            .layer(axum::middleware::from_fn_with_state(
+                secrets,
+                require_secret,
+            ));
     Ok(ClusterRuntime {
         node,
         bus,
