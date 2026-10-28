@@ -48,6 +48,10 @@ pub async fn handle_query(
     State(qs): State<Arc<QueryState>>,
     Json(req): Json<QueryRequest>,
 ) -> impl IntoResponse {
+    let _permit = match qs.admission.admit(&user.sub) {
+        Ok(permit) => permit,
+        Err(rejection) => return rejection.into_response(),
+    };
     let attachments = req.attachments.as_deref().unwrap_or(&[]);
     let context = load_context_if_needed(&qs, &user.sub, req.conversation_id.as_deref()).await;
     let history = context.history();
@@ -147,6 +151,10 @@ pub async fn handle_query_stream(
     State(qs): State<Arc<QueryState>>,
     Json(req): Json<QueryRequest>,
 ) -> impl IntoResponse {
+    let permit = match qs.admission.admit(&user.sub) {
+        Ok(permit) => permit,
+        Err(rejection) => return rejection.into_response(),
+    };
     let selection = selection_from(&req);
     let attachments = req.attachments.unwrap_or_default();
 
@@ -181,6 +189,7 @@ pub async fn handle_query_stream(
         .collect();
 
     tokio::spawn(async move {
+        let _permit = permit;
         let context = load_context_if_needed(&qs_ctx, &user_id, conv_id.as_deref()).await;
         let history = context.history();
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);

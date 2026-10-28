@@ -18,3 +18,4 @@ pub mod machines;
 pub mod projects;
 pub mod server;
 pub mod skills;
+pub mod turns;

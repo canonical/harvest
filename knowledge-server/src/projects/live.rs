@@ -14,6 +14,8 @@ use crate::cluster::node::ClusterNode;
 use crate::cluster::peer::PeerClient;
 use crate::cluster::Shutdown;
 use crate::config::ClusterConfig;
+use crate::turns::admission::TurnPermit;
+use crate::turns::metrics::TURNS;
 
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -143,6 +145,7 @@ struct LocalTurn {
     state: InFlightState,
     seq: u64,
     abort: Option<tokio::task::AbortHandle>,
+    permit: Option<TurnPermit>,
 }
 
 pub struct ProjectLive {
@@ -253,9 +256,16 @@ impl ProjectLive {
                 },
                 seq: 0,
                 abort: None,
+                permit: None,
             },
         );
         Ok(true)
+    }
+
+    pub async fn hold_permit(&self, conv_id: &str, permit: TurnPermit) {
+        if let Some(turn) = self.turns.write().await.get_mut(conv_id) {
+            turn.permit = Some(permit);
+        }
     }
 
     pub async fn set_abort_handle(&self, conv_id: &str, handle: tokio::task::AbortHandle) {
@@ -545,6 +555,7 @@ impl ProjectLive {
                 .await;
             self.announce_abort(&turn.project_id, conv_id);
         }
+        TURNS.aborted(drained.len());
         drained.len()
     }
 
