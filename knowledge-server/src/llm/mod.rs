@@ -199,18 +199,30 @@ impl FallbackProvider {
     }
 
     fn record(&self, index: usize, outcome: &Result<impl Sized>) -> Option<Failure> {
-        match outcome {
+        let provider = self.providers[index].id();
+        let breaker = &self.breakers[index];
+        let failure = match outcome {
             Ok(_) => {
-                self.breakers[index].succeeded();
+                breaker.succeeded();
                 None
             }
             Err(e) => {
                 let failure = Failure::of(e);
-                self.breakers[index].failed(failure);
-                tracing::warn!(error = %e, provider = self.providers[index].id(), ?failure, "LLM provider call failed");
+                breaker.failed(failure);
+                tracing::warn!(error = %e, provider, ?failure, "LLM provider call failed");
                 Some(failure)
             }
-        }
+        };
+        let outcome_label = match failure {
+            None => "ok",
+            Some(Failure::RateLimited) => "rate_limited",
+            Some(Failure::Transient) => "transient",
+            Some(Failure::Permanent) => "permanent",
+        };
+        crate::metrics::LLM_CALLS.inc(&[("provider", provider), ("outcome", outcome_label)]);
+        crate::metrics::LLM_BREAKER_OPEN
+            .set(&[("provider", provider)], u64::from(breaker.is_open()));
+        failure
     }
 
     async fn first_success<T, F, Fut>(

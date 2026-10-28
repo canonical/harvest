@@ -12,7 +12,6 @@ use crate::cluster::node::VERSION;
 use crate::machines::MachineRegistry;
 use crate::projects::live::ProjectLive;
 use crate::turns::admission::TurnAdmission;
-use crate::turns::metrics::TURNS;
 
 pub struct HealthState {
     pub db: Arc<Db>,
@@ -112,6 +111,16 @@ pub async fn metrics(State(state): State<Arc<HealthState>>) -> Response {
         "harvest_cluster_fenced {}",
         u8::from(state.live.node().is_fenced())
     );
+    let _ = writeln!(out, "# TYPE harvest_cluster_term gauge");
+    let _ = writeln!(out, "harvest_cluster_term {}", membership.term);
+    let _ = writeln!(out, "# TYPE harvest_cluster_apply_lag gauge");
+    let _ = writeln!(out, "harvest_cluster_apply_lag {}", membership.apply_lag);
+    let _ = writeln!(out, "# TYPE harvest_cluster_leader_changes_total counter");
+    let _ = writeln!(
+        out,
+        "harvest_cluster_leader_changes_total {}",
+        membership.leader_changes
+    );
     let _ = writeln!(out, "# TYPE harvest_cluster_voters gauge");
     let _ = writeln!(out, "harvest_cluster_voters {}", membership.voters);
     let _ = writeln!(out, "# TYPE harvest_local_active_turns gauge");
@@ -122,7 +131,7 @@ pub async fn metrics(State(state): State<Arc<HealthState>>) -> Response {
     let _ = writeln!(out, "harvest_db_pool_max_size {pool_size}");
     let _ = writeln!(out, "# TYPE harvest_admitted_turns gauge");
     let _ = writeln!(out, "harvest_admitted_turns {}", state.admission.active());
-    TURNS.render(&mut out);
+    crate::metrics::render(&mut out);
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response()
 }
 

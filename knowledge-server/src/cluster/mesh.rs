@@ -19,6 +19,7 @@ use tokio_tungstenite::tungstenite::Message as WireMessage;
 use crate::cluster::bus::{next_batch, resync_event, ClusterBus, Outbox};
 use crate::cluster::node::ClusterNode;
 use crate::cluster::peer::{FORWARDED_HEADER, SECRET_HEADER};
+use crate::metrics::{MESH_DROPPED, MESH_LINKS, MESH_RESYNCS};
 
 pub const MESH_PATH: &str = "/internal/bus";
 const LINK_QUEUE: usize = 4_096;
@@ -123,7 +124,7 @@ impl Mesh {
             .unwrap_or_else(|e| e.into_inner())
             .insert(origin, last_sent);
         if previous.flatten().is_some() && previous.flatten() != last_sent {
-            self.bus.deliver_to_all(&resync_event());
+            self.resync("reconnect");
         }
     }
 
@@ -137,11 +138,16 @@ impl Mesh {
             .unwrap_or_else(|e| e.into_inner())
             .insert(origin, Some(seq));
         if previous.flatten().is_some_and(|last| seq != last + 1) {
-            self.bus.deliver_to_all(&resync_event());
+            self.resync("gap");
         }
         for (topic, data) in messages {
             self.bus.deliver(&topic, data);
         }
+    }
+
+    fn resync(&self, cause: &str) {
+        MESH_RESYNCS.inc(&[("cause", cause)]);
+        self.bus.deliver_to_all(&resync_event());
     }
 
     fn broadcast(&self, batch: Vec<(String, String)>) {
@@ -158,6 +164,7 @@ impl Mesh {
         let links = self.links.lock().unwrap_or_else(|e| e.into_inner());
         for (peer, link) in links.iter() {
             if link.queue.try_send(envelope.clone()).is_err() {
+                MESH_DROPPED.inc(&[("peer", peer)]);
                 tracing::warn!(peer, seq, "mesh link is saturated: dropping a batch");
             }
         }
@@ -165,13 +172,20 @@ impl Mesh {
 
     fn reconcile(self: &Arc<Self>, peers: HashMap<String, String>) {
         let mut links = self.links.lock().unwrap_or_else(|e| e.into_inner());
-        links.retain(|id, link| peers.get(id) == Some(&link.url));
+        links.retain(|id, link| {
+            let keep = peers.get(id) == Some(&link.url);
+            if !keep {
+                MESH_LINKS.remove(&[("peer", id)]);
+            }
+            keep
+        });
         for (id, url) in peers {
             if links.contains_key(&id) {
                 continue;
             }
             let (queue, inbox) = mpsc::channel(LINK_QUEUE);
-            let task = tokio::spawn(run_link(Arc::clone(self), url.clone(), inbox));
+            let task = tokio::spawn(run_link(Arc::clone(self), id.clone(), url.clone(), inbox));
+            MESH_LINKS.set(&[("peer", &id)], 0);
             links.insert(id, Link { url, queue, task });
         }
     }
@@ -220,13 +234,14 @@ fn websocket_url(base: &str) -> String {
     format!("{base}{MESH_PATH}")
 }
 
-async fn run_link(mesh: Arc<Mesh>, url: String, mut inbox: mpsc::Receiver<Envelope>) {
+async fn run_link(mesh: Arc<Mesh>, peer: String, url: String, mut inbox: mpsc::Receiver<Envelope>) {
     let mut last_sent: Option<u64> = None;
     let mut backoff = RECONNECT_MIN;
     loop {
-        match stream_to(&mesh, &url, &mut inbox, &mut last_sent).await {
+        match stream_to(&mesh, &peer, &url, &mut inbox, &mut last_sent).await {
             Ok(()) => return,
             Err(e) => {
+                MESH_LINKS.set(&[("peer", &peer)], 0);
                 tracing::debug!(error = %e, url, "mesh link dropped, reconnecting");
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(RECONNECT_MAX);
@@ -237,6 +252,7 @@ async fn run_link(mesh: Arc<Mesh>, url: String, mut inbox: mpsc::Receiver<Envelo
 
 async fn stream_to(
     mesh: &Mesh,
+    peer: &str,
     url: &str,
     inbox: &mut mpsc::Receiver<Envelope>,
     last_sent: &mut Option<u64>,
@@ -251,6 +267,7 @@ async fn stream_to(
     let (mut socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .with_context(|| format!("connecting the mesh link to {url}"))?;
+    MESH_LINKS.set(&[("peer", peer)], 1);
     let hello = json!({ "o": mesh.origin(), "h": last_sent }).to_string();
     socket.send(WireMessage::Text(hello.into())).await?;
     loop {
