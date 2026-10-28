@@ -21,6 +21,7 @@ pub enum Command {
     Expire { node_id: String, at_ms: u64 },
     IssueToken { digest: String, expires_at_ms: u64 },
     ConsumeToken { digest: String, at_ms: u64 },
+    RevokeTokens,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +71,10 @@ impl ClusterState {
             Command::ConsumeToken { digest, at_ms } => {
                 self.tokens.retain(|_, expires| *expires > at_ms);
                 Response::TokenAccepted(self.tokens.remove(&digest).is_some())
+            }
+            Command::RevokeTokens => {
+                self.tokens.clear();
+                Response::Done
             }
         }
     }
@@ -219,6 +224,23 @@ mod tests {
             state.apply(Command::ConsumeToken {
                 digest: "late".into(),
                 at_ms: 100
+            }),
+            Response::TokenAccepted(false)
+        );
+    }
+
+    #[test]
+    fn revoking_tokens_invalidates_every_outstanding_token() {
+        let mut state = ClusterState::default();
+        state.apply(Command::IssueToken {
+            digest: "t".into(),
+            expires_at_ms: 100,
+        });
+        state.apply(Command::RevokeTokens);
+        assert_eq!(
+            state.apply(Command::ConsumeToken {
+                digest: "t".into(),
+                at_ms: 1
             }),
             Response::TokenAccepted(false)
         );

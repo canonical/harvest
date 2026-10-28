@@ -22,6 +22,7 @@ impl Server {
             election_timeout: Duration::from_millis(300),
             session_ttl: Duration::from_millis(800),
             http: reqwest::Client::new(),
+            admit_without_token: false,
         })
         .await
         .unwrap();
