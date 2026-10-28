@@ -43,6 +43,10 @@ pub trait LlmProvider: Send + Sync {
         None
     }
 
+    fn context_window(&self) -> Option<usize> {
+        None
+    }
+
     async fn list_models(&self) -> Result<Vec<ModelInfo>>;
 
     async fn available_models(&self) -> Result<Vec<ModelInfo>> {
@@ -320,6 +324,13 @@ impl LlmProvider for FallbackProvider {
         &self.providers
     }
 
+    fn context_window(&self) -> Option<usize> {
+        self.providers
+            .iter()
+            .filter_map(|p| p.context_window())
+            .min()
+    }
+
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         let mut all = Vec::new();
         for provider in &self.providers {
@@ -404,9 +415,10 @@ fn build_provider_with_key(
     config: &LlmProviderConfig,
     api_key_override: Option<&str>,
 ) -> Arc<dyn LlmProvider> {
-    limited::ConcurrencyLimited::wrap(
+    limited::ProviderLimits::wrap(
         build_bare_provider(config, api_key_override),
         config.max_concurrency(),
+        config.context_window(),
     )
 }
 
