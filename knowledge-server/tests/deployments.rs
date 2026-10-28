@@ -437,6 +437,37 @@ async fn seed_project(app: &Router, token: &str, group_id: &str, name: &str) -> 
     body["id"].as_str().unwrap().to_string()
 }
 
+async fn seed_project_without_deployment(
+    app: &Router,
+    token: &str,
+    group_id: &str,
+    name: &str,
+) -> String {
+    let project_id = seed_project(app, token, group_id, name).await;
+    let (status, deployment) = send(
+        app.clone(),
+        req_get(&format!("/projects/{project_id}/deployment"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        app.clone(),
+        req_del(
+            &format!(
+                "/projects/{project_id}/deployments/{}",
+                deployment["id"].as_str().unwrap()
+            ),
+            token,
+        ),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "removing the default deployment: {status}"
+    );
+    project_id
+}
+
 fn cookie(token: &str) -> String {
     format!("token={token}")
 }
@@ -720,13 +751,24 @@ async fn seed_design_doc(db: &Db, project_id: &str, deployment_id: &str, content
     aid
 }
 
-async fn create_deployment_raw(app: &Router, token: &str, project_id: &str, _name: &str) -> String {
+async fn create_deployment_raw(app: &Router, token: &str, project_id: &str, name: &str) -> String {
     let (_, body) = send(
         app.clone(),
         req_get(&format!("/projects/{project_id}/deployment"), token),
     )
     .await;
-    body["id"].as_str().unwrap().to_string()
+    let deployment_id = body["id"].as_str().unwrap().to_string();
+    let (status, _) = send(
+        app.clone(),
+        req_patch(
+            &format!("/projects/{project_id}/deployments/{deployment_id}"),
+            token,
+            json!({ "name": name }),
+        ),
+    )
+    .await;
+    assert!(status.is_success(), "renaming the deployment: {status}");
+    deployment_id
 }
 
 // ---- ProductTemplate CRUD ----
@@ -764,8 +806,8 @@ async fn template_visible_from_two_different_projects_in_the_same_group() {
     join_group(&db, &uid, &gid).await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
 
-    let pid1 = seed_project(&app, &tok, &gid, "Customer A").await;
-    let pid2 = seed_project(&app, &tok, &gid, "Customer B").await;
+    let pid1 = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
+    let pid2 = seed_project_without_deployment(&app, &tok, &gid, "Customer B").await;
 
     let (_, created) = send(
         app.clone(),
@@ -901,7 +943,7 @@ async fn create_deployment_without_template_creates_deployment() {
     let gid = make_group(&db, "eng").await;
     join_group(&db, &uid, &gid).await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
 
     let (status, body) = send(
         app.clone(),
@@ -931,7 +973,7 @@ async fn create_deployment_with_template_links_uses_template_edge() {
     let gid = make_group(&db, "eng").await;
     join_group(&db, &uid, &gid).await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
 
     let (_, created_template) = send(
         app.clone(),
@@ -979,7 +1021,7 @@ async fn create_deployment_rejects_empty_name() {
     let gid = make_group(&db, "eng").await;
     join_group(&db, &uid, &gid).await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
 
     let (status, _) = send(
         app,
@@ -999,13 +1041,13 @@ async fn create_deployment_rejects_empty_name() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn list_deployments_orders_by_updated_at_desc() {
+async fn a_project_lists_its_single_deployment() {
     db!(c, db);
     let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let gid = make_group(&db, "eng").await;
     join_group(&db, &uid, &gid).await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
 
     let (_, first) = send(
         app.clone(),
@@ -1018,7 +1060,7 @@ async fn list_deployments_orders_by_updated_at_desc() {
         ),
     )
     .await;
-    let (_, second) = send(
+    let (status, _) = send(
         app.clone(),
         req_post(
             &format!("/projects/{pid}/deployments"),
@@ -1029,16 +1071,17 @@ async fn list_deployments_orders_by_updated_at_desc() {
         ),
     )
     .await;
+    assert_eq!(status, StatusCode::CONFLICT);
 
     let (status, list) = send(app, req_get(&format!("/projects/{pid}/deployments"), &tok)).await;
     assert_eq!(status, StatusCode::OK);
-    let names: Vec<_> = list
+    let ids: Vec<_> = list
         .as_array()
         .unwrap()
         .iter()
         .map(|d| d["id"].clone())
         .collect();
-    assert_eq!(names, vec![second["id"].clone(), first["id"].clone()]);
+    assert_eq!(ids, vec![first["id"].clone()]);
 }
 
 #[tokio::test]
@@ -1049,7 +1092,7 @@ async fn update_deployment_changes_environment_description() {
     let gid = make_group(&db, "eng").await;
     join_group(&db, &uid, &gid).await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
 
     let (_, created) = send(
         app.clone(),
@@ -1086,7 +1129,7 @@ async fn delete_deployment_removes_deployment() {
     let gid = make_group(&db, "eng").await;
     join_group(&db, &uid, &gid).await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
 
     let (_, created) = send(
         app.clone(),
@@ -1122,7 +1165,7 @@ async fn get_deployment_rejected_for_user_outside_the_project_group() {
     let gid = make_group(&db, "eng").await;
     join_group(&db, &uid, &gid).await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
 
     let (_, created) = send(
         app.clone(),
@@ -1718,8 +1761,15 @@ async fn generate_environment_questions_returns_422_when_unparseable() {
 
 // ---- design generation / revision ----
 
+const DESIGN_DOC: &str = "# Design\nUse a single VM.\n\n\
+## Topology\nOne Ubuntu 24.04 virtual machine hosts the application, its database and the reverse proxy. \
+The machine sits in a private subnet and only the proxy port is reachable from the corporate network.\n\n\
+## Operations\nBackups run nightly to object storage and are restored weekly into a scratch machine to prove they work. \
+Upgrades follow a blue/green procedure: a second machine is provisioned, verified and promoted, then the old one is removed.\n\n\
+## Risks\nA single machine is a single point of failure; the recovery time objective is one hour, met by the restore procedure.\n";
+
 fn design_generation_llm() -> Arc<ClosureLlm> {
-    ClosureLlm::new(|_messages| text_response("# Design\nUse a single VM."))
+    ClosureLlm::new(|_messages| text_response(DESIGN_DOC))
 }
 
 #[tokio::test]
@@ -1742,7 +1792,7 @@ async fn generate_design_saves_the_document_deterministically() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body["design_doc"]["id"].is_string());
     assert_eq!(body["design_doc"]["title"], "Rollout Design");
 }
@@ -1778,7 +1828,7 @@ async fn generate_design_stream_emits_text_delta_and_done_and_saves_document() {
     let (uid, tok) = make_user(&db, "s@x.com", "Sue", "regular").await;
     let gid = make_group(&db, "eng").await;
     join_group(&db, &uid, &gid).await;
-    let design_doc = "# Design\nUse a single VM.";
+    let design_doc = DESIGN_DOC;
     let llm = ClosureLlm::new(move |_messages| text_response(design_doc));
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
     let pid = seed_project(&app, &tok, &gid, "Customer S").await;
@@ -1993,7 +2043,7 @@ async fn generate_design_includes_selected_artifacts_and_links_template() {
             .lock()
             .unwrap()
             .replace(captured_prompt_for_design(messages));
-        text_response("# Design\nUse a single VM.")
+        text_response(DESIGN_DOC)
     });
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
 
@@ -2067,7 +2117,7 @@ async fn generate_design_ignores_artifacts_belonging_to_other_projects() {
             .lock()
             .unwrap()
             .replace(captured_prompt_for_design(messages).1);
-        text_response("# Design\n")
+        text_response(DESIGN_DOC)
     });
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
 
@@ -3150,19 +3200,6 @@ async fn run_destroy_dag_400_when_no_destroy_steps() {
 
     let agent_id = "agent-1";
     let _rx = register_agent(&registry, agent_id, &pid);
-
-    let (_, _) = send(
-        app.clone(),
-        req_post(
-            &format!("/projects/{pid}/deployments/{did}/execution-plan"),
-            &tok,
-            json!({
-                "deploy_steps": [{"artifact_id": bash_aid, "action": "run", "depends_on": []}],
-                "destroy_steps": [{"artifact_id": bash_aid, "action": "destroy", "depends_on": []}]
-            }),
-        ),
-    )
-    .await;
 
     let (status, body) = send(
         app,
