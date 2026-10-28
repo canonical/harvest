@@ -295,8 +295,29 @@ where
     }
 }
 
+pub struct ClusterSecrets {
+    accepted: Vec<String>,
+}
+
+impl ClusterSecrets {
+    pub fn new(primary: Option<String>, also_accepted: &[String]) -> Arc<Self> {
+        let accepted = primary
+            .into_iter()
+            .chain(also_accepted.iter().cloned())
+            .filter(|s| !s.is_empty())
+            .collect();
+        Arc::new(Self { accepted })
+    }
+
+    pub fn admits(&self, presented: &str) -> bool {
+        self.accepted.iter().fold(false, |ok, secret| {
+            ok | constant_time_eq(presented.as_bytes(), secret.as_bytes())
+        })
+    }
+}
+
 pub async fn require_secret(
-    State(secret): State<Arc<String>>,
+    State(secrets): State<Arc<ClusterSecrets>>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -305,7 +326,7 @@ pub async fn require_secret(
         .get(SECRET_HEADER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if secret.is_empty() || !constant_time_eq(presented.as_bytes(), secret.as_bytes()) {
+    if !secrets.admits(presented) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     next.run(request).await
@@ -483,7 +504,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_secret_middleware_rejects_missing_or_wrong_secrets() {
-        let secret = Arc::new("right".to_string());
+        let secret = ClusterSecrets::new(Some("right".into()), &[]);
         let router = Router::new()
             .route("/internal/ok", get(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(secret, require_secret));
@@ -515,6 +536,16 @@ mod tests {
                 .status(),
             200
         );
+    }
+
+    #[test]
+    fn rotation_accepts_the_primary_and_the_extra_secrets_only() {
+        let secrets = ClusterSecrets::new(Some("new".into()), &["old".into()]);
+        assert!(secrets.admits("new"));
+        assert!(secrets.admits("old"));
+        assert!(!secrets.admits("other"));
+        assert!(!secrets.admits(""));
+        assert!(!ClusterSecrets::new(None, &[]).admits(""));
     }
 
     #[test]

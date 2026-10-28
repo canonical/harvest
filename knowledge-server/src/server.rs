@@ -18,7 +18,7 @@ use crate::api::{AppState, GraphCache, ProjectAgentBuilder};
 use crate::auth::{api_keys::ApiKeyStore, user_keys::UserKeyStore};
 use crate::cluster::bus::ClusterBus;
 use crate::cluster::node::{ClusterNode, NodeStanding};
-use crate::cluster::peer::{require_secret, PeerClient};
+use crate::cluster::peer::{require_secret, ClusterSecrets, PeerClient};
 use crate::cluster::{singleton, Shutdown};
 use crate::config::Config;
 use crate::crypto::Crypto;
@@ -105,7 +105,7 @@ async fn turn_snapshot(
 fn internal_router(
     live: Arc<ProjectLive>,
     registry: Arc<MachineRegistry>,
-    secret: Arc<String>,
+    secrets: Arc<ClusterSecrets>,
 ) -> Router {
     Router::new()
         .route(
@@ -117,7 +117,10 @@ fn internal_router(
             get(turn_snapshot).with_state(live),
         )
         .merge(crate::machines::internal::router(registry))
-        .layer(axum::middleware::from_fn_with_state(secret, require_secret))
+        .layer(axum::middleware::from_fn_with_state(
+            secrets,
+            require_secret,
+        ))
 }
 
 async fn reap(db: &Db, live: &ProjectLive, directory: &AgentDirectory) {
@@ -431,7 +434,10 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     let reap_interval = node.heartbeat_interval().max(Duration::from_millis(200)) * 2;
     let drain_grace = Duration::from_secs(cluster_config.drain_grace_secs);
     let drain_timeout = Duration::from_secs(cluster_config.drain_timeout_secs);
-    let secret = Arc::new(cluster_config.effective_shared_secret().unwrap_or_default());
+    let secrets = ClusterSecrets::new(
+        cluster_config.effective_shared_secret(),
+        &cluster_config.accepted_secrets,
+    );
 
     let collocate_reaper = Arc::clone(&collocate_registry);
     let state = AppState {
@@ -491,7 +497,7 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     let internal = cluster.serve(app.clone().merge(internal_router(
         Arc::clone(&live),
         Arc::clone(&machine_registry),
-        secret,
+        secrets,
     )));
 
     let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
