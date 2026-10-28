@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
-use openraft::error::{ClientWriteError, RaftError};
+use openraft::error::{ChangeMembershipError, ClientWriteError, RaftError};
 use openraft::{ChangeMembers, ServerState};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -326,16 +326,34 @@ impl Quorium {
             if voters.len() == 1 {
                 bail!("cannot remove the last voter of the cluster");
             }
-            self.raft
-                .change_membership(ChangeMembers::RemoveVoters(BTreeSet::from([id])), true)
+            self.change_membership(ChangeMembers::RemoveVoters(BTreeSet::from([id])), true)
                 .await
-                .map_err(|e| anyhow!("demoting server {id}: {e}"))?;
+                .map_err(|e| e.context(format!("demoting server {id}")))?;
         }
-        self.raft
-            .change_membership(ChangeMembers::RemoveNodes(BTreeSet::from([id])), false)
+        self.change_membership(ChangeMembers::RemoveNodes(BTreeSet::from([id])), false)
             .await
-            .map_err(|e| anyhow!("removing server {id}: {e}"))?;
+            .map_err(|e| e.context(format!("removing server {id}")))?;
         Ok(())
+    }
+
+    async fn change_membership(
+        &self,
+        changes: ChangeMembers<ServerId, Node>,
+        retain: bool,
+    ) -> Result<()> {
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            match self.raft.change_membership(changes.clone(), retain).await {
+                Ok(_) => return Ok(()),
+                Err(RaftError::APIError(ClientWriteError::ChangeMembershipError(
+                    ChangeMembershipError::InProgress(_),
+                ))) if tries < LEADER_ATTEMPTS => {
+                    tokio::time::sleep(LEADER_RETRY).await;
+                }
+                Err(e) => return Err(anyhow!("{e}")),
+            }
+        }
     }
 
     pub fn servers(&self) -> Vec<ServerInfo> {
