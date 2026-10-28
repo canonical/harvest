@@ -188,18 +188,20 @@ impl SessionContainerRegistry {
         }
     }
 
-    pub async fn reap_dead_nodes(&self, timeout_secs: f64) -> usize {
+    pub async fn reap_dead_nodes(&self, alive: &[String]) -> usize {
         let Some(store) = self.store.get() else {
             return 0;
         };
-        let rows = store.db.query(
-            "DELETE FROM collocate_sessions s
-             WHERE s.persistent = false AND s.node_id <> $node AND NOT EXISTS (
-                 SELECT 1 FROM cluster_nodes n
-                 WHERE n.node_id = s.node_id AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8))
+        let rows = store
+            .db
+            .query(
+                "DELETE FROM collocate_sessions s
+             WHERE s.persistent = false AND NOT (s.node_id = ANY($alive::text[]))
              RETURNING container_id",
-            json!({ "node": store.node_id, "timeout": timeout_secs }),
-        ).await.unwrap_or_default();
+                json!({ "alive": alive }),
+            )
+            .await
+            .unwrap_or_default();
         if let Some(handle) = &store.handle {
             for row in &rows {
                 if let Some(id) = row["container_id"].as_str() {

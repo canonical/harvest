@@ -10,6 +10,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 
 # Error handling
 anyhow       = "1"
+thiserror    = "2"
 
 # Serialisation
 serde        = { version = "1", features = ["derive"] }

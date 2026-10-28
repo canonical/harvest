@@ -219,6 +219,10 @@ impl ProjectLive {
         query: &str,
         attachments: &[Value],
     ) -> Result<bool> {
+        if self.node.is_fenced() {
+            return Ok(false);
+        }
+        let alive = self.node.live_node_ids().await?;
         let rows = self.db.query(
             "INSERT INTO active_turns (conv_id, project_id, turn_id, node_id, locked_by, query, attachments)
              VALUES ($cid, $pid, $tid, $node, $by, $query, $attachments)
@@ -226,16 +230,11 @@ impl ProjectLive {
                  project_id = EXCLUDED.project_id, turn_id = EXCLUDED.turn_id, node_id = EXCLUDED.node_id,
                  locked_by = EXCLUDED.locked_by, query = EXCLUDED.query, attachments = EXCLUDED.attachments,
                  started_at = now()
-             WHERE active_turns.node_id <> $node
-               AND NOT EXISTS (
-                   SELECT 1 FROM cluster_nodes n
-                   WHERE n.node_id = active_turns.node_id
-                     AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8))
+             WHERE NOT (active_turns.node_id = ANY($alive::text[]))
              RETURNING turn_id",
             json!({
                 "cid": conv_id, "pid": project_id, "tid": turn_id, "node": self.node.node_id(),
-                "by": by, "query": query, "attachments": attachments,
-                "timeout": self.node.timeout_secs(),
+                "by": by, "query": query, "attachments": attachments, "alive": alive,
             }),
         ).await?;
         if rows.is_empty() {
@@ -302,16 +301,16 @@ impl ProjectLive {
     }
 
     pub async fn locks(&self, project_id: &str) -> Result<Vec<(String, String)>> {
-        let rows = self.db.query(
-            "SELECT conv_id, locked_by FROM active_turns t
-             WHERE t.project_id = $pid
-               AND (t.node_id = $node OR EXISTS (
-                   SELECT 1 FROM cluster_nodes n
-                   WHERE n.node_id = t.node_id
-                     AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8)))
+        let alive = self.node.live_node_ids().await?;
+        let rows = self
+            .db
+            .query(
+                "SELECT conv_id, locked_by FROM active_turns t
+             WHERE t.project_id = $pid AND t.node_id = ANY($alive::text[])
              ORDER BY t.started_at",
-            json!({ "pid": project_id, "node": self.node.node_id(), "timeout": self.node.timeout_secs() }),
-        ).await?;
+                json!({ "pid": project_id, "alive": alive }),
+            )
+            .await?;
         Ok(rows
             .into_iter()
             .map(|r| {
@@ -414,17 +413,16 @@ impl ProjectLive {
     }
 
     pub async fn presence(&self, project_id: &str) -> Result<Vec<Value>> {
-        self.db.query(
-            "SELECT DISTINCT ON (p.user_id) p.user_id, p.name, p.conv_id
+        let alive = self.node.live_node_ids().await?;
+        self.db
+            .query(
+                "SELECT DISTINCT ON (p.user_id) p.user_id, p.name, p.conv_id
              FROM project_presence p
-             WHERE p.project_id = $pid
-               AND (p.node_id = $node OR EXISTS (
-                   SELECT 1 FROM cluster_nodes n
-                   WHERE n.node_id = p.node_id
-                     AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8)))
+             WHERE p.project_id = $pid AND p.node_id = ANY($alive::text[])
              ORDER BY p.user_id, p.connected_at DESC",
-            json!({ "pid": project_id, "node": self.node.node_id(), "timeout": self.node.timeout_secs() }),
-        ).await
+                json!({ "pid": project_id, "alive": alive }),
+            )
+            .await
     }
 
     pub async fn save_paused(
@@ -501,16 +499,14 @@ impl ProjectLive {
     }
 
     pub async fn reap_dead_nodes(&self) -> Result<usize> {
+        let alive = self.node.live_node_ids().await?;
         let turns = self
             .db
             .query(
                 "DELETE FROM active_turns t
-             WHERE t.node_id <> $node AND NOT EXISTS (
-                 SELECT 1 FROM cluster_nodes n
-                 WHERE n.node_id = t.node_id
-                   AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8))
+             WHERE NOT (t.node_id = ANY($alive::text[]))
              RETURNING project_id, conv_id",
-                json!({ "node": self.node.node_id(), "timeout": self.node.timeout_secs() }),
+                json!({ "alive": alive }),
             )
             .await?;
         for row in &turns {
@@ -523,12 +519,9 @@ impl ProjectLive {
             .db
             .query(
                 "DELETE FROM project_presence p
-             WHERE p.node_id <> $node AND NOT EXISTS (
-                 SELECT 1 FROM cluster_nodes n
-                 WHERE n.node_id = p.node_id
-                   AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8))
+             WHERE NOT (p.node_id = ANY($alive::text[]))
              RETURNING project_id, user_id, name",
-                json!({ "node": self.node.node_id(), "timeout": self.node.timeout_secs() }),
+                json!({ "alive": alive }),
             )
             .await?;
         for row in &presence {
