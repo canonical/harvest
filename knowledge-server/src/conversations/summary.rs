@@ -1,10 +1,10 @@
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use harvest_db::Db;
 use serde_json::{json, Value};
 
 use crate::agent::Agent;
+use crate::cluster::singleton;
 use crate::conversations::store::{load_context, ConversationContext, Owner};
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -49,34 +49,20 @@ pub async fn store(db: &Db, conv_id: &str, summary: &StoredSummary) -> bool {
     .unwrap_or(false)
 }
 
-fn refreshing() -> &'static Mutex<HashSet<String>> {
-    static REFRESHING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    REFRESHING.get_or_init(Default::default)
-}
-
-struct RefreshGuard(String);
-
-impl RefreshGuard {
-    fn acquire(conv_id: &str) -> Option<Self> {
-        let mut set = refreshing().lock().unwrap_or_else(|e| e.into_inner());
-        set.insert(conv_id.to_string())
-            .then(|| Self(conv_id.to_string()))
-    }
-}
-
-impl Drop for RefreshGuard {
-    fn drop(&mut self) {
-        refreshing()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.0);
-    }
-}
-
 pub async fn refresh(db: &Db, agent: &Agent, conv_id: &str) {
-    let Some(_guard) = RefreshGuard::acquire(conv_id) else {
-        return;
-    };
+    let key = format!("summary:{conv_id}");
+    let ran = singleton::run_exclusive(db, &key, || summarize(db, agent, conv_id)).await;
+    match ran {
+        Ok(true) => {}
+        Ok(false) => tracing::debug!(
+            conv_id,
+            "another node is already summarizing this conversation"
+        ),
+        Err(e) => tracing::warn!(error = %e, conv_id, "could not coordinate the summary refresh"),
+    }
+}
+
+async fn summarize(db: &Db, agent: &Agent, conv_id: &str) {
     let context = match load_context(db, Owner::Unscoped, conv_id).await {
         Ok(context) => context,
         Err(e) => {
@@ -98,6 +84,7 @@ pub fn spawn_refresh(db: Arc<Db>, agent: Arc<Agent>, conv_id: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use crate::agent::HistoryMessage;
     use crate::llm::types::{
         LlmResponse, Message, MessageContent, ModelInfo, ToolDefinition, Usage,
@@ -109,13 +96,19 @@ mod tests {
     struct RecordingLlm {
         reply: Option<String>,
         prompts: Mutex<Vec<String>>,
+        delay: std::time::Duration,
     }
 
     impl RecordingLlm {
         fn new(reply: Option<&str>) -> Arc<Self> {
+            Self::slow(reply, std::time::Duration::ZERO)
+        }
+
+        fn slow(reply: Option<&str>, delay: std::time::Duration) -> Arc<Self> {
             Arc::new(Self {
                 reply: reply.map(str::to_string),
                 prompts: Mutex::new(vec![]),
+                delay,
             })
         }
 
@@ -153,6 +146,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
             self.prompts.lock().unwrap().push(prompt);
+            tokio::time::sleep(self.delay).await;
             match &self.reply {
                 Some(text) => Ok(LlmResponse::Message {
                     text: text.clone(),
@@ -387,12 +381,17 @@ mod tests {
         assert_eq!(stored(&test_db.db, &cid).await, Some(newer));
     }
 
-    #[test]
-    fn refresh_guard_allows_one_refresh_per_conversation() {
-        let first = RefreshGuard::acquire("conv-guard-test");
-        assert!(first.is_some());
-        assert!(RefreshGuard::acquire("conv-guard-test").is_none());
-        drop(first);
-        assert!(RefreshGuard::acquire("conv-guard-test").is_some());
+    #[tokio::test]
+    #[ignore = "needs HARVEST_TEST_DATABASE_URL"]
+    async fn concurrent_refreshes_summarize_once() {
+        let test_db = harvest_db::test_support::TestDb::new().await;
+        let (_, cid) = insert_conversation(&test_db.db, &conversation(5)).await;
+        let llm = RecordingLlm::slow(Some("summary v1"), std::time::Duration::from_millis(300));
+        let agent = agent(llm.clone(), 10, 2);
+        tokio::join!(
+            refresh(&test_db.db, &agent, &cid),
+            refresh(&test_db.db, &agent, &cid)
+        );
+        assert_eq!(llm.prompts().len(), 1);
     }
 }
