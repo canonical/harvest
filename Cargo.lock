@@ -2396,6 +2396,7 @@ dependencies = [
  "knowledge-harvester",
  "lopdf 0.39.0",
  "markdown2pdf",
+ "quorium",
  "rand_core 0.6.4",
  "rcgen 0.14.5",
  "regex",
