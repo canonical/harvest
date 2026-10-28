@@ -46,6 +46,9 @@ pub struct Health {
     pub quorum: bool,
     pub leader: Option<String>,
     pub voters: usize,
+    pub term: u64,
+    pub apply_lag: u64,
+    pub leader_changes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -91,6 +94,8 @@ pub struct Quorium {
     admit_without_token: bool,
     sessions: Mutex<Sessions>,
     controller: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    leader_changes: std::sync::atomic::AtomicU64,
+    last_leader: Mutex<Option<ServerId>>,
 }
 
 pub fn now_ms() -> u64 {
@@ -142,6 +147,8 @@ impl Quorium {
             admit_without_token: config.admit_without_token,
             sessions: Mutex::new(Sessions::default()),
             controller: Mutex::new(None),
+            leader_changes: std::sync::atomic::AtomicU64::new(0),
+            last_leader: Mutex::new(None),
         });
         let controller = tokio::spawn(run_controller(Arc::downgrade(&quorium)));
         *quorium.controller.lock().unwrap_or_else(|e| e.into_inner()) = Some(controller);
@@ -204,22 +211,13 @@ impl Quorium {
             server_id: self.id,
             address: self.advertise_url.clone(),
         };
-        let mut last_error = anyhow!("the join token lists no addresses");
-        let mut accepted = false;
-        for address in &token.addresses {
-            match self
-                .post::<_, ()>(address, "/internal/quorium/servers", &request)
-                .await
-            {
-                Ok(()) => {
-                    accepted = true;
-                    break;
-                }
-                Err(e) => last_error = e,
+        let deadline = Instant::now() + timeout;
+        while let Err(e) = self.request_admission(token, &request).await {
+            if Instant::now() >= deadline {
+                return Err(e.context("no cluster member accepted the join request"));
             }
-        }
-        if !accepted {
-            return Err(last_error.context("no cluster member accepted the join request"));
+            tracing::info!(error = %e, "waiting for the cluster to accept this server");
+            tokio::time::sleep(LEADER_RETRY * 5).await;
         }
         let id = self.id;
         self.raft
@@ -356,6 +354,17 @@ impl Quorium {
         }
     }
 
+    fn observe_leader(&self, leader: Option<ServerId>) {
+        let mut last = self.last_leader.lock().unwrap_or_else(|e| e.into_inner());
+        if leader.is_some() && *last != leader {
+            if last.is_some() {
+                self.leader_changes
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            *last = leader;
+        }
+    }
+
     pub fn servers(&self) -> Vec<ServerInfo> {
         let metrics = self.metrics();
         let membership = metrics.membership_config.membership();
@@ -406,10 +415,17 @@ impl Quorium {
             ServerState::Follower | ServerState::Learner => leader.is_some(),
             _ => false,
         };
+        let last_log = metrics.last_log_index.unwrap_or(0);
+        let applied = metrics.last_applied.map_or(0, |l| l.index);
         Health {
             quorum,
             leader,
             voters: metrics.membership_config.membership().voter_ids().count(),
+            term: metrics.current_term,
+            apply_lag: last_log.saturating_sub(applied),
+            leader_changes: self
+                .leader_changes
+                .load(std::sync::atomic::Ordering::Relaxed),
         }
     }
 
@@ -667,6 +683,7 @@ async fn run_controller(quorium: std::sync::Weak<Quorium>) {
             return;
         };
         let metrics = quorium.metrics();
+        quorium.observe_leader(metrics.current_leader);
         if metrics.state != ServerState::Leader {
             continue;
         }

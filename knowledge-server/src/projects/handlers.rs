@@ -33,7 +33,7 @@ use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::llm::types::{Message, ProviderSelection, Usage, UsedProvider};
 use crate::turns::admission::TurnAdmission;
 use crate::turns::idempotency::{self, Reservation};
-use crate::turns::metrics::TURNS;
+use crate::turns::metrics::{Stage, TURNS};
 use harvest_db::Db;
 
 const PROJECT_NAME_MAX_CHARS: usize = 100;
@@ -998,7 +998,7 @@ async fn start_project_turn(
             &attachments_for_broadcast,
         )
         .await;
-    TURNS.lock.observe(lock_started.elapsed());
+    TURNS.stage(Stage::Lock, lock_started.elapsed());
     match locked {
         Ok(true) => state.live.hold_permit(&body.conversation_id, permit).await,
         Ok(false) => {
@@ -1642,7 +1642,7 @@ pub async fn resume_confirm_action(
                 "could not lock the conversation",
             )
         })?;
-    TURNS.lock.observe(lock_started.elapsed());
+    TURNS.stage(Stage::Lock, lock_started.elapsed());
     if !locked {
         let _ = state
             .live

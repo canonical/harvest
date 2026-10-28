@@ -974,7 +974,7 @@ impl Agent {
         match outcome {
             LoopOutcome::Finished {
                 text,
-                iterations,
+                iterations: _,
                 provider_used,
                 hit_max_iterations,
                 usage,
@@ -1010,7 +1010,7 @@ impl Agent {
             }
             LoopOutcome::EndedWithQuestion {
                 text,
-                iterations,
+                iterations: _,
                 provider_used,
                 usage,
                 llm_call_count,

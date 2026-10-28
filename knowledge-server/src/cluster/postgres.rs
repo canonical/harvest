@@ -91,6 +91,9 @@ impl Membership for PostgresMembership {
             quorum: true,
             leader: None,
             voters: 0,
+            term: 0,
+            apply_lag: 0,
+            leader_changes: 0,
         }
     }
 }

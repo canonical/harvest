@@ -113,6 +113,9 @@ impl Membership for QuoriumMembership {
             quorum: health.quorum,
             leader: health.leader,
             voters: health.voters,
+            term: health.term,
+            apply_lag: health.apply_lag,
+            leader_changes: health.leader_changes,
         }
     }
 }

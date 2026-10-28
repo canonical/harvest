@@ -134,6 +134,7 @@ impl ClusterNode {
     }
 
     fn record_lapse(&self) {
+        crate::metrics::CLUSTER_LAPSES.inc(&[]);
         self.lapses.send_modify(|count| *count += 1);
     }
 

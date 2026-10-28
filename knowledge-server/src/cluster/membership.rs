@@ -28,6 +28,9 @@ pub struct MembershipHealth {
     pub quorum: bool,
     pub leader: Option<String>,
     pub voters: usize,
+    pub term: u64,
+    pub apply_lag: u64,
+    pub leader_changes: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
