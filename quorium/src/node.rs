@@ -30,6 +30,7 @@ pub struct QuoriumConfig {
     pub election_timeout: Duration,
     pub session_ttl: Duration,
     pub http: reqwest::Client,
+    pub admit_without_token: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +65,7 @@ pub struct Status {
     pub last_applied: Option<u64>,
     pub servers: Vec<ServerInfo>,
     pub members: Vec<MemberRecord>,
+    pub token_expiries_ms: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -86,6 +88,7 @@ pub struct Quorium {
     state: StateMachineStore,
     http: reqwest::Client,
     session_ttl: Duration,
+    admit_without_token: bool,
     sessions: Mutex<Sessions>,
     controller: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -136,6 +139,7 @@ impl Quorium {
             state,
             http: config.http,
             session_ttl: config.session_ttl,
+            admit_without_token: config.admit_without_token,
             sessions: Mutex::new(Sessions::default()),
             controller: Mutex::new(None),
         });
@@ -229,14 +233,26 @@ impl Quorium {
         Ok(())
     }
 
+    async fn request_admission(&self, token: &JoinToken, request: &JoinRequest) -> Result<()> {
+        let mut last_error = anyhow!("the join token lists no addresses");
+        for address in token
+            .addresses
+            .iter()
+            .filter(|a| a.trim_end_matches('/') != self.advertise_url)
+        {
+            match self
+                .post::<_, ()>(address, "/internal/quorium/servers", request)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => last_error = e,
+            }
+        }
+        Err(last_error)
+    }
+
     pub async fn admit(&self, request: JoinRequest) -> Result<bool> {
-        let accepted = self
-            .write(Command::ConsumeToken {
-                digest: digest(&request.secret),
-                at_ms: now_ms(),
-            })
-            .await?;
-        if accepted != Response::TokenAccepted(true) {
+        if !self.accepts(&request).await? {
             return Ok(false);
         }
         self.raft
@@ -250,6 +266,24 @@ impl Quorium {
             .await
             .map_err(|e| anyhow!("adding server {}: {e}", request.server_id))?;
         Ok(true)
+    }
+
+    async fn accepts(&self, request: &JoinRequest) -> Result<bool> {
+        if request.secret.is_empty() {
+            return Ok(self.admit_without_token);
+        }
+        let accepted = self
+            .write(Command::ConsumeToken {
+                digest: digest(&request.secret),
+                at_ms: now_ms(),
+            })
+            .await?;
+        Ok(accepted == Response::TokenAccepted(true))
+    }
+
+    pub async fn revoke_tokens(&self) -> Result<()> {
+        self.write(Command::RevokeTokens).await?;
+        Ok(())
     }
 
     pub async fn issue_token(&self, ttl: Duration) -> Result<JoinToken> {
@@ -372,6 +406,9 @@ impl Quorium {
             last_applied: metrics.last_applied.map(|l| l.index),
             servers: self.servers(),
             members: self.members(),
+            token_expiries_ms: self
+                .state
+                .read(|a| a.cluster.tokens.values().copied().collect()),
         }
     }
 

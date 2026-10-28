@@ -26,7 +26,10 @@ pub fn router(quorium: Arc<Quorium>) -> Router {
         .route("/internal/quorium/members", get(members))
         .route("/internal/quorium/servers", post(admit))
         .route("/internal/quorium/servers/:id", delete(remove))
-        .route("/internal/quorium/tokens", post(issue_token))
+        .route(
+            "/internal/quorium/tokens",
+            post(issue_token).delete(revoke_tokens),
+        )
         .route("/internal/quorium/status", get(status))
         .with_state(quorium)
 }
@@ -119,6 +122,13 @@ struct TokenRequest {
 async fn issue_token(State(q): Shared, Json(request): Json<TokenRequest>) -> Response {
     match q.issue_token(Duration::from_secs(request.ttl_secs)).await {
         Ok(token) => Json(token).into_response(),
+        Err(e) => failure(StatusCode::SERVICE_UNAVAILABLE, e),
+    }
+}
+
+async fn revoke_tokens(State(q): Shared) -> Response {
+    match q.revoke_tokens().await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => failure(StatusCode::SERVICE_UNAVAILABLE, e),
     }
 }
