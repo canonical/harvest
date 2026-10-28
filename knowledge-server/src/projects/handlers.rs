@@ -27,7 +27,8 @@ use crate::agent::{
 };
 use crate::api::ProjectAgentBuilder;
 use crate::auth::jwt::Claims;
-use crate::conversations::summary::{effective_history, refresh as refresh_summary, StoredSummary};
+use crate::conversations::store::{self, ConversationContext, Owner, Page};
+use crate::conversations::summary::refresh as refresh_summary;
 use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::llm::types::{Message, ProviderSelection, Usage, UsedProvider};
 use harvest_db::Db;
@@ -306,35 +307,71 @@ pub async fn project_events(
     response
 }
 
-async fn load_project_messages_raw(db: &Db, project_id: &str, conv_id: &str) -> Vec<Value> {
-    load_project_conversation(db, project_id, conv_id).await.0
+async fn load_project_context(db: &Db, project_id: &str, conv_id: &str) -> ConversationContext {
+    store::load_context(db, Owner::Project(project_id), conv_id)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, conv_id, "could not load conversation context");
+            ConversationContext::default()
+        })
 }
 
-async fn load_project_conversation(
+fn provider_json(provider_used: &UsedProvider) -> Value {
+    json!({
+        "provider_id": provider_used.provider_id,
+        "kind": provider_used.kind,
+        "model": provider_used.model,
+    })
+}
+
+async fn record_turn_cost(
     db: &Db,
     project_id: &str,
     conv_id: &str,
-) -> (Vec<Value>, Option<StoredSummary>) {
-    let rows = db.query(
-        "SELECT messages, summary, summary_upto FROM conversations WHERE id = $cid AND project_id = $pid",
-        json!({ "pid": project_id, "cid": conv_id }),
-    ).await.unwrap_or_default();
-
-    let Some(row) = rows.into_iter().next() else {
-        return (vec![], None);
-    };
-    let messages = row
-        .get("messages")
-        .and_then(|v| v.as_str())
-        .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
-        .unwrap_or_default();
-    (messages, StoredSummary::from_row(&row))
+    turn: &TurnOutcome<'_>,
+    turn_id: &str,
+    user_id: &str,
+    pricing: &crate::cost::PricingTable,
+) {
+    if let Some(record) = crate::cost::build_turn_record(
+        crate::cost::CostScope::Chat,
+        turn_id,
+        user_id,
+        turn.provider_used,
+        turn.usage,
+        turn.llm_call_count,
+        pricing,
+        turn.duration_ms,
+        Some(project_id),
+        Some(conv_id),
+        None,
+        None,
+        None,
+    ) {
+        let _ = crate::cost::record_llm_call(db, &record).await;
+    }
 }
 
-fn history_messages_from_raw(raw: &[Value]) -> Vec<HistoryMessage> {
-    raw.iter()
-        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-        .collect()
+struct TurnOutcome<'a> {
+    answer: &'a str,
+    sources: &'a [Source],
+    tool_calls_made: usize,
+    chain: Vec<Value>,
+    question: Option<Value>,
+    provider_used: Option<&'a UsedProvider>,
+    duration_ms: u64,
+    usage: &'a Usage,
+    llm_call_count: usize,
+}
+
+impl TurnOutcome<'_> {
+    fn cost_microusd(&self, pricing: &crate::cost::PricingTable) -> i64 {
+        pricing.price_call(
+            self.usage,
+            self.provider_used.map(|p| p.kind.as_str()).unwrap_or(""),
+            self.provider_used.map(|p| p.model.as_str()).unwrap_or(""),
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -346,98 +383,46 @@ async fn save_project_turn(
     user_text: &str,
     username: &str,
     attachments_meta: Vec<Value>,
-    prior_messages: Vec<Value>,
-    assistant_text: &str,
-    sources: &[Source],
-    tool_calls_made: usize,
-    chain: Vec<Value>,
-    question: Option<Value>,
-    provider_used: Option<&UsedProvider>,
-    duration_ms: u64,
-    usage: &Usage,
-    llm_call_count: usize,
+    turn: TurnOutcome<'_>,
     turn_id: &str,
     user_id: &str,
     pricing: &crate::cost::PricingTable,
-    release_lock: bool,
 ) {
-    let mut messages = prior_messages;
-    messages.push(json!({
-        "role": "user",
-        "text": user_text,
-        "username": username,
-        "attachments": attachments_meta,
-    }));
-    let (chain, enumerations) = crate::agent::chain::split_enumerations(chain);
+    let cost_microusd = turn.cost_microusd(pricing);
+    let (chain, enumerations) = crate::agent::chain::split_enumerations(turn.chain.clone());
     let mut assistant_message = json!({
         "role": "assistant",
-        "text": assistant_text,
-        "sources": sources,
+        "text": turn.answer,
+        "sources": turn.sources,
         "chain": chain,
-        "tool_calls_made": tool_calls_made,
-        "duration_ms": duration_ms,
-        "usage": usage,
-        "llm_call_count": llm_call_count,
-        "cost_microusd": pricing.price_call(usage, provider_used.map(|p| p.kind.as_str()).unwrap_or(""), provider_used.map(|p| p.model.as_str()).unwrap_or("")),
+        "tool_calls_made": turn.tool_calls_made,
+        "duration_ms": turn.duration_ms,
+        "usage": turn.usage,
+        "llm_call_count": turn.llm_call_count,
+        "cost_microusd": cost_microusd,
     });
     if !enumerations.is_empty() {
         assistant_message["enumerations"] = json!(enumerations);
     }
-    if let Some(question) = question {
-        assistant_message["question"] = question;
+    if let Some(question) = &turn.question {
+        assistant_message["question"] = question.clone();
     }
-    if let Some(provider_used) = provider_used {
-        assistant_message["provider"] = json!({
-            "provider_id": provider_used.provider_id,
-            "kind": provider_used.kind,
-            "model": provider_used.model,
-        });
+    if let Some(provider_used) = turn.provider_used {
+        assistant_message["provider"] = provider_json(provider_used);
     }
-    messages.push(assistant_message);
-
-    let messages_json = match serde_json::to_string(&messages) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error=%e, "failed to serialize conversation");
-            return;
-        }
-    };
-    let count = messages.len() as i64;
-
-    let _ = db
-        .query(
-            "WITH released AS (
-             DELETE FROM active_turns WHERE conv_id = $cid AND turn_id = $tid AND $release::bool
-         )
-         UPDATE conversations
-         SET messages = $messages, message_count = $count, updated_at = $now
-         WHERE id = $cid AND project_id = $pid
-         RETURNING id",
-            json!({
-                "pid": project_id, "cid": conv_id,
-                "messages": messages_json, "count": count, "now": now,
-                "tid": turn_id, "release": release_lock,
-            }),
-        )
-        .await;
-
-    if let Some(record) = crate::cost::build_turn_record(
-        crate::cost::CostScope::Chat,
-        turn_id,
-        user_id,
-        provider_used,
-        usage,
-        llm_call_count,
-        pricing,
-        duration_ms,
-        Some(project_id),
-        Some(conv_id),
-        None,
-        None,
-        None,
-    ) {
-        let _ = crate::cost::record_llm_call(db, &record).await;
+    let messages = [
+        json!({
+            "role": "user",
+            "text": user_text,
+            "username": username,
+            "attachments": attachments_meta,
+        }),
+        assistant_message,
+    ];
+    if let Err(e) = store::append(db, Owner::Project(project_id), conv_id, &messages, now).await {
+        tracing::error!(error = %e, conv_id, "failed to save the turn");
     }
+    record_turn_cost(db, project_id, conv_id, &turn, turn_id, user_id, pricing).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -446,99 +431,40 @@ async fn update_last_assistant_turn(
     project_id: &str,
     conv_id: &str,
     now: &str,
-    assistant_text: &str,
-    sources: &[Source],
-    tool_calls_made: usize,
-    new_chain: Vec<Value>,
-    question: Option<Value>,
-    provider_used: Option<&UsedProvider>,
-    duration_ms: u64,
-    usage: &Usage,
-    llm_call_count: usize,
+    turn: TurnOutcome<'_>,
     turn_id: &str,
     user_id: &str,
     pricing: &crate::cost::PricingTable,
-    release_lock: bool,
 ) {
-    let mut messages = load_project_messages_raw(db, project_id, conv_id).await;
-    let Some(last) = messages.last_mut() else {
-        return;
-    };
-
-    let mut chain = last["chain"].as_array().cloned().unwrap_or_default();
-    chain.extend(new_chain);
-
-    last["text"] = json!(assistant_text);
-    last["sources"] = json!(sources);
-    last["chain"] = json!(chain);
-    last["tool_calls_made"] = json!(tool_calls_made);
-    last["duration_ms"] = json!(duration_ms);
-    last["usage"] = json!(usage);
-    last["llm_call_count"] = json!(llm_call_count);
-    last["cost_microusd"] = json!(pricing.price_call(
-        usage,
-        provider_used.map(|p| p.kind.as_str()).unwrap_or(""),
-        provider_used.map(|p| p.model.as_str()).unwrap_or("")
-    ));
-    match question {
-        Some(question) => last["question"] = question,
-        None => {
-            if let Some(obj) = last.as_object_mut() {
-                obj.remove("question");
+    let cost_microusd = turn.cost_microusd(pricing);
+    let edited = store::update_last(db, Owner::Project(project_id), conv_id, now, |last| {
+        let mut chain = last["chain"].as_array().cloned().unwrap_or_default();
+        chain.extend(turn.chain.iter().cloned());
+        last["text"] = json!(turn.answer);
+        last["sources"] = json!(turn.sources);
+        last["chain"] = json!(chain);
+        last["tool_calls_made"] = json!(turn.tool_calls_made);
+        last["duration_ms"] = json!(turn.duration_ms);
+        last["usage"] = json!(turn.usage);
+        last["llm_call_count"] = json!(turn.llm_call_count);
+        last["cost_microusd"] = json!(cost_microusd);
+        match &turn.question {
+            Some(question) => last["question"] = question.clone(),
+            None => {
+                if let Some(obj) = last.as_object_mut() {
+                    obj.remove("question");
+                }
             }
         }
-    }
-    if let Some(provider_used) = provider_used {
-        last["provider"] = json!({
-            "provider_id": provider_used.provider_id,
-            "kind": provider_used.kind,
-            "model": provider_used.model,
-        });
-    }
-
-    let messages_json = match serde_json::to_string(&messages) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error=%e, "failed to serialize conversation");
-            return;
+        if let Some(provider_used) = turn.provider_used {
+            last["provider"] = provider_json(provider_used);
         }
-    };
-    let count = messages.len() as i64;
-
-    let _ = db
-        .query(
-            "WITH released AS (
-             DELETE FROM active_turns WHERE conv_id = $cid AND turn_id = $tid AND $release::bool
-         )
-         UPDATE conversations
-         SET messages = $messages, message_count = $count, updated_at = $now
-         WHERE id = $cid AND project_id = $pid
-         RETURNING id",
-            json!({
-                "pid": project_id, "cid": conv_id,
-                "messages": messages_json, "count": count, "now": now,
-                "tid": turn_id, "release": release_lock,
-            }),
-        )
-        .await;
-
-    if let Some(record) = crate::cost::build_turn_record(
-        crate::cost::CostScope::Chat,
-        turn_id,
-        user_id,
-        provider_used,
-        usage,
-        llm_call_count,
-        pricing,
-        duration_ms,
-        Some(project_id),
-        Some(conv_id),
-        None,
-        None,
-        None,
-    ) {
-        let _ = crate::cost::record_llm_call(db, &record).await;
+    })
+    .await;
+    if let Err(e) = edited {
+        tracing::error!(error = %e, conv_id, "failed to update the continued turn");
     }
+    record_turn_cost(db, project_id, conv_id, &turn, turn_id, user_id, pricing).await;
 }
 
 async fn mark_confirm_action_statuses(
@@ -547,48 +473,25 @@ async fn mark_confirm_action_statuses(
     conv_id: &str,
     results: &[ResumeConfirmItem],
 ) {
-    let mut messages = load_project_messages_raw(db, project_id, conv_id).await;
-    let Some(last) = messages.last_mut() else {
-        return;
-    };
-    let Some(chain) = last["chain"].as_array_mut() else {
-        return;
-    };
-    for entry in chain.iter_mut() {
-        if entry["type"] != "confirm_action" {
-            continue;
-        }
-        let Some(id) = entry["id"].as_str() else {
-            continue;
-        };
-        if let Some(item) = results.iter().find(|r| r.tool_call_id == id) {
-            entry["status"] = json!(item.status);
-            entry["result_text"] = json!(item.result_text);
-        }
-    }
-
-    let messages_json = match serde_json::to_string(&messages) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error=%e, "failed to serialize conversation");
-            return;
-        }
-    };
-    let count = messages.len() as i64;
     let now = harvest_db::now_rfc3339();
-
-    let _ = db
-        .query(
-            "UPDATE conversations
-         SET messages = $messages, message_count = $count, updated_at = $now
-         WHERE id = $cid AND project_id = $pid
-         RETURNING id",
-            json!({
-                "pid": project_id, "cid": conv_id,
-                "messages": messages_json, "count": count, "now": now,
-            }),
-        )
-        .await;
+    let edited = store::update_last(db, Owner::Project(project_id), conv_id, &now, |last| {
+        let Some(chain) = last["chain"].as_array_mut() else {
+            return;
+        };
+        for entry in chain.iter_mut().filter(|e| e["type"] == "confirm_action") {
+            let Some(id) = entry["id"].as_str() else {
+                continue;
+            };
+            if let Some(item) = results.iter().find(|r| r.tool_call_id == id) {
+                entry["status"] = json!(item.status);
+                entry["result_text"] = json!(item.result_text);
+            }
+        }
+    })
+    .await;
+    if let Err(e) = edited {
+        tracing::error!(error = %e, conv_id, "failed to record confirmation statuses");
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -610,10 +513,7 @@ pub struct ProjectQueryStreamBody {
 }
 
 enum TurnPersist {
-    New {
-        prior_messages: Vec<Value>,
-        attachment_meta: Vec<Value>,
-    },
+    New { attachment_meta: Vec<Value> },
     Continuation,
 }
 
@@ -629,6 +529,7 @@ async fn drive_turn(
     query: String,
     username: String,
     history: Vec<HistoryMessage>,
+    message_count: usize,
     persist: TurnPersist,
     selection: Option<ProviderSelection>,
     mut agent_rx: mpsc::Receiver<AgentEvent>,
@@ -732,12 +633,19 @@ async fn drive_turn(
         } = &event
         {
             let save_now = harvest_db::now_rfc3339();
-            let chain = std::mem::take(&mut chain_builder).finish();
+            let outcome = TurnOutcome {
+                answer,
+                sources,
+                tool_calls_made: *tool_calls_made,
+                chain: std::mem::take(&mut chain_builder).finish(),
+                question: pending_question.clone(),
+                provider_used: provider_used.as_ref(),
+                duration_ms: *duration_ms,
+                usage,
+                llm_call_count: *llm_call_count,
+            };
             match &persist {
-                TurnPersist::New {
-                    prior_messages,
-                    attachment_meta,
-                } => {
+                TurnPersist::New { attachment_meta } => {
                     save_project_turn(
                         &db,
                         &project_id,
@@ -746,20 +654,10 @@ async fn drive_turn(
                         &query,
                         &username,
                         attachment_meta.clone(),
-                        prior_messages.clone(),
-                        answer,
-                        sources,
-                        *tool_calls_made,
-                        chain,
-                        pending_question.clone(),
-                        provider_used.as_ref(),
-                        *duration_ms,
-                        usage,
-                        *llm_call_count,
+                        outcome,
                         &turn_id,
                         &user_id,
                         &pricing,
-                        !confirmation_requested,
                     )
                     .await;
                 }
@@ -769,19 +667,10 @@ async fn drive_turn(
                         &project_id,
                         &conv_id,
                         &save_now,
-                        answer,
-                        sources,
-                        *tool_calls_made,
-                        chain,
-                        pending_question.clone(),
-                        provider_used.as_ref(),
-                        *duration_ms,
-                        usage,
-                        *llm_call_count,
+                        outcome,
                         &turn_id,
                         &user_id,
                         &pricing,
-                        !confirmation_requested,
                     )
                     .await;
                 }
@@ -816,8 +705,8 @@ async fn drive_turn(
             let answer_t = answer.clone();
             let prior_t = history.clone();
             let count_t = match &persist {
-                TurnPersist::New { prior_messages, .. } => prior_messages.len() + 2,
-                TurnPersist::Continuation => history.len() + 2,
+                TurnPersist::New { .. } => message_count + 2,
+                TurnPersist::Continuation => message_count,
             };
             tokio::spawn(async move {
                 if let Some(new_title) = maybe_regenerate_title(
@@ -1082,10 +971,8 @@ pub async fn project_query_stream(
                 user_system_one.or_else(|| state.agent_builder.system_one.clone()),
             )
     };
-    let (raw_messages, stored_summary) =
-        load_project_conversation(&state.db, &project_id, &body.conversation_id).await;
-    let raw_history = history_messages_from_raw(&raw_messages);
-    let history = effective_history(&raw_history, stored_summary.as_ref());
+    let context = load_project_context(&state.db, &project_id, &body.conversation_id).await;
+    let history = context.history();
 
     state
         .broadcast(
@@ -1127,7 +1014,7 @@ pub async fn project_query_stream(
         .iter()
         .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
         .collect();
-    let prior_messages_for_save = raw_messages;
+    let message_count = context.message_count;
     let pricing = Arc::clone(&state.pricing);
     let user_id = user.sub.clone();
 
@@ -1171,10 +1058,8 @@ pub async fn project_query_stream(
             query,
             username,
             history,
-            TurnPersist::New {
-                prior_messages: prior_messages_for_save,
-                attachment_meta,
-            },
+            message_count,
+            TurnPersist::New { attachment_meta },
             selection,
             agent_rx,
             paused_rx,
@@ -1430,9 +1315,9 @@ pub async fn create_conversation(
     state
         .db
         .query(
-            "INSERT INTO conversations (id, project_id, title, messages, message_count,
+            "INSERT INTO conversations (id, project_id, title, message_count,
                                     created_by, created_at, updated_at)
-         VALUES ($id, $pid, $title, '[]', 0, $uid, $now, $now)
+         VALUES ($id, $pid, $title, 0, $uid, $now, $now)
          RETURNING id",
             json!({ "pid": project_id, "id": id, "title": title, "uid": user.sub, "now": now }),
         )
@@ -1463,12 +1348,13 @@ pub async fn get_conversation(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
     Path((project_id, conv_id)): Path<(String, String)>,
+    Query(page): Query<Page>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let rows = state
         .db
         .query(
-            "SELECT id, title, messages, created_by, created_at, updated_at
+            "SELECT id, title, message_count, created_by, created_at, updated_at
          FROM conversations WHERE id = $cid AND project_id = $pid",
             json!({ "pid": project_id, "cid": conv_id }),
         )
@@ -1478,12 +1364,11 @@ pub async fn get_conversation(
         .into_iter()
         .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+    let messages = store::load_page(&state.db, Owner::Project(&project_id), &conv_id, page)
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let mut obj = row.as_object().cloned().unwrap_or_default();
-    if let Some(Value::String(s)) = obj.get("messages") {
-        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-            obj.insert("messages".to_string(), parsed);
-        }
-    }
+    obj.insert("messages".to_string(), Value::Array(messages));
     Ok(Json(Value::Object(obj)))
 }
 
@@ -1512,28 +1397,17 @@ pub async fn update_conversation(
         return Err(err(StatusCode::NOT_FOUND, "not found"));
     }
     let now = harvest_db::now_rfc3339();
-    let message_count = body
-        .messages
-        .as_array()
-        .map(|a| a.len() as i64)
-        .unwrap_or(0);
-    let messages_json = body.messages.to_string();
-    state
-        .db
-        .query(
-            "UPDATE conversations
-         SET title = $title, messages = $messages, message_count = $count, updated_at = $now,
-             summary = NULL, summary_upto = 0
-         WHERE id = $cid AND project_id = $pid
-         RETURNING id",
-            json!({
-                "pid": project_id, "cid": conv_id,
-                "title": body.title, "messages": messages_json,
-                "count": message_count, "now": now,
-            }),
-        )
-        .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let messages = body.messages.as_array().cloned().unwrap_or_default();
+    store::replace_all(
+        &state.db,
+        Owner::Project(&project_id),
+        &conv_id,
+        &body.title,
+        &messages,
+        &now,
+    )
+    .await
+    .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1643,14 +1517,12 @@ pub async fn resume_confirm_action(
         ));
     };
 
-    let (raw_messages, stored_summary) =
-        load_project_conversation(&state.db, &project_id, &conv_id).await;
-    let split = raw_messages.len().saturating_sub(2);
-    let (prior_raw, tail_raw) = raw_messages.split_at(split);
-    let prior_history = effective_history(
-        &history_messages_from_raw(prior_raw),
-        stored_summary.as_ref(),
-    );
+    let mut context = load_project_context(&state.db, &project_id, &conv_id).await;
+    let message_count = context.message_count;
+    let tail_raw = context
+        .recent
+        .split_off(context.recent.len().saturating_sub(2));
+    let prior_history = context.history();
     let (query, username) = tail_raw
         .iter()
         .find(|m| m["role"] == "user")
@@ -1791,6 +1663,7 @@ pub async fn resume_confirm_action(
             query,
             username,
             prior_history,
+            message_count,
             TurnPersist::Continuation,
             selection,
             agent_rx,
@@ -2154,6 +2027,7 @@ mod drive_turn_broadcast_tests {
             "query".into(),
             "tester".into(),
             vec![],
+            0,
             TurnPersist::Continuation,
             None,
             agent_rx,
@@ -2478,11 +2352,9 @@ pub async fn project_query(
         )
     };
     let history = match &body.conversation_id {
-        Some(conv_id) => {
-            let (raw, stored_summary) =
-                load_project_conversation(&state.db, &project_id, conv_id).await;
-            effective_history(&history_messages_from_raw(&raw), stored_summary.as_ref())
-        }
+        Some(conv_id) => load_project_context(&state.db, &project_id, conv_id)
+            .await
+            .history(),
         None => vec![],
     };
     let attachments = body.attachments.as_deref().unwrap_or(&[]);
