@@ -361,20 +361,48 @@ export const getProjectConversation     = (projectId, convId)   => projectFetch(
 export const updateProjectConversation  = (projectId, convId, body) => projectFetch(conversationUrl(projectId, convId), { method: 'PUT',  body: JSON.stringify(body) });
 export const deleteProjectConversation  = (projectId, convId)   => projectFetch(conversationUrl(projectId, convId), { method: 'DELETE' });
 
-export async function projectQueryStart(projectId, query, conversationId, attachments, providerSelection) {
+const START_ATTEMPTS = 3;
+const START_RETRY_MS = 500;
+
+export function newIdempotencyKey() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export async function projectQueryStart(projectId, query, conversationId, attachments, providerSelection, { retryMs = START_RETRY_MS } = {}) {
   const url = `${projectUrl(projectId)}/query/stream`;
   const body = withProviderSelection({ query, conversation_id: conversationId, attachments }, providerSelection);
-  const response = await fetch(url, {
+  const request = {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': newIdempotencyKey() },
     body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    handleUnauthorized(response.status);
-    const data = await response.json().catch(() => ({}));
-    const e = new Error(data.error || `Server error: ${response.status}`);
-    e.status = response.status;
-    throw e;
+  };
+  for (let attempt = 1; ; attempt++) {
+    const lastAttempt = attempt >= START_ATTEMPTS;
+    let response;
+    try {
+      response = await fetch(url, request);
+    } catch (e) {
+      if (lastAttempt) throw e;
+      await sleep(retryMs * attempt);
+      continue;
+    }
+    if (response.status === 503 && !lastAttempt) {
+      await sleep(retryMs * attempt);
+      continue;
+    }
+    if (!response.ok) {
+      handleUnauthorized(response.status);
+      const data = await response.json().catch(() => ({}));
+      const e = new Error(data.error || `Server error: ${response.status}`);
+      e.status = response.status;
+      throw e;
+    }
+    return response.json().catch(() => ({}));
   }
 }
 
