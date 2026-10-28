@@ -140,6 +140,22 @@ impl Node {
         }
     }
 
+    fn signal(&self, signal: &str) {
+        if let Some(child) = &self.child {
+            let _ = Command::new("kill")
+                .args([signal, &child.id().to_string()])
+                .status();
+        }
+    }
+
+    fn pause(&self) {
+        self.signal("-STOP");
+    }
+
+    fn resume(&self) {
+        self.signal("-CONT");
+    }
+
     fn terminate(&mut self) {
         if let Some(child) = &self.child {
             let _ = Command::new("kill")
@@ -935,6 +951,82 @@ async fn connect_fake_agent_with_token(
     (String::new(), token.to_string(), events)
 }
 
+async fn wait_ready_again(http: &reqwest::Client, node: &Node, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(response) = http.get(node.url("/health/ready")).send().await {
+            if response.status() == 200 {
+                return true;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
+}
+
+async fn a_frozen_node_is_fenced_and_cannot_overwrite_the_takeover(backend: Backend) {
+    let mut cluster = Cluster::start(backend, 3).await;
+    cluster.mock.chunks.store(150, Ordering::SeqCst);
+    cluster.mock.chunk_delay_ms.store(100, Ordering::SeqCst);
+    let conv = cluster.new_conversation(1).await;
+    let mut watch = cluster.events(2, Some(&conv)).await;
+
+    assert_eq!(cluster.send(0, &conv, "frozen").await, 200);
+    wait_for(&mut watch, Duration::from_secs(10), |e| {
+        e["type"] == "text_delta"
+    })
+    .await;
+    cluster.nodes[0].pause();
+    wait_for(&mut watch, Duration::from_secs(15), |e| {
+        e["type"] == "turn_aborted" && e["conv_id"] == conv
+    })
+    .await;
+
+    cluster.mock.chunks.store(3, Ordering::SeqCst);
+    cluster.mock.chunk_delay_ms.store(5, Ordering::SeqCst);
+    assert_eq!(cluster.send(1, &conv, "taken over").await, 200);
+    wait_for(&mut watch, Duration::from_secs(30), |e| {
+        e["type"] == "done" && e["conv_id"] == conv
+    })
+    .await;
+
+    cluster.nodes[0].resume();
+    match backend {
+        Backend::Quorium => assert!(
+            cluster.nodes[0].wait_exit(Duration::from_secs(20)),
+            "an evicted node must exit:\n{}",
+            cluster.nodes[0].log()
+        ),
+        Backend::Postgres => assert!(
+            wait_ready_again(&cluster.http, &cluster.nodes[0], Duration::from_secs(20)).await,
+            "a fenced node rejoins once its heartbeat is confirmed:\n{}",
+            cluster.nodes[0].log()
+        ),
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let saved: Value = cluster
+        .http
+        .get(cluster.nodes[1].url(&format!(
+            "/projects/{}/conversations/{conv}",
+            cluster.project_id
+        )))
+        .bearer_auth(&cluster.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let messages = saved["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2, "only the takeover turn is saved: {messages:?}");
+    assert_eq!(messages[0]["text"], "taken over");
+    assert_eq!(
+        messages[1]["text"].as_str().unwrap().trim(),
+        expected_answer(3).trim()
+    );
+}
+
 macro_rules! on_every_backend {
     ($($scenario:ident),* $(,)?) => {
         $(
@@ -956,6 +1048,7 @@ macro_rules! on_every_backend {
 }
 
 on_every_backend!(
+    a_frozen_node_is_fenced_and_cannot_overwrite_the_takeover,
     three_nodes_serve_one_cluster,
     a_turn_started_on_one_node_streams_to_watchers_on_every_node,
     a_conversation_lock_is_enforced_across_nodes,
