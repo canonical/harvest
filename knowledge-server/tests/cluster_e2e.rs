@@ -307,8 +307,10 @@ async fn wait_ready(http: &reqwest::Client, node: &Node) {
     }
 }
 
+static ONE_CLUSTER_AT_A_TIME: std::sync::LazyLock<Arc<tokio::sync::Mutex<()>>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
+
 struct Cluster {
-    _db: TestDb,
     db_url: String,
     nodes: Vec<Node>,
     http: reqwest::Client,
@@ -316,10 +318,13 @@ struct Cluster {
     project_id: String,
     mock: Arc<MockLlm>,
     _dir: tempfile::TempDir,
+    _db: TestDb,
+    _exclusive: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl Cluster {
     async fn start(backend: Backend, wanted: usize) -> Self {
+        let exclusive = Arc::clone(&ONE_CLUSTER_AT_A_TIME).lock_owned().await;
         let count = backend.smallest_cluster(wanted);
         let db = TestDb::new().await;
         let db_url = db.url.clone();
@@ -415,6 +420,7 @@ impl Cluster {
             project_id,
             mock,
             _dir: dir,
+            _exclusive: exclusive,
         }
     }
 
