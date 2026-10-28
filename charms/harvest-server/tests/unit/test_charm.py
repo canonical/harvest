@@ -84,6 +84,44 @@ class FakeWorkload:
         return "harvest-server-0-abc"
 
 
+class FakeAdmin:
+    known_servers = []
+    status_value = {"membership": {"quorum": True}, "members": [], "quorium": None}
+    removed = []
+    calls = []
+
+    def __init__(self, base_url, secret, timeout=10):
+        self.base_url = base_url
+        self.secret = secret
+
+    def status(self):
+        return FakeAdmin.status_value
+
+    def servers(self):
+        return FakeAdmin.known_servers
+
+    def remove_server(self, address):
+        FakeAdmin.removed.append(address)
+
+    def evacuate(self):
+        FakeAdmin.calls.append(("evacuate", self.base_url))
+        return {}
+
+    def restore(self):
+        FakeAdmin.calls.append(("restore", self.base_url))
+        return {}
+
+
+@pytest.fixture(autouse=True)
+def admin(monkeypatch):
+    FakeAdmin.known_servers = []
+    FakeAdmin.removed = []
+    FakeAdmin.calls = []
+    FakeAdmin.status_value = {"membership": {"quorum": True}, "members": [], "quorium": None}
+    monkeypatch.setattr(charm_module, "ClusterAdmin", FakeAdmin)
+    return FakeAdmin
+
+
 class ActionCapture:
     def __init__(self, params=None):
         self.params = params or {}
@@ -157,13 +195,13 @@ def auth_relation(provider, secret_id=None, **overrides):
     return testing.Relation(endpoint="auth-provider", interface="harvest_auth_provider", remote_app_name=f"harvest-auth-provider-{provider}", remote_app_data=data)
 
 
-def base_state(*, leader=True, relations=(), config=None, secrets=(), planned_units=1):
+def base_state(*, leader=True, relations=(), config=None, secrets=(), planned_units=1, peer=None):
     cfg = {}
     cfg.update(config or {})
     return testing.State(
         leader=leader,
         config=cfg,
-        relations=[testing.PeerRelation(endpoint="harvest-peers"), testing.PeerRelation(endpoint="restart"), *relations],
+        relations=[peer or testing.PeerRelation(endpoint="harvest-peers"), testing.PeerRelation(endpoint="restart"), *relations],
         secrets=[*secrets],
         planned_units=planned_units,
     )
@@ -534,10 +572,117 @@ def test_cluster_rotate_secrets_action_updates_secret(ctx, workload):
         manager.run()
         relation = manager.charm._peer
         secret_id = relation.data[manager.charm.app]["cluster-secret-id"]
-        before = manager.charm.model.get_secret(id=secret_id).get_content(refresh=True)["cluster-secret"]
+        before = manager.charm.model.get_secret(id=secret_id).get_content(refresh=True)
         event = ActionCapture()
         manager.charm._on_cluster_rotate_secrets(event)
-        after = manager.charm.model.get_secret(id=secret_id).get_content(refresh=True)["cluster-secret"]
+        after = manager.charm.model.get_secret(id=secret_id).get_content(refresh=True)
         assert event.failed is None
-        assert event.results == {"rotated": True}
-        assert before != after
+        assert event.results == {"rotated": True, "phase": "staged"}
+        assert after["cluster-secret"] == before["cluster-secret"]
+        assert after["cluster-secret-extra"] != before["cluster-secret"]
+        again = ActionCapture()
+        manager.charm._on_cluster_rotate_secrets(again)
+        assert again.failed == "a rotation is already staged"
+
+
+def quorium_peer(*, app_data=None, units=None):
+    return testing.PeerRelation(
+        endpoint="harvest-peers",
+        local_app_data=app_data or {},
+        peers_data=units or {},
+    )
+
+
+def test_the_leader_seeds_a_quorium_cluster(ctx, workload):
+    llm = llm_secret()
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm], config={"cluster-backend": "quorium"}))
+    cluster = server_toml(workload)["cluster"]
+    assert cluster["backend"] == "quorium"
+    assert cluster["bootstrap"] == "init"
+    peer = out.get_relations("harvest-peers")[0]
+    assert peer.local_app_data["quorium-seed"] == "harvest-server/0"
+    assert peer.local_unit_data["internal-url"].endswith(":8081")
+
+
+def test_followers_join_the_seed_and_keep_their_join_list(ctx, workload):
+    llm = llm_secret()
+    leader = ctx.run(ctx.on.leader_elected(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm]))
+    secret_id = leader.get_relations("harvest-peers")[0].local_app_data["cluster-secret-id"]
+    peer = quorium_peer(
+        app_data={"cluster-secret-id": secret_id, "quorium-seed": "harvest-server/1"},
+        units={1: {"internal-url": "http://10.0.0.21:8081"}},
+    )
+    state = base_state(leader=False, relations=[database(), llm_relation(llm.id)], secrets=list(leader.secrets), config={"cluster-backend": "quorium"}, peer=peer)
+    out = ctx.run(ctx.on.config_changed(), state)
+    cluster = server_toml(workload)["cluster"]
+    assert cluster["bootstrap"] == "join"
+    assert cluster["join_addresses"] == ["http://10.0.0.21:8081"]
+
+    grown = dataclasses.replace(peer, peers_data={1: {"internal-url": "http://10.0.0.21:8081"}, 2: {"internal-url": "http://10.0.0.22:8081"}})
+    ctx.run(ctx.on.config_changed(), dataclasses.replace(out, relations=[r for r in out.relations if r.endpoint != "harvest-peers"] + [grown]))
+    assert server_toml(workload)["cluster"]["join_addresses"] == ["http://10.0.0.21:8081"]
+
+
+def test_an_unknown_backend_blocks(ctx, workload):
+    llm = llm_secret()
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm], config={"cluster-backend": "etcd"}))
+    assert out.unit_status == testing.BlockedStatus("cluster-backend must be one of: postgres, quorium")
+
+
+def test_the_leader_prunes_servers_whose_unit_departed(ctx, workload, admin):
+    llm = llm_secret()
+    admin.known_servers = [{"address": "http://10.0.0.21:8081", "voter": True}, {"address": "http://10.0.0.99:8081", "voter": True}]
+    peer = quorium_peer(units={1: {"internal-url": "http://10.0.0.21:8081"}})
+    ctx.run(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm], config={"cluster-backend": "quorium"}, peer=peer))
+    assert admin.removed == ["http://10.0.0.99:8081"]
+
+
+def test_servers_are_not_pruned_while_a_peer_has_not_published_its_address(ctx, workload, admin):
+    llm = llm_secret()
+    admin.known_servers = [{"address": "http://10.0.0.99:8081", "voter": True}]
+    peer = quorium_peer(units={1: {}})
+    ctx.run(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm], config={"cluster-backend": "quorium"}, peer=peer))
+    assert admin.removed == []
+
+
+def test_a_restart_waits_while_it_would_break_quorum(ctx, workload, admin):
+    llm = llm_secret()
+    with ctx(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm], config={"cluster-backend": "quorium"})) as manager:
+        manager.run()
+        own = manager.charm._internal_url()
+        admin.status_value = {
+            "membership": {"quorum": True},
+            "quorium": {"servers": [{"address": own, "voter": True}, {"address": "http://b", "voter": True}, {"address": "http://c", "voter": True}]},
+            "members": [{"internal_url": own}, {"internal_url": "http://b"}],
+        }
+        workload["w"].is_running = True
+        manager.charm._stored.restart_pending = True
+        manager.charm._restart(None)
+        assert ("restart",) not in workload["w"].calls
+        assert manager.charm._stored.restart_pending
+        admin.status_value["members"].append({"internal_url": "http://c"})
+        manager.charm._restart(None)
+        assert ("restart",) in workload["w"].calls
+        assert not manager.charm._stored.restart_pending
+
+
+def test_running_units_report_the_secrets_they_use(ctx, workload):
+    llm = llm_secret()
+    out = ctx.run(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm]))
+    unit_data = out.get_relations("harvest-peers")[0].local_unit_data
+    assert len(unit_data["cluster-secret-digest"]) == 16
+    assert unit_data.get("cluster-accepted-digests", "") == ""
+
+
+def test_cluster_restore_action_returns_a_unit_to_service(ctx, workload, admin):
+    llm = llm_secret()
+    peer = quorium_peer(units={1: {"internal-url": "http://10.0.0.21:8081"}})
+    with ctx(ctx.on.config_changed(), base_state(relations=[database(), llm_relation(llm.id)], secrets=[llm], peer=peer)) as manager:
+        manager.run()
+        workload["w"].is_running = True
+        manager.charm._on_cluster_evacuate(ActionCapture({"unit": "harvest-server/1"}))
+        event = ActionCapture({"unit": "harvest-server/1"})
+        manager.charm._on_cluster_restore(event)
+        assert event.results == {"restored": "harvest-server/1"}
+        assert admin.calls == [("evacuate", "http://10.0.0.21:8081"), ("restore", "http://10.0.0.21:8081")]
+        assert "harvest-server/1" not in manager.charm._evacuated_units()

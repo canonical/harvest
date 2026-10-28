@@ -4,6 +4,7 @@ import logging
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
@@ -18,6 +19,7 @@ CONFIG_PATH = COMMON / "server.toml"
 CA_PATH = COMMON / "db-ca.pem"
 DIGEST_PATH = COMMON / ".charm-resource-digest"
 AGENT_BINARY = "/snap/harvest/current/bin/harvest-agent"
+SECRET_HEADER = "x-harvest-cluster-secret"
 SNAP_ATTEMPTS = 5
 SNAP_BACKOFF = 10
 
@@ -173,3 +175,48 @@ class Workload:
                 return json.loads(response.read()).get("node_id")
         except (urllib.error.URLError, OSError, ValueError):
             return None
+
+
+class ClusterAdmin:
+    def __init__(self, base_url: str, secret: str, timeout: float = 10):
+        self.base_url = base_url.rstrip("/")
+        self.secret = secret
+        self.timeout = timeout
+
+    def call(self, method: str, path: str, body: Optional[dict] = None) -> dict:
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(f"{self.base_url}{path}", data=data, method=method)
+        request.add_header(SECRET_HEADER, self.secret)
+        if data is not None:
+            request.add_header("content-type", "application/json")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                raw = response.read()
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")
+            raise WorkloadError(f"{method} {path} failed with {e.code}: {detail}") from e
+        except (urllib.error.URLError, OSError) as e:
+            raise WorkloadError(f"{method} {path} failed: {e}") from e
+        return json.loads(raw) if raw else {}
+
+    def status(self) -> dict:
+        return self.call("GET", "/internal/cluster/status")
+
+    def has_quorum(self) -> bool:
+        try:
+            return bool(self.status().get("membership", {}).get("quorum"))
+        except WorkloadError:
+            return False
+
+    def servers(self) -> list:
+        return (self.status().get("quorium") or {}).get("servers") or []
+
+    def remove_server(self, address: str) -> None:
+        self.call("DELETE", f"/internal/cluster/servers/{urllib.parse.quote(address, safe='')}")
+
+    def evacuate(self) -> dict:
+        return self.call("POST", "/internal/cluster/evacuate")
+
+    def restore(self) -> dict:
+        return self.call("POST", "/internal/cluster/restore")
+
