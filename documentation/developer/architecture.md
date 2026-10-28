@@ -204,12 +204,15 @@ harvest/
 │   │   │   └── workflow.rs     # 4-phase doc generation workflow
 │   │   └── pipeline.rs         # orchestrates ingestion
 │   └── Cargo.toml
+├── quorium/                # embedded raft control plane (openraft + redb)
 ├── knowledge-server/       # server crate
 │   ├── src/
 │   │   ├── main.rs
 │   │   ├── config.rs           # TOML config (multi-provider LLM, agent, lxd, …)
 │   │   ├── neo4j.rs            # Cypher query helpers
 │   │   ├── api/                # axum router and shared state types
+│   │   ├── cluster/            # membership backends, bus transports, fencing, admin api
+│   │   ├── conversations/      # append-only message store, summaries, titles
 │   │   ├── agent/              # agentic loop + all tool definitions
 │   │   │   ├── mod.rs          # Agent struct, query/query_streaming, intent
 │   │   │   ├── tool.rs         # Tool trait + DEFAULT_PREVIEW_CHARS

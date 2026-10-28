@@ -92,6 +92,12 @@ compiler.
   once, on the leader, in an application secret shared through the peer relation. Set
   `import-secrets` to a secret holding `jwt-secret` and `user-key-encryption-key` to keep
   the keys of an existing deployment (encrypted per-user API keys stay readable).
+* Runs the cluster control plane on PostgreSQL by default, or on the embedded quorium raft
+  group with `cluster-backend=quorium` (three units or more). The first leader seeds the
+  group, the other units join their peers, departed units are removed from the voters, and
+  rolling restarts wait until restarting a unit keeps a healthy majority. `cluster-rotate-secrets`
+  rotates the node-to-node secret in three phases without downtime. See
+  [cluster.md](../documentation/developer/cluster.md).
 * Builds the database URL from every PostgreSQL endpoint in a stable order with
   `target_session_attrs=read-write`, so a switchover is followed without a restart. When the
   relation reports TLS the CA is written to `$SNAP_COMMON/db-ca.pem` and `sslmode=require` is set.
