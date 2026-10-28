@@ -274,9 +274,12 @@ impl Quorium {
 
     pub async fn remove_server(&self, id: ServerId) -> Result<()> {
         if !self.is_leader() {
-            let leader = self.leader_url().await?;
             return self
-                .delete(&leader, &format!("/internal/quorium/servers/{id}"))
+                .retrying(|| async {
+                    let leader = self.known_leader_url()?;
+                    self.delete(&leader, &format!("/internal/quorium/servers/{id}"))
+                        .await
+                })
                 .await;
         }
         let voters: BTreeSet<ServerId> = self
@@ -321,11 +324,18 @@ impl Quorium {
     }
 
     pub async fn members_linearizable(&self) -> Result<Vec<MemberRecord>> {
-        if self.is_leader() && self.raft.ensure_linearizable().await.is_ok() {
-            return Ok(self.members());
-        }
-        let leader = self.leader_url().await?;
-        self.get(&leader, "/internal/quorium/members").await
+        self.retrying(|| async {
+            if self.is_leader() {
+                self.raft
+                    .ensure_linearizable()
+                    .await
+                    .map_err(|e| anyhow!("confirming leadership: {e}"))?;
+                return Ok(self.members());
+            }
+            let leader = self.known_leader_url()?;
+            self.get(&leader, "/internal/quorium/members").await
+        })
+        .await
     }
 
     pub fn health(&self) -> Health {
@@ -366,25 +376,20 @@ impl Quorium {
     }
 
     pub async fn write(&self, command: Command) -> Result<Response> {
-        let mut attempt = 0;
-        loop {
-            attempt += 1;
+        self.retrying(|| async {
             match self.raft.client_write(command.clone()).await {
-                Ok(response) => return Ok(response.data),
+                Ok(response) => Ok(response.data),
                 Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => {
-                    if let Some(node) = forward.leader_node {
-                        return self
-                            .post(&node.addr, "/internal/quorium/write", &command)
-                            .await;
-                    }
+                    let node = forward
+                        .leader_node
+                        .ok_or_else(|| anyhow!("no quorium leader is available"))?;
+                    self.post(&node.addr, "/internal/quorium/write", &command)
+                        .await
                 }
-                Err(e) => return Err(anyhow!("quorium write failed: {e}")),
+                Err(e) => Err(anyhow!("quorium write failed: {e}")),
             }
-            if attempt >= LEADER_ATTEMPTS {
-                bail!("no quorium leader is available");
-            }
-            tokio::time::sleep(LEADER_RETRY).await;
-        }
+        })
+        .await
     }
 
     pub async fn write_locally(&self, command: Command) -> Result<Response> {
@@ -396,12 +401,15 @@ impl Quorium {
     }
 
     pub async fn keepalive(&self, node_id: &str) -> Result<KeepAlive> {
-        if self.is_leader() {
-            return Ok(self.touch(node_id));
-        }
-        let leader = self.leader_url().await?;
-        self.post(&leader, "/internal/quorium/keepalive", &node_id)
-            .await
+        self.retrying(|| async {
+            if self.is_leader() {
+                return Ok(self.touch(node_id));
+            }
+            let leader = self.known_leader_url()?;
+            self.post(&leader, "/internal/quorium/keepalive", &node_id)
+                .await
+        })
+        .await
     }
 
     pub fn touch(&self, node_id: &str) -> KeepAlive {
@@ -437,21 +445,37 @@ impl Quorium {
         let _ = self.raft.shutdown().await;
     }
 
-    async fn leader_url(&self) -> Result<String> {
-        for _ in 0..LEADER_ATTEMPTS {
-            let metrics = self.metrics();
-            if let Some(node) = metrics.current_leader.and_then(|id| {
+    fn known_leader_url(&self) -> Result<String> {
+        let metrics = self.metrics();
+        metrics
+            .current_leader
+            .filter(|id| *id != self.id)
+            .and_then(|id| {
                 metrics
                     .membership_config
                     .membership()
                     .get_node(&id)
                     .cloned()
-            }) {
-                return Ok(node.addr);
+            })
+            .map(|node| node.addr)
+            .ok_or_else(|| anyhow!("no quorium leader is available"))
+    }
+
+    async fn retrying<T, F, Fut>(&self, mut attempt: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            match attempt().await {
+                Ok(value) => return Ok(value),
+                Err(e) if tries >= LEADER_ATTEMPTS => return Err(e),
+                Err(e) => tracing::debug!(error = %e, tries, "retrying a quorium leader call"),
             }
             tokio::time::sleep(LEADER_RETRY).await;
         }
-        bail!("no quorium leader is available")
     }
 
     pub(crate) async fn post<B: Serialize + ?Sized, T: for<'de> Deserialize<'de>>(
