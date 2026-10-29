@@ -492,7 +492,10 @@ impl Cluster {
             .json()
             .await
             .unwrap();
-        conv["id"].as_str().unwrap().to_string()
+        conv["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("creating a conversation failed: {conv}"))
+            .to_string()
     }
 
     async fn send(&self, node: usize, conv: &str, query: &str) -> reqwest::StatusCode {
@@ -1097,6 +1100,147 @@ async fn a_frozen_node_is_fenced_and_cannot_overwrite_the_takeover(backend: Back
         messages[3]["text"].as_str().unwrap().trim(),
         expected_answer(3).trim()
     );
+}
+
+struct LoadProfile {
+    backend: Backend,
+    turns: usize,
+    concurrency: usize,
+    chunks: usize,
+    chunk_delay_ms: u64,
+}
+
+impl LoadProfile {
+    fn from_env() -> Option<Self> {
+        let number = |name: &str, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let turns = number("HARVEST_LOAD_TURNS", 0);
+        if turns == 0 {
+            return None;
+        }
+        let backend = match std::env::var("HARVEST_LOAD_BACKEND").as_deref() {
+            Ok("quorium") => Backend::Quorium,
+            _ => Backend::Postgres,
+        };
+        Some(Self {
+            backend,
+            turns,
+            concurrency: number("HARVEST_LOAD_CONCURRENCY", 8),
+            chunks: number("HARVEST_LOAD_CHUNKS", 20),
+            chunk_delay_ms: number("HARVEST_LOAD_CHUNK_DELAY_MS", 20) as u64,
+        })
+    }
+}
+
+#[derive(Default)]
+struct TurnTimings {
+    first_token: Vec<Duration>,
+    completed: Vec<Duration>,
+    rejected: usize,
+    failed: usize,
+}
+
+fn percentile(samples: &mut [Duration], p: f64) -> u128 {
+    if samples.is_empty() {
+        return 0;
+    }
+    samples.sort();
+    let rank = ((samples.len() as f64 - 1.0) * p).round() as usize;
+    samples[rank].as_millis()
+}
+
+async fn timed_turn(cluster: &Cluster, index: usize) -> Result<(Duration, Duration), u16> {
+    let nodes = cluster.nodes.len();
+    let conv = cluster.new_conversation(index % nodes).await;
+    let mut watch = cluster.events((index + 1) % nodes, Some(&conv)).await;
+    let started = Instant::now();
+    let status = cluster.send(index % nodes, &conv, "load").await;
+    if status != 200 {
+        return Err(status.as_u16());
+    }
+    let mut first_token = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let event = tokio::time::timeout_at(deadline, watch.recv())
+            .await
+            .map_err(|_| 504u16)?
+            .ok_or(502u16)?;
+        if event["conv_id"] != conv {
+            continue;
+        }
+        if event["type"] == "text_delta" && first_token.is_none() {
+            first_token = Some(started.elapsed());
+        }
+        if event["type"] == "done" {
+            return Ok((first_token.unwrap_or_default(), started.elapsed()));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "load profile: set HARVEST_LOAD_TURNS"]
+async fn load_profile_reports_latency_percentiles() {
+    let Some(profile) = LoadProfile::from_env() else {
+        return;
+    };
+    let cluster = Arc::new(Cluster::start(profile.backend, 3).await);
+    cluster.mock.chunks.store(profile.chunks, Ordering::SeqCst);
+    cluster
+        .mock
+        .chunk_delay_ms
+        .store(profile.chunk_delay_ms, Ordering::SeqCst);
+    let permits = Arc::new(tokio::sync::Semaphore::new(profile.concurrency));
+    let mut runs = tokio::task::JoinSet::new();
+    let wall = Instant::now();
+    for index in 0..profile.turns {
+        let permit = Arc::clone(&permits).acquire_owned().await.unwrap();
+        let cluster = Arc::clone(&cluster);
+        runs.spawn(async move {
+            let outcome = timed_turn(&cluster, index).await;
+            drop(permit);
+            outcome
+        });
+    }
+    let mut timings = TurnTimings::default();
+    while let Some(outcome) = runs.join_next().await {
+        match outcome.unwrap() {
+            Ok((first_token, completed)) => {
+                timings.first_token.push(first_token);
+                timings.completed.push(completed);
+            }
+            Err(429) | Err(503) => timings.rejected += 1,
+            Err(_) => timings.failed += 1,
+        }
+    }
+    let wall = wall.elapsed();
+    let report = json!({
+        "backend": format!("{:?}", profile.backend).to_lowercase(),
+        "turns": profile.turns,
+        "concurrency": profile.concurrency,
+        "mock_stream_ms": profile.chunks as u64 * profile.chunk_delay_ms,
+        "completed": timings.completed.len(),
+        "rejected": timings.rejected,
+        "failed": timings.failed,
+        "turns_per_second": timings.completed.len() as f64 / wall.as_secs_f64(),
+        "first_token_ms": {
+            "p50": percentile(&mut timings.first_token, 0.50),
+            "p95": percentile(&mut timings.first_token, 0.95),
+            "p99": percentile(&mut timings.first_token, 0.99),
+        },
+        "completion_ms": {
+            "p50": percentile(&mut timings.completed, 0.50),
+            "p95": percentile(&mut timings.completed, 0.95),
+            "p99": percentile(&mut timings.completed, 0.99),
+        },
+    });
+    let path = std::env::var("HARVEST_LOAD_REPORT").unwrap_or_else(|_| "harvest-load.json".into());
+    std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+    println!("{report}");
+    assert_eq!(timings.failed, 0, "{report}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
