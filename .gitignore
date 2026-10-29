@@ -2,4 +2,4 @@
 .env
 .env.*
 squall/squall.toml
-squall/squall-reports/
+squall/squall-reports/harvest-load.json
