@@ -35,6 +35,7 @@ enum ClusterCommand {
     Restore(TargetArgs),
     RotateSecrets(RotateArgs),
     Token(TokenArgs),
+    Recover,
 }
 
 #[derive(Parser)]
@@ -155,6 +156,7 @@ pub async fn run(args: ClusterArgs) -> Result<()> {
         ClusterCommand::Restore(args) => set_evacuated(args, false).await,
         ClusterCommand::RotateSecrets(args) => rotate_secrets(args),
         ClusterCommand::Token(args) => token(args).await,
+        ClusterCommand::Recover => recover(),
     }
 }
 
@@ -303,6 +305,26 @@ fn preseed_settings(preseed: &Preseed, local: &str) -> Result<Settings> {
         ("cluster.join-token".to_string(), String::new()),
         ("cluster.join-addresses".to_string(), peers.join(",")),
     ])
+}
+
+fn recover() -> Result<()> {
+    ensure_mutable()?;
+    let snap = std::env::var("SNAP").context("SNAP environment variable is missing")?;
+    let status = std::process::Command::new(format!("{snap}/bin/wrapper-server"))
+        .arg("recover-cluster")
+        .status()
+        .context("running the recovery")?;
+    if !status.success() {
+        bail!("recovery failed; stop the server first with: snapctl stop harvest.server");
+    }
+    apply(
+        vec![
+            ("cluster.bootstrap".to_string(), "init".to_string()),
+            ("cluster.join-token".to_string(), String::new()),
+            ("cluster.join-addresses".to_string(), String::new()),
+        ],
+        false,
+    )
 }
 
 fn rotate_secrets(args: RotateArgs) -> Result<()> {
