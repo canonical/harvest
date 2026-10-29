@@ -15,12 +15,10 @@ use crate::state::{Command, MemberRecord, Response};
 use crate::store::{StateMachineStore, Storage};
 use crate::token::JoinToken;
 use crate::types::{Metrics, Node, Raft, ServerId};
+use crate::voters::{promotion_candidate, Tuning, VoterWatch};
 
-pub const MAX_VOTERS: usize = 5;
-const CONTROL_TICK: Duration = Duration::from_millis(200);
 const LEADER_RETRY: Duration = Duration::from_millis(100);
 const LEADER_ATTEMPTS: usize = 30;
-const CAUGHT_UP_LAG: u64 = 16;
 
 #[derive(Clone, Debug)]
 pub struct QuoriumConfig {
@@ -31,6 +29,7 @@ pub struct QuoriumConfig {
     pub session_ttl: Duration,
     pub http: reqwest::Client,
     pub admit_without_token: bool,
+    pub tuning: Tuning,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +95,8 @@ pub struct Quorium {
     controller: Mutex<Option<tokio::task::JoinHandle<()>>>,
     leader_changes: std::sync::atomic::AtomicU64,
     last_leader: Mutex<Option<ServerId>>,
+    tuning: Tuning,
+    voter_watch: Mutex<VoterWatch>,
 }
 
 pub fn now_ms() -> u64 {
@@ -123,7 +124,7 @@ impl Quorium {
             election_timeout_min: election_ms,
             election_timeout_max: election_ms * 2,
             install_snapshot_timeout: election_ms * 4,
-            snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(1_000),
+            snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(config.tuning.snapshot_logs),
             max_in_snapshot_log_to_keep: 200,
             ..Default::default()
         }
@@ -149,8 +150,13 @@ impl Quorium {
             controller: Mutex::new(None),
             leader_changes: std::sync::atomic::AtomicU64::new(0),
             last_leader: Mutex::new(None),
+            tuning: config.tuning,
+            voter_watch: Mutex::new(VoterWatch::default()),
         });
-        let controller = tokio::spawn(run_controller(Arc::downgrade(&quorium)));
+        let controller = tokio::spawn(run_controller(
+            Arc::downgrade(&quorium),
+            quorium.tuning.control_tick,
+        ));
         *quorium.controller.lock().unwrap_or_else(|e| e.into_inner()) = Some(controller);
         Ok(quorium)
     }
@@ -635,17 +641,15 @@ impl Quorium {
         }
         let voters: BTreeSet<ServerId> = membership.voter_ids().collect();
         let learners: Vec<ServerId> = membership.learner_ids().collect();
-        if voters.len() >= target_voters(voters.len() + learners.len()) {
-            return;
-        }
-        let commit = metrics.last_log_index.unwrap_or(0);
         let replication = metrics.replication.clone().unwrap_or_default();
-        let Some(candidate) = learners.into_iter().find(|id| {
-            replication
-                .get(id)
-                .and_then(|matched| *matched)
-                .is_some_and(|matched| matched.index + CAUGHT_UP_LAG >= commit)
-        }) else {
+        let commit = metrics.last_log_index.unwrap_or(0);
+        let Some(candidate) = promotion_candidate(
+            &voters,
+            &learners,
+            &replication,
+            commit,
+            self.tuning.caught_up_lag,
+        ) else {
             return;
         };
         tracing::info!(
@@ -653,7 +657,6 @@ impl Quorium {
             "promoting a caught-up learner to voter"
         );
         if let Err(e) = self
-            .raft
             .change_membership(
                 ChangeMembers::AddVoterIds(BTreeSet::from([candidate])),
                 true,
@@ -663,19 +666,72 @@ impl Quorium {
             tracing::warn!(error = %e, server_id = candidate, "could not promote learner");
         }
     }
+
+    fn voters_without_members(
+        &self,
+        voters: &BTreeSet<ServerId>,
+        metrics: &Metrics,
+    ) -> BTreeSet<ServerId> {
+        let live: BTreeSet<String> = self
+            .members()
+            .into_iter()
+            .map(|m| m.internal_url.trim_end_matches('/').to_string())
+            .collect();
+        let membership = metrics.membership_config.membership();
+        voters
+            .iter()
+            .copied()
+            .filter(|id| {
+                membership
+                    .get_node(id)
+                    .is_some_and(|node| !live.contains(node.addr.trim_end_matches('/')))
+            })
+            .collect()
+    }
+
+    async fn replace_silent_voter(&self, metrics: &Metrics) {
+        let membership = metrics.membership_config.membership();
+        if membership.get_joint_config().len() > 1 {
+            return;
+        }
+        let voters: BTreeSet<ServerId> = membership.voter_ids().collect();
+        let learners: Vec<ServerId> = membership.learner_ids().collect();
+        let replication = metrics.replication.clone().unwrap_or_default();
+        let commit = metrics.last_log_index.unwrap_or(0);
+        let now = Instant::now();
+        let absent = self.voters_without_members(&voters, metrics);
+        let demotion = {
+            let mut watch = self.voter_watch.lock().unwrap_or_else(|e| e.into_inner());
+            watch.observe(&absent, now);
+            watch.demotion(
+                self.id,
+                &voters,
+                &learners,
+                &replication,
+                commit,
+                &self.tuning,
+                now,
+            )
+        };
+        let Some((stale, replacement)) = demotion else {
+            return;
+        };
+        tracing::warn!(
+            stale,
+            replacement,
+            "demoting a voter that stopped replicating"
+        );
+        if let Err(e) = self
+            .change_membership(ChangeMembers::RemoveVoters(BTreeSet::from([stale])), true)
+            .await
+        {
+            tracing::warn!(error = %e, server_id = stale, "could not demote the silent voter");
+        }
+    }
 }
 
-pub fn target_voters(servers: usize) -> usize {
-    let odd = if servers % 2 == 0 {
-        servers.saturating_sub(1)
-    } else {
-        servers
-    };
-    odd.clamp(1, MAX_VOTERS)
-}
-
-async fn run_controller(quorium: std::sync::Weak<Quorium>) {
-    let mut ticker = tokio::time::interval(CONTROL_TICK);
+async fn run_controller(quorium: std::sync::Weak<Quorium>, tick: Duration) {
+    let mut ticker = tokio::time::interval(tick);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
@@ -689,23 +745,13 @@ async fn run_controller(quorium: std::sync::Weak<Quorium>) {
         }
         quorium.expire_lapsed_sessions(metrics.current_term).await;
         quorium.promote_caught_up_learner(&metrics).await;
+        quorium.replace_silent_voter(&metrics).await;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn voter_targets_stay_odd_and_bounded() {
-        assert_eq!(target_voters(0), 1);
-        assert_eq!(target_voters(1), 1);
-        assert_eq!(target_voters(2), 1);
-        assert_eq!(target_voters(3), 3);
-        assert_eq!(target_voters(4), 3);
-        assert_eq!(target_voters(5), 5);
-        assert_eq!(target_voters(9), 5);
-    }
 
     #[test]
     fn digests_are_stable_hex() {

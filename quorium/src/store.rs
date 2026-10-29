@@ -20,6 +20,7 @@ use crate::types::{
     Vote,
 };
 
+pub const DATABASE_FILE: &str = "quorium.redb";
 const LOGS: TableDefinition<u64, &[u8]> = TableDefinition::new("logs");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
@@ -91,7 +92,7 @@ pub struct Storage {
 impl Storage {
     pub async fn open(dir: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(dir)?;
-        let disk = Disk(Arc::new(Database::create(dir.join("quorium.redb"))?));
+        let disk = Disk(Arc::new(open_database(&dir.join(DATABASE_FILE))?));
         let server_id = match disk.get::<ServerId>(SERVER_ID)? {
             Some(id) => id,
             None => {
@@ -107,6 +108,19 @@ impl Storage {
             state_machine,
         })
     }
+}
+
+fn open_database(path: &Path) -> anyhow::Result<Database> {
+    Database::create(path).map_err(|e| match e {
+        redb::DatabaseError::DatabaseAlreadyOpen => anyhow::anyhow!(
+            "{} is in use by a running server; stop it first",
+            path.display()
+        ),
+        other => anyhow::anyhow!(
+            "{} is unreadable ({other}); move the data directory aside and recover the cluster",
+            path.display()
+        ),
+    })
 }
 
 fn new_server_id() -> ServerId {
@@ -436,6 +450,63 @@ mod tests {
         let first = Storage::open(dir.path()).await.unwrap().server_id;
         let second = Storage::open(dir.path()).await.unwrap().server_id;
         assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn a_file_in_use_is_reported_as_held_by_a_running_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let _running = Storage::open(dir.path()).await.unwrap();
+        let error = Storage::open(dir.path()).await.err().unwrap().to_string();
+        assert!(error.contains("in use by a running server"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_corrupted_file_points_at_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(DATABASE_FILE),
+            b"definitely not a redb file",
+        )
+        .unwrap();
+        let error = Storage::open(dir.path()).await.err().unwrap().to_string();
+        assert!(error.contains("recover the cluster"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn thousands_of_entries_survive_snapshot_and_purge() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(dir.path()).await.unwrap();
+        let mut log = storage.log;
+        let mut machine = storage.state_machine;
+        let entries: Vec<Entry> = (1..=5_000)
+            .map(|i| entry(i, register(&format!("n{}", i % 50))))
+            .collect();
+        let encoded = entries
+            .iter()
+            .map(|e| (e.log_id.index, serde_json::to_vec(e).unwrap()))
+            .collect::<Vec<_>>();
+        log.disk
+            .write(move |txn| {
+                let mut table = txn.open_table(LOGS)?;
+                for (index, bytes) in &encoded {
+                    table.insert(*index, bytes.as_slice())?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        machine.apply(entries).await.unwrap();
+        machine.build_snapshot().await.unwrap();
+        log.purge(LogId::new(CommittedLeaderId::new(1, 0), 4_800))
+            .await
+            .unwrap();
+        assert_eq!(log.try_get_log_entries(0..10_000).await.unwrap().len(), 200);
+        drop((log, machine));
+        let reopened = Storage::open(dir.path()).await.unwrap().state_machine;
+        reopened.read(|applied| {
+            assert_eq!(applied.cluster.members.len(), 50);
+            assert_eq!(applied.last_applied.unwrap().index, 5_000);
+        });
     }
 
     #[tokio::test]

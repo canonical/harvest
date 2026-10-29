@@ -12,6 +12,10 @@ struct Server {
 
 impl Server {
     async fn start() -> Self {
+        Self::start_with(quorium::Tuning::default()).await
+    }
+
+    async fn start_with(tuning: quorium::Tuning) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let dir = tempfile::tempdir().unwrap();
@@ -23,6 +27,7 @@ impl Server {
             session_ttl: Duration::from_millis(800),
             http: reqwest::Client::new(),
             admit_without_token: false,
+            tuning,
         })
         .await
         .unwrap();
@@ -65,7 +70,11 @@ async fn eventually<F: Fn() -> bool>(what: &str, timeout: Duration, check: F) {
 }
 
 async fn three_voters() -> Vec<Server> {
-    let first = Server::start().await;
+    voters_with(quorium::Tuning::default()).await
+}
+
+async fn voters_with(tuning: quorium::Tuning) -> Vec<Server> {
+    let first = Server::start_with(tuning.clone()).await;
     first.quorium.initialize().await.unwrap();
     let mut servers = vec![first];
     for _ in 0..2 {
@@ -304,6 +313,75 @@ async fn a_removed_server_leaves_the_voters() {
         first.servers().iter().all(|s| s.id != victim)
     })
     .await;
+    for server in servers {
+        server.stop().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_voter_whose_server_goes_away_is_replaced_by_a_learner() {
+    let tuning = quorium::Tuning {
+        demote_after: Some(Duration::from_secs(1)),
+        ..quorium::Tuning::default()
+    };
+    let mut servers = voters_with(tuning.clone()).await;
+    let token = servers[0]
+        .quorium
+        .issue_token(Duration::from_secs(60))
+        .await
+        .unwrap();
+    let learner = Server::start_with(tuning).await;
+    learner
+        .quorium
+        .join(&token, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let learner_id = learner.quorium.id();
+    servers.push(learner);
+    let victim_index = servers
+        .iter()
+        .position(|s| !s.quorium.is_leader() && s.quorium.id() != learner_id)
+        .unwrap();
+    let mut keepers = Vec::new();
+    for (index, server) in servers.iter().enumerate() {
+        let name = format!("member-{index}");
+        let record = MemberRecord {
+            internal_url: server.quorium.advertise_url().to_string(),
+            ..member(&name)
+        };
+        servers[0]
+            .quorium
+            .write(Command::Register { member: record })
+            .await
+            .unwrap();
+        if index != victim_index {
+            let quorium = Arc::clone(&server.quorium);
+            keepers.push(tokio::spawn(async move {
+                loop {
+                    let _ = quorium.keepalive(&name).await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }));
+        }
+    }
+    let victim = servers.remove(victim_index);
+    let victim_id = victim.quorium.id();
+    victim.serving.abort();
+    victim.quorium.raft().shutdown().await.unwrap();
+    let observer = Arc::clone(&servers[0].quorium);
+    eventually(
+        "the learner to replace the silent voter",
+        Duration::from_secs(15),
+        || {
+            let all = observer.servers();
+            let voter = |id| all.iter().any(|s| s.id == id && s.voter);
+            voter(learner_id) && !voter(victim_id)
+        },
+    )
+    .await;
+    for keeper in &keepers {
+        keeper.abort();
+    }
     for server in servers {
         server.stop().await;
     }
