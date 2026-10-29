@@ -148,6 +148,12 @@ sudo harvest cluster rotate-secrets finish          # on every node
 `harvest_cluster_voters` next to the readiness and turn gauges, and `/health/ready` reports the
 membership health of the node.
 
+## Performance
+
+[`ha-lab/baseline.md`](../../ha-lab/baseline.md) holds the measured load baseline and the
+targets each release is checked against; rerun the load profile described there after any
+change to the turn path or the cluster layer.
+
 ## Testing
 
 * `cargo test -p quorium` runs the raft state machine, the storage and a three-server cluster in
