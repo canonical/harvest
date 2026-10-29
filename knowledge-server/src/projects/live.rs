@@ -327,7 +327,7 @@ impl ProjectLive {
     }
 
     pub async fn locks(&self, project_id: &str) -> Result<Vec<(String, String)>> {
-        let alive = self.node.live_node_ids().await?;
+        let alive = self.node.recently_live_node_ids().await?;
         let rows = self
             .db
             .query(
@@ -439,7 +439,7 @@ impl ProjectLive {
     }
 
     pub async fn presence(&self, project_id: &str) -> Result<Vec<Value>> {
-        let alive = self.node.live_node_ids().await?;
+        let alive = self.node.recently_live_node_ids().await?;
         self.db
             .query(
                 "SELECT DISTINCT ON (p.user_id) p.user_id, p.name, p.conv_id

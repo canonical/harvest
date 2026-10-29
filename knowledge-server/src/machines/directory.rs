@@ -78,7 +78,7 @@ impl AgentDirectory {
     }
 
     pub async fn locate(&self, agent_id: &str) -> Option<AgentLocation> {
-        let alive = self.node.live_node_ids().await.ok()?;
+        let alive = self.node.recently_live_node_ids().await.ok()?;
         let rows = self.db.query(
             "SELECT c.agent_id, c.node_id, c.project_id, c.hostname, c.connected_at FROM agent_connections c
              WHERE c.agent_id = $aid AND c.node_id = ANY($alive::text[])",
@@ -88,7 +88,7 @@ impl AgentDirectory {
     }
 
     pub async fn online_in_project(&self, project_id: &str) -> Vec<AgentLocation> {
-        let Ok(alive) = self.node.live_node_ids().await else {
+        let Ok(alive) = self.node.recently_live_node_ids().await else {
             return vec![];
         };
         self.db.query(

@@ -51,6 +51,7 @@ pub struct ClusterNode {
     node_timeout: Duration,
     draining: AtomicBool,
     withdrawn: AtomicBool,
+    recently_alive: Mutex<Option<(Instant, Vec<String>)>>,
     membership: Arc<dyn Membership>,
     db: Arc<Db>,
     confirmed_at: Mutex<Option<Instant>>,
@@ -77,6 +78,7 @@ impl ClusterNode {
             node_timeout: Duration::from_millis(config.node_timeout_ms.max(20)),
             draining: AtomicBool::new(false),
             withdrawn: AtomicBool::new(false),
+            recently_alive: Mutex::new(None),
             membership,
             db,
             confirmed_at: Mutex::new(None),
@@ -262,6 +264,25 @@ impl ClusterNode {
         if !ids.iter().any(|id| *id == self.node_id) {
             ids.push(self.node_id.clone());
         }
+        Ok(ids)
+    }
+
+    pub async fn recently_live_node_ids(&self) -> Result<Vec<String>> {
+        let fresh_for = self.heartbeat_interval / 2;
+        if let Some((at, ids)) = &*self
+            .recently_alive
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+        {
+            if at.elapsed() < fresh_for {
+                return Ok(ids.clone());
+            }
+        }
+        let ids = self.live_node_ids().await?;
+        *self
+            .recently_alive
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), ids.clone()));
         Ok(ids)
     }
 
