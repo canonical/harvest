@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
+use axum::Json;
 use harvest_db::Db;
 use serde_json::json;
 
@@ -55,6 +56,58 @@ pub async fn reserve(
     }
     Ok(Reservation::Replay {
         turn_id: row["turn_id"].as_str().unwrap_or_default().to_string(),
+    })
+}
+
+pub type Refusal = (StatusCode, Json<serde_json::Value>);
+
+pub struct Claim {
+    user_id: String,
+    key: Option<String>,
+}
+
+impl Claim {
+    pub async fn release(self, db: &Db) {
+        if let Some(key) = &self.key {
+            release(db, &self.user_id, key).await;
+        }
+    }
+}
+
+pub async fn claim(
+    db: &Db,
+    user_id: &str,
+    headers: &HeaderMap,
+    conv_id: &str,
+) -> Result<Claim, Refusal> {
+    let key = key_from(headers);
+    if let Some(key) = &key {
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        match reserve(db, user_id, key, conv_id, &turn_id).await {
+            Ok(Reservation::Fresh) => {}
+            Ok(Reservation::Replay { turn_id }) => {
+                crate::turns::metrics::TURNS.replayed();
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": "this request was already accepted",
+                        "duplicate": true,
+                        "turn_id": turn_id,
+                    })),
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not reserve the request");
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": "could not register the request, retry" })),
+                ));
+            }
+        }
+    }
+    Ok(Claim {
+        user_id: user_id.to_string(),
+        key,
     })
 }
 
@@ -126,6 +179,22 @@ mod tests {
             reserve(db, "u", "k", "c", "t2").await.unwrap(),
             Reservation::Fresh
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "needs HARVEST_TEST_DATABASE_URL"]
+    async fn a_second_claim_with_the_same_key_is_refused_until_released() {
+        let test_db = TestDb::new().await;
+        let db = &test_db.db;
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER, HeaderValue::from_static("k"));
+        let first = claim(db, "u", &headers, "c").await.unwrap();
+        let (status, body) = claim(db, "u", &headers, "c").await.err().unwrap();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["duplicate"], true);
+        first.release(db).await;
+        assert!(claim(db, "u", &headers, "c").await.is_ok());
+        assert!(claim(db, "u", &HeaderMap::new(), "c").await.is_ok());
     }
 
     #[tokio::test]
