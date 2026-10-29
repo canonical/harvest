@@ -47,6 +47,8 @@ description: |
   cluster.accepted-secrets    Extra secrets accepted while rotating
   cluster.data-dir            Quorium state  (default: $SNAP_COMMON/quorium)
   cluster.bus                 notify or mesh (default follows the backend)
+  cluster.replace-absent-voter-after-secs
+                              Replace a voter whose server is gone (0: never)
   config.managed              true when a charm writes server.toml itself
   server.host / server.port   API address        (default: 127.0.0.1:8080)
   ui.host / ui.port           Web UI address     (default: 127.0.0.1:3000)
