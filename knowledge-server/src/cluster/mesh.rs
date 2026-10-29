@@ -13,6 +13,7 @@ use futures::{SinkExt as _, StreamExt as _};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WireMessage;
 
@@ -25,6 +26,7 @@ pub const MESH_PATH: &str = "/internal/bus";
 const LINK_QUEUE: usize = 4_096;
 const RECONNECT_MIN: Duration = Duration::from_millis(100);
 const RECONNECT_MAX: Duration = Duration::from_secs(2);
+const DEGRADED_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
@@ -58,6 +60,38 @@ struct Link {
     url: String,
     queue: mpsc::Sender<Envelope>,
     task: tokio::task::JoinHandle<()>,
+    health: Arc<LinkHealth>,
+}
+
+struct LinkHealth {
+    peer: String,
+    state: Mutex<(bool, Instant)>,
+}
+
+impl LinkHealth {
+    fn new(peer: &str) -> Arc<Self> {
+        Arc::new(Self {
+            peer: peer.to_string(),
+            state: Mutex::new((false, Instant::now())),
+        })
+    }
+
+    fn set(&self, connected: bool) {
+        MESH_LINKS.set(&[("peer", &self.peer)], u64::from(connected));
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.0 != connected {
+            *state = (connected, Instant::now());
+        }
+    }
+
+    fn is_connected(&self) -> bool {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).0
+    }
+
+    fn down_for(&self, now: Instant) -> Option<Duration> {
+        let (connected, since) = *self.state.lock().unwrap_or_else(|e| e.into_inner());
+        (!connected).then(|| now.duration_since(since))
+    }
 }
 
 impl Drop for Link {
@@ -184,14 +218,38 @@ impl Mesh {
                 continue;
             }
             let (queue, inbox) = mpsc::channel(LINK_QUEUE);
-            let task = tokio::spawn(run_link(Arc::clone(self), id.clone(), url.clone(), inbox));
-            MESH_LINKS.set(&[("peer", &id)], 0);
-            links.insert(id, Link { url, queue, task });
+            let health = LinkHealth::new(&id);
+            health.set(false);
+            let task = tokio::spawn(run_link(
+                Arc::clone(self),
+                Arc::clone(&health),
+                url.clone(),
+                inbox,
+            ));
+            links.insert(
+                id,
+                Link {
+                    url,
+                    queue,
+                    task,
+                    health,
+                },
+            );
         }
     }
 
-    fn connected_peers(&self) -> usize {
-        self.links.lock().unwrap_or_else(|e| e.into_inner()).len()
+    fn degraded_peers(&self, now: Instant) -> Vec<String> {
+        self.links
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|(_, link)| {
+                link.health
+                    .down_for(now)
+                    .is_some_and(|d| d >= DEGRADED_AFTER)
+            })
+            .map(|(peer, _)| peer.clone())
+            .collect()
     }
 }
 
@@ -214,7 +272,7 @@ async fn run_membership(mesh: Arc<Mesh>, node: Arc<ClusterNode>) {
                     .map(|m| (m.node_id, m.internal_url))
                     .collect();
                 mesh.reconcile(peers);
-                tracing::trace!(peers = mesh.connected_peers(), "mesh links reconciled");
+                mesh.bus.set_degraded(mesh.degraded_peers(Instant::now()));
             }
             Err(e) => tracing::debug!(error = %e, "mesh could not refresh cluster members"),
         }
@@ -234,14 +292,22 @@ fn websocket_url(base: &str) -> String {
     format!("{base}{MESH_PATH}")
 }
 
-async fn run_link(mesh: Arc<Mesh>, peer: String, url: String, mut inbox: mpsc::Receiver<Envelope>) {
+async fn run_link(
+    mesh: Arc<Mesh>,
+    health: Arc<LinkHealth>,
+    url: String,
+    mut inbox: mpsc::Receiver<Envelope>,
+) {
     let mut last_sent: Option<u64> = None;
     let mut backoff = RECONNECT_MIN;
     loop {
-        match stream_to(&mesh, &peer, &url, &mut inbox, &mut last_sent).await {
+        match stream_to(&mesh, &health, &url, &mut inbox, &mut last_sent).await {
             Ok(()) => return,
             Err(e) => {
-                MESH_LINKS.set(&[("peer", &peer)], 0);
+                if health.is_connected() {
+                    backoff = RECONNECT_MIN;
+                }
+                health.set(false);
                 tracing::debug!(error = %e, url, "mesh link dropped, reconnecting");
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(RECONNECT_MAX);
@@ -252,7 +318,7 @@ async fn run_link(mesh: Arc<Mesh>, peer: String, url: String, mut inbox: mpsc::R
 
 async fn stream_to(
     mesh: &Mesh,
-    peer: &str,
+    health: &LinkHealth,
     url: &str,
     inbox: &mut mpsc::Receiver<Envelope>,
     last_sent: &mut Option<u64>,
@@ -267,7 +333,7 @@ async fn stream_to(
     let (mut socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .with_context(|| format!("connecting the mesh link to {url}"))?;
-    MESH_LINKS.set(&[("peer", peer)], 1);
+    health.set(true);
     let hello = json!({ "o": mesh.origin(), "h": last_sent }).to_string();
     socket.send(WireMessage::Text(hello.into())).await?;
     loop {
@@ -389,5 +455,89 @@ mod tests {
         let mut rx = mesh.bus.subscribe("t");
         mesh.receive(&batch("self", 1, "a"));
         assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn a_link_down_for_long_enough_is_degraded() {
+        let health = LinkHealth::new("peer-health-test");
+        let start = Instant::now();
+        health.set(false);
+        assert!(health.down_for(start + Duration::from_secs(1)).is_some());
+        health.set(true);
+        assert!(health.down_for(start + DEGRADED_AFTER * 2).is_none());
+        health.set(false);
+        assert!(health
+            .down_for(Instant::now())
+            .is_some_and(|d| d < DEGRADED_AFTER));
+    }
+
+    async fn serving_mesh(origin: &str) -> (Arc<Mesh>, String) {
+        let (bus, outbox) = ClusterBus::with_outbox(origin);
+        let mesh = Arc::new(Mesh {
+            bus,
+            links: Mutex::new(HashMap::new()),
+            seen: Mutex::new(HashMap::new()),
+            published: AtomicU64::new(0),
+            secret: "s".into(),
+        });
+        tokio::spawn(run_publisher(
+            Arc::clone(&mesh),
+            Duration::from_millis(5),
+            outbox,
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = router(Arc::clone(&mesh));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (mesh, url)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "stress test"]
+    async fn ten_thousand_events_arrive_once_and_in_order() {
+        let (sender, _) = serving_mesh("sender").await;
+        let (receiver, receiver_url) = serving_mesh("receiver").await;
+        let mut events = receiver.bus.subscribe("t");
+        sender.reconcile(HashMap::from([("receiver".to_string(), receiver_url)]));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while sender.degraded_peers(Instant::now() + DEGRADED_AFTER).len() == 1 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the link never connected"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        const COUNT: usize = 10_000;
+        let publisher = Arc::clone(&sender);
+        tokio::spawn(async move {
+            for i in 0..COUNT {
+                publisher.bus.publish("t", i.to_string());
+                if i % 500 == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        });
+        let mut next = 0;
+        let mut resyncs = 0;
+        while next < COUNT {
+            let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
+                .await
+                .expect("events stopped arriving")
+                .unwrap();
+            if event == resync_event() {
+                resyncs += 1;
+                continue;
+            }
+            let value: usize = event.parse().unwrap();
+            assert!(value >= next, "event {value} arrived after {next}");
+            if value > next {
+                assert!(
+                    resyncs > 0,
+                    "events {next}..{value} were lost without a resync"
+                );
+            }
+            next = value + 1;
+        }
+        assert_eq!(resyncs, 0, "a healthy link never needs a resync");
     }
 }
