@@ -4,7 +4,6 @@ use harvest_db::Db;
 use serde_json::{json, Value};
 
 use crate::agent::Agent;
-use crate::cluster::singleton;
 use crate::conversations::store::{load_context, ConversationContext, Owner};
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -49,16 +48,44 @@ pub async fn store(db: &Db, conv_id: &str, summary: &StoredSummary) -> bool {
     .unwrap_or(false)
 }
 
+const SUMMARY_LEASE_SECS: f64 = 120.0;
+
+async fn claim_refresh(db: &Db, conv_id: &str) -> Result<bool, anyhow::Error> {
+    let claimed = db
+        .query(
+            "UPDATE conversations
+             SET summary_lease_until = now() + make_interval(secs => $lease::float8)
+             WHERE id = $cid AND (summary_lease_until IS NULL OR summary_lease_until < now())
+             RETURNING id",
+            json!({ "cid": conv_id, "lease": SUMMARY_LEASE_SECS }),
+        )
+        .await?;
+    Ok(!claimed.is_empty())
+}
+
+async fn release_refresh(db: &Db, conv_id: &str) {
+    let released = db
+        .execute(
+            "UPDATE conversations SET summary_lease_until = NULL WHERE id = $cid",
+            json!({ "cid": conv_id }),
+        )
+        .await;
+    if let Err(e) = released {
+        tracing::warn!(error = %e, conv_id, "could not release the summary lease");
+    }
+}
+
 pub async fn refresh(db: &Db, agent: &Agent, conv_id: &str) {
-    let key = format!("summary:{conv_id}");
-    let ran = singleton::run_exclusive(db, &key, || summarize(db, agent, conv_id)).await;
-    match ran {
-        Ok(true) => {}
+    match claim_refresh(db, conv_id).await {
+        Ok(true) => {
+            summarize(db, agent, conv_id).await;
+            release_refresh(db, conv_id).await;
+        }
         Ok(false) => tracing::debug!(
             conv_id,
             "another node is already summarizing this conversation"
         ),
-        Err(e) => tracing::warn!(error = %e, conv_id, "could not coordinate the summary refresh"),
+        Err(e) => tracing::warn!(error = %e, conv_id, "could not claim the summary refresh"),
     }
 }
 
