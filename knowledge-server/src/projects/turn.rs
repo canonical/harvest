@@ -16,7 +16,8 @@ use crate::conversations::store::{self, ConversationContext, Guard, Owner};
 use crate::conversations::summary::refresh as refresh_summary;
 use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::llm::types::{Message, ProviderSelection, Usage, UsedProvider};
-use crate::turns::metrics::TURNS;
+use crate::turns::metrics::{Stage, TURNS};
+use tracing::Instrument as _;
 
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 
@@ -158,51 +159,61 @@ impl TurnLaunch {
         let collocate_registry = Arc::clone(&state.collocate_registry);
         let pricing = Arc::clone(&state.pricing);
         let conv_id = self.conv_id.clone();
-        let task = tokio::spawn(async move {
-            let _collocate_guard = crate::collocate::sessions::SessionGuard::new(
-                collocate_registry,
-                self.project_id.clone(),
-                self.conv_id.clone(),
-            );
-            let (events, agent_rx) = mpsc::channel::<AgentEvent>(64);
-            let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
-            let persist = self.work.persistence();
-            let worker = {
-                let agent = Arc::clone(&agent);
-                let query = self.query.clone();
-                let history = self.history.clone();
-                let selection = self.selection.clone();
-                let work = self.work;
-                tokio::spawn(async move {
-                    let paused = work
-                        .run(&agent, &query, &history, selection.as_ref(), events)
-                        .await;
-                    let _ = paused_tx.send(paused);
-                })
-            };
-            let _worker = CancelOnDrop(worker.abort_handle());
-            drive_turn(
-                live,
-                Arc::clone(&db),
-                Arc::clone(agent.llm()),
-                registry,
-                self.project_id,
-                self.conv_id.clone(),
-                self.query,
-                self.username,
-                self.history,
-                self.message_count,
-                persist,
-                self.selection,
-                agent_rx,
-                paused_rx,
-                self.user_id,
-                pricing,
-                self.turn_id,
-            )
-            .await;
-            refresh_summary(&db, &agent, &self.conv_id).await;
-        });
+        let span = tracing::info_span!(
+            "turn",
+            turn_id = %self.turn_id,
+            conv_id = %self.conv_id,
+            project_id = %self.project_id,
+            node_id = %state.live.node().node_id(),
+        );
+        let task = tokio::spawn(
+            async move {
+                let _collocate_guard = crate::collocate::sessions::SessionGuard::new(
+                    collocate_registry,
+                    self.project_id.clone(),
+                    self.conv_id.clone(),
+                );
+                let (events, agent_rx) = mpsc::channel::<AgentEvent>(64);
+                let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+                let persist = self.work.persistence();
+                let worker = {
+                    let agent = Arc::clone(&agent);
+                    let query = self.query.clone();
+                    let history = self.history.clone();
+                    let selection = self.selection.clone();
+                    let work = self.work;
+                    tokio::spawn(async move {
+                        let paused = work
+                            .run(&agent, &query, &history, selection.as_ref(), events)
+                            .await;
+                        let _ = paused_tx.send(paused);
+                    })
+                };
+                let _worker = CancelOnDrop(worker.abort_handle());
+                drive_turn(
+                    live,
+                    Arc::clone(&db),
+                    Arc::clone(agent.llm()),
+                    registry,
+                    self.project_id,
+                    self.conv_id.clone(),
+                    self.query,
+                    self.username,
+                    self.history,
+                    self.message_count,
+                    persist,
+                    self.selection,
+                    agent_rx,
+                    paused_rx,
+                    self.user_id,
+                    pricing,
+                    self.turn_id,
+                )
+                .await;
+                refresh_summary(&db, &agent, &self.conv_id).await;
+            }
+            .instrument(span),
+        );
         state
             .live
             .set_abort_handle(&conv_id, task.abort_handle())
@@ -421,6 +432,7 @@ pub(super) async fn drive_turn(
     let mut pending_question: Option<Value> = None;
     let mut confirmation_requested = false;
     let mut released = false;
+    let mut answered = false;
 
     while let Some(event) = agent_rx.recv().await {
         if matches!(event, AgentEvent::ConfirmAction { .. }) {
@@ -441,7 +453,13 @@ pub(super) async fn drive_turn(
         };
 
         match &event {
-            AgentEvent::TextDelta { text } => chain_builder.text_delta(text),
+            AgentEvent::TextDelta { text } => {
+                if !answered {
+                    answered = true;
+                    TURNS.stage(Stage::FirstToken, started_at.elapsed());
+                }
+                chain_builder.text_delta(text)
+            }
             AgentEvent::ThinkingDelta { text } => chain_builder.thinking_delta(text),
             AgentEvent::Thinking { text } => chain_builder.thinking(text),
             AgentEvent::ToolCall { name, input } => {
@@ -524,6 +542,7 @@ pub(super) async fn drive_turn(
                 usage,
                 llm_call_count: *llm_call_count,
             };
+            let persisting = std::time::Instant::now();
             match &persist {
                 TurnPersist::New { attachment_meta } => {
                     save_project_turn(
@@ -555,6 +574,7 @@ pub(super) async fn drive_turn(
                     .await;
                 }
             }
+            TURNS.stage(Stage::Persist, persisting.elapsed());
             live.broadcast(
                 &project_id,
                 json!({

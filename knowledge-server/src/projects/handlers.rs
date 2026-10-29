@@ -461,7 +461,9 @@ async fn start_project_turn(
         }
     }
 
+    let loading = std::time::Instant::now();
     let context = load_project_context(&state.db, &project_id, &body.conversation_id).await;
+    TURNS.stage(Stage::LoadContext, loading.elapsed());
     let history = context.history();
     TURNS.started(context.recent.len());
 
