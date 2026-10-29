@@ -207,18 +207,35 @@ impl Drop for Node {
     }
 }
 
+fn tls_settings(name: &str, tls: Option<&std::path::Path>) -> String {
+    let Some(dir) = tls else {
+        return String::new();
+    };
+    let issued =
+        knowledge_server::cluster::tls::issue(dir, name, &["127.0.0.1".to_string()]).unwrap();
+    format!(
+        "[cluster.tls]\nca_cert = \"{}\"\ncert = \"{}\"\nkey = \"{}\"\n",
+        issued.ca_cert.display(),
+        issued.cert.display(),
+        issued.key.display()
+    )
+}
+
 fn start_node(
     name: &str,
     db_url: &str,
     llm_url: &str,
     dir: &std::path::Path,
     bootstrap: Option<Bootstrap>,
+    tls: Option<&std::path::Path>,
 ) -> Node {
     let port = free_port();
     let internal_port = free_port();
     let quorium = bootstrap
         .map(|b| b.settings(&dir.join(format!("{name}-quorium"))))
         .unwrap_or_default();
+    let tls_section = tls_settings(name, tls);
+    let scheme = if tls.is_some() { "https" } else { "http" };
     let config = format!(
         r#"
 [server]
@@ -239,6 +256,7 @@ bus_batch_window_ms = 10
 drain_grace_secs = 1
 drain_timeout_secs = 5
 {quorium}
+{tls_section}
 
 [auth]
 jwt_secret = "{JWT_SECRET}"
@@ -264,7 +282,7 @@ max_retries = 0
         name: name.to_string(),
         child: Some(child),
         base: format!("http://127.0.0.1:{port}"),
-        internal: format!("http://127.0.0.1:{internal_port}"),
+        internal: format!("{scheme}://127.0.0.1:{internal_port}"),
         config_path,
         log_path,
     }
@@ -285,6 +303,24 @@ fn spawn_server(config_path: &std::path::Path, log_path: &std::path::Path, args:
         .stderr(Stdio::from(log))
         .spawn()
         .expect("starting knowledge-server")
+}
+
+fn internal_client(tls: Option<&std::path::Path>) -> reqwest::Client {
+    let builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
+    let Some(dir) = tls else {
+        return builder.build().unwrap();
+    };
+    let issued =
+        knowledge_server::cluster::tls::issue(dir, "operator", &["operator".to_string()]).unwrap();
+    let tls = knowledge_server::cluster::tls::ClusterTls::load(
+        &knowledge_server::cluster::tls::TlsPaths {
+            ca_cert: issued.ca_cert,
+            cert: issued.cert,
+            key: issued.key,
+        },
+    )
+    .unwrap();
+    tls.http_client(builder).unwrap().build().unwrap()
 }
 
 fn node_name(index: usize) -> String {
@@ -371,6 +407,7 @@ struct Cluster {
     project_id: String,
     mock: Arc<MockLlm>,
     llm_url: String,
+    internal_http: reqwest::Client,
     _dir: tempfile::TempDir,
     _db: TestDb,
     _exclusive: tokio::sync::OwnedMutexGuard<()>,
@@ -378,6 +415,14 @@ struct Cluster {
 
 impl Cluster {
     async fn start(backend: Backend, wanted: usize) -> Self {
+        Self::start_secured(backend, wanted, None).await
+    }
+
+    async fn start_secured(
+        backend: Backend,
+        wanted: usize,
+        tls: Option<std::path::PathBuf>,
+    ) -> Self {
         let exclusive = Arc::clone(&ONE_CLUSTER_AT_A_TIME).lock_owned().await;
         let count = backend.smallest_cluster(wanted);
         let db = TestDb::new().await;
@@ -388,10 +433,20 @@ impl Cluster {
             .timeout(Duration::from_secs(60))
             .build()
             .unwrap();
+        let internal_http = internal_client(tls.as_deref());
         let nodes = match backend {
             Backend::Postgres => {
                 let nodes: Vec<Node> = (0..count)
-                    .map(|i| start_node(&node_name(i), &db_url, &llm_url, dir.path(), None))
+                    .map(|i| {
+                        start_node(
+                            &node_name(i),
+                            &db_url,
+                            &llm_url,
+                            dir.path(),
+                            None,
+                            tls.as_deref(),
+                        )
+                    })
                     .collect();
                 for node in &nodes {
                     wait_ready(&http, node).await;
@@ -405,22 +460,24 @@ impl Cluster {
                     &llm_url,
                     dir.path(),
                     Some(Bootstrap::Init),
+                    tls.as_deref(),
                 );
                 wait_ready(&http, &seed).await;
                 let mut nodes = vec![seed];
                 for i in 1..count {
-                    let token = join_token(&http, &nodes[0]).await;
+                    let token = join_token(&internal_http, &nodes[0]).await;
                     let node = start_node(
                         &node_name(i),
                         &db_url,
                         &llm_url,
                         dir.path(),
                         Some(Bootstrap::Join(token)),
+                        tls.as_deref(),
                     );
                     wait_ready(&http, &node).await;
                     nodes.push(node);
                 }
-                wait_for_voters(&http, &nodes[0], expected_voters(count)).await;
+                wait_for_voters(&internal_http, &nodes[0], expected_voters(count)).await;
                 nodes
             }
         };
@@ -475,6 +532,7 @@ impl Cluster {
             project_id,
             mock,
             llm_url,
+            internal_http,
             _dir: dir,
             _exclusive: exclusive,
         }
@@ -601,7 +659,7 @@ async fn three_nodes_serve_one_cluster(backend: Backend) {
         .unwrap();
     assert_eq!(nodes["schema_version"], harvest_db::LATEST_SCHEMA_VERSION);
     for node in &cluster.nodes {
-        let status = cluster_status(&cluster.http, node).await;
+        let status = cluster_status(&cluster.internal_http, node).await;
         assert_eq!(status["members"].as_array().unwrap().len(), 3, "{status}");
         assert_eq!(status["membership"]["quorum"], true);
     }
@@ -842,7 +900,7 @@ async fn a_drained_node_fails_readiness_refuses_turns_and_exits_cleanly(backend:
         cluster.nodes[0].log()
     );
 
-    let status = cluster_status(&cluster.http, &cluster.nodes[1]).await;
+    let status = cluster_status(&cluster.internal_http, &cluster.nodes[1]).await;
     assert!(
         status["members"]
             .as_array()
@@ -1274,18 +1332,19 @@ async fn a_cluster_that_lost_quorum_is_recovered_from_its_survivor() {
     wait_ready(&cluster.http, &cluster.nodes[0]).await;
 
     for index in 1..3 {
-        let token = join_token(&cluster.http, &cluster.nodes[0]).await;
+        let token = join_token(&cluster.internal_http, &cluster.nodes[0]).await;
         let replacement = start_node(
             &format!("node-r{index}"),
             &cluster.db_url,
             &cluster.llm_url,
             cluster._dir.path(),
             Some(Bootstrap::Join(token)),
+            None,
         );
         wait_ready(&cluster.http, &replacement).await;
         cluster.nodes[index] = replacement;
     }
-    wait_for_voters(&cluster.http, &cluster.nodes[0], 3).await;
+    wait_for_voters(&cluster.internal_http, &cluster.nodes[0], 3).await;
 
     let conv = cluster.new_conversation(1).await;
     let mut watch = cluster.events(2, Some(&conv)).await;
@@ -1360,6 +1419,42 @@ async fn the_cluster_secret_rotates_without_downtime(backend: Backend) {
     assert_eq!(rejected, 401, "the retired secret is no longer accepted");
 }
 
+async fn internal_peers_authenticate_with_certificates(backend: Backend) {
+    let certificates = tempfile::tempdir().unwrap();
+    let cluster = Cluster::start_secured(backend, 3, Some(certificates.path().to_path_buf())).await;
+    assert!(cluster.nodes[0].internal.starts_with("https://"));
+    streams_across_nodes(&cluster, "over mutual tls").await;
+    let status = cluster_status(&cluster.internal_http, &cluster.nodes[0]).await;
+    assert_eq!(status["members"].as_array().unwrap().len(), 3, "{status}");
+
+    let stranger = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let refused = stranger
+        .get(cluster.nodes[0].internal_url("/internal/cluster/status"))
+        .header("x-harvest-cluster-secret", SECRET)
+        .send()
+        .await;
+    assert!(
+        refused.is_err(),
+        "a client without a certificate is refused"
+    );
+
+    let other_ca = tempfile::tempdir().unwrap();
+    let impostor = internal_client(Some(other_ca.path()));
+    let refused = impostor
+        .get(cluster.nodes[0].internal_url("/internal/cluster/status"))
+        .header("x-harvest-cluster-secret", SECRET)
+        .send()
+        .await;
+    assert!(
+        refused.is_err(),
+        "a certificate from another authority is refused"
+    );
+}
+
 macro_rules! on_every_backend {
     ($($scenario:ident),* $(,)?) => {
         $(
@@ -1381,6 +1476,7 @@ macro_rules! on_every_backend {
 }
 
 on_every_backend!(
+    internal_peers_authenticate_with_certificates,
     the_cluster_secret_rotates_without_downtime,
     a_frozen_node_is_fenced_and_cannot_overwrite_the_takeover,
     three_nodes_serve_one_cluster,
