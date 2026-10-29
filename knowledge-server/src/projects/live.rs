@@ -14,6 +14,7 @@ use crate::cluster::node::ClusterNode;
 use crate::cluster::peer::PeerClient;
 use crate::cluster::Shutdown;
 use crate::config::ClusterConfig;
+use crate::projects::interruption::{partial_answer, Interruption};
 use crate::turns::admission::TurnPermit;
 use crate::turns::metrics::TURNS;
 
@@ -146,6 +147,7 @@ struct LocalTurn {
     seq: u64,
     abort: Option<tokio::task::AbortHandle>,
     permit: Option<TurnPermit>,
+    continuation: bool,
 }
 
 pub struct ProjectLive {
@@ -257,9 +259,23 @@ impl ProjectLive {
                 seq: 0,
                 abort: None,
                 permit: None,
+                continuation: false,
             },
         );
         Ok(true)
+    }
+
+    pub async fn mark_continuation(&self, conv_id: &str, turn_id: &str) -> Result<()> {
+        if let Some(turn) = self.turns.write().await.get_mut(conv_id) {
+            turn.continuation = true;
+        }
+        self.db
+            .execute(
+                "UPDATE active_turns SET continuation = true WHERE conv_id = $cid AND turn_id = $tid",
+                json!({ "cid": conv_id, "tid": turn_id }),
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn hold_permit(&self, conv_id: &str, permit: TurnPermit) {
@@ -510,20 +526,46 @@ impl ProjectLive {
 
     pub async fn reap_dead_nodes(&self) -> Result<usize> {
         let alive = self.node.live_node_ids().await?;
-        let turns = self
+        let orphans = self
             .db
             .query(
-                "DELETE FROM active_turns t
-             WHERE NOT (t.node_id = ANY($alive::text[]))
-             RETURNING project_id, conv_id",
+                "SELECT project_id, conv_id, turn_id, locked_by, query, attachments, continuation
+             FROM active_turns t
+             WHERE NOT (t.node_id = ANY($alive::text[]))",
                 json!({ "alive": alive }),
             )
             .await?;
-        for row in &turns {
-            let project_id = row["project_id"].as_str().unwrap_or_default();
-            let conv_id = row["conv_id"].as_str().unwrap_or_default();
-            tracing::warn!(project_id, conv_id, "turn owned by a lost node was aborted");
-            self.announce_abort(project_id, conv_id);
+        let mut turns = 0;
+        for row in &orphans {
+            let text = |key: &str| row[key].as_str().unwrap_or_default();
+            if row["continuation"].as_bool() != Some(true) {
+                self.record_interruption(Interruption {
+                    project_id: text("project_id"),
+                    conv_id: text("conv_id"),
+                    turn_id: text("turn_id"),
+                    username: text("locked_by"),
+                    query: text("query"),
+                    attachments: row["attachments"].as_array().map_or(&[], Vec::as_slice),
+                    partial_answer: String::new(),
+                })
+                .await;
+            }
+            let released = self
+                .db
+                .execute(
+                    "DELETE FROM active_turns WHERE conv_id = $cid AND turn_id = $tid",
+                    json!({ "cid": text("conv_id"), "tid": text("turn_id") }),
+                )
+                .await?;
+            if released > 0 {
+                turns += 1;
+                tracing::warn!(
+                    project_id = text("project_id"),
+                    conv_id = text("conv_id"),
+                    "turn owned by a lost node was aborted"
+                );
+                self.announce_abort(text("project_id"), text("conv_id"));
+            }
         }
         let presence = self
             .db
@@ -537,7 +579,7 @@ impl ProjectLive {
         for row in &presence {
             self.announce_leave_if_gone(row).await;
         }
-        Ok(turns.len() + presence.len())
+        Ok(turns + presence.len())
     }
 
     pub async fn abort_local_turns(&self) -> usize {
@@ -545,6 +587,18 @@ impl ProjectLive {
         for (conv_id, turn) in &drained {
             if let Some(abort) = &turn.abort {
                 abort.abort();
+            }
+            if !turn.continuation {
+                self.record_interruption(Interruption {
+                    project_id: &turn.project_id,
+                    conv_id,
+                    turn_id: &turn.turn_id,
+                    username: &turn.state.username,
+                    query: &turn.state.query,
+                    attachments: &turn.state.attachments,
+                    partial_answer: partial_answer(&turn.state),
+                })
+                .await;
             }
             let _ = self
                 .db
@@ -557,6 +611,16 @@ impl ProjectLive {
         }
         TURNS.aborted(drained.len());
         drained.len()
+    }
+
+    async fn record_interruption(&self, interruption: Interruption<'_>) {
+        match interruption.record(&self.db).await {
+            Ok(true) => TURNS.interrupted(),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, conv_id = interruption.conv_id, "could not record an interrupted turn")
+            }
+        }
     }
 
     pub async fn release_presence(&self) -> Result<()> {

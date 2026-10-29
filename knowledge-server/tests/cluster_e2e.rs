@@ -990,6 +990,10 @@ async fn a_frozen_node_is_fenced_and_cannot_overwrite_the_takeover(backend: Back
 
     cluster.mock.chunks.store(3, Ordering::SeqCst);
     cluster.mock.chunk_delay_ms.store(5, Ordering::SeqCst);
+    wait_for(&mut watch, Duration::from_secs(5), |e| {
+        e["type"] == "unlock" && e["conv_id"] == conv
+    })
+    .await;
     assert_eq!(cluster.send(1, &conv, "taken over").await, 200);
     wait_for(&mut watch, Duration::from_secs(30), |e| {
         e["type"] == "done" && e["conv_id"] == conv
@@ -1027,12 +1031,14 @@ async fn a_frozen_node_is_fenced_and_cannot_overwrite_the_takeover(backend: Back
     let messages = saved["messages"].as_array().unwrap();
     assert_eq!(
         messages.len(),
-        2,
-        "only the takeover turn is saved: {messages:?}"
+        4,
+        "the interrupted turn and the takeover are each saved once: {messages:?}"
     );
-    assert_eq!(messages[0]["text"], "taken over");
+    assert_eq!(messages[0]["text"], "frozen");
+    assert_eq!(messages[1]["status"], "interrupted");
+    assert_eq!(messages[2]["text"], "taken over");
     assert_eq!(
-        messages[1]["text"].as_str().unwrap().trim(),
+        messages[3]["text"].as_str().unwrap().trim(),
         expected_answer(3).trim()
     );
 }
