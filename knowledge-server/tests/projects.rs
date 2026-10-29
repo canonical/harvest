@@ -7,7 +7,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
     middleware::from_fn_with_state,
-    routing::{delete as route_delete, get as route_get, post as route_post, put as route_put},
+    routing::{get as route_get, post as route_post},
     Router,
 };
 use harvest_db::test_support::TestDb;

@@ -2906,7 +2906,7 @@ async fn apply_provision_change_for_bash_creates_missing_destroy_script() {
             .await;
     link_bash_step(&db, &did, &deploy_aid, "deploy", "run").await;
 
-    let (status, body) = send(
+    let (status, _body) = send(
         app,
         req_post(
             &format!("/projects/{pid}/deployments/{did}/provision/apply-change"),
@@ -3196,7 +3196,7 @@ async fn run_destroy_dag_400_when_no_destroy_steps() {
     let (app, registry) = deployments_app(Arc::clone(&db));
     let pid = seed_project(&app, &tok, &gid, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
-    let bash_aid = seed_bash_artifact(&db, &pid, "echo hi").await;
+    let _bash_aid = seed_bash_artifact(&db, &pid, "echo hi").await;
 
     let agent_id = "agent-1";
     let _rx = register_agent(&registry, agent_id, &pid);
