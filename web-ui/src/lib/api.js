@@ -9,6 +9,15 @@ const CONVERSATIONS_URL = '/conversations';
 const LLM_PROVIDERS_URL = '/llm/providers';
 const API_KEYS_URL = '/api-keys';
 
+export function pageQuery(page) {
+  if (!page) return '';
+  const params = new URLSearchParams();
+  if (page.before != null) params.set('before', String(page.before));
+  if (page.limit != null) params.set('limit', String(page.limit));
+  const query = params.toString();
+  return query ? `?${query}` : '';
+}
+
 async function convFetch(url, options = {}) {
   const res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...options });
   if (!res.ok) {
@@ -20,7 +29,7 @@ async function convFetch(url, options = {}) {
 
 export const listConversations   = ()            => convFetch(CONVERSATIONS_URL);
 export const createConversation  = (title)       => convFetch(CONVERSATIONS_URL, { method: 'POST', body: JSON.stringify({ title }) });
-export const getConversation     = (id)          => convFetch(`${CONVERSATIONS_URL}/${id}`);
+export const getConversation     = (id, page)    => convFetch(`${CONVERSATIONS_URL}/${id}${pageQuery(page)}`);
 export const updateConversation  = (id, payload) => convFetch(`${CONVERSATIONS_URL}/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
 export const deleteConversation  = (id)          => convFetch(`${CONVERSATIONS_URL}/${id}`, { method: 'DELETE' });
 
@@ -357,7 +366,7 @@ export const deleteProject      = (id)       => projectFetch(projectUrl(id), { m
 
 export const listProjectConversations   = (projectId) => projectFetch(`${projectUrl(projectId)}/conversations`);
 export const createProjectConversation  = (projectId, body)     => projectFetch(`${projectUrl(projectId)}/conversations`, { method: 'POST', body: JSON.stringify(body) });
-export const getProjectConversation     = (projectId, convId)   => projectFetch(conversationUrl(projectId, convId));
+export const getProjectConversation     = (projectId, convId, page) => projectFetch(`${conversationUrl(projectId, convId)}${pageQuery(page)}`);
 export const updateProjectConversation  = (projectId, convId, body) => projectFetch(conversationUrl(projectId, convId), { method: 'PUT',  body: JSON.stringify(body) });
 export const deleteProjectConversation  = (projectId, convId)   => projectFetch(conversationUrl(projectId, convId), { method: 'DELETE' });
 

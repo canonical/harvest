@@ -117,8 +117,18 @@ pub async fn load_context(db: &Db, owner: Owner<'_>, conv_id: &str) -> Result<Co
 }
 
 pub async fn load_page(db: &Db, owner: Owner<'_>, conv_id: &str, page: Page) -> Result<Vec<Value>> {
+    Ok(load_window(db, owner, conv_id, page).await?.messages)
+}
+
+#[derive(Debug, Default)]
+pub struct Window {
+    pub messages: Vec<Value>,
+    pub first_seq: usize,
+}
+
+pub async fn load_window(db: &Db, owner: Owner<'_>, conv_id: &str, page: Page) -> Result<Window> {
     let sql = format!(
-        "SELECT m.payload FROM (
+        "SELECT m.seq, m.payload FROM (
              SELECT m.seq, m.payload
              FROM conversation_messages m
              JOIN conversations c ON c.id = m.conv_id
@@ -140,7 +150,11 @@ pub async fn load_page(db: &Db, owner: Owner<'_>, conv_id: &str, page: Page) -> 
         )
         .await
         .context("loading conversation messages")?;
-    Ok(rows.into_iter().map(|mut r| r["payload"].take()).collect())
+    let first_seq = rows.first().and_then(|r| r["seq"].as_u64()).unwrap_or(0) as usize;
+    Ok(Window {
+        messages: rows.into_iter().map(|mut r| r["payload"].take()).collect(),
+        first_seq,
+    })
 }
 
 #[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
@@ -475,6 +489,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(texts(&last), vec!["3", "4"]);
+        let window = load_window(&test_db.db, Owner::User(&uid), &cid, Page::last(2))
+            .await
+            .unwrap();
+        assert_eq!(window.first_seq, 3);
         let earlier = load_page(
             &test_db.db,
             Owner::User(&uid),

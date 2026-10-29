@@ -261,65 +261,71 @@ export function createConversationThreadState() {
       });
   });
 
+  function fromStored(m) {
+    if (m.role === 'user') {
+      const attachments = (m.attachments ?? []).map(a => ({
+        ...a,
+        preview_url: a.preview_url
+          ?? (a.data && a.mime_type?.startsWith('image/')
+              ? `data:${a.mime_type};base64,${a.data}`
+              : null),
+      }));
+      const msg = { role: 'user', text: m.text, attachments };
+      if (m.username) msg.username = m.username;
+      return msg;
+    } else {
+      let chain;
+      if (m.chain) {
+        chain = m.chain.map(item => {
+          if (item.type === 'tool_call') return { ...item, status: 'done' };
+          if (item.type === 'confirm_action') {
+            const { result_text, ...rest } = item;
+            return {
+              ...rest,
+              status: item.status ?? 'pending',
+              steps: item.steps ?? [],
+              resultText: result_text ?? '',
+            };
+          }
+          return item;
+        });
+      } else {
+        const thinkingItems  = (m.thinking  ?? []).map(text => ({ type: 'thinking', text }));
+        const toolCallItems  = (m.tool_calls ?? []).map(tc  => ({ type: 'tool_call', ...tc, status: 'done' }));
+        chain = [...thinkingItems, ...toolCallItems];
+      }
+      const msg = {
+        role: 'assistant', status: 'done',
+        chain,
+        tool_calls: chain.filter(c => c.type === 'tool_call'),
+        answer: m.text,
+        sources: m.sources ?? [],
+        tool_calls_made: m.tool_calls_made ?? 0,
+        provider_used: m.provider ?? null,
+        intent: m.intent ?? null,
+        phase: m.phase ?? null,
+        durationMs: m.duration_ms ?? null,
+        usage: m.usage ?? null,
+        llm_call_count: m.llm_call_count ?? 0,
+        cost_microusd: m.cost_microusd ?? 0,
+      };
+      if (m.question) msg.question = m.question;
+      if (m.status === 'interrupted') {
+        msg.status = 'error';
+        msg.error = INTERRUPTED_MESSAGE;
+      }
+      return msg;
+    }
+  }
+
   function loadFromHistory(history) {
     reset();
-    for (const m of history) {
-      if (m.role === 'user') {
-        const attachments = (m.attachments ?? []).map(a => ({
-          ...a,
-          preview_url: a.preview_url
-            ?? (a.data && a.mime_type?.startsWith('image/')
-                ? `data:${a.mime_type};base64,${a.data}`
-                : null),
-        }));
-        const msg = { role: 'user', text: m.text, attachments };
-        if (m.username) msg.username = m.username;
-        messages.value.push(msg);
-      } else {
-        let chain;
-        if (m.chain) {
-          chain = m.chain.map(item => {
-            if (item.type === 'tool_call') return { ...item, status: 'done' };
-            if (item.type === 'confirm_action') {
-              const { result_text, ...rest } = item;
-              return {
-                ...rest,
-                status: item.status ?? 'pending',
-                steps: item.steps ?? [],
-                resultText: result_text ?? '',
-              };
-            }
-            return item;
-          });
-        } else {
-          const thinkingItems  = (m.thinking  ?? []).map(text => ({ type: 'thinking', text }));
-          const toolCallItems  = (m.tool_calls ?? []).map(tc  => ({ type: 'tool_call', ...tc, status: 'done' }));
-          chain = [...thinkingItems, ...toolCallItems];
-        }
-        const msg = {
-          role: 'assistant', status: 'done',
-          chain,
-          tool_calls: chain.filter(c => c.type === 'tool_call'),
-          answer: m.text,
-          sources: m.sources ?? [],
-          tool_calls_made: m.tool_calls_made ?? 0,
-          provider_used: m.provider ?? null,
-          intent: m.intent ?? null,
-          phase: m.phase ?? null,
-          durationMs: m.duration_ms ?? null,
-          usage: m.usage ?? null,
-          llm_call_count: m.llm_call_count ?? 0,
-          cost_microusd: m.cost_microusd ?? 0,
-        };
-        if (m.question) msg.question = m.question;
-        if (m.status === 'interrupted') {
-          msg.status = 'error';
-          msg.error = INTERRUPTED_MESSAGE;
-        }
-        messages.value.push(msg);
-      }
-    }
+    messages.value = history.map(fromStored);
     loading.value = false;
+  }
+
+  function prependHistory(history) {
+    messages.value = [...history.map(fromStored), ...messages.value];
   }
 
   function reset() {
@@ -337,6 +343,6 @@ export function createConversationThreadState() {
     setIntent, setPhase,
     addParallelResearchStarted, updateParallelResearchLead, markParallelResearchMerging,
     addPendingAttachment, removePendingAttachment, clearPendingAttachments,
-    saveableMessages, loadFromHistory, reset,
+    saveableMessages, loadFromHistory, prependHistory, reset,
   };
 }
