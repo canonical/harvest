@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 
 use knowledge_server::{
-    agent::{tool::Tool, Agent},
+    agent::Agent,
     api::{
         docs::{handle_get_index, handle_get_page},
         query::{handle_query, handle_query_stream},
