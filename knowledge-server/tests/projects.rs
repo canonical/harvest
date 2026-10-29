@@ -290,6 +290,23 @@ async fn wait_for_message_count(app: Router, uri: &str, token: &str, expected: u
     panic!("conversation at {uri} never reached {expected} messages");
 }
 
+async fn wait_until_unlocked(db: &Db, conv_id: &str) {
+    for _ in 0..40 {
+        let held = db
+            .query(
+                "SELECT 1 FROM active_turns WHERE conv_id = $cid",
+                json!({ "cid": conv_id }),
+            )
+            .await
+            .unwrap();
+        if held.is_empty() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("conversation {conv_id} stayed locked");
+}
+
 async fn wait_for_message_text(app: Router, uri: &str, token: &str, expected_text: &str) -> Value {
     for _ in 0..40 {
         let (_, conv) = send(app.clone(), req_get(uri, token)).await;
@@ -959,6 +976,7 @@ async fn second_turn_preserves_first_turns_sources_and_chain() {
     .await;
     assert_eq!(status, StatusCode::OK);
     wait_for_message_count(app.clone(), &conv_uri, &tok, 2).await;
+    wait_until_unlocked(&db, &cid).await;
 
     let (status, _) = send(
         app.clone(),
