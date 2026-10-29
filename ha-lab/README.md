@@ -15,6 +15,7 @@ lxc launch ubuntu:24.04 harvest-ha-lab && lxc exec harvest-ha-lab -- apt-get ins
 lxc launch ubuntu:24.04 harvest-pg-a && lxc launch ubuntu:24.04 harvest-pg-b
 ha-lab/provision.sh
 SERVER_BIN=target/debug/knowledge-server node ha-lab/ha_e2e.mjs
+SERVER_BIN=target/debug/knowledge-server HA_BACKEND=quorium node ha-lab/ha_e2e.mjs
 ```
 
 Scenarios, each recorded in `~/.cache/harvest-ha-lab/report.json`:
@@ -27,6 +28,9 @@ Scenarios, each recorded in `~/.cache/harvest-ha-lab/report.json`:
    API traffic through HAProxy sees no failed request.
 6. Rolling restart of every node with `SIGTERM`: no failed request.
 7. PostgreSQL primary failover: no Harvest node restarts, traffic resumes on its own.
+8. With `HA_BACKEND=quorium` only, `SIGKILL` of the raft leader: the survivors elect a
+   successor within 10 s, chat and API traffic see no failed request, and the killed node
+   rejoins as the third voter.
 
 The failover scenario promotes the replica; run `provision.sh` on fresh containers before
 running the lab again.
