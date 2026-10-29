@@ -385,6 +385,11 @@ impl Quorium {
             .collect()
     }
 
+    pub fn evicted(&self) -> Vec<String> {
+        self.state
+            .read(|a| a.cluster.evicted.keys().cloned().collect())
+    }
+
     pub fn members(&self) -> Vec<MemberRecord> {
         self.state
             .read(|a| a.cluster.members.values().cloned().collect())
