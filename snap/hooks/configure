@@ -40,6 +40,9 @@ CLUSTER_NODE_TIMEOUT_MS=$(snapctl get cluster.node-timeout-ms)
 CLUSTER_ELECTION_MS=$(snapctl get cluster.election-timeout-ms)
 CLUSTER_SNAPSHOT_LOGS=$(snapctl get cluster.snapshot-logs)
 CLUSTER_REPLACE_VOTER_SECS=$(snapctl get cluster.replace-absent-voter-after-secs)
+CLUSTER_TLS_CA=$(snapctl get cluster.tls-ca)
+CLUSTER_TLS_CERT=$(snapctl get cluster.tls-cert)
+CLUSTER_TLS_KEY=$(snapctl get cluster.tls-key)
 
 AGENT_MAX_ITER=$(snapctl get agent.max-iterations)
 AGENT_COMPACT_CHARS=$(snapctl get agent.compaction-threshold-chars)
@@ -217,6 +220,15 @@ TOML
     else
       [ -n "${CLUSTER_HEARTBEAT_MS:-}" ]    && echo "heartbeat_interval_ms = ${CLUSTER_HEARTBEAT_MS}"
       [ -n "${CLUSTER_NODE_TIMEOUT_MS:-}" ] && echo "node_timeout_ms = ${CLUSTER_NODE_TIMEOUT_MS}"
+    fi
+    if [ -n "${CLUSTER_TLS_CERT:-}" ]; then
+      cat << TOML
+
+[cluster.tls]
+ca_cert = "${CLUSTER_TLS_CA}"
+cert = "${CLUSTER_TLS_CERT}"
+key = "${CLUSTER_TLS_KEY}"
+TOML
     fi
   fi
 
