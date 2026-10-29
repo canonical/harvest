@@ -2,6 +2,8 @@ import { ref, computed } from 'vue';
 
 let _nextId = 1;
 
+export const INTERRUPTED_MESSAGE = 'The response was interrupted because the server handling it went away. Please send your message again.';
+
 export function createConversationThreadState() {
   const messages          = ref([]);
   const loading           = ref(false);
@@ -310,6 +312,10 @@ export function createConversationThreadState() {
           cost_microusd: m.cost_microusd ?? 0,
         };
         if (m.question) msg.question = m.question;
+        if (m.status === 'interrupted') {
+          msg.status = 'error';
+          msg.error = INTERRUPTED_MESSAGE;
+        }
         messages.value.push(msg);
       }
     }
