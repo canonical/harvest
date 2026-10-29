@@ -788,11 +788,12 @@ pub async fn get_conversation(
         .into_iter()
         .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
-    let messages = store::load_page(&state.db, Owner::Project(&project_id), &conv_id, page)
+    let window = store::load_window(&state.db, Owner::Project(&project_id), &conv_id, page)
         .await
         .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let mut obj = row.as_object().cloned().unwrap_or_default();
-    obj.insert("messages".to_string(), Value::Array(messages));
+    obj.insert("first_seq".to_string(), json!(window.first_seq));
+    obj.insert("messages".to_string(), Value::Array(window.messages));
     Ok(Json(Value::Object(obj)))
 }
 

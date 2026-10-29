@@ -20,3 +20,12 @@ describe('loadFromHistory', () => {
     expect(thread.messages.value[0].status).toBe('done');
   });
 });
+
+describe('prependHistory', () => {
+  it('puts earlier messages before the loaded ones', () => {
+    const thread = createConversationThreadState();
+    thread.loadFromHistory([{ role: 'user', text: 'latest' }]);
+    thread.prependHistory([{ role: 'user', text: 'first' }, { role: 'assistant', text: 'reply', chain: [] }]);
+    expect(thread.messages.value.map(m => m.text ?? m.answer)).toEqual(['first', 'reply', 'latest']);
+  });
+});

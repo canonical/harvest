@@ -6,7 +6,7 @@ import {
   listTemplates, createTemplate, getTemplate, updateTemplate, deleteTemplate,
   generateEnvironmentQuestions, generateDesign, generateDesignStream, generateDesignDecisions, reviseDesign,
   generateProvision, generateProvisionStream, proposeProvisionChange, applyProvisionChange,
-  createProjectArtifact, updateDesignContent, designPdfUrl,
+  createProjectArtifact, updateDesignContent, designPdfUrl, pageQuery,
 } from '../../src/lib/api.js';
 
 function mockStreamResponse() {
@@ -433,4 +433,12 @@ describe('deployment phase-action API functions', () => {
     expect(JSON.parse(options.body)).toEqual({ files: { 'main.tf': 'x' } });
   });
 
+});
+
+describe('pageQuery', () => {
+  it('builds before and limit parameters only when given', () => {
+    expect(pageQuery(undefined)).toBe('');
+    expect(pageQuery({ limit: 50 })).toBe('?limit=50');
+    expect(pageQuery({ before: 120, limit: 50 })).toBe('?before=120&limit=50');
+  });
 });

@@ -17,6 +17,12 @@
 
         <div class="messages-wrap">
           <div ref="messagesEl" class="messages" @scroll="onMessagesScroll">
+            <button
+              v-if="firstSeq > 0"
+              class="p-button--base is-dense load-earlier"
+              :disabled="loadingEarlier"
+              @click="loadEarlier"
+            >{{ loadingEarlier ? 'Loading…' : 'Load earlier messages' }}</button>
             <div v-if="!projectId && !chat.messages.length" class="no-project-state chat-empty-state">
               <p>Select a project to start chatting, or use the global query below.</p>
             </div>
@@ -389,13 +395,45 @@ async function loadConversationList() {
   }
 }
 
+const HISTORY_PAGE = 50;
+const firstSeq = ref(0);
+const loadingEarlier = ref(false);
+
+function fetchConversation(id, page) {
+  return props.projectId
+    ? getProjectConversation(props.projectId, id, page)
+    : getConversation(id, page);
+}
+
+function showLatest(conv) {
+  firstSeq.value = conv.first_seq ?? 0;
+  chat.loadFromHistory(Array.isArray(conv.messages) ? conv.messages : []);
+}
+
+async function loadEarlier() {
+  const id = activeConvId.value;
+  if (!id || loadingEarlier.value) return;
+  loadingEarlier.value = true;
+  try {
+    const conv = await fetchConversation(id, { before: firstSeq.value, limit: HISTORY_PAGE });
+    if (id !== activeConvId.value) return;
+    const el = messagesEl.value;
+    const fromBottom = el ? el.scrollHeight - el.scrollTop : 0;
+    chat.prependHistory(Array.isArray(conv.messages) ? conv.messages : []);
+    firstSeq.value = conv.first_seq ?? 0;
+    await nextTick();
+    if (el) el.scrollTop = el.scrollHeight - fromBottom;
+  } catch {
+  } finally {
+    loadingEarlier.value = false;
+  }
+}
+
 async function loadConversation(id) {
   try {
-    const conv = props.projectId
-      ? await getProjectConversation(props.projectId, id)
-      : await getConversation(id);
+    const conv = await fetchConversation(id, { limit: HISTORY_PAGE });
     setActiveConvId(id);
-    chat.loadFromHistory(Array.isArray(conv.messages) ? conv.messages : []);
+    showLatest(conv);
     if (conv.title) emit('title-updated', conv.title);
     historyOpen.value = false;
     openEventStream();
@@ -408,11 +446,9 @@ async function refreshActiveConversation() {
   const id = activeConvId.value;
   if (!id) return;
   try {
-    const conv = props.projectId
-      ? await getProjectConversation(props.projectId, id)
-      : await getConversation(id);
+    const conv = await fetchConversation(id, { limit: HISTORY_PAGE });
     if (id !== activeConvId.value || chat.loading) return;
-    chat.loadFromHistory(Array.isArray(conv.messages) ? conv.messages : []);
+    showLatest(conv);
   } catch {}
 }
 
