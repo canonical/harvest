@@ -180,6 +180,11 @@ impl Node {
         false
     }
 
+    fn rewrite_config(&self, edit: impl Fn(&str) -> String) {
+        let config = std::fs::read_to_string(&self.config_path).unwrap();
+        std::fs::write(&self.config_path, edit(&config)).unwrap();
+    }
+
     fn start_again(&mut self) {
         self.child = Some(spawn_server(&self.config_path, &self.log_path, &[]));
     }
@@ -1147,6 +1152,70 @@ async fn a_cluster_that_lost_quorum_is_recovered_from_its_survivor() {
     .await;
 }
 
+fn secrets_line(primary: &str, accepted: &[&str]) -> String {
+    let accepted: Vec<String> = accepted.iter().map(|s| format!("\"{s}\"")).collect();
+    format!(
+        "shared_secret = \"{primary}\"\naccepted_secrets = [{}]",
+        accepted.join(", ")
+    )
+}
+
+fn with_secrets(config: &str, primary: &str, accepted: &[&str]) -> String {
+    config
+        .lines()
+        .filter(|line| !line.starts_with("accepted_secrets"))
+        .map(|line| {
+            if line.starts_with("shared_secret") {
+                secrets_line(primary, accepted)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn restart_one_by_one(cluster: &mut Cluster, primary: &str, accepted: &[&str]) {
+    for index in 0..cluster.nodes.len() {
+        cluster.nodes[index].terminate();
+        assert!(cluster.nodes[index].wait_exit(Duration::from_secs(30)));
+        cluster.nodes[index].rewrite_config(|config| with_secrets(config, primary, accepted));
+        cluster.nodes[index].start_again();
+        wait_ready(&cluster.http, &cluster.nodes[index]).await;
+    }
+}
+
+async fn streams_across_nodes(cluster: &Cluster, query: &str) {
+    let conv = cluster.new_conversation(0).await;
+    let mut watch = cluster.events(2, Some(&conv)).await;
+    assert_eq!(cluster.send(1, &conv, query).await, 200);
+    let events = wait_for(&mut watch, Duration::from_secs(30), |e| {
+        e["type"] == "done" && e["conv_id"] == conv
+    })
+    .await;
+    assert!(events.iter().any(|e| e["type"] == "text_delta"));
+}
+
+async fn the_cluster_secret_rotates_without_downtime(backend: Backend) {
+    let mut cluster = Cluster::start(backend, 3).await;
+    let next = "e2e-rotated-secret";
+    restart_one_by_one(&mut cluster, SECRET, &[next]).await;
+    streams_across_nodes(&cluster, "after staging").await;
+    restart_one_by_one(&mut cluster, next, &[SECRET]).await;
+    streams_across_nodes(&cluster, "after committing").await;
+    restart_one_by_one(&mut cluster, next, &[]).await;
+    streams_across_nodes(&cluster, "after finishing").await;
+    let rejected = cluster
+        .http
+        .get(cluster.nodes[0].internal_url("/internal/cluster/status"))
+        .header("x-harvest-cluster-secret", SECRET)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(rejected, 401, "the retired secret is no longer accepted");
+}
+
 macro_rules! on_every_backend {
     ($($scenario:ident),* $(,)?) => {
         $(
@@ -1168,6 +1237,7 @@ macro_rules! on_every_backend {
 }
 
 on_every_backend!(
+    the_cluster_secret_rotates_without_downtime,
     a_frozen_node_is_fenced_and_cannot_overwrite_the_takeover,
     three_nodes_serve_one_cluster,
     a_turn_started_on_one_node_streams_to_watchers_on_every_node,
