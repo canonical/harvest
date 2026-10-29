@@ -180,6 +180,16 @@ impl Node {
         false
     }
 
+    fn start_again(&mut self) {
+        self.child = Some(spawn_server(&self.config_path, &self.log_path, &[]));
+    }
+
+    fn recover(&self) -> std::process::ExitStatus {
+        spawn_server(&self.config_path, &self.log_path, &["recover-cluster"])
+            .wait()
+            .unwrap()
+    }
+
     fn log(&self) -> String {
         std::fs::read_to_string(&self.log_path).unwrap_or_default()
     }
@@ -244,15 +254,7 @@ max_retries = 0
     let config_path = dir.join(format!("{name}.toml"));
     let log_path = dir.join(format!("{name}.log"));
     std::fs::write(&config_path, config).unwrap();
-    let log = std::fs::File::create(&log_path).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_knowledge-server"))
-        .arg("--config")
-        .arg(&config_path)
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::from(log.try_clone().unwrap()))
-        .stderr(Stdio::from(log))
-        .spawn()
-        .expect("starting knowledge-server");
+    let child = spawn_server(&config_path, &log_path, &[]);
     Node {
         name: name.to_string(),
         child: Some(child),
@@ -261,6 +263,23 @@ max_retries = 0
         config_path,
         log_path,
     }
+}
+
+fn spawn_server(config_path: &std::path::Path, log_path: &std::path::Path, args: &[&str]) -> Child {
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .unwrap();
+    Command::new(env!("CARGO_BIN_EXE_knowledge-server"))
+        .arg("--config")
+        .arg(config_path)
+        .args(args)
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::from(log.try_clone().unwrap()))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .expect("starting knowledge-server")
 }
 
 fn node_name(index: usize) -> String {
@@ -346,6 +365,7 @@ struct Cluster {
     token: String,
     project_id: String,
     mock: Arc<MockLlm>,
+    llm_url: String,
     _dir: tempfile::TempDir,
     _db: TestDb,
     _exclusive: tokio::sync::OwnedMutexGuard<()>,
@@ -449,6 +469,7 @@ impl Cluster {
             token,
             project_id,
             mock,
+            llm_url,
             _dir: dir,
             _exclusive: exclusive,
         }
@@ -1071,6 +1092,59 @@ async fn a_frozen_node_is_fenced_and_cannot_overwrite_the_takeover(backend: Back
         messages[3]["text"].as_str().unwrap().trim(),
         expected_answer(3).trim()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts server processes"]
+async fn a_cluster_that_lost_quorum_is_recovered_from_its_survivor() {
+    let mut cluster = Cluster::start(Backend::Quorium, 3).await;
+    cluster.nodes[1].kill();
+    cluster.nodes[2].kill();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while cluster
+        .http
+        .get(cluster.nodes[0].url("/health/ready"))
+        .send()
+        .await
+        .is_ok_and(|r| r.status() == 200)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "a survivor without quorum must fail readiness"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    cluster.nodes[0].kill();
+    assert!(
+        cluster.nodes[0].recover().success(),
+        "{}",
+        cluster.nodes[0].log()
+    );
+    cluster.nodes[0].start_again();
+    wait_ready(&cluster.http, &cluster.nodes[0]).await;
+
+    for index in 1..3 {
+        let token = join_token(&cluster.http, &cluster.nodes[0]).await;
+        let replacement = start_node(
+            &format!("node-r{index}"),
+            &cluster.db_url,
+            &cluster.llm_url,
+            cluster._dir.path(),
+            Some(Bootstrap::Join(token)),
+        );
+        wait_ready(&cluster.http, &replacement).await;
+        cluster.nodes[index] = replacement;
+    }
+    wait_for_voters(&cluster.http, &cluster.nodes[0], 3).await;
+
+    let conv = cluster.new_conversation(1).await;
+    let mut watch = cluster.events(2, Some(&conv)).await;
+    assert_eq!(cluster.send(1, &conv, "after recovery").await, 200);
+    wait_for(&mut watch, Duration::from_secs(30), |e| {
+        e["type"] == "done" && e["conv_id"] == conv
+    })
+    .await;
 }
 
 macro_rules! on_every_backend {
