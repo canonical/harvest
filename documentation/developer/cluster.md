@@ -142,6 +142,57 @@ sudo harvest cluster rotate-secrets commit --secret <new>   # on every node
 sudo harvest cluster rotate-secrets finish          # on every node
 ```
 
+### Switching backends
+
+Only membership lives in the backend; conversations, turns and fencing tokens stay in PostgreSQL,
+so switching loses no data. Nodes on different backends do not see each other, so switch the whole
+cluster in one maintenance window:
+
+1. Stop every node.
+2. Set `backend = "quorium"` and a `data_dir` everywhere, `bootstrap = "init"` on one node and
+   `bootstrap = "join"` with a token or `join_addresses` on the others.
+3. Start the init node, wait for `/health/ready`, then start the others.
+
+To go back, stop every node, set `backend = "postgres"` and delete `data_dir`.
+
+### Leadership transfer
+
+Draining or restarting the raft leader costs one election timeout of write unavailability: the
+pinned openraft 0.9 has no leader transfer, and followers holding a leader lease reject early
+votes. Restart the leader last during a rolling restart to pay this cost once.
+
+### Mutual TLS between nodes
+
+The shared secret authenticates peers but travels in clear text. To encrypt and authenticate the
+internal listener (raft RPCs, the mesh bus, forwarded turns and the admin API), give every node a
+certificate signed by one cluster CA:
+
+```bash
+knowledge-server issue-cluster-certificate --dir /etc/harvest/cluster-tls \
+  --name harvest-1 --host 10.0.0.11 --host harvest-1
+```
+
+The first call creates `ca.pem` and `ca-key.pem` in `--dir`; later calls reuse them, so issue
+every node's certificate from the same directory and copy `ca.pem`, `<name>.pem` and
+`<name>-key.pem` to that node. Keep `ca-key.pem` off the servers.
+
+```toml
+[cluster]
+internal_url = "https://10.0.0.11:8081"
+
+[cluster.tls]
+ca_cert = "/etc/harvest/cluster-tls/ca.pem"
+cert = "/etc/harvest/cluster-tls/harvest-1.pem"
+key = "/etc/harvest/cluster-tls/harvest-1-key.pem"
+```
+
+With `[cluster.tls]` set, `internal_url` must use `https`, the listener only accepts clients
+presenting a certificate from the cluster CA, and outgoing peer connections present this node's
+certificate. The snap takes the same paths through `cluster.tls-ca`, `cluster.tls-cert` and
+`cluster.tls-key`; `harvest cluster` commands then talk to the local node over its advertised
+`https` URL. Enable TLS on every node at once: a TLS node and a plain node cannot reach each
+other. The charm does not manage certificates yet.
+
 ### Metrics
 
 `/metrics` exposes `harvest_cluster_quorum{backend=…}`, `harvest_cluster_fenced`,
