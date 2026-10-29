@@ -684,7 +684,7 @@ mod tests {
         let server = MockServer::start();
         server.mock(move |when, then| {
             let when = when.method("POST").path(path);
-            let when = match expect_body_fragment {
+            match expect_body_fragment {
                 Some((fragment, true)) => when.body_includes(fragment),
                 Some((fragment, false)) => when.body_excludes(fragment),
                 None => when,
