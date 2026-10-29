@@ -19,6 +19,7 @@ use crate::cluster::node::{ClusterNode, NodeIdentity};
 use crate::cluster::peer::{require_secret, ClusterSecrets};
 use crate::cluster::postgres::PostgresMembership;
 use crate::cluster::quorium::QuoriumMembership;
+use crate::cluster::tls::{self, ClusterTls};
 use crate::cluster::{mesh, quorium as quorium_backend, Shutdown};
 use crate::config::{BusTransport, ClusterBackend, ClusterConfig};
 
@@ -29,6 +30,7 @@ pub struct ClusterRuntime {
     pub bus: Arc<ClusterBus>,
     pub quorium: Option<Arc<Quorium>>,
     pub internal: Option<InternalServer>,
+    pub tls: Option<Arc<ClusterTls>>,
     cluster_routes: Router,
 }
 
@@ -66,6 +68,7 @@ fn serve_internal(
     listener: TcpListener,
     early: Router,
     secrets: Arc<ClusterSecrets>,
+    tls: Option<&ClusterTls>,
     shutdown: &Shutdown,
 ) -> Result<InternalServer> {
     let addr = listener.local_addr()?;
@@ -79,15 +82,18 @@ fn serve_internal(
             require_secret,
         ))
         .merge(fallback);
-    let shutdown = shutdown.clone();
-    let handle = tokio::spawn(async move {
-        let _ = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(shutdown.wait())
-        .await;
-    });
+    let stop = shutdown.wait();
+    let handle = match tls.map(ClusterTls::server_config).transpose()? {
+        Some(config) => tokio::spawn(tls::serve(listener, app, config, stop)),
+        None => tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(stop)
+            .await;
+        }),
+    };
     Ok(InternalServer { addr, handle, late })
 }
 
@@ -112,6 +118,7 @@ pub async fn start(
     shutdown: &Shutdown,
 ) -> Result<ClusterRuntime> {
     let identity = NodeIdentity::from_config(config);
+    let tls = config.tls.as_ref().map(ClusterTls::load).transpose()?;
     let secret = config.effective_shared_secret().unwrap_or_default();
     let secrets = ClusterSecrets::new(Some(secret.clone()), &config.accepted_secrets);
     let (membership, quorium, early): (Arc<dyn Membership>, Option<Arc<Quorium>>, Router) =
@@ -124,7 +131,9 @@ pub async fn start(
                     .internal_url
                     .clone()
                     .context("the quorium backend needs an internal url")?;
-                let quorium = quorium_backend::start(config, &identity.node_id, &advertise).await?;
+                let quorium =
+                    quorium_backend::start(config, &identity.node_id, &advertise, tls.as_deref())
+                        .await?;
                 let early = quorium::api::router(Arc::clone(&quorium));
                 (
                     QuoriumMembership::new(Arc::clone(&quorium)),
@@ -134,7 +143,15 @@ pub async fn start(
             }
         };
     let internal = internal_listener
-        .map(|listener| serve_internal(listener, early, Arc::clone(&secrets), shutdown))
+        .map(|listener| {
+            serve_internal(
+                listener,
+                early,
+                Arc::clone(&secrets),
+                tls.as_deref(),
+                shutdown,
+            )
+        })
         .transpose()?;
     if let Some(quorium) = &quorium {
         quorium_backend::bootstrap(quorium, config)
@@ -159,7 +176,12 @@ pub async fn start(
             Router::new(),
         ),
         BusTransport::Mesh => {
-            let (bus, mesh) = mesh::start(Arc::clone(&node), secret.clone(), batch_window);
+            let connector = tls
+                .as_deref()
+                .map(ClusterTls::websocket_connector)
+                .transpose()?;
+            let (bus, mesh) =
+                mesh::start(Arc::clone(&node), secret.clone(), batch_window, connector);
             (bus, mesh::router(mesh))
         }
     };
@@ -180,6 +202,7 @@ pub async fn start(
         bus,
         quorium,
         internal,
+        tls,
         cluster_routes,
     })
 }

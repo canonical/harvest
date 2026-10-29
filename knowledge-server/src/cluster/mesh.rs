@@ -54,6 +54,7 @@ pub struct Mesh {
     seen: Mutex<HashMap<String, Option<u64>>>,
     published: AtomicU64,
     secret: String,
+    connector: Option<tokio_tungstenite::Connector>,
 }
 
 struct Link {
@@ -104,6 +105,7 @@ pub fn start(
     node: Arc<ClusterNode>,
     secret: String,
     batch_window: Duration,
+    connector: Option<tokio_tungstenite::Connector>,
 ) -> (Arc<ClusterBus>, Arc<Mesh>) {
     let (bus, outbox) = ClusterBus::with_outbox(node.node_id().to_string());
     let mesh = Arc::new(Mesh {
@@ -112,6 +114,7 @@ pub fn start(
         seen: Mutex::new(HashMap::new()),
         published: AtomicU64::new(0),
         secret,
+        connector,
     });
     tokio::spawn(run_publisher(Arc::clone(&mesh), batch_window, outbox));
     tokio::spawn(run_membership(Arc::clone(&mesh), node));
@@ -330,9 +333,14 @@ async fn stream_to(
     request
         .headers_mut()
         .insert(FORWARDED_HEADER, mesh.origin().parse()?);
-    let (mut socket, _) = tokio_tungstenite::connect_async(request)
-        .await
-        .with_context(|| format!("connecting the mesh link to {url}"))?;
+    let (mut socket, _) = tokio_tungstenite::connect_async_tls_with_config(
+        request,
+        None,
+        false,
+        mesh.connector.clone(),
+    )
+    .await
+    .with_context(|| format!("connecting the mesh link to {url}"))?;
     health.set(true);
     let hello = json!({ "o": mesh.origin(), "h": last_sent }).to_string();
     socket.send(WireMessage::Text(hello.into())).await?;
@@ -368,6 +376,7 @@ mod tests {
             seen: Mutex::new(HashMap::new()),
             published: AtomicU64::new(0),
             secret: "s".into(),
+            connector: None,
         })
     }
 
@@ -479,6 +488,7 @@ mod tests {
             seen: Mutex::new(HashMap::new()),
             published: AtomicU64::new(0),
             secret: "s".into(),
+            connector: None,
         });
         tokio::spawn(run_publisher(
             Arc::clone(&mesh),

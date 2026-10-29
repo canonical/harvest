@@ -276,6 +276,8 @@ pub struct ClusterConfig {
     pub snapshot_logs: u64,
     #[serde(default)]
     pub replace_absent_voter_after_secs: u64,
+    #[serde(default)]
+    pub tls: Option<crate::cluster::tls::TlsPaths>,
 }
 
 impl Default for ClusterConfig {
@@ -301,6 +303,7 @@ impl Default for ClusterConfig {
             join_timeout_secs: default_join_timeout_secs(),
             snapshot_logs: default_snapshot_logs(),
             replace_absent_voter_after_secs: 0,
+            tls: None,
         }
     }
 }
@@ -313,7 +316,8 @@ impl ClusterConfig {
         if bound.ip().is_unspecified() {
             anyhow::bail!("cluster.internal_url is required when cluster.internal_listen binds every interface");
         }
-        Ok(format!("http://{bound}"))
+        let scheme = if self.tls.is_some() { "https" } else { "http" };
+        Ok(format!("{scheme}://{bound}"))
     }
 
     pub fn effective_shared_secret(&self) -> Option<String> {
@@ -340,6 +344,14 @@ impl ClusterConfig {
         }
         if self.backend == ClusterBackend::Quorium {
             self.validate_quorium()?;
+        }
+        if self.tls.is_some()
+            && self
+                .internal_url
+                .as_deref()
+                .is_some_and(|url| !url.starts_with("https://"))
+        {
+            anyhow::bail!("cluster.internal_url must use https:// when cluster.tls is set");
         }
         if self.bus_transport() == BusTransport::Mesh && self.internal_listen.is_none() {
             anyhow::bail!("cluster.bus = \"mesh\" requires cluster.internal_listen");
