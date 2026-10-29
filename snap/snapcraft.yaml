@@ -1,5 +1,5 @@
 name: harvest
-base: core24
+base: core26
 version: '0.10.0'
 summary: AI-powered code knowledge graph server and web interface
 description: |
@@ -119,19 +119,23 @@ parts:
       - cargo
       - libssl-dev
       - pkg-config
+      - musl-tools
     stage-packages:
       - libssl3
       - ca-certificates
+      - python3-minimal
     override-build: |
       rm -f rust-toolchain.toml
       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
       export PATH="$HOME/.cargo/bin:$PATH"
-      cargo build --release -p knowledge-server -p harvest-cli -p agent -p knowledge-harvester
+      rustup target add x86_64-unknown-linux-musl
+      cargo build --release -p knowledge-server -p harvest-cli -p knowledge-harvester
+      cargo build --release -p agent --target x86_64-unknown-linux-musl
       install -Dm755 target/release/knowledge-server \
         "$SNAPCRAFT_PART_INSTALL/bin/knowledge-server"
       install -Dm755 target/release/harvest \
         "$SNAPCRAFT_PART_INSTALL/bin/harvest"
-      install -Dm755 target/release/harvest-agent \
+      install -Dm755 target/x86_64-unknown-linux-musl/release/harvest-agent \
         "$SNAPCRAFT_PART_INSTALL/bin/harvest-agent"
       install -Dm755 target/release/knowledge-harvester \
         "$SNAPCRAFT_PART_INSTALL/bin/knowledge-harvester"
