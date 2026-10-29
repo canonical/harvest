@@ -10,6 +10,7 @@ use crate::cluster::membership::{
     Announcement, Member, Membership, MembershipError, MembershipHealth,
 };
 use crate::cluster::peer::{FORWARDED_HEADER, SECRET_HEADER};
+use crate::cluster::tls::ClusterTls;
 use crate::config::{ClusterBootstrap, ClusterConfig};
 
 const RAFT_HEARTBEAT: Duration = Duration::from_millis(250);
@@ -120,11 +121,19 @@ impl Membership for QuoriumMembership {
     }
 }
 
-pub fn peer_http_client(node_id: &str, secret: &str) -> Result<reqwest::Client> {
+pub fn peer_http_client(
+    node_id: &str,
+    secret: &str,
+    tls: Option<&ClusterTls>,
+) -> Result<reqwest::Client> {
     let mut headers = HeaderMap::new();
     headers.insert(SECRET_HEADER, HeaderValue::from_str(secret)?);
     headers.insert(FORWARDED_HEADER, HeaderValue::from_str(node_id)?);
-    Ok(reqwest::Client::builder()
+    let builder = match tls {
+        Some(tls) => tls.http_client(reqwest::Client::builder())?,
+        None => reqwest::Client::builder(),
+    };
+    Ok(builder
         .default_headers(headers)
         .connect_timeout(Duration::from_secs(2))
         .pool_idle_timeout(Duration::from_secs(30))
@@ -136,6 +145,7 @@ pub async fn start(
     config: &ClusterConfig,
     node_id: &str,
     advertise_url: &str,
+    tls: Option<&ClusterTls>,
 ) -> Result<Arc<Quorium>> {
     let secret = config.shared_secret.clone().unwrap_or_default();
     let data_dir = config
@@ -149,7 +159,7 @@ pub async fn start(
             .min(Duration::from_millis(config.election_timeout_ms / 3)),
         election_timeout: Duration::from_millis(config.election_timeout_ms),
         session_ttl: Duration::from_millis(config.node_timeout_ms),
-        http: peer_http_client(node_id, &secret)?,
+        http: peer_http_client(node_id, &secret, tls)?,
         admit_without_token: true,
         tuning: tuning(config),
     })

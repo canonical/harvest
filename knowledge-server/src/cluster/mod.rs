@@ -11,6 +11,7 @@ pub mod postgres;
 pub mod quorium;
 pub mod runtime;
 pub mod singleton;
+pub mod tls;
 
 use std::future::Future;
 use std::sync::Arc;

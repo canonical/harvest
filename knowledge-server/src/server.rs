@@ -291,7 +291,11 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     let bus = Arc::clone(&cluster.bus);
     let quorium = cluster.quorium.clone();
     let peers = match (cluster_config.effective_shared_secret(), internal_addr) {
-        (Some(secret), Some(_)) => Some(PeerClient::new(node.node_id(), secret)),
+        (Some(secret), Some(_)) => Some(PeerClient::secured(
+            node.node_id(),
+            secret,
+            cluster.tls.as_deref(),
+        )?),
         _ => None,
     };
     let live = ProjectLive::new(

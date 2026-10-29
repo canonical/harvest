@@ -24,6 +24,17 @@ enum Command {
     CheckConfig,
     SchemaVersion,
     RecoverCluster,
+    IssueClusterCertificate(IssueCertificateArgs),
+}
+
+#[derive(clap::Args)]
+struct IssueCertificateArgs {
+    #[arg(long)]
+    dir: PathBuf,
+    #[arg(long)]
+    name: String,
+    #[arg(long = "host", required = true)]
+    hosts: Vec<String>,
 }
 
 #[tokio::main]
@@ -33,9 +44,18 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let command = cli.command.unwrap_or(Command::Serve);
+    if let Command::IssueClusterCertificate(args) = &command {
+        let issued = knowledge_server::cluster::tls::issue(&args.dir, &args.name, &args.hosts)?;
+        println!("ca_cert = \"{}\"", issued.ca_cert.display());
+        println!("cert = \"{}\"", issued.cert.display());
+        println!("key = \"{}\"", issued.key.display());
+        return Ok(());
+    }
     let config = Config::from_file(&cli.config)?;
 
-    match cli.command.unwrap_or(Command::Serve) {
+    match command {
+        Command::IssueClusterCertificate(_) => Ok(()),
         Command::Serve => knowledge_server::server::run(config).await,
         Command::Migrate => {
             let version = knowledge_server::server::migrate(&config).await?;
