@@ -281,6 +281,35 @@ async fn join_token(http: &reqwest::Client, seed: &Node) -> String {
     response["token"].as_str().expect("join token").to_string()
 }
 
+fn expected_voters(servers: usize) -> usize {
+    let odd = if servers % 2 == 0 {
+        servers - 1
+    } else {
+        servers
+    };
+    odd.clamp(1, 5)
+}
+
+async fn wait_for_voters(http: &reqwest::Client, node: &Node, voters: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = cluster_status(http, node).await;
+        let promoted = status["quorium"]["servers"]
+            .as_array()
+            .map_or(0, |servers| {
+                servers.iter().filter(|s| s["voter"] == true).count()
+            });
+        if promoted >= voters {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "only {promoted} of {voters} voters after 30s: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn cluster_status(http: &reqwest::Client, node: &Node) -> Value {
     http.get(node.internal_url("/internal/cluster/status"))
         .header("x-harvest-cluster-secret", SECRET)
@@ -366,6 +395,7 @@ impl Cluster {
                     wait_ready(&http, &node).await;
                     nodes.push(node);
                 }
+                wait_for_voters(&http, &nodes[0], expected_voters(count)).await;
                 nodes
             }
         };
