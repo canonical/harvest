@@ -151,6 +151,7 @@ pub async fn start(
         session_ttl: Duration::from_millis(config.node_timeout_ms),
         http: peer_http_client(node_id, &secret)?,
         admit_without_token: true,
+        tuning: tuning(config),
     })
     .await
 }
@@ -165,6 +166,27 @@ fn join_token(config: &ClusterConfig) -> Result<JoinToken> {
             shared_secret: String::new(),
         }),
     }
+}
+
+fn tuning(config: &ClusterConfig) -> quorium::Tuning {
+    quorium::Tuning {
+        snapshot_logs: config.snapshot_logs,
+        demote_after: (config.replace_absent_voter_after_secs > 0)
+            .then(|| Duration::from_secs(config.replace_absent_voter_after_secs)),
+        ..quorium::Tuning::default()
+    }
+}
+
+pub async fn recover(config: &ClusterConfig) -> Result<std::path::PathBuf> {
+    if config.backend != crate::config::ClusterBackend::Quorium {
+        bail!("recovery only applies to cluster.backend = \"quorium\"");
+    }
+    let data_dir = config
+        .data_dir
+        .as_deref()
+        .context("cluster.data_dir is required by the quorium backend")?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    quorium::recovery::set_aside(data_dir, &stamp).await
 }
 
 pub async fn bootstrap(quorium: &Quorium, config: &ClusterConfig) -> Result<()> {

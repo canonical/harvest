@@ -208,6 +208,9 @@ fn default_election_timeout_ms() -> u64 {
 fn default_join_timeout_secs() -> u64 {
     60
 }
+fn default_snapshot_logs() -> u64 {
+    1_000
+}
 
 #[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -269,6 +272,10 @@ pub struct ClusterConfig {
     pub election_timeout_ms: u64,
     #[serde(default = "default_join_timeout_secs")]
     pub join_timeout_secs: u64,
+    #[serde(default = "default_snapshot_logs")]
+    pub snapshot_logs: u64,
+    #[serde(default)]
+    pub replace_absent_voter_after_secs: u64,
 }
 
 impl Default for ClusterConfig {
@@ -292,6 +299,8 @@ impl Default for ClusterConfig {
             accepted_secrets: Vec::new(),
             election_timeout_ms: default_election_timeout_ms(),
             join_timeout_secs: default_join_timeout_secs(),
+            snapshot_logs: default_snapshot_logs(),
+            replace_absent_voter_after_secs: 0,
         }
     }
 }
@@ -351,6 +360,15 @@ impl ClusterConfig {
         {
             anyhow::bail!(
                 "cluster.bootstrap = \"join\" requires cluster.join_token or cluster.join_addresses"
+            );
+        }
+        if self.snapshot_logs == 0 {
+            anyhow::bail!("cluster.snapshot_logs must be positive");
+        }
+        let replace_after = self.replace_absent_voter_after_secs.saturating_mul(1_000);
+        if replace_after > 0 && replace_after <= self.node_timeout_ms {
+            anyhow::bail!(
+                "cluster.replace_absent_voter_after_secs must be longer than cluster.node_timeout_ms"
             );
         }
         let election_worst_case = self
@@ -2182,6 +2200,16 @@ mod cluster_config_tests {
         assert!(cfg.validate().is_ok());
         cfg.cluster.join_token = None;
         cfg.cluster.join_addresses = vec!["http://10.0.0.10:8081".into()];
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn absent_voters_are_replaced_only_after_their_session_expired() {
+        let mut cfg = quorium_config();
+        assert_eq!(cfg.cluster.replace_absent_voter_after_secs, 0);
+        cfg.cluster.replace_absent_voter_after_secs = 3;
+        assert!(cfg.validate().is_err());
+        cfg.cluster.replace_absent_voter_after_secs = 600;
         assert!(cfg.validate().is_ok());
     }
 

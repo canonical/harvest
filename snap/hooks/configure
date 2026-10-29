@@ -38,6 +38,8 @@ CLUSTER_DATA_DIR=$(snapctl get cluster.data-dir)
 CLUSTER_HEARTBEAT_MS=$(snapctl get cluster.heartbeat-interval-ms)
 CLUSTER_NODE_TIMEOUT_MS=$(snapctl get cluster.node-timeout-ms)
 CLUSTER_ELECTION_MS=$(snapctl get cluster.election-timeout-ms)
+CLUSTER_SNAPSHOT_LOGS=$(snapctl get cluster.snapshot-logs)
+CLUSTER_REPLACE_VOTER_SECS=$(snapctl get cluster.replace-absent-voter-after-secs)
 
 AGENT_MAX_ITER=$(snapctl get agent.max-iterations)
 AGENT_COMPACT_CHARS=$(snapctl get agent.compaction-threshold-chars)
@@ -210,6 +212,8 @@ TOML
       [ -n "${CLUSTER_BOOTSTRAP:-}" ]      && echo "bootstrap = \"${CLUSTER_BOOTSTRAP}\""
       [ -n "${CLUSTER_JOIN_TOKEN:-}" ]     && echo "join_token = \"${CLUSTER_JOIN_TOKEN}\""
       [ -n "${CLUSTER_JOIN_ADDRESSES:-}" ] && echo "join_addresses = $(toml_list "$CLUSTER_JOIN_ADDRESSES")"
+      [ -n "${CLUSTER_SNAPSHOT_LOGS:-}" ] && echo "snapshot_logs = ${CLUSTER_SNAPSHOT_LOGS}"
+      [ -n "${CLUSTER_REPLACE_VOTER_SECS:-}" ] && echo "replace_absent_voter_after_secs = ${CLUSTER_REPLACE_VOTER_SECS}"
     else
       [ -n "${CLUSTER_HEARTBEAT_MS:-}" ]    && echo "heartbeat_interval_ms = ${CLUSTER_HEARTBEAT_MS}"
       [ -n "${CLUSTER_NODE_TIMEOUT_MS:-}" ] && echo "node_timeout_ms = ${CLUSTER_NODE_TIMEOUT_MS}"
