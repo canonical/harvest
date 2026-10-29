@@ -1,6 +1,7 @@
 pub mod bus;
 pub mod node;
 pub mod peer;
+pub mod runtime;
 pub mod singleton;
 
 use std::future::Future;
