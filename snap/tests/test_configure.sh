@@ -72,9 +72,14 @@ expect "standalone config never mentions neo4j" '! grep -qi neo4j $dir/server.to
 expect "standalone config is accepted by the server" '"$SERVER_BIN" --config $dir/server.toml check-config > /dev/null'
 expect "harvester config points at the same database" 'grep -q "postgres://h:p@db:5432/harvest" $dir/harvester.toml'
 
-dir=$(run_case cluster '{"database.url":"postgres://h:p@db1:5432,db2:5432/harvest?target_session_attrs=read-write","database.pool-size":"24","auth.jwt-secret":"s","llm.main.provider":"gemini","llm.main.api-key":"k","cluster.internal-listen":"0.0.0.0:8081","cluster.internal-url":"http://10.1.1.1:8081","cluster.shared-secret":"cs"}')
-expect "cluster keys are rendered" 'grep -q "internal_url = \"http://10.1.1.1:8081\"" $dir/server.toml && grep -q "pool_size = 24" $dir/server.toml'
+dir=$(run_case cluster '{"database.url":"postgres://h:p@db1:5432,db2:5432/harvest?target_session_attrs=read-write","database.pool-size":"24","auth.jwt-secret":"s","llm.main.provider":"gemini","llm.main.api-key":"k","cluster.backend":"postgres","cluster.internal-listen":"0.0.0.0:8081","cluster.internal-url":"http://10.1.1.1:8081","cluster.shared-secret":"cs"}')
+expect "cluster keys are rendered" 'grep -q "backend = \"postgres\"" $dir/server.toml && grep -q "internal_url = \"http://10.1.1.1:8081\"" $dir/server.toml && grep -q "pool_size = 24" $dir/server.toml'
 expect "cluster config is accepted by the server" '"$SERVER_BIN" --config $dir/server.toml check-config > /dev/null'
+
+dir=$(run_case user_key '{"database.url":"postgres://h:p@db:5432/harvest","auth.jwt-secret":"s","llm.primary.provider":"anthropic","llm.primary.user-provided-key":"true","llm.primary.api-key":""}')
+expect "user-provided provider renders block" 'grep -q "\[\[llm\]\]" $dir/server.toml && grep -q "user_provided_key = true" $dir/server.toml'
+expect "user-provided provider keeps empty api_key" 'grep -q "api_key      = \"\"" $dir/server.toml'
+expect "user-provided config is accepted by server" '"$SERVER_BIN" --config $dir/server.toml check-config > /dev/null'
 
 dir=$(run_case managed '{"config.managed":"true"}')
 echo 'sentinel' > "$dir/server.toml"
