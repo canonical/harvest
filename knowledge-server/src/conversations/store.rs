@@ -651,4 +651,50 @@ mod tests {
         assert!(context.summary.is_none());
         assert_eq!(texts(&context.recent), vec!["only"]);
     }
+
+    #[tokio::test]
+    #[ignore = "needs HARVEST_TEST_DATABASE_URL"]
+    async fn a_long_conversation_loads_only_what_follows_its_summary() {
+        let test_db = TestDb::new().await;
+        let (uid, cid) = user_conversation(&test_db.db).await;
+        let now = harvest_db::now_rfc3339();
+        for chunk in 0..20 {
+            let messages: Vec<Value> = (0..100)
+                .map(|i| message("user", &format!("{}{}", chunk * 100 + i, "x".repeat(400))))
+                .collect();
+            append(
+                &test_db.db,
+                Owner::User(&uid),
+                Guard::Unguarded,
+                &cid,
+                &messages,
+                &now,
+            )
+            .await
+            .unwrap();
+        }
+        crate::conversations::summary::store(
+            &test_db.db,
+            &cid,
+            &StoredSummary {
+                text: "s".into(),
+                upto: 1_990,
+            },
+        )
+        .await;
+        let mut samples = Vec::new();
+        for _ in 0..20 {
+            let started = std::time::Instant::now();
+            let context = load_context(&test_db.db, Owner::User(&uid), &cid)
+                .await
+                .unwrap();
+            samples.push(started.elapsed());
+            assert_eq!(context.recent.len(), 10);
+            assert_eq!(context.message_count, 2_000);
+        }
+        samples.sort();
+        let p95 = samples[18];
+        println!("context load over 2000 messages: p95 {p95:?}");
+        assert!(p95 < std::time::Duration::from_millis(30), "p95 {p95:?}");
+    }
 }
