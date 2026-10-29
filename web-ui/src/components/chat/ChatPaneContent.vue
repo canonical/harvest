@@ -169,6 +169,7 @@
 </template>
 
 <script setup>
+import { INTERRUPTED_MESSAGE } from '../../lib/conversation-thread.js';
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useAuthStore }    from '../../stores/auth.js';
 import { useLlmStore }     from '../../stores/llm.js';
@@ -316,7 +317,7 @@ function handleProjectEvent(event) {
         remoteLocked.value = false;
         lockedBy.value     = '';
         if (chat.loading) {
-          chat.setError('The response was interrupted because the server handling it went away. Please send your message again.');
+          chat.setError(INTERRUPTED_MESSAGE);
         }
       }
       break;
