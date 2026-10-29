@@ -1,18 +1,29 @@
 use std::collections::{hash_map::DefaultHasher, BTreeSet, HashMap};
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use crossterm::event::{self, Event as CEvent, KeyCode, KeyEventKind};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use crossterm::ExecutableCommand;
 use dialoguer::theme::ColorfulTheme;
 use dialoguer::{Confirm, FuzzySelect, Input, MultiSelect, Password, Select};
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
@@ -28,7 +39,648 @@ enum Commands {
     PrepareDbScript(PrepareDbScriptArgs),
     Status(StatusArgs),
     ShowPublicUrl(ShowPublicUrlArgs),
+    Llm(LlmArgs),
+    Identity(IdentityArgs),
+    Auth(AuthArgs),
+    Security(SecurityArgs),
+    Database(DatabaseArgs),
+    Server(ServerArgs),
+    Ui(UiArgs),
+    Agents(AgentsArgs),
+    Config(ConfigArgs),
     Cluster(ClusterArgs),
+}
+
+#[derive(Args, Clone, Default)]
+struct ApplyArgs {
+    #[arg(long, action = ArgAction::Set, default_value_t = true)]
+    apply_now: bool,
+    #[arg(long)]
+    no_restart: bool,
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Parser)]
+struct LlmArgs {
+    #[command(subcommand)]
+    command: LlmCommand,
+}
+
+#[derive(Subcommand)]
+enum LlmCommand {
+    Provider(LlmProviderArgs),
+}
+
+#[derive(Parser)]
+struct LlmProviderArgs {
+    #[command(subcommand)]
+    command: LlmProviderCommand,
+}
+
+#[derive(Subcommand)]
+enum LlmProviderCommand {
+    List(JsonArgs),
+    Show(LlmProviderShowArgs),
+    Add(LlmProviderUpsertArgs),
+    Update(LlmProviderUpdateArgs),
+    Remove(LlmProviderRemoveArgs),
+    Enable(LlmProviderEnableArgs),
+    Disable(LlmProviderEnableArgs),
+    SetPrimary(LlmProviderSetPrimaryArgs),
+    Reorder(LlmProviderReorderArgs),
+    Models(LlmProviderModelsArgs),
+    Key(LlmProviderKeyArgs),
+    DetectModels(LlmProviderDetectModelsArgs),
+}
+
+#[derive(Parser, Default)]
+struct JsonArgs {
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct LlmProviderShowArgs {
+    id: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, ValueEnum, Serialize, Deserialize)]
+enum ProviderKindArg {
+    Anthropic,
+    Gemini,
+    OpenAiCompatible,
+}
+
+impl ProviderKindArg {
+    fn to_provider_kind(self) -> ProviderKind {
+        match self {
+            ProviderKindArg::Anthropic => ProviderKind::Anthropic,
+            ProviderKindArg::Gemini => ProviderKind::Gemini,
+            ProviderKindArg::OpenAiCompatible => ProviderKind::OpenAiCompatible,
+        }
+    }
+}
+
+#[derive(Parser)]
+struct LlmProviderUpsertArgs {
+    #[arg(long)]
+    id: Option<String>,
+    #[arg(long, value_enum)]
+    provider: Option<ProviderKindArg>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    api_key: Option<String>,
+    #[arg(long)]
+    user_provided_key: bool,
+    #[arg(long)]
+    base_url: Option<String>,
+    #[arg(long)]
+    display_name: Option<String>,
+    #[arg(long)]
+    models: Option<String>,
+    #[arg(long)]
+    timeout_secs: Option<u32>,
+    #[arg(long)]
+    max_retries: Option<u32>,
+    #[arg(long)]
+    priority: Option<i32>,
+    #[arg(long)]
+    expose_to_ui: Option<bool>,
+    #[arg(long)]
+    enabled: Option<bool>,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct LlmProviderUpdateArgs {
+    id: String,
+    #[arg(long, value_enum)]
+    provider: Option<ProviderKindArg>,
+    #[arg(long)]
+    model: Option<String>,
+    #[arg(long)]
+    api_key: Option<String>,
+    #[arg(long)]
+    clear_api_key: bool,
+    #[arg(long)]
+    user_provided_key: Option<bool>,
+    #[arg(long)]
+    base_url: Option<String>,
+    #[arg(long)]
+    display_name: Option<String>,
+    #[arg(long)]
+    models: Option<String>,
+    #[arg(long)]
+    timeout_secs: Option<u32>,
+    #[arg(long)]
+    max_retries: Option<u32>,
+    #[arg(long)]
+    priority: Option<i32>,
+    #[arg(long)]
+    expose_to_ui: Option<bool>,
+    #[arg(long)]
+    enabled: Option<bool>,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct LlmProviderRemoveArgs {
+    id: String,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct LlmProviderEnableArgs {
+    id: String,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct LlmProviderSetPrimaryArgs {
+    id: String,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct LlmProviderReorderArgs {
+    #[arg(long)]
+    order: Option<String>,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct LlmProviderModelsArgs {
+    id: String,
+    #[command(subcommand)]
+    command: LlmProviderModelsCommand,
+}
+
+#[derive(Subcommand)]
+enum LlmProviderModelsCommand {
+    Set(LlmProviderModelsSetArgs),
+    Edit(LlmProviderModelsEditArgs),
+    Clear(LlmProviderModelsClearArgs),
+}
+
+#[derive(Parser)]
+struct LlmProviderModelsSetArgs {
+    models: String,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct LlmProviderModelsEditArgs {
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct LlmProviderModelsClearArgs {
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct LlmProviderKeyArgs {
+    id: String,
+    #[command(subcommand)]
+    command: LlmProviderKeyCommand,
+}
+
+#[derive(Subcommand)]
+enum LlmProviderKeyCommand {
+    Set(LlmProviderKeySetArgs),
+    Clear(LlmProviderKeyClearArgs),
+    UserProvided(LlmProviderKeyUserProvidedArgs),
+}
+
+#[derive(Parser)]
+struct LlmProviderKeySetArgs {
+    key: String,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct LlmProviderKeyClearArgs {
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct LlmProviderKeyUserProvidedArgs {
+    value: bool,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct LlmProviderDetectModelsArgs {
+    id: String,
+    #[arg(long)]
+    set_primary: bool,
+    #[arg(long)]
+    set_allowlist: bool,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct IdentityArgs {
+    #[command(subcommand)]
+    command: IdentityCommand,
+}
+
+#[derive(Subcommand)]
+enum IdentityCommand {
+    Provider(IdentityProviderArgs),
+}
+
+#[derive(Parser)]
+struct IdentityProviderArgs {
+    #[command(subcommand)]
+    command: IdentityProviderCommand,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, ValueEnum)]
+enum IdentityProviderKind {
+    Google,
+    Oidc,
+}
+
+#[derive(Subcommand)]
+enum IdentityProviderCommand {
+    List(JsonArgs),
+    Show(IdentityProviderShowArgs),
+    Enable(IdentityProviderUpdateArgs),
+    Disable(IdentityProviderDisableArgs),
+    Update(IdentityProviderUpdateArgs),
+}
+
+#[derive(Parser)]
+struct IdentityProviderShowArgs {
+    provider: IdentityProviderKind,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct IdentityProviderDisableArgs {
+    provider: IdentityProviderKind,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct IdentityProviderUpdateArgs {
+    provider: IdentityProviderKind,
+    #[arg(long)]
+    client_id: Option<String>,
+    #[arg(long)]
+    client_secret: Option<String>,
+    #[arg(long)]
+    redirect_uri: Option<String>,
+    #[arg(long)]
+    issuer_url: Option<String>,
+    #[arg(long)]
+    display_name: Option<String>,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct AuthArgs {
+    #[command(subcommand)]
+    command: AuthCommand,
+}
+
+#[derive(Subcommand)]
+enum AuthCommand {
+    LocalLogin(AuthLocalLoginArgs),
+    Jwt(AuthJwtArgs),
+    PublicUrl(AuthPublicUrlArgs),
+}
+
+#[derive(Parser)]
+struct AuthLocalLoginArgs {
+    #[command(subcommand)]
+    command: AuthLocalLoginCommand,
+}
+
+#[derive(Subcommand)]
+enum AuthLocalLoginCommand {
+    Get(JsonArgs),
+    Set(AuthLocalLoginSetArgs),
+}
+
+#[derive(Parser)]
+struct AuthLocalLoginSetArgs {
+    value: bool,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct AuthJwtArgs {
+    #[command(subcommand)]
+    command: AuthJwtCommand,
+}
+
+#[derive(Subcommand)]
+enum AuthJwtCommand {
+    Rotate(AuthJwtRotateArgs),
+}
+
+#[derive(Parser)]
+struct AuthJwtRotateArgs {
+    #[arg(long)]
+    auto: bool,
+    #[arg(long)]
+    value: Option<String>,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct AuthPublicUrlArgs {
+    #[command(subcommand)]
+    command: AuthPublicUrlCommand,
+}
+
+#[derive(Subcommand)]
+enum AuthPublicUrlCommand {
+    Get(JsonArgs),
+    Set(AuthPublicUrlSetArgs),
+}
+
+#[derive(Parser)]
+struct AuthPublicUrlSetArgs {
+    value: String,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct SecurityArgs {
+    #[command(subcommand)]
+    command: SecurityCommand,
+}
+
+#[derive(Subcommand)]
+enum SecurityCommand {
+    UserKeyEncryptionKey(SecurityUserKeyArgs),
+}
+
+#[derive(Parser)]
+struct SecurityUserKeyArgs {
+    #[command(subcommand)]
+    command: SecurityUserKeyCommand,
+}
+
+#[derive(Subcommand)]
+enum SecurityUserKeyCommand {
+    Set(SecurityUserKeySetArgs),
+    Rotate(SecurityUserKeyRotateArgs),
+    Clear(SecurityUserKeyClearArgs),
+}
+
+#[derive(Parser)]
+struct SecurityUserKeySetArgs {
+    value: String,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct SecurityUserKeyRotateArgs {
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct SecurityUserKeyClearArgs {
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct DatabaseArgs {
+    #[command(subcommand)]
+    command: DatabaseCommand,
+}
+
+#[derive(Subcommand)]
+enum DatabaseCommand {
+    Get(JsonArgs),
+    SetUrl(DatabaseSetUrlArgs),
+    SetPoolSize(DatabaseSetPoolSizeArgs),
+    SetCaFile(DatabaseSetCaFileArgs),
+}
+
+#[derive(Parser)]
+struct DatabaseSetUrlArgs {
+    value: String,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct DatabaseSetPoolSizeArgs {
+    value: u32,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct DatabaseSetCaFileArgs {
+    value: String,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct ServerArgs {
+    #[command(subcommand)]
+    command: ServerCommand,
+}
+
+#[derive(Subcommand)]
+enum ServerCommand {
+    Get(JsonArgs),
+    SetHost(ServerSetHostArgs),
+    SetPort(ServerSetPortArgs),
+}
+
+#[derive(Parser)]
+struct ServerSetHostArgs {
+    value: String,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct ServerSetPortArgs {
+    value: u16,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct UiArgs {
+    #[command(subcommand)]
+    command: UiCommand,
+}
+
+#[derive(Subcommand)]
+enum UiCommand {
+    Get(JsonArgs),
+    SetHost(UiSetHostArgs),
+    SetPort(UiSetPortArgs),
+    SetMode(UiSetModeArgs),
+    EnableDocs(UiEnableDocsArgs),
+}
+
+#[derive(Parser)]
+struct UiSetHostArgs {
+    value: String,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct UiSetPortArgs {
+    value: u16,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct UiSetModeArgs {
+    value: String,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct UiEnableDocsArgs {
+    value: bool,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct AgentsArgs {
+    #[command(subcommand)]
+    command: AgentsCommand,
+}
+
+#[derive(Subcommand)]
+enum AgentsCommand {
+    Get(JsonArgs),
+    SetPublicUrl(AgentsSetPublicUrlArgs),
+}
+
+#[derive(Parser)]
+struct AgentsSetPublicUrlArgs {
+    value: String,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    command: ConfigCommand,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    Get(ConfigGetArgs),
+    Set(ConfigSetArgs),
+    Unset(ConfigUnsetArgs),
+    List(ConfigListArgs),
+    Export(ConfigExportArgs),
+    Import(ConfigImportArgs),
+    Diff(ConfigDiffArgs),
+    Apply(ConfigApplyArgs),
+    Validate(ConfigValidateArgs),
+}
+
+#[derive(Parser)]
+struct ConfigGetArgs {
+    key: String,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct ConfigSetArgs {
+    entries: Vec<String>,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct ConfigUnsetArgs {
+    keys: Vec<String>,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct ConfigListArgs {
+    #[arg(long)]
+    prefix: Option<String>,
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, ValueEnum)]
+enum ExportFormat {
+    Json,
+    Yaml,
+}
+
+#[derive(Parser)]
+struct ConfigExportArgs {
+    #[arg(long, value_enum, default_value_t = ExportFormat::Json)]
+    format: ExportFormat,
+}
+
+#[derive(Parser)]
+struct ConfigImportArgs {
+    file: PathBuf,
+    #[command(flatten)]
+    apply: ApplyArgs,
+}
+
+#[derive(Parser)]
+struct ConfigDiffArgs {
+    #[arg(long)]
+    file: PathBuf,
+}
+
+#[derive(Parser)]
+struct ConfigApplyArgs {
+    #[arg(long)]
+    no_restart: bool,
+}
+
+#[derive(Parser, Default)]
+struct ConfigValidateArgs {
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Parser)]
@@ -42,6 +694,7 @@ enum ClusterCommand {
     Init(ClusterInitArgs),
     Join(ClusterJoinArgs),
     Preseed(ClusterPreseedArgs),
+    Backend(ClusterBackendArgs),
     Status(ClusterStatusArgs),
     List(ClusterListArgs),
     Remove(ClusterNodeArgs),
@@ -61,6 +714,8 @@ struct ClusterInitArgs {
     internal_url: Option<String>,
     #[arg(long)]
     shared_secret: Option<String>,
+    #[arg(long, value_enum)]
+    backend: Option<ClusterBackend>,
     #[arg(long)]
     dry_run: bool,
 }
@@ -77,6 +732,8 @@ struct ClusterJoinArgs {
     shared_secret: Option<String>,
     #[arg(long)]
     token: Option<String>,
+    #[arg(long, value_enum)]
+    backend: Option<ClusterBackend>,
     #[arg(long)]
     dry_run: bool,
 }
@@ -87,6 +744,26 @@ struct ClusterPreseedArgs {
     file: Option<PathBuf>,
     #[arg(long)]
     dry_run: bool,
+}
+
+#[derive(Parser)]
+struct ClusterBackendArgs {
+    #[command(subcommand)]
+    command: ClusterBackendCommand,
+}
+
+#[derive(Subcommand)]
+enum ClusterBackendCommand {
+    Get(JsonArgs),
+    Set(ClusterBackendSetArgs),
+}
+
+#[derive(Parser)]
+struct ClusterBackendSetArgs {
+    #[arg(value_enum)]
+    value: ClusterBackend,
+    #[command(flatten)]
+    apply: ApplyArgs,
 }
 
 #[derive(Parser, Default)]
@@ -252,14 +929,76 @@ struct ModelCacheEntry {
     models: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct LlmProviderConfig {
+    provider: String,
+    #[serde(rename = "api-key", default)]
+    api_key: String,
+    #[serde(rename = "user-provided-key", default)]
+    user_provided_key: bool,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    priority: i32,
+    #[serde(rename = "base-url", default)]
+    base_url: String,
+    #[serde(rename = "timeout-secs", default)]
+    timeout_secs: u32,
+    #[serde(rename = "max-retries", default)]
+    max_retries: u32,
+    #[serde(rename = "display-name", default)]
+    display_name: String,
+    #[serde(default)]
+    models: String,
+    #[serde(rename = "expose-to-ui", default = "default_true")]
+    expose_to_ui: bool,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Serialize)]
+struct ValidationReport {
+    ok: bool,
+    errors: Vec<String>,
+}
+
 #[derive(Serialize)]
 struct ClusterStatusReport {
     managed: bool,
+    backend: String,
     node_name: String,
     internal_listen: String,
     internal_url: String,
     healthy: bool,
     members: Vec<ClusterMember>,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+enum ClusterBackend {
+    Postgres,
+    Quorium,
+}
+
+impl ClusterBackend {
+    fn as_snap_value(self) -> &'static str {
+        match self {
+            ClusterBackend::Postgres => "postgres",
+            ClusterBackend::Quorium => "quorium",
+        }
+    }
+
+    fn from_snap_value(value: &str) -> Result<Self> {
+        match value.trim() {
+            "" | "postgres" => Ok(ClusterBackend::Postgres),
+            "quorium" => Ok(ClusterBackend::Quorium),
+            other => bail!("unsupported cluster backend: {other}"),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Debug)]
@@ -282,6 +1021,7 @@ struct ClusterPreseed {
 
 #[derive(Deserialize)]
 struct ClusterPreseedCluster {
+    backend: Option<ClusterBackend>,
     internal_listen: Option<String>,
     shared_secret: Option<String>,
 }
@@ -300,6 +1040,15 @@ async fn main() -> Result<()> {
         Commands::PrepareDbScript(args) => run_prepare_db_script(args),
         Commands::Status(args) => run_status(args).await,
         Commands::ShowPublicUrl(args) => run_show_public_url(args),
+        Commands::Llm(args) => run_llm(args).await,
+        Commands::Identity(args) => run_identity(args),
+        Commands::Auth(args) => run_auth(args),
+        Commands::Security(args) => run_security(args),
+        Commands::Database(args) => run_database(args),
+        Commands::Server(args) => run_server(args),
+        Commands::Ui(args) => run_ui(args),
+        Commands::Agents(args) => run_agents(args),
+        Commands::Config(args) => run_config(args),
         Commands::Cluster(args) => run_cluster(args).await,
     }
 }
@@ -315,35 +1064,17 @@ async fn run_init(args: InitArgs) -> Result<()> {
     let current_ui_port = non_empty_or(snapctl_get("ui.port")?, "3000");
     let current_ui_mode = non_empty_or(snapctl_get("ui.mode")?, "proxy");
     let current_allow_local = non_empty_or(snapctl_get("auth.allow-local-login")?, "true");
+    let current_user_key_encryption_key =
+        non_empty_or(snapctl_get("security.user-key-encryption-key")?, "");
 
     let database_url = if let Some(url) = args.from_db_url {
         validate_database_url(&url)?;
         url
+    } else if !current_db.trim().is_empty() {
+        validate_database_url(&current_db)?;
+        current_db
     } else {
-        let mut entries = vec!["Use existing database.url".to_string()];
-        entries.push("Use harvest prepare-db-script workflow".to_string());
-        let choice = Select::with_theme(&theme)
-            .with_prompt("Database setup")
-            .items(&entries)
-            .default(0)
-            .interact()?;
-
-        if choice == 0 {
-            ask_database_url(
-                &theme,
-                if current_db.is_empty() {
-                    None
-                } else {
-                    Some(current_db)
-                },
-            )?
-        } else {
-            println!("Run this command in another terminal and complete it:");
-            println!("  harvest prepare-db-script > /tmp/harvest-db-setup.sh");
-            println!("  sudo bash -x /tmp/harvest-db-setup.sh");
-            println!("Then paste the printed database.url value.");
-            ask_database_url(&theme, None)?
-        }
+        ask_database_url(&theme, None)?
     };
 
     let secret_mode_items = vec!["Generate random jwt secret", "Enter jwt secret manually"];
@@ -412,12 +1143,74 @@ async fn run_init(args: InitArgs) -> Result<()> {
         .with_prompt("Provider URL")
         .default(provider_kind.default_base_url().to_string())
         .interact_text()?;
-    let provider_api_key = Password::with_theme(&theme)
-        .with_prompt("Provider API key")
-        .with_confirmation("Confirm provider API key", "Keys do not match")
+    let use_user_provided_key = Confirm::with_theme(&theme)
+        .with_prompt("Use user-provided API keys?")
+        .default(false)
         .interact()?;
 
-    let detected_models = if let Some(cached) = load_model_cache(provider_kind, &provider_url)? {
+    let user_key_encryption_key = if use_user_provided_key {
+        println!();
+        println!("User-provided API keys are encrypted at rest.");
+        println!("An encryption key is required to store and decrypt those keys securely.");
+        println!();
+        let key_mode_items = vec![
+            "Generate random encryption key",
+            "Enter encryption key manually",
+        ];
+        let key_mode = Select::with_theme(&theme)
+            .with_prompt("security.user-key-encryption-key")
+            .items(&key_mode_items)
+            .default(0)
+            .interact()?;
+        if key_mode == 0 {
+            generate_hex_secret(64)
+        } else {
+            let default = if current_user_key_encryption_key.trim().is_empty() {
+                None
+            } else {
+                Some(current_user_key_encryption_key.clone())
+            };
+            let mut input = Password::with_theme(&theme)
+                .with_prompt("Encryption key")
+                .with_confirmation("Confirm encryption key", "Keys do not match");
+            if let Some(v) = default {
+                input = input.with_confirmation(
+                    "Confirm encryption key",
+                    "Keys do not match",
+                );
+                if Confirm::with_theme(&theme)
+                    .with_prompt("Reuse existing encryption key from config?")
+                    .default(true)
+                    .interact()?
+                {
+                    v
+                } else {
+                    input.interact()?
+                }
+            } else {
+                input.interact()?
+            }
+        }
+    } else {
+        String::new()
+    };
+
+    if use_user_provided_key {
+        validate_user_key_encryption_key(&user_key_encryption_key)?;
+    }
+
+    let provider_api_key = if use_user_provided_key {
+        String::new()
+    } else {
+        Password::with_theme(&theme)
+            .with_prompt("Provider API key")
+            .with_confirmation("Confirm provider API key", "Keys do not match")
+            .interact()?
+    };
+
+    let detected_models = if use_user_provided_key && provider_api_key.trim().is_empty() {
+        load_model_cache(provider_kind, &provider_url)?.unwrap_or_default()
+    } else if let Some(cached) = load_model_cache(provider_kind, &provider_url)? {
         cached
     } else {
         let spinner = ProgressBar::new_spinner();
@@ -476,7 +1269,7 @@ async fn run_init(args: InitArgs) -> Result<()> {
             None
         }
     } else {
-        select_models_multi(&theme, &detected_models, &model)?
+        select_models_allowlist(&theme, &detected_models, &model)?
     };
 
     let mut settings = vec![
@@ -496,6 +1289,10 @@ async fn run_init(args: InitArgs) -> Result<()> {
             "llm.primary.provider".to_string(),
             provider_kind.as_snap_value().to_string(),
         ),
+        (
+            "llm.primary.user-provided-key".to_string(),
+            use_user_provided_key.to_string(),
+        ),
         ("llm.primary.api-key".to_string(), provider_api_key),
         ("llm.primary.model".to_string(), model),
         ("llm.primary.priority".to_string(), "0".to_string()),
@@ -505,6 +1302,13 @@ async fn run_init(args: InitArgs) -> Result<()> {
         settings.push(("llm.primary.base-url".to_string(), provider_url));
     }
 
+    if use_user_provided_key {
+        settings.push((
+            "security.user-key-encryption-key".to_string(),
+            user_key_encryption_key,
+        ));
+    }
+
     if let Some(models) = models_allowlist {
         settings.push(("llm.primary.models".to_string(), models.join(",")));
     }
@@ -512,7 +1316,7 @@ async fn run_init(args: InitArgs) -> Result<()> {
     println!();
     println!("Pending configuration:");
     for (k, v) in &settings {
-        if k.contains("secret") || k.contains("api-key") {
+        if k.contains("secret") || k.contains("api-key") || k.contains("encryption-key") {
             println!("  {k}=<redacted>");
         } else {
             println!("  {k}={v}");
@@ -557,7 +1361,23 @@ fn ask_database_url(theme: &ColorfulTheme, default: Option<String>) -> Result<St
     Ok(url)
 }
 
-fn select_models_multi(
+fn select_models_allowlist(
+    theme: &ColorfulTheme,
+    all_models: &[String],
+    primary: &str,
+) -> Result<Option<Vec<String>>> {
+    if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+        if let Ok(selected) = pick_models_tui(all_models, primary) {
+            if selected.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(selected));
+        }
+    }
+    select_models_multi_fallback(theme, all_models, primary)
+}
+
+fn select_models_multi_fallback(
     theme: &ColorfulTheme,
     all_models: &[String],
     primary: &str,
@@ -626,6 +1446,221 @@ fn select_models_multi(
     } else {
         Ok(Some(selected.into_iter().collect()))
     }
+}
+
+fn pick_models_tui(all_models: &[String], primary: &str) -> Result<Vec<String>> {
+    struct State {
+        query: String,
+        selected: BTreeSet<String>,
+        ordered: Vec<String>,
+        list_state: ListState,
+        focus_search: bool,
+        last_input: std::time::Instant,
+        dirty: bool,
+    }
+
+    impl State {
+        fn new(all_models: &[String], primary: &str) -> Self {
+            let mut selected = BTreeSet::new();
+            selected.insert(primary.to_string());
+            let mut state = Self {
+                query: String::new(),
+                selected,
+                ordered: Vec::new(),
+                list_state: ListState::default(),
+                focus_search: true,
+                last_input: std::time::Instant::now(),
+                dirty: true,
+            };
+            state.rebuild(all_models);
+            state
+        }
+
+        fn rebuild(&mut self, all_models: &[String]) {
+            if !self.dirty {
+                return;
+            }
+            let q = self.query.to_lowercase();
+            let mut pinned: Vec<String> = self.selected.iter().cloned().collect();
+            pinned.sort();
+            let mut rest: Vec<String> = all_models
+                .iter()
+                .filter(|m| !self.selected.contains(*m))
+                .filter(|m| q.is_empty() || m.to_lowercase().contains(&q))
+                .cloned()
+                .collect();
+            rest.sort();
+            self.ordered = pinned;
+            self.ordered.extend(rest);
+            if self.ordered.is_empty() {
+                self.list_state.select(None);
+            } else {
+                let idx = self
+                    .list_state
+                    .selected()
+                    .unwrap_or(0)
+                    .min(self.ordered.len() - 1);
+                self.list_state.select(Some(idx));
+            }
+            self.dirty = false;
+        }
+    }
+
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    stdout.execute(EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    let mut state = State::new(all_models, primary);
+    let mut result: Option<Vec<String>> = None;
+
+    let loop_result = (|| -> Result<()> {
+        loop {
+            if state.last_input.elapsed() >= Duration::from_secs(2) {
+                state.rebuild(all_models);
+            }
+            terminal.draw(|f| {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(3),
+                        Constraint::Min(1),
+                        Constraint::Length(2),
+                    ])
+                    .split(f.area());
+                let search_title = if state.focus_search {
+                    "Search (focused)"
+                } else {
+                    "Search"
+                };
+                let search = Paragraph::new(state.query.clone())
+                    .block(Block::default().borders(Borders::ALL).title(search_title));
+                f.render_widget(search, chunks[0]);
+
+                let items: Vec<ListItem> = state
+                    .ordered
+                    .iter()
+                    .map(|m| {
+                        let is_primary = m == primary;
+                        let mark = if state.selected.contains(m) {
+                            "[x]"
+                        } else {
+                            "[ ]"
+                        };
+                        let suffix = if is_primary { " (primary)" } else { "" };
+                        ListItem::new(Line::from(format!("{mark} {m}{suffix}")))
+                    })
+                    .collect();
+                let list_title = if state.focus_search {
+                    "Models"
+                } else {
+                    "Models (focused)"
+                };
+                let list = List::new(items)
+                    .block(Block::default().borders(Borders::ALL).title(list_title))
+                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+                f.render_stateful_widget(list, chunks[1], &mut state.list_state);
+
+                let hint = Paragraph::new(
+                    "↑/↓ move focus/cursor, space toggle, enter confirm, esc cancel",
+                )
+                .block(Block::default().borders(Borders::ALL));
+                f.render_widget(hint, chunks[2]);
+            })?;
+
+            if !event::poll(Duration::from_millis(120))? {
+                continue;
+            }
+            let evt = event::read()?;
+            let CEvent::Key(key) = evt else {
+                continue;
+            };
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            state.last_input = std::time::Instant::now();
+            match key.code {
+                KeyCode::Esc => {
+                    result = Some(vec![primary.to_string()]);
+                    break;
+                }
+                KeyCode::Enter => {
+                    let mut out: Vec<String> = state.selected.iter().cloned().collect();
+                    out.sort();
+                    if !out.iter().any(|m| m == primary) {
+                        out.push(primary.to_string());
+                        out.sort();
+                    }
+                    result = Some(out);
+                    break;
+                }
+                KeyCode::Up => {
+                    if state.focus_search {
+                        continue;
+                    }
+                    if let Some(idx) = state.list_state.selected() {
+                        if idx == 0 {
+                            state.focus_search = true;
+                        } else {
+                            state.list_state.select(Some(idx - 1));
+                        }
+                    }
+                }
+                KeyCode::Down => {
+                    if state.focus_search {
+                        state.focus_search = false;
+                        if state.list_state.selected().is_none() && !state.ordered.is_empty() {
+                            state.list_state.select(Some(0));
+                        }
+                        continue;
+                    }
+                    if let Some(idx) = state.list_state.selected() {
+                        let next = (idx + 1).min(state.ordered.len().saturating_sub(1));
+                        state.list_state.select(Some(next));
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    if state.focus_search {
+                        continue;
+                    }
+                    if let Some(idx) = state.list_state.selected() {
+                        if let Some(name) = state.ordered.get(idx) {
+                            if name == primary {
+                                continue;
+                            }
+                            if state.selected.contains(name) {
+                                state.selected.remove(name);
+                            } else {
+                                state.selected.insert(name.clone());
+                            }
+                            state.dirty = true;
+                            state.rebuild(all_models);
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    if state.focus_search {
+                        state.query.pop();
+                        state.dirty = true;
+                    }
+                }
+                KeyCode::Char(c) => {
+                    if state.focus_search {
+                        state.query.push(c);
+                        state.dirty = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    })();
+
+    let _ = disable_raw_mode();
+    let _ = terminal.backend_mut().execute(LeaveAlternateScreen);
+    let _ = terminal.show_cursor();
+    loop_result?;
+    Ok(result.unwrap_or_else(|| vec![primary.to_string()]))
 }
 
 async fn detect_models(kind: ProviderKind, base_url: &str, api_key: &str) -> Result<Vec<String>> {
@@ -777,6 +1812,10 @@ BEGIN
   ELSE
     EXECUTE format('ALTER ROLE %I LOGIN PASSWORD %L', '$DB_USER', '$DB_PASSWORD');
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'harvest_graph_reader') THEN
+    CREATE ROLE harvest_graph_reader NOLOGIN;
+  END IF;
+  EXECUTE format('GRANT harvest_graph_reader TO %I', '$DB_USER');
 END \$\$;
 SQL"
 
@@ -785,6 +1824,13 @@ if ! $ROOT_CMD bash -c "${{PSQL}} -U postgres -d postgres -tAc \"SELECT 1 FROM p
 fi
 
 $ROOT_CMD bash -c "${{PSQL}} -v ON_ERROR_STOP=1 -U postgres -d postgres -c 'GRANT ALL PRIVILEGES ON DATABASE \"'$DB_NAME'\" TO \"'$DB_USER'\";'"
+
+$ROOT_CMD bash -c "${{PSQL}} -v ON_ERROR_STOP=1 -U postgres -d '$DB_NAME' <<'SQL'
+GRANT USAGE ON SCHEMA public TO harvest_graph_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO harvest_graph_reader;
+ALTER DEFAULT PRIVILEGES FOR ROLE \"$DB_USER\" IN SCHEMA public
+  GRANT SELECT ON TABLES TO harvest_graph_reader;
+SQL"
 
 DATABASE_URL="postgres://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME"
 echo
@@ -956,9 +2002,1155 @@ fn run_show_public_url(args: ShowPublicUrlArgs) -> Result<()> {
     Ok(())
 }
 
+async fn run_llm(args: LlmArgs) -> Result<()> {
+    require_snapctl()?;
+    match args.command {
+        LlmCommand::Provider(args) => run_llm_provider(args).await,
+    }
+}
+
+async fn run_llm_provider(args: LlmProviderArgs) -> Result<()> {
+    match args.command {
+        LlmProviderCommand::List(args) => {
+            let providers = load_llm_providers()?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&providers)?);
+                return Ok(());
+            }
+            for (id, cfg) in sort_providers(&providers) {
+                let key_mode = if cfg.user_provided_key {
+                    "user"
+                } else if cfg.api_key.trim().is_empty() {
+                    "missing"
+                } else {
+                    "stored"
+                };
+                println!(
+                    "{}\t{}\tmodel={}\tpriority={}\tenabled={}\tkey={}",
+                    id, cfg.provider, cfg.model, cfg.priority, cfg.enabled, key_mode
+                );
+            }
+            Ok(())
+        }
+        LlmProviderCommand::Show(args) => {
+            let providers = load_llm_providers()?;
+            let cfg = providers
+                .get(&args.id)
+                .ok_or_else(|| anyhow!("provider {} not found", args.id))?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(cfg)?);
+            } else {
+                println!("{}", serde_yaml::to_string(cfg)?);
+            }
+            Ok(())
+        }
+        LlmProviderCommand::Add(args) => run_llm_provider_add(args),
+        LlmProviderCommand::Update(args) => run_llm_provider_update(args),
+        LlmProviderCommand::Remove(args) => run_llm_provider_remove(args),
+        LlmProviderCommand::Enable(args) => {
+            run_llm_provider_enable_disable(args.id, true, args.apply)
+        }
+        LlmProviderCommand::Disable(args) => {
+            run_llm_provider_enable_disable(args.id, false, args.apply)
+        }
+        LlmProviderCommand::SetPrimary(args) => run_llm_provider_set_primary(args),
+        LlmProviderCommand::Reorder(args) => run_llm_provider_reorder(args),
+        LlmProviderCommand::Models(args) => run_llm_provider_models(args).await,
+        LlmProviderCommand::Key(args) => run_llm_provider_key(args),
+        LlmProviderCommand::DetectModels(args) => run_llm_provider_detect_models(args).await,
+    }
+}
+
+fn run_llm_provider_add(args: LlmProviderUpsertArgs) -> Result<()> {
+    let theme = ColorfulTheme::default();
+    let mut providers = load_llm_providers()?;
+    let id = match args.id {
+        Some(v) => v,
+        None => Input::with_theme(&theme)
+            .with_prompt("Provider id")
+            .interact_text()?,
+    };
+    validate_identifier("provider id", &id)?;
+    if providers.contains_key(&id) {
+        bail!("provider {} already exists", id);
+    }
+    let provider_kind = match args.provider {
+        Some(v) => v.to_provider_kind(),
+        None => {
+            let choices = vec!["anthropic", "gemini", "openai-compatible"];
+            let pick = Select::with_theme(&theme)
+                .with_prompt("Provider type")
+                .items(&choices)
+                .default(0)
+                .interact()?;
+            match pick {
+                0 => ProviderKind::Anthropic,
+                1 => ProviderKind::Gemini,
+                _ => ProviderKind::OpenAiCompatible,
+            }
+        }
+    };
+    let model = args
+        .model
+        .unwrap_or_else(|| provider_kind.default_model().to_string());
+    let mut user_provided_key = args.user_provided_key;
+    if !user_provided_key && args.api_key.is_none() {
+        user_provided_key = Confirm::with_theme(&theme)
+            .with_prompt("Use user-provided API keys?")
+            .default(false)
+            .interact()?;
+    }
+    let api_key = if user_provided_key {
+        String::new()
+    } else {
+        match args.api_key {
+            Some(v) => v,
+            None => Password::with_theme(&theme)
+                .with_prompt("Provider API key")
+                .with_confirmation("Confirm provider API key", "Keys do not match")
+                .interact()?,
+        }
+    };
+    let base_url = args
+        .base_url
+        .unwrap_or_else(|| provider_kind.default_base_url().to_string());
+    let cfg = LlmProviderConfig {
+        provider: provider_kind.as_snap_value().to_string(),
+        api_key,
+        user_provided_key,
+        model,
+        priority: args.priority.unwrap_or(next_priority(&providers)),
+        base_url,
+        timeout_secs: args.timeout_secs.unwrap_or(120),
+        max_retries: args.max_retries.unwrap_or(3),
+        display_name: args.display_name.unwrap_or_default(),
+        models: args.models.unwrap_or_default(),
+        expose_to_ui: args.expose_to_ui.unwrap_or(true),
+        enabled: args.enabled.unwrap_or(true),
+    };
+    providers.insert(id.clone(), cfg.clone());
+    validate_llm_providers(&providers)?;
+    let settings = llm_provider_to_settings(&id, &cfg);
+    mutate_settings(&settings, &args.apply)
+}
+
+fn run_llm_provider_update(args: LlmProviderUpdateArgs) -> Result<()> {
+    let mut providers = load_llm_providers()?;
+    let mut cfg = providers
+        .get(&args.id)
+        .cloned()
+        .ok_or_else(|| anyhow!("provider {} not found", args.id))?;
+    if let Some(provider) = args.provider {
+        cfg.provider = provider.to_provider_kind().as_snap_value().to_string();
+    }
+    if let Some(model) = args.model {
+        cfg.model = model;
+    }
+    if let Some(key) = args.api_key {
+        cfg.api_key = key;
+    }
+    if args.clear_api_key {
+        cfg.api_key = String::new();
+    }
+    if let Some(value) = args.user_provided_key {
+        cfg.user_provided_key = value;
+        if value {
+            cfg.api_key.clear();
+        }
+    }
+    if let Some(url) = args.base_url {
+        cfg.base_url = url;
+    }
+    if let Some(name) = args.display_name {
+        cfg.display_name = name;
+    }
+    if let Some(models) = args.models {
+        cfg.models = normalize_models_csv(&models);
+    }
+    if let Some(timeout) = args.timeout_secs {
+        cfg.timeout_secs = timeout;
+    }
+    if let Some(retries) = args.max_retries {
+        cfg.max_retries = retries;
+    }
+    if let Some(priority) = args.priority {
+        cfg.priority = priority;
+    }
+    if let Some(expose) = args.expose_to_ui {
+        cfg.expose_to_ui = expose;
+    }
+    if let Some(enabled) = args.enabled {
+        cfg.enabled = enabled;
+    }
+    providers.insert(args.id.clone(), cfg.clone());
+    validate_llm_providers(&providers)?;
+    let settings = llm_provider_to_settings(&args.id, &cfg);
+    mutate_settings(&settings, &args.apply)
+}
+
+fn run_llm_provider_remove(args: LlmProviderRemoveArgs) -> Result<()> {
+    let settings = llm_provider_clear_settings(&args.id);
+    mutate_settings(&settings, &args.apply)
+}
+
+fn run_llm_provider_enable_disable(id: String, enabled: bool, apply: ApplyArgs) -> Result<()> {
+    let settings = vec![(format!("llm.{id}.enabled"), enabled.to_string())];
+    mutate_settings(&settings, &apply)
+}
+
+fn run_llm_provider_set_primary(args: LlmProviderSetPrimaryArgs) -> Result<()> {
+    let mut providers = load_llm_providers()?;
+    if !providers.contains_key(&args.id) {
+        bail!("provider {} not found", args.id);
+    }
+    let mut ordered = sort_providers(&providers);
+    ordered.retain(|(id, _)| id != &args.id);
+    ordered.insert(
+        0,
+        (
+            args.id.clone(),
+            providers.get(&args.id).cloned().unwrap_or_default(),
+        ),
+    );
+    let mut settings = Vec::new();
+    for (idx, (id, cfg)) in ordered.into_iter().enumerate() {
+        let mut cfg = cfg;
+        cfg.priority = idx as i32;
+        providers.insert(id.clone(), cfg.clone());
+        settings.extend(llm_provider_to_settings(&id, &cfg));
+    }
+    validate_llm_providers(&providers)?;
+    mutate_settings(&settings, &args.apply)
+}
+
+fn run_llm_provider_reorder(args: LlmProviderReorderArgs) -> Result<()> {
+    let mut providers = load_llm_providers()?;
+    let ids = provider_order_input(&providers, args.order)?;
+    if ids.len() != providers.len() {
+        bail!("provider reorder must include every provider exactly once");
+    }
+    let mut settings = Vec::new();
+    for (idx, id) in ids.into_iter().enumerate() {
+        let mut cfg = providers
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| anyhow!("provider {} not found", id))?;
+        cfg.priority = idx as i32;
+        providers.insert(id.clone(), cfg.clone());
+        settings.extend(llm_provider_to_settings(&id, &cfg));
+    }
+    validate_llm_providers(&providers)?;
+    mutate_settings(&settings, &args.apply)
+}
+
+async fn run_llm_provider_models(args: LlmProviderModelsArgs) -> Result<()> {
+    match args.command {
+        LlmProviderModelsCommand::Set(set) => {
+            let csv = normalize_models_csv(&set.models);
+            let settings = vec![(format!("llm.{}.models", args.id), csv)];
+            mutate_settings(&settings, &set.apply)
+        }
+        LlmProviderModelsCommand::Edit(edit) => {
+            let providers = load_llm_providers()?;
+            let cfg = providers
+                .get(&args.id)
+                .ok_or_else(|| anyhow!("provider {} not found", args.id))?;
+            let kind = provider_kind_from_string(&cfg.provider)?;
+            let detected = if cfg.user_provided_key && cfg.api_key.trim().is_empty() {
+                load_model_cache(kind, &cfg.base_url)?.unwrap_or_default()
+            } else {
+                let live = detect_models(kind, &cfg.base_url, &cfg.api_key)
+                    .await
+                    .unwrap_or_default();
+                if !live.is_empty() {
+                    let _ = store_model_cache(kind, &cfg.base_url, &live);
+                }
+                if live.is_empty() {
+                    load_model_cache(kind, &cfg.base_url)?.unwrap_or_default()
+                } else {
+                    live
+                }
+            };
+            if detected.is_empty() {
+                bail!("no detected models available to edit");
+            }
+            let selected =
+                select_models_allowlist(&ColorfulTheme::default(), &detected, &cfg.model)?
+                    .unwrap_or_else(|| vec![cfg.model.clone()]);
+            let settings = vec![(format!("llm.{}.models", args.id), selected.join(","))];
+            mutate_settings(&settings, &edit.apply)
+        }
+        LlmProviderModelsCommand::Clear(clear) => {
+            let settings = vec![(format!("llm.{}.models", args.id), String::new())];
+            mutate_settings(&settings, &clear.apply)
+        }
+    }
+}
+
+fn run_llm_provider_key(args: LlmProviderKeyArgs) -> Result<()> {
+    match args.command {
+        LlmProviderKeyCommand::Set(set) => {
+            let settings = vec![
+                (format!("llm.{}.api-key", args.id), set.key),
+                (
+                    format!("llm.{}.user-provided-key", args.id),
+                    "false".to_string(),
+                ),
+            ];
+            mutate_settings(&settings, &set.apply)
+        }
+        LlmProviderKeyCommand::Clear(clear) => {
+            let settings = vec![(format!("llm.{}.api-key", args.id), String::new())];
+            mutate_settings(&settings, &clear.apply)
+        }
+        LlmProviderKeyCommand::UserProvided(v) => {
+            let mut settings = vec![(
+                format!("llm.{}.user-provided-key", args.id),
+                v.value.to_string(),
+            )];
+            if v.value {
+                settings.push((format!("llm.{}.api-key", args.id), String::new()));
+            }
+            mutate_settings(&settings, &v.apply)
+        }
+    }
+}
+
+async fn run_llm_provider_detect_models(args: LlmProviderDetectModelsArgs) -> Result<()> {
+    let providers = load_llm_providers()?;
+    let cfg = providers
+        .get(&args.id)
+        .cloned()
+        .ok_or_else(|| anyhow!("provider {} not found", args.id))?;
+    let kind = provider_kind_from_string(&cfg.provider)?;
+    let models = if cfg.user_provided_key && cfg.api_key.trim().is_empty() {
+        load_model_cache(kind, &cfg.base_url)?.unwrap_or_default()
+    } else {
+        let live = detect_models(kind, &cfg.base_url, &cfg.api_key)
+            .await
+            .unwrap_or_default();
+        if !live.is_empty() {
+            let _ = store_model_cache(kind, &cfg.base_url, &live);
+            live
+        } else {
+            load_model_cache(kind, &cfg.base_url)?.unwrap_or_default()
+        }
+    };
+    if models.is_empty() {
+        println!("no models found");
+        return Ok(());
+    }
+    println!("{}", serde_json::to_string_pretty(&models)?);
+    let mut settings = Vec::new();
+    if args.set_primary {
+        settings.push((format!("llm.{}.model", args.id), models[0].clone()));
+    }
+    if args.set_allowlist {
+        settings.push((format!("llm.{}.models", args.id), models.join(",")));
+    }
+    if settings.is_empty() {
+        return Ok(());
+    }
+    mutate_settings(&settings, &args.apply)
+}
+
+fn run_identity(args: IdentityArgs) -> Result<()> {
+    require_snapctl()?;
+    match args.command {
+        IdentityCommand::Provider(args) => run_identity_provider(args),
+    }
+}
+
+fn run_identity_provider(args: IdentityProviderArgs) -> Result<()> {
+    match args.command {
+        IdentityProviderCommand::List(json) => {
+            let google = identity_google_state()?;
+            let oidc = identity_oidc_state()?;
+            let payload = serde_json::json!({"google": google, "oidc": oidc});
+            if json.json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("google\tenabled={}", payload["google"]["enabled"]);
+                println!("oidc\tenabled={}", payload["oidc"]["enabled"]);
+            }
+            Ok(())
+        }
+        IdentityProviderCommand::Show(args) => {
+            let payload = match args.provider {
+                IdentityProviderKind::Google => identity_google_state()?,
+                IdentityProviderKind::Oidc => identity_oidc_state()?,
+            };
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{}", serde_yaml::to_string(&payload)?);
+            }
+            Ok(())
+        }
+        IdentityProviderCommand::Enable(args) => run_identity_provider_update(args, true),
+        IdentityProviderCommand::Disable(args) => run_identity_provider_disable(args),
+        IdentityProviderCommand::Update(args) => run_identity_provider_update(args, false),
+    }
+}
+
+fn run_identity_provider_disable(args: IdentityProviderDisableArgs) -> Result<()> {
+    let settings = match args.provider {
+        IdentityProviderKind::Google => vec![
+            ("auth.google.client-id".to_string(), String::new()),
+            ("auth.google.client-secret".to_string(), String::new()),
+            ("auth.google.redirect-uri".to_string(), String::new()),
+        ],
+        IdentityProviderKind::Oidc => vec![
+            ("auth.oidc.issuer-url".to_string(), String::new()),
+            ("auth.oidc.client-id".to_string(), String::new()),
+            ("auth.oidc.client-secret".to_string(), String::new()),
+            ("auth.oidc.redirect-uri".to_string(), String::new()),
+            ("auth.oidc.display-name".to_string(), String::new()),
+        ],
+    };
+    mutate_settings(&settings, &args.apply)
+}
+
+fn run_identity_provider_update(
+    args: IdentityProviderUpdateArgs,
+    force_validate: bool,
+) -> Result<()> {
+    let mut settings = Vec::new();
+    match args.provider {
+        IdentityProviderKind::Google => {
+            let client_id = args
+                .client_id
+                .clone()
+                .unwrap_or_else(|| snapctl_get("auth.google.client-id").unwrap_or_default());
+            let client_secret = args
+                .client_secret
+                .clone()
+                .unwrap_or_else(|| snapctl_get("auth.google.client-secret").unwrap_or_default());
+            let redirect_uri = args
+                .redirect_uri
+                .clone()
+                .unwrap_or_else(|| snapctl_get("auth.google.redirect-uri").unwrap_or_default());
+            if let Some(v) = args.client_id {
+                settings.push(("auth.google.client-id".to_string(), v));
+            }
+            if let Some(v) = args.client_secret {
+                settings.push(("auth.google.client-secret".to_string(), v));
+            }
+            if let Some(v) = args.redirect_uri {
+                settings.push(("auth.google.redirect-uri".to_string(), v));
+            }
+            if force_validate {
+                if client_id.trim().is_empty()
+                    || client_secret.trim().is_empty()
+                    || redirect_uri.trim().is_empty()
+                {
+                    bail!("google requires client-id, client-secret, redirect-uri");
+                }
+            }
+        }
+        IdentityProviderKind::Oidc => {
+            let issuer_url = args
+                .issuer_url
+                .clone()
+                .unwrap_or_else(|| snapctl_get("auth.oidc.issuer-url").unwrap_or_default());
+            let client_id = args
+                .client_id
+                .clone()
+                .unwrap_or_else(|| snapctl_get("auth.oidc.client-id").unwrap_or_default());
+            let client_secret = args
+                .client_secret
+                .clone()
+                .unwrap_or_else(|| snapctl_get("auth.oidc.client-secret").unwrap_or_default());
+            let redirect_uri = args
+                .redirect_uri
+                .clone()
+                .unwrap_or_else(|| snapctl_get("auth.oidc.redirect-uri").unwrap_or_default());
+            if let Some(v) = args.issuer_url {
+                settings.push(("auth.oidc.issuer-url".to_string(), v));
+            }
+            if let Some(v) = args.client_id {
+                settings.push(("auth.oidc.client-id".to_string(), v));
+            }
+            if let Some(v) = args.client_secret {
+                settings.push(("auth.oidc.client-secret".to_string(), v));
+            }
+            if let Some(v) = args.redirect_uri {
+                settings.push(("auth.oidc.redirect-uri".to_string(), v));
+            }
+            if let Some(v) = args.display_name {
+                settings.push(("auth.oidc.display-name".to_string(), v));
+            }
+            if force_validate {
+                if issuer_url.trim().is_empty()
+                    || client_id.trim().is_empty()
+                    || client_secret.trim().is_empty()
+                    || redirect_uri.trim().is_empty()
+                {
+                    bail!("oidc requires issuer-url, client-id, client-secret, redirect-uri");
+                }
+            }
+        }
+    }
+    if settings.is_empty() {
+        return Ok(());
+    }
+    mutate_settings(&settings, &args.apply)
+}
+
+fn run_auth(args: AuthArgs) -> Result<()> {
+    require_snapctl()?;
+    match args.command {
+        AuthCommand::LocalLogin(args) => match args.command {
+            AuthLocalLoginCommand::Get(json) => {
+                let value = snapctl_get("auth.allow-local-login")?;
+                if json.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({"value": value}))?
+                    );
+                } else {
+                    println!("{}", non_empty_or(value, "true"));
+                }
+                Ok(())
+            }
+            AuthLocalLoginCommand::Set(set) => mutate_settings(
+                &[("auth.allow-local-login".to_string(), set.value.to_string())],
+                &set.apply,
+            ),
+        },
+        AuthCommand::Jwt(args) => match args.command {
+            AuthJwtCommand::Rotate(rotate) => {
+                let value = if let Some(v) = rotate.value {
+                    v
+                } else if rotate.auto || rotate.value.is_none() {
+                    generate_secret(64)
+                } else {
+                    bail!("provide --auto or --value");
+                };
+                mutate_settings(&[("auth.jwt-secret".to_string(), value)], &rotate.apply)
+            }
+        },
+        AuthCommand::PublicUrl(args) => match args.command {
+            AuthPublicUrlCommand::Get(json) => {
+                let value = snapctl_get("auth.public-url")?;
+                if json.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({"value": value}))?
+                    );
+                } else {
+                    println!("{value}");
+                }
+                Ok(())
+            }
+            AuthPublicUrlCommand::Set(set) => {
+                mutate_settings(&[("auth.public-url".to_string(), set.value)], &set.apply)
+            }
+        },
+    }
+}
+
+fn run_security(args: SecurityArgs) -> Result<()> {
+    require_snapctl()?;
+    match args.command {
+        SecurityCommand::UserKeyEncryptionKey(args) => match args.command {
+            SecurityUserKeyCommand::Set(set) => {
+                validate_user_key_encryption_key(&set.value)?;
+                mutate_settings(
+                    &[("security.user-key-encryption-key".to_string(), set.value)],
+                    &set.apply,
+                )
+            }
+            SecurityUserKeyCommand::Rotate(rotate) => mutate_settings(
+                &[(
+                    "security.user-key-encryption-key".to_string(),
+                    generate_hex_secret(64),
+                )],
+                &rotate.apply,
+            ),
+            SecurityUserKeyCommand::Clear(clear) => {
+                let providers = load_llm_providers().unwrap_or_default();
+                if providers.values().any(|p| p.user_provided_key) {
+                    bail!("cannot clear encryption key while user-provided-key providers exist");
+                }
+                mutate_settings(
+                    &[(
+                        "security.user-key-encryption-key".to_string(),
+                        String::new(),
+                    )],
+                    &clear.apply,
+                )
+            }
+        },
+    }
+}
+
+fn run_database(args: DatabaseArgs) -> Result<()> {
+    require_snapctl()?;
+    match args.command {
+        DatabaseCommand::Get(json) => {
+            let payload = serde_json::json!({
+                "url": snapctl_get("database.url")?,
+                "pool_size": non_empty_or(snapctl_get("database.pool-size")?, "16"),
+                "ca_file": snapctl_get("database.ca-file")?,
+            });
+            if json.json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{}", serde_yaml::to_string(&payload)?);
+            }
+            Ok(())
+        }
+        DatabaseCommand::SetUrl(set) => {
+            validate_database_url(&set.value)?;
+            mutate_settings(&[("database.url".to_string(), set.value)], &set.apply)
+        }
+        DatabaseCommand::SetPoolSize(set) => mutate_settings(
+            &[("database.pool-size".to_string(), set.value.to_string())],
+            &set.apply,
+        ),
+        DatabaseCommand::SetCaFile(set) => {
+            mutate_settings(&[("database.ca-file".to_string(), set.value)], &set.apply)
+        }
+    }
+}
+
+fn run_server(args: ServerArgs) -> Result<()> {
+    require_snapctl()?;
+    match args.command {
+        ServerCommand::Get(json) => {
+            let payload = serde_json::json!({
+                "host": non_empty_or(snapctl_get("server.host")?, "127.0.0.1"),
+                "port": non_empty_or(snapctl_get("server.port")?, "8080"),
+            });
+            if json.json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{}", serde_yaml::to_string(&payload)?);
+            }
+            Ok(())
+        }
+        ServerCommand::SetHost(set) => {
+            mutate_settings(&[("server.host".to_string(), set.value)], &set.apply)
+        }
+        ServerCommand::SetPort(set) => mutate_settings(
+            &[("server.port".to_string(), set.value.to_string())],
+            &set.apply,
+        ),
+    }
+}
+
+fn run_ui(args: UiArgs) -> Result<()> {
+    require_snapctl()?;
+    match args.command {
+        UiCommand::Get(json) => {
+            let payload = serde_json::json!({
+                "host": non_empty_or(snapctl_get("ui.host")?, "127.0.0.1"),
+                "port": non_empty_or(snapctl_get("ui.port")?, "3000"),
+                "mode": non_empty_or(snapctl_get("ui.mode")?, "proxy"),
+                "enable_docs": non_empty_or(snapctl_get("ui.enable-docs")?, "false"),
+            });
+            if json.json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{}", serde_yaml::to_string(&payload)?);
+            }
+            Ok(())
+        }
+        UiCommand::SetHost(set) => {
+            mutate_settings(&[("ui.host".to_string(), set.value)], &set.apply)
+        }
+        UiCommand::SetPort(set) => mutate_settings(
+            &[("ui.port".to_string(), set.value.to_string())],
+            &set.apply,
+        ),
+        UiCommand::SetMode(set) => {
+            mutate_settings(&[("ui.mode".to_string(), set.value)], &set.apply)
+        }
+        UiCommand::EnableDocs(set) => mutate_settings(
+            &[("ui.enable-docs".to_string(), set.value.to_string())],
+            &set.apply,
+        ),
+    }
+}
+
+fn run_agents(args: AgentsArgs) -> Result<()> {
+    require_snapctl()?;
+    match args.command {
+        AgentsCommand::Get(json) => {
+            let payload = serde_json::json!({"public_url": snapctl_get("agents.public-url")?});
+            if json.json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{}", serde_yaml::to_string(&payload)?);
+            }
+            Ok(())
+        }
+        AgentsCommand::SetPublicUrl(set) => {
+            mutate_settings(&[("agents.public-url".to_string(), set.value)], &set.apply)
+        }
+    }
+}
+
+fn run_config(args: ConfigArgs) -> Result<()> {
+    require_snapctl()?;
+    match args.command {
+        ConfigCommand::Get(args) => {
+            let value = snapctl_get(&args.key)?;
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({args.key: value}))?
+                );
+            } else {
+                println!("{value}");
+            }
+            Ok(())
+        }
+        ConfigCommand::Set(args) => {
+            let mut settings = Vec::new();
+            for pair in args.entries {
+                let (k, v) = pair
+                    .split_once('=')
+                    .ok_or_else(|| anyhow!("entry must be key=value: {}", pair))?;
+                settings.push((k.to_string(), v.to_string()));
+            }
+            mutate_settings(&settings, &args.apply)
+        }
+        ConfigCommand::Unset(args) => {
+            let settings = args
+                .keys
+                .into_iter()
+                .map(|k| (k, String::new()))
+                .collect::<Vec<_>>();
+            mutate_settings(&settings, &args.apply)
+        }
+        ConfigCommand::List(args) => {
+            let map = load_snap_map(args.prefix.as_deref())?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&map)?);
+            } else {
+                for (k, v) in map {
+                    println!("{k}={v}");
+                }
+            }
+            Ok(())
+        }
+        ConfigCommand::Export(args) => {
+            let map = load_snap_map(None)?;
+            match args.format {
+                ExportFormat::Json => println!("{}", serde_json::to_string_pretty(&map)?),
+                ExportFormat::Yaml => println!("{}", serde_yaml::to_string(&map)?),
+            }
+            Ok(())
+        }
+        ConfigCommand::Import(args) => {
+            let content = std::fs::read_to_string(&args.file)?;
+            let map: HashMap<String, String> =
+                if args.file.extension().and_then(|e| e.to_str()) == Some("json") {
+                    serde_json::from_str(&content)?
+                } else {
+                    serde_yaml::from_str(&content)?
+                };
+            let settings = map.into_iter().collect::<Vec<_>>();
+            if args.apply.dry_run {
+                for (k, v) in settings {
+                    println!("{k}={v}");
+                }
+                return Ok(());
+            }
+            mutate_settings(&settings, &args.apply)
+        }
+        ConfigCommand::Diff(args) => {
+            let content = std::fs::read_to_string(&args.file)?;
+            let desired: HashMap<String, String> =
+                if args.file.extension().and_then(|e| e.to_str()) == Some("json") {
+                    serde_json::from_str(&content)?
+                } else {
+                    serde_yaml::from_str(&content)?
+                };
+            let current = load_snap_map(None)?;
+            let mut keys = BTreeSet::new();
+            for k in desired.keys() {
+                keys.insert(k.clone());
+            }
+            for k in current.keys() {
+                keys.insert(k.clone());
+            }
+            for key in keys {
+                let a = current.get(&key).cloned().unwrap_or_default();
+                let b = desired.get(&key).cloned().unwrap_or_default();
+                if a != b {
+                    println!("{}\n  current: {}\n  desired: {}", key, a, b);
+                }
+            }
+            Ok(())
+        }
+        ConfigCommand::Apply(args) => {
+            run_configure_hook()?;
+            if !args.no_restart {
+                let _ = run_snapctl(["restart", "harvest.server"]);
+                let _ = run_snapctl(["restart", "harvest.ui"]);
+                let _ = run_snapctl(["start", "--enable", "harvest.server"]);
+                let _ = run_snapctl(["start", "--enable", "harvest.ui"]);
+            }
+            Ok(())
+        }
+        ConfigCommand::Validate(args) => {
+            let providers = load_llm_providers().unwrap_or_default();
+            let mut errors = validate_llm_providers_collect(&providers);
+            if providers.values().any(|p| p.user_provided_key) {
+                let key = snapctl_get("security.user-key-encryption-key").unwrap_or_default();
+                if key.trim().is_empty() {
+                    errors.push("security.user-key-encryption-key is required when any provider uses user-provided-key=true".to_string());
+                } else if let Err(e) = validate_user_key_encryption_key(&key) {
+                    errors.push(e.to_string());
+                }
+            }
+            let report = ValidationReport {
+                ok: errors.is_empty(),
+                errors,
+            };
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if report.ok {
+                println!("ok");
+            } else {
+                for e in &report.errors {
+                    println!("error: {e}");
+                }
+            }
+            if report.ok {
+                Ok(())
+            } else {
+                bail!("validation failed")
+            }
+        }
+    }
+}
+
+fn mutate_settings(settings: &[(String, String)], apply: &ApplyArgs) -> Result<()> {
+    enforce_user_key_encryption_guard(settings)?;
+    if apply.dry_run {
+        for (k, v) in settings {
+            if k.contains("secret") || k.contains("api-key") {
+                println!("{k}=<redacted>");
+            } else {
+                println!("{k}={v}");
+            }
+        }
+        return Ok(());
+    }
+    if !running_as_root() {
+        bail!("this operation requires root inside the snap environment");
+    }
+    apply_snap_settings(settings)?;
+    if apply.apply_now {
+        run_configure_hook()?;
+        if !apply.no_restart {
+            let _ = run_snapctl(["restart", "harvest.server"]);
+            let _ = run_snapctl(["restart", "harvest.ui"]);
+            let _ = run_snapctl(["start", "--enable", "harvest.server"]);
+            let _ = run_snapctl(["start", "--enable", "harvest.ui"]);
+        }
+    }
+    Ok(())
+}
+
+fn enforce_user_key_encryption_guard(pending: &[(String, String)]) -> Result<()> {
+    let mut providers = load_llm_providers().unwrap_or_default();
+    for (k, v) in pending {
+        if let Some(rest) = k.strip_prefix("llm.") {
+            if let Some((id, field)) = rest.split_once('.') {
+                let cfg = providers.entry(id.to_string()).or_default();
+                match field {
+                    "user-provided-key" => {
+                        cfg.user_provided_key = v.trim().eq_ignore_ascii_case("true") || v == "1";
+                    }
+                    "api-key" => cfg.api_key = v.clone(),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut encryption_key = snapctl_get("security.user-key-encryption-key").unwrap_or_default();
+    for (k, v) in pending {
+        if k == "security.user-key-encryption-key" {
+            encryption_key = v.clone();
+        }
+    }
+    let uses_user_keys = providers.values().any(|p| p.user_provided_key);
+    if uses_user_keys && encryption_key.trim().is_empty() {
+        bail!(
+            "security.user-key-encryption-key is required when any provider has user-provided-key=true"
+        );
+    }
+    if uses_user_keys {
+        validate_user_key_encryption_key(&encryption_key)?;
+    }
+    Ok(())
+}
+
+fn load_llm_providers() -> Result<HashMap<String, LlmProviderConfig>> {
+    let raw = snapctl_get_json("llm")?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({"llm":{}}));
+    let node = value
+        .get("llm")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut out: HashMap<String, LlmProviderConfig> =
+        serde_json::from_value(node).unwrap_or_default();
+    for cfg in out.values_mut() {
+        if cfg.timeout_secs == 0 {
+            cfg.timeout_secs = 120;
+        }
+        if cfg.max_retries == 0 {
+            cfg.max_retries = 3;
+        }
+        if cfg.provider.is_empty() {
+            cfg.provider = "anthropic".to_string();
+        }
+    }
+    Ok(out)
+}
+
+fn sort_providers(
+    providers: &HashMap<String, LlmProviderConfig>,
+) -> Vec<(String, LlmProviderConfig)> {
+    let mut items: Vec<(String, LlmProviderConfig)> = providers
+        .iter()
+        .map(|(id, cfg)| (id.clone(), cfg.clone()))
+        .collect();
+    items.sort_by(|a, b| a.1.priority.cmp(&b.1.priority).then(a.0.cmp(&b.0)));
+    items
+}
+
+fn next_priority(providers: &HashMap<String, LlmProviderConfig>) -> i32 {
+    providers.values().map(|p| p.priority).max().unwrap_or(-1) + 1
+}
+
+fn llm_provider_to_settings(id: &str, cfg: &LlmProviderConfig) -> Vec<(String, String)> {
+    vec![
+        (format!("llm.{id}.provider"), cfg.provider.clone()),
+        (format!("llm.{id}.api-key"), cfg.api_key.clone()),
+        (
+            format!("llm.{id}.user-provided-key"),
+            cfg.user_provided_key.to_string(),
+        ),
+        (format!("llm.{id}.model"), cfg.model.clone()),
+        (format!("llm.{id}.priority"), cfg.priority.to_string()),
+        (format!("llm.{id}.base-url"), cfg.base_url.clone()),
+        (
+            format!("llm.{id}.timeout-secs"),
+            cfg.timeout_secs.to_string(),
+        ),
+        (format!("llm.{id}.max-retries"), cfg.max_retries.to_string()),
+        (format!("llm.{id}.display-name"), cfg.display_name.clone()),
+        (
+            format!("llm.{id}.models"),
+            normalize_models_csv(&cfg.models),
+        ),
+        (
+            format!("llm.{id}.expose-to-ui"),
+            cfg.expose_to_ui.to_string(),
+        ),
+        (format!("llm.{id}.enabled"), cfg.enabled.to_string()),
+    ]
+}
+
+fn llm_provider_clear_settings(id: &str) -> Vec<(String, String)> {
+    vec![
+        (format!("llm.{id}.provider"), String::new()),
+        (format!("llm.{id}.api-key"), String::new()),
+        (format!("llm.{id}.user-provided-key"), String::new()),
+        (format!("llm.{id}.model"), String::new()),
+        (format!("llm.{id}.priority"), String::new()),
+        (format!("llm.{id}.base-url"), String::new()),
+        (format!("llm.{id}.timeout-secs"), String::new()),
+        (format!("llm.{id}.max-retries"), String::new()),
+        (format!("llm.{id}.display-name"), String::new()),
+        (format!("llm.{id}.models"), String::new()),
+        (format!("llm.{id}.expose-to-ui"), String::new()),
+        (format!("llm.{id}.enabled"), String::new()),
+    ]
+}
+
+fn validate_llm_providers(providers: &HashMap<String, LlmProviderConfig>) -> Result<()> {
+    let errors = validate_llm_providers_collect(providers);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!(errors.join("; "))
+    }
+}
+
+fn validate_llm_providers_collect(providers: &HashMap<String, LlmProviderConfig>) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (id, cfg) in providers {
+        if cfg.provider.trim().is_empty() {
+            errors.push(format!("llm.{id}.provider is required"));
+        }
+        if !cfg.user_provided_key && cfg.api_key.trim().is_empty() {
+            errors.push(format!(
+                "llm.{id}.api-key is required when user-provided-key=false"
+            ));
+        }
+        if cfg.model.trim().is_empty() {
+            errors.push(format!("llm.{id}.model is required"));
+        }
+        let allow = parse_models_csv(&cfg.models);
+        if !allow.is_empty() && !allow.iter().any(|m| m == &cfg.model) {
+            errors.push(format!("llm.{id}.models must include llm.{id}.model"));
+        }
+    }
+    errors
+}
+
+fn parse_models_csv(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn normalize_models_csv(raw: &str) -> String {
+    parse_models_csv(raw).join(",")
+}
+
+fn provider_kind_from_string(value: &str) -> Result<ProviderKind> {
+    match value {
+        "anthropic" => Ok(ProviderKind::Anthropic),
+        "gemini" => Ok(ProviderKind::Gemini),
+        "openai-compatible" => Ok(ProviderKind::OpenAiCompatible),
+        _ => bail!("unsupported provider kind {}", value),
+    }
+}
+
+fn provider_order_input(
+    providers: &HashMap<String, LlmProviderConfig>,
+    order: Option<String>,
+) -> Result<Vec<String>> {
+    if let Some(value) = order {
+        let parsed = value
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        return Ok(parsed);
+    }
+    let default = sort_providers(providers)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>()
+        .join(",");
+    let value: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Provider order (comma-separated ids, first is primary)")
+        .default(default)
+        .interact_text()?;
+    Ok(value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn identity_google_state() -> Result<serde_json::Value> {
+    let client_id = snapctl_get("auth.google.client-id")?;
+    let client_secret = snapctl_get("auth.google.client-secret")?;
+    let redirect_uri = snapctl_get("auth.google.redirect-uri")?;
+    Ok(serde_json::json!({
+        "enabled": !client_id.is_empty() && !client_secret.is_empty() && !redirect_uri.is_empty(),
+        "client_id": client_id,
+        "client_secret": if client_secret.is_empty() { "" } else { "<redacted>" },
+        "redirect_uri": redirect_uri,
+    }))
+}
+
+fn identity_oidc_state() -> Result<serde_json::Value> {
+    let issuer_url = snapctl_get("auth.oidc.issuer-url")?;
+    let client_id = snapctl_get("auth.oidc.client-id")?;
+    let client_secret = snapctl_get("auth.oidc.client-secret")?;
+    let redirect_uri = snapctl_get("auth.oidc.redirect-uri")?;
+    let display_name = snapctl_get("auth.oidc.display-name")?;
+    Ok(serde_json::json!({
+        "enabled": !issuer_url.is_empty() && !client_id.is_empty() && !client_secret.is_empty() && !redirect_uri.is_empty(),
+        "issuer_url": issuer_url,
+        "client_id": client_id,
+        "client_secret": if client_secret.is_empty() { "" } else { "<redacted>" },
+        "redirect_uri": redirect_uri,
+        "display_name": display_name,
+    }))
+}
+
+fn load_snap_map(prefix: Option<&str>) -> Result<HashMap<String, String>> {
+    if let Some(p) = prefix {
+        return read_prefix_map(p);
+    }
+    let roots = [
+        "database", "server", "ui", "auth", "security", "agent", "agents", "cluster", "llm", "lxd",
+        "docs", "log", "config",
+    ];
+    let mut merged = HashMap::new();
+    for root in roots {
+        if let Ok(map) = read_prefix_map(root) {
+            merged.extend(map);
+        }
+    }
+    Ok(merged)
+}
+
+fn read_prefix_map(prefix: &str) -> Result<HashMap<String, String>> {
+    let raw = snapctl_get_json(prefix)?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+    let node = value
+        .get(prefix)
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let mut map = HashMap::new();
+    flatten_json(prefix, &node, &mut map);
+    Ok(map)
+}
+
+fn flatten_json(prefix: &str, value: &serde_json::Value, out: &mut HashMap<String, String>) {
+    match value {
+        serde_json::Value::Object(obj) => {
+            for (k, v) in obj {
+                let key = format!("{prefix}.{k}");
+                flatten_json(&key, v, out);
+            }
+        }
+        serde_json::Value::Null => {
+            out.insert(prefix.to_string(), String::new());
+        }
+        serde_json::Value::Bool(v) => {
+            out.insert(prefix.to_string(), v.to_string());
+        }
+        serde_json::Value::Number(v) => {
+            out.insert(prefix.to_string(), v.to_string());
+        }
+        serde_json::Value::String(v) => {
+            out.insert(prefix.to_string(), v.to_string());
+        }
+        serde_json::Value::Array(v) => {
+            let joined = v
+                .iter()
+                .filter_map(|x| x.as_str().map(ToOwned::to_owned))
+                .collect::<Vec<_>>()
+                .join(",");
+            out.insert(prefix.to_string(), joined);
+        }
+    }
+}
+
 async fn run_cluster(args: ClusterArgs) -> Result<()> {
     require_snapctl()?;
     match args.command {
+        ClusterCommand::Backend(args) => run_cluster_backend(args),
         ClusterCommand::Status(args) => run_cluster_status(args).await,
         ClusterCommand::List(args) => run_cluster_list(args),
         ClusterCommand::Token(args) => run_cluster_token(args),
@@ -989,6 +3181,7 @@ fn ensure_cluster_mutable() -> Result<()> {
 
 async fn run_cluster_status(args: ClusterStatusArgs) -> Result<()> {
     let managed = is_cluster_managed()?;
+    let backend = current_cluster_backend()?.as_snap_value().to_string();
     let node_name = snapctl_get("cluster.node-name")?;
     let internal_listen = non_empty_or(snapctl_get("cluster.internal-listen")?, "0.0.0.0:8081");
     let internal_url = snapctl_get("cluster.internal-url")?;
@@ -1001,6 +3194,7 @@ async fn run_cluster_status(args: ClusterStatusArgs) -> Result<()> {
     let members = parse_cluster_members(&snapctl_get("cluster.members")?);
     let report = ClusterStatusReport {
         managed,
+        backend,
         node_name,
         internal_listen,
         internal_url,
@@ -1012,10 +3206,34 @@ async fn run_cluster_status(args: ClusterStatusArgs) -> Result<()> {
         return Ok(());
     }
     println!(
-        "managed={} healthy={} node={} internal_url={}",
-        report.managed, report.healthy, report.node_name, report.internal_url
+        "managed={} backend={} healthy={} node={} internal_url={}",
+        report.managed, report.backend, report.healthy, report.node_name, report.internal_url
     );
     Ok(())
+}
+
+fn run_cluster_backend(args: ClusterBackendArgs) -> Result<()> {
+    match args.command {
+        ClusterBackendCommand::Get(json) => {
+            let value = current_cluster_backend()?.as_snap_value().to_string();
+            if json.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({"value": value}))?
+                );
+            } else {
+                println!("{value}");
+            }
+            Ok(())
+        }
+        ClusterBackendCommand::Set(set) => mutate_settings(
+            &[(
+                "cluster.backend".to_string(),
+                set.value.as_snap_value().to_string(),
+            )],
+            &set.apply,
+        ),
+    }
 }
 
 fn run_cluster_list(args: ClusterListArgs) -> Result<()> {
@@ -1104,6 +3322,7 @@ fn run_cluster_init(args: ClusterInitArgs) -> Result<()> {
     let node_name = cluster_node_name(args.node_name)?;
     let internal_url = cluster_internal_url(args.internal_url)?;
     let shared_secret = args.shared_secret.unwrap_or_else(|| generate_secret(48));
+    let backend = resolve_cluster_backend(args.backend)?;
     let mut settings = vec![
         ("cluster.node-name".to_string(), node_name.clone()),
         (
@@ -1112,7 +3331,10 @@ fn run_cluster_init(args: ClusterInitArgs) -> Result<()> {
         ),
         ("cluster.internal-url".to_string(), internal_url.clone()),
         ("cluster.shared-secret".to_string(), shared_secret),
-        ("cluster.backend".to_string(), "quorium".to_string()),
+        (
+            "cluster.backend".to_string(),
+            backend.as_snap_value().to_string(),
+        ),
         (
             "cluster.members".to_string(),
             format_cluster_members(&[ClusterMember {
@@ -1154,6 +3376,7 @@ fn run_cluster_join(args: ClusterJoinArgs) -> Result<()> {
     }
     let node_name = cluster_node_name(args.node_name)?;
     let internal_url = cluster_internal_url(args.internal_url)?;
+    let backend = resolve_cluster_backend(args.backend)?;
     let secret = match args.shared_secret {
         Some(value) => value,
         None => snapctl_get("cluster.shared-secret")?,
@@ -1177,7 +3400,10 @@ fn run_cluster_join(args: ClusterJoinArgs) -> Result<()> {
         ),
         ("cluster.internal-url".to_string(), internal_url),
         ("cluster.shared-secret".to_string(), secret),
-        ("cluster.backend".to_string(), "quorium".to_string()),
+        (
+            "cluster.backend".to_string(),
+            backend.as_snap_value().to_string(),
+        ),
         (
             "cluster.members".to_string(),
             format_cluster_members(&members),
@@ -1221,6 +3447,7 @@ fn run_cluster_preseed(args: ClusterPreseedArgs) -> Result<()> {
     let shared_secret = cluster
         .shared_secret
         .ok_or_else(|| anyhow!("preseed cluster.shared_secret is required"))?;
+    let backend = resolve_cluster_backend(cluster.backend)?;
     let internal_listen = cluster
         .internal_listen
         .unwrap_or_else(|| "0.0.0.0:8081".to_string());
@@ -1233,7 +3460,10 @@ fn run_cluster_preseed(args: ClusterPreseedArgs) -> Result<()> {
         ("cluster.internal-listen".to_string(), internal_listen),
         ("cluster.internal-url".to_string(), internal_url),
         ("cluster.shared-secret".to_string(), shared_secret),
-        ("cluster.backend".to_string(), "quorium".to_string()),
+        (
+            "cluster.backend".to_string(),
+            backend.as_snap_value().to_string(),
+        ),
         (
             "cluster.members".to_string(),
             format_cluster_members(&members),
@@ -1280,6 +3510,18 @@ fn run_cluster_rotate_secrets() -> Result<()> {
     apply_snap_settings(&[("cluster.shared-secret".to_string(), generate_secret(48))])?;
     run_configure_hook()?;
     Ok(())
+}
+
+fn current_cluster_backend() -> Result<ClusterBackend> {
+    let raw = snapctl_get("cluster.backend").unwrap_or_default();
+    ClusterBackend::from_snap_value(&raw)
+}
+
+fn resolve_cluster_backend(value: Option<ClusterBackend>) -> Result<ClusterBackend> {
+    match value {
+        Some(v) => Ok(v),
+        None => current_cluster_backend(),
+    }
 }
 
 fn cluster_node_name(input: Option<String>) -> Result<String> {
@@ -1400,6 +3642,17 @@ fn snapctl_get(key: &str) -> Result<String> {
         .with_context(|| format!("running snapctl get {key}"))?;
     if !output.status.success() {
         return Ok(String::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn snapctl_get_json(key: &str) -> Result<String> {
+    let output = Command::new("snapctl")
+        .args(["get", "-d", key])
+        .output()
+        .with_context(|| format!("running snapctl get -d {key}"))?;
+    if !output.status.success() {
+        return Ok("{}".to_string());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -1565,6 +3818,25 @@ fn generate_secret(len: usize) -> String {
         .collect()
 }
 
+fn generate_hex_secret(len: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut rng = thread_rng();
+    (0..len)
+        .map(|_| HEX[rng.gen_range(0..16)] as char)
+        .collect()
+}
+
+fn validate_user_key_encryption_key(value: &str) -> Result<()> {
+    let trimmed = value.trim();
+    if trimmed.len() != 64 {
+        bail!("security.user-key-encryption-key must be exactly 64 hex characters");
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("security.user-key-encryption-key must contain only hex characters");
+    }
+    Ok(())
+}
+
 fn model_cache_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("SNAP_COMMON") {
         return PathBuf::from(dir).join("model-cache");
@@ -1728,6 +4000,7 @@ mod tests {
     fn cluster_preseed_parses_yaml() {
         let yaml = r#"
 cluster:
+  backend: "postgres"
   internal_listen: "0.0.0.0:8081"
   shared_secret: "secret"
 systems:
@@ -1744,5 +4017,22 @@ systems:
             "secret"
         );
         assert_eq!(parsed.systems.expect("systems").len(), 1);
+    }
+
+    #[test]
+    fn cluster_backend_parsing_defaults_to_postgres() {
+        assert_eq!(
+            ClusterBackend::from_snap_value("").expect("default backend"),
+            ClusterBackend::Postgres
+        );
+        assert_eq!(
+            ClusterBackend::from_snap_value("postgres").expect("postgres backend"),
+            ClusterBackend::Postgres
+        );
+        assert_eq!(
+            ClusterBackend::from_snap_value("quorium").expect("quorium backend"),
+            ClusterBackend::Quorium
+        );
+        assert!(ClusterBackend::from_snap_value("invalid").is_err());
     }
 }
