@@ -59,6 +59,7 @@ pub async fn ready(State(state): State<Arc<HealthState>>) -> Response {
             "bus":      readiness.bus,
             "draining": readiness.draining,
             "cluster":  readiness.cluster,
+            "bus_degraded": state.live.bus().degraded_peers(),
             "membership": state.live.node().membership_health(),
             "node_id":  state.live.node().node_id(),
         })),

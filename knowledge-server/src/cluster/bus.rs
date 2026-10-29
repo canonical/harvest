@@ -22,6 +22,7 @@ pub struct ClusterBus {
     topics: Mutex<HashMap<String, broadcast::Sender<String>>>,
     outbox: Option<mpsc::UnboundedSender<(String, String)>>,
     listening: watch::Sender<bool>,
+    degraded: Mutex<Vec<String>>,
     listener_pid: Mutex<Option<i32>>,
 }
 
@@ -33,6 +34,7 @@ impl ClusterBus {
             topics: Mutex::new(HashMap::new()),
             outbox: None,
             listening,
+            degraded: Mutex::new(Vec::new()),
             listener_pid: Mutex::new(None),
         })
     }
@@ -45,6 +47,7 @@ impl ClusterBus {
             topics: Mutex::new(HashMap::new()),
             outbox: Some(sender),
             listening,
+            degraded: Mutex::new(Vec::new()),
             listener_pid: Mutex::new(None),
         });
         (bus, receiver)
@@ -80,6 +83,17 @@ impl ClusterBus {
     pub async fn wait_until_listening(&self) {
         let mut receiver = self.listening.subscribe();
         let _ = receiver.wait_for(|listening| *listening).await;
+    }
+
+    pub fn degraded_peers(&self) -> Vec<String> {
+        self.degraded
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn set_degraded(&self, peers: Vec<String>) {
+        *self.degraded.lock().unwrap_or_else(|e| e.into_inner()) = peers;
     }
 
     pub fn is_listening(&self) -> bool {
