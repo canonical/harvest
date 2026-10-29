@@ -1,5 +1,7 @@
 pub mod admin;
 pub mod bus;
+#[cfg(test)]
+mod conformance;
 pub mod membership;
 pub mod mesh;
 pub mod node;
