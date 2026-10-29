@@ -1107,6 +1107,17 @@ impl Agent {
         let goal = latest_user_text(&messages);
         let mut scored_tool_results: HashSet<u64> = HashSet::new();
         loop {
+            if event_sender.is_closed() {
+                tracing::info!(iterations, "turn abandoned: stopping the agent loop");
+                return abandoned(
+                    &messages,
+                    accumulated_answer,
+                    iterations,
+                    last_provider_used,
+                    total_usage,
+                    llm_call_count,
+                );
+            }
             if iterations >= max_iterations {
                 tracing::warn!(
                     max_iterations,
@@ -1606,6 +1617,16 @@ impl Agent {
                             })
                             .await;
                     }
+                    if event_sender.is_closed() {
+                        return abandoned(
+                            &messages,
+                            accumulated_answer,
+                            iterations,
+                            last_provider_used,
+                            total_usage,
+                            llm_call_count,
+                        );
+                    }
                     let results = join_all(
                         automatic
                             .iter()
@@ -1697,6 +1718,16 @@ impl Agent {
                     .await;
             }
 
+            if event_sender.is_closed() {
+                return abandoned(
+                    &messages,
+                    accumulated_answer,
+                    iterations,
+                    last_provider_used,
+                    total_usage,
+                    llm_call_count,
+                );
+            }
             let results = join_all(
                 tool_calls
                     .iter()
@@ -2843,6 +2874,26 @@ impl Agent {
             );
         }
         fitted.messages
+    }
+}
+
+fn abandoned(
+    messages: &[Message],
+    text: String,
+    iterations: usize,
+    provider_used: Option<UsedProvider>,
+    usage: Usage,
+    llm_call_count: usize,
+) -> LoopOutcome {
+    LoopOutcome::Finished {
+        text,
+        iterations,
+        provider_used,
+        hit_max_iterations: false,
+        usage,
+        llm_call_count,
+        tool_calls_executed: tally_count(messages),
+        tool_errors: tally_errors(messages),
     }
 }
 
@@ -7212,4 +7263,42 @@ fn extract_code_blocks(text: &str) -> Vec<(String, (usize, usize))> {
         pos = fence_end;
     }
     blocks
+}
+
+#[cfg(test)]
+mod abandonment_tests {
+    use super::*;
+    use crate::config::MockBehaviour;
+    use crate::llm::mock::MockProvider;
+    use crate::llm::types::ProviderMeta;
+
+    #[tokio::test]
+    async fn an_abandoned_turn_never_reaches_the_model() {
+        let llm = Arc::new(MockProvider::new(
+            "mock".into(),
+            MockBehaviour {
+                first_token_ms: 10_000,
+                ..MockBehaviour::default()
+            },
+            ProviderMeta {
+                id: "mock".into(),
+                expose_to_ui: true,
+                name: None,
+                models: None,
+                user_provided_key: false,
+            },
+        ));
+        let agent = Agent::new(llm, vec![], 5);
+        let (events, receiver) = mpsc::channel(8);
+        drop(receiver);
+        let finished = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            agent.query_streaming("hello there, how are you", &[], &[], None, events),
+        )
+        .await;
+        assert!(
+            finished.is_ok(),
+            "the agent stops instead of waiting for the model"
+        );
+    }
 }
