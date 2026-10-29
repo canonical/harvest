@@ -1,3 +1,5 @@
+use axum::http::HeaderMap;
+use axum::response::Response;
 use axum::{
     extract::{Extension, State},
     http::{HeaderName, HeaderValue, StatusCode},
@@ -21,6 +23,7 @@ use crate::conversations::store::ConversationContext;
 use crate::conversations::summary::spawn_refresh as spawn_summary_refresh;
 use crate::conversations::title_generation::maybe_regenerate_title;
 use crate::llm::types::ProviderSelection;
+use crate::turns::idempotency;
 
 #[derive(Deserialize)]
 pub struct QueryRequest {
@@ -46,8 +49,38 @@ fn selection_from(req: &QueryRequest) -> Option<ProviderSelection> {
 pub async fn handle_query(
     Extension(user): Extension<Claims>,
     State(qs): State<Arc<QueryState>>,
+    headers: HeaderMap,
     Json(req): Json<QueryRequest>,
 ) -> impl IntoResponse {
+    let claim = match claim_request(&qs, &user.sub, &headers, req.conversation_id.as_deref()).await
+    {
+        Ok(claim) => claim,
+        Err(refusal) => return refusal.into_response(),
+    };
+    let response = answer_query(user, qs.clone(), req).await;
+    if let (Some(claim), Some(db)) = (claim, &qs.db) {
+        if !response.status().is_success() {
+            claim.release(db).await;
+        }
+    }
+    response
+}
+
+async fn claim_request(
+    qs: &QueryState,
+    user_id: &str,
+    headers: &HeaderMap,
+    conv_id: Option<&str>,
+) -> Result<Option<idempotency::Claim>, idempotency::Refusal> {
+    match &qs.db {
+        Some(db) => idempotency::claim(db, user_id, headers, conv_id.unwrap_or_default())
+            .await
+            .map(Some),
+        None => Ok(None),
+    }
+}
+
+async fn answer_query(user: Claims, qs: Arc<QueryState>, req: QueryRequest) -> Response {
     let _permit = match qs.admission.admit(&user.sub) {
         Ok(permit) => permit,
         Err(rejection) => return rejection.into_response(),
@@ -149,11 +182,22 @@ pub async fn handle_query(
 pub async fn handle_query_stream(
     Extension(user): Extension<Claims>,
     State(qs): State<Arc<QueryState>>,
+    headers: HeaderMap,
     Json(req): Json<QueryRequest>,
 ) -> impl IntoResponse {
+    let claim = match claim_request(&qs, &user.sub, &headers, req.conversation_id.as_deref()).await
+    {
+        Ok(claim) => claim,
+        Err(refusal) => return refusal.into_response(),
+    };
     let permit = match qs.admission.admit(&user.sub) {
         Ok(permit) => permit,
-        Err(rejection) => return rejection.into_response(),
+        Err(rejection) => {
+            if let (Some(claim), Some(db)) = (claim, &qs.db) {
+                claim.release(db).await;
+            }
+            return rejection.into_response();
+        }
     };
     let selection = selection_from(&req);
     let attachments = req.attachments.unwrap_or_default();

@@ -15,6 +15,7 @@ use crate::auth::api_keys::ApiKeyPrincipal;
 use crate::conversations::handlers::{append_user_turn, load_conversation_context};
 use crate::conversations::store::{self, Owner, Page};
 use crate::llm::types::ProviderSelection;
+use crate::turns::idempotency;
 
 type ApiError = (StatusCode, Json<Value>);
 
@@ -252,7 +253,27 @@ async fn history_for_thread(
 pub async fn chat(
     Extension(principal): Extension<ApiKeyPrincipal>,
     State(state): State<Arc<ExternalChatState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<ChatRequest>,
+) -> Result<axum::response::Response, ApiError> {
+    let db = state
+        .qs
+        .db
+        .as_ref()
+        .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let thread = req.tracking_id.clone().unwrap_or_default();
+    let claim = idempotency::claim(db, &principal.user_id, &headers, &thread).await?;
+    let answered = answer_chat(principal, Arc::clone(&state), req).await;
+    if answered.is_err() {
+        claim.release(db).await;
+    }
+    answered.map(IntoResponse::into_response)
+}
+
+async fn answer_chat(
+    principal: ApiKeyPrincipal,
+    state: Arc<ExternalChatState>,
+    req: ChatRequest,
 ) -> Result<impl IntoResponse, ApiError> {
     if req.message.trim().is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "message must not be empty"));
