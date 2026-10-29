@@ -18,7 +18,7 @@ use crate::api::{AppState, GraphCache, ProjectAgentBuilder};
 use crate::auth::{api_keys::ApiKeyStore, user_keys::UserKeyStore};
 use crate::cluster::bus::ClusterBus;
 use crate::cluster::node::ClusterNode;
-use crate::cluster::peer::{require_secret, PeerClient};
+use crate::cluster::peer::require_secret;
 use crate::cluster::{singleton, Shutdown};
 use crate::config::Config;
 use crate::crypto::Crypto;
@@ -241,23 +241,13 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         cluster_config.internal_url = Some(cluster_config.advertised_url(addr)?);
     }
 
-    let node = ClusterNode::new(Arc::clone(&db), &cluster_config);
-    node.heartbeat()
-        .await
-        .context("registering this node in the cluster")?;
-    node.spawn_heartbeat();
-    tracing::info!(node_id = node.node_id(), internal_url = ?node.internal_url(), "cluster node registered");
-
     let shutdown = Shutdown::new();
-    let bus = ClusterBus::start(
-        Arc::clone(&db),
-        node.node_id().to_string(),
-        Duration::from_millis(cluster_config.bus_batch_window_ms),
-    );
-    let peers = match (&cluster_config.shared_secret, internal_addr) {
-        (Some(secret), Some(_)) => Some(PeerClient::new(node.node_id(), secret.clone())),
-        _ => None,
-    };
+    let runtime = crate::cluster::runtime::start(Arc::clone(&db), &cluster_config, internal_addr)
+        .await
+        .context("starting cluster runtime")?;
+    let node = runtime.node;
+    let bus = runtime.bus;
+    let peers = runtime.peers;
     let live = ProjectLive::new(
         Arc::clone(&db),
         Arc::clone(&node),

@@ -203,8 +203,21 @@ fn default_drain_timeout_secs() -> u64 {
     120
 }
 
+fn default_cluster_backend() -> ClusterBackend {
+    ClusterBackend::Postgres
+}
+
+#[derive(Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClusterBackend {
+    Postgres,
+    Quorium,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct ClusterConfig {
+    #[serde(default = "default_cluster_backend")]
+    pub backend: ClusterBackend,
     #[serde(default)]
     pub node_name: Option<String>,
     #[serde(default)]
@@ -228,6 +241,7 @@ pub struct ClusterConfig {
 impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
+            backend: default_cluster_backend(),
             node_name: None,
             internal_listen: None,
             internal_url: None,
@@ -253,6 +267,11 @@ impl ClusterConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if matches!(self.backend, ClusterBackend::Quorium) {
+            anyhow::bail!(
+                "cluster.backend=quorium is configured but Quorium runtime is not implemented"
+            );
+        }
         if self.internal_listen.is_some()
             && self.shared_secret.as_deref().map_or(true, str::is_empty)
         {
@@ -1814,6 +1833,7 @@ mod cluster_config_tests {
     #[test]
     fn cluster_defaults_without_a_cluster_section() {
         let cfg = with_sections("");
+        assert_eq!(cfg.cluster.backend, ClusterBackend::Postgres);
         assert!(cfg.cluster.internal_listen.is_none());
         assert!(cfg.cluster.internal_url.is_none());
         assert!(cfg.cluster.shared_secret.is_none());
@@ -1833,6 +1853,7 @@ mod cluster_config_tests {
             [database]
             url = "postgres://harvest:pw@localhost:5432/harvest"
             [cluster]
+            backend = "postgres"
             node_name = "harvest-server-0"
             internal_listen = "0.0.0.0:8081"
             internal_url = "http://10.0.0.11:8081"
@@ -1851,6 +1872,7 @@ mod cluster_config_tests {
         "#,
         )
         .unwrap();
+        assert_eq!(cfg.cluster.backend, ClusterBackend::Postgres);
         assert_eq!(cfg.cluster.node_name.as_deref(), Some("harvest-server-0"));
         assert_eq!(cfg.cluster.internal_listen.as_deref(), Some("0.0.0.0:8081"));
         assert_eq!(
@@ -1873,6 +1895,13 @@ mod cluster_config_tests {
         assert!(cfg.validate().is_err());
         cfg.cluster.shared_secret = Some("s".into());
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn cluster_validation_rejects_quorium_backend() {
+        let mut cfg = with_sections("");
+        cfg.cluster.backend = ClusterBackend::Quorium;
+        assert!(cfg.validate().is_err());
     }
 
     #[test]
