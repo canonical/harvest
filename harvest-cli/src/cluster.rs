@@ -345,9 +345,43 @@ fn rotate_secrets(args: RotateArgs) -> Result<()> {
     apply(settings, false)
 }
 
+#[derive(Clone)]
+struct TlsIdentity {
+    ca: Vec<u8>,
+    identity: Vec<u8>,
+}
+
+impl TlsIdentity {
+    fn from_snap() -> Result<Option<Self>> {
+        let ca = snapctl_get("cluster.tls-ca")?;
+        let cert = snapctl_get("cluster.tls-cert")?;
+        let key = snapctl_get("cluster.tls-key")?;
+        if ca.is_empty() || cert.is_empty() || key.is_empty() {
+            return Ok(None);
+        }
+        let read = |path: &str| {
+            std::fs::read(path).with_context(|| format!("reading {path}"))
+        };
+        let mut identity = read(&cert)?;
+        identity.extend_from_slice(&read(&key)?);
+        Ok(Some(Self {
+            ca: read(&ca)?,
+            identity,
+        }))
+    }
+
+    fn apply(&self, builder: reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder> {
+        Ok(builder
+            .add_root_certificate(reqwest::Certificate::from_pem(&self.ca)?)
+            .identity(reqwest::Identity::from_pem(&self.identity)?)
+            .tls_built_in_root_certs(false))
+    }
+}
+
 struct Admin {
     base: String,
     secret: String,
+    tls: Option<TlsIdentity>,
     http: reqwest::Client,
 }
 
@@ -364,19 +398,25 @@ impl Admin {
             s if !s.is_empty() => s,
             _ => token_shared_secret(&snapctl_get("cluster.join-token")?)?,
         };
-        Self::at(
-            &format!("http://{}:{port}", to_local_probe_host(host)),
-            secret,
-        )
+        let tls = TlsIdentity::from_snap()?;
+        let base = match &tls {
+            Some(_) => snapctl_get("cluster.internal-url")?,
+            None => format!("http://{}:{port}", to_local_probe_host(host)),
+        };
+        Self::at(&base, secret, tls)
     }
 
-    fn at(base: &str, secret: String) -> Result<Self> {
+    fn at(base: &str, secret: String, tls: Option<TlsIdentity>) -> Result<Self> {
+        let builder = reqwest::Client::builder().timeout(Duration::from_secs(15));
+        let builder = match &tls {
+            Some(tls) => tls.apply(builder)?,
+            None => builder,
+        };
         Ok(Self {
             base: base.trim_end_matches('/').to_string(),
             secret,
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
-                .build()?,
+            tls,
+            http: builder.build()?,
         })
     }
 
@@ -519,7 +559,7 @@ async fn set_evacuated(args: TargetArgs, evacuated: bool) -> Result<()> {
     let member = find_member(&members, &args.target)
         .ok_or_else(|| anyhow!("no live cluster member matches {}", args.target))?;
     let url = member["internal_url"].as_str().unwrap_or_default();
-    let remote = Admin::at(url, local.secret.clone())?;
+    let remote = Admin::at(url, local.secret.clone(), local.tls.clone())?;
     let path = if evacuated {
         "/internal/cluster/evacuate"
     } else {
