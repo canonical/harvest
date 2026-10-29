@@ -1651,6 +1651,9 @@ pub async fn resume_confirm_action(
         return Err(err(StatusCode::CONFLICT, "chat is locked"));
     }
     state.live.hold_permit(&conv_id, permit).await;
+    if let Err(e) = state.live.mark_continuation(&conv_id, &turn_id).await {
+        tracing::warn!(error = %e, conv_id, "could not mark the resumed turn");
+    }
     state
         .broadcast(
             &project_id,
