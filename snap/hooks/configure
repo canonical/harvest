@@ -28,6 +28,7 @@ CLUSTER_INTERNAL_LISTEN=$(snapctl get cluster.internal-listen)
 CLUSTER_INTERNAL_URL=$(snapctl get cluster.internal-url)
 CLUSTER_SHARED_SECRET=$(snapctl get cluster.shared-secret)
 CLUSTER_NODE_NAME=$(snapctl get cluster.node-name)
+CLUSTER_BACKEND=$(snapctl get cluster.backend)
 
 AGENT_MAX_ITER=$(snapctl get agent.max-iterations)
 AGENT_COMPACT_CHARS=$(snapctl get agent.compaction-threshold-chars)
@@ -65,6 +66,7 @@ LXD_PROFILE=$(snapctl get lxd.profile)
 : "${SERVER_HOST:=127.0.0.1}"
 : "${SERVER_PORT:=8080}"
 : "${DATABASE_POOL_SIZE:=16}"
+: "${CLUSTER_BACKEND:=postgres}"
 : "${AGENT_MAX_ITER:=20}"
 : "${AGENT_COMPACT_CHARS:=40000}"
 : "${AGENT_COMPACT_KEEP:=6}"
@@ -117,8 +119,12 @@ found = 0
 for name, cfg in sorted(providers.items(), key=sort_key):
     if not isinstance(cfg, dict):
         continue
+    enabled = str(cfg.get("enabled", "true")).strip().lower() not in ("false", "0", "no", "")
+    if not enabled:
+        continue
     api_key = cfg.get("api-key", "")
-    if not api_key:
+    user_provided_key = str(cfg.get("user-provided-key", "false")).strip().lower() in ("true", "1", "yes", "on")
+    if not api_key and not user_provided_key:
         continue
     provider     = cfg.get("provider", "anthropic")
     model        = cfg.get("model", "") or DEFAULTS.get(provider, "")
@@ -134,6 +140,7 @@ for name, cfg in sorted(providers.items(), key=sort_key):
     print("[[llm]]")
     print("provider     = \"%s\"" % provider)
     print("api_key      = \"%s\"" % api_key)
+    print("user_provided_key = %s" % ("true" if user_provided_key else "false"))
     if model:
         print("model        = \"%s\"" % model)
     print("timeout_secs = %s" % timeout)
@@ -173,6 +180,7 @@ TOML
     cat << TOML
 
 [cluster]
+backend = "${CLUSTER_BACKEND}"
 internal_listen = "${CLUSTER_INTERNAL_LISTEN}"
 TOML
     [ -n "${CLUSTER_INTERNAL_URL:-}" ]  && echo "internal_url = \"${CLUSTER_INTERNAL_URL}\""
