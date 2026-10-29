@@ -94,8 +94,12 @@ python3 -c 'import sys, tomllib; c = tomllib.load(open(sys.argv[1], "rb")); c["d
   || die "$CONFIG is not valid TOML or has no [database] url"
 
 if [ "$BUILD" -eq 1 ]; then
-  echo "==> Building knowledge-server and harvest-agent (release) as $RUN_USER"
-  as_user bash -c 'cd "$1" && cargo build --release -p knowledge-server -p agent' _ "$REPO_ROOT"
+  if ! command -v musl-gcc >/dev/null 2>&1; then
+    die "musl-gcc not found; install musl-tools (apt install musl-tools)"
+  fi
+
+  echo "==> Building knowledge-server (release) and portable harvest-agent (musl) as $RUN_USER"
+  as_user bash -c 'cd "$1" && rustup target add x86_64-unknown-linux-musl && cargo build --release -p knowledge-server && cargo build --release -p agent --target x86_64-unknown-linux-musl' _ "$REPO_ROOT"
   echo "==> Building web UI as $RUN_USER"
   as_user bash -c 'cd "$1/web-ui" && npm ci && npm run build' _ "$REPO_ROOT"
 fi
