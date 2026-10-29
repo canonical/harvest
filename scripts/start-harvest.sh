@@ -3,7 +3,8 @@
 # over the built web-ui/dist, proxying API routes to the backend).
 #
 # Expects prebuilt artifacts — run scripts/install-systemd-service.sh, or:
-#   cargo build --release -p knowledge-server -p agent
+#   cargo build --release -p knowledge-server
+#   rustup target add x86_64-unknown-linux-musl && cargo build --release -p agent --target x86_64-unknown-linux-musl
 #   (cd web-ui && npm ci && npm run build)
 #
 # Usage: scripts/start-harvest.sh --config /path/to/server.toml

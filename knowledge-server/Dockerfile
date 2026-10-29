@@ -11,7 +11,7 @@ WORKDIR /build
 # builds OpenSSL from source, and its Configure/Makefile need core Perl
 # modules (FindBin.pm) and make, neither of which rust:slim-bookworm ships.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends cmake pkg-config libssl-dev perl make \
+ && apt-get install -y --no-install-recommends cmake pkg-config libssl-dev perl make musl-tools \
  && rm -rf /var/lib/apt/lists/*
 
 # Workspace manifests first — lets Docker cache the (slow) dep-compilation
@@ -39,8 +39,9 @@ RUN mkdir -p knowledge-server/src knowledge-harvester/src agent/src \
                                   knowledge-harvester/src/main.rs \
                                   agent/src/main.rs > /dev/null
 
-RUN cargo build --release -p knowledge-server \
- && cargo build --release -p agent
+RUN rustup target add x86_64-unknown-linux-musl \
+ && cargo build --release -p knowledge-server \
+ && cargo build --release -p agent --target x86_64-unknown-linux-musl
 
 # Replace stubs with real source — only user code is recompiled from here.
 RUN rm -f knowledge-server/src/lib.rs knowledge-server/src/main.rs \
@@ -55,7 +56,7 @@ RUN touch knowledge-server/src/lib.rs knowledge-server/src/main.rs \
            knowledge-harvester/src/lib.rs knowledge-harvester/src/main.rs \
            agent/src/main.rs \
  && cargo build --release -p knowledge-server \
- && cargo build --release -p agent
+ && cargo build --release -p agent --target x86_64-unknown-linux-musl
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM ubuntu:26.04
@@ -69,7 +70,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/knowledge-server /usr/local/bin/knowledge-server
-COPY --from=builder /build/target/release/harvest-agent    /usr/local/bin/harvest-agent
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/harvest-agent /usr/local/bin/harvest-agent
 COPY knowledge-server/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

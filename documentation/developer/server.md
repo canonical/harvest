@@ -234,7 +234,7 @@ enable_docs = false              # default; set true to show the Document tab
 
 # Optional: serve the harvest-agent binary and generate install scripts
 [agents]
-binary_path = "/usr/local/bin/harvest-agent"    # path to the compiled agent binary
+binary_path = "/usr/local/bin/harvest-agent"    # path to the compiled agent binary (ship a static musl build so installs work across Ubuntu series)
 public_url  = "https://harvest.example.com"     # used in generated install scripts
 
 # Optional: let Harvest provision and manage agents on an LXD cluster
