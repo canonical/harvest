@@ -47,6 +47,10 @@ soft — members, their sessions, join token digests — so it never carries con
   committed. A new leader grants every session a full TTL before it expires anyone.
 * Liveness reads used for lock take-over are linearizable (ReadIndex on the leader).
 
+`postgres` stays the default until the HA lab (`HA_BACKEND=quorium`) and the charm HA suite
+(`--cluster-backend=quorium`) pass on real machines; both run in-process today
+(`cluster_e2e` covers both backends) but not yet across hosts.
+
 ### Configuration
 
 ```toml
