@@ -23,6 +23,7 @@ enum Command {
     Migrate,
     CheckConfig,
     SchemaVersion,
+    RecoverCluster,
 }
 
 #[tokio::main]
@@ -43,6 +44,12 @@ async fn main() -> Result<()> {
         }
         Command::CheckConfig => {
             println!("ok");
+            Ok(())
+        }
+        Command::RecoverCluster => {
+            let backup = knowledge_server::cluster::quorium::recover(&config.cluster).await?;
+            println!("moved the quorium state to {}", backup.display());
+            println!("start this server with cluster.bootstrap = \"init\", then join the other servers with new tokens");
             Ok(())
         }
         Command::SchemaVersion => {
