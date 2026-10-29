@@ -83,6 +83,10 @@ expect "join addresses become a list" 'grep -q "join_addresses = \[\"http://10.1
 expect "accepted secrets become a list" 'grep -q "accepted_secrets = \[\"old\"\]" $dir/server.toml'
 expect "quorium config is accepted by the server" '"$SERVER_BIN" --config $dir/server.toml check-config > /dev/null'
 
+dir=$(run_case tls '{"database.url":"postgres://h:p@db:5432/harvest","auth.jwt-secret":"s","llm.main.provider":"gemini","llm.main.api-key":"k","cluster.internal-listen":"0.0.0.0:8081","cluster.internal-url":"https://10.1.1.2:8081","cluster.shared-secret":"cs","cluster.tls-ca":"/certs/ca.pem","cluster.tls-cert":"/certs/node.pem","cluster.tls-key":"/certs/node-key.pem"}')
+expect "tls paths are rendered" 'grep -q "\[cluster.tls\]" $dir/server.toml && grep -q "cert = \"/certs/node.pem\"" $dir/server.toml'
+expect "tls config is accepted by the server" '"$SERVER_BIN" --config $dir/server.toml check-config > /dev/null'
+
 dir=$(run_case managed '{"config.managed":"true"}')
 echo 'sentinel' > "$dir/server.toml"
 PATH="$WORK/bin:$PATH" SNAPCTL_STORE="$dir/store.json" SNAP_COMMON="$dir" SNAP="/snap/harvest/current" bash "$HOOK" > /dev/null 2>&1

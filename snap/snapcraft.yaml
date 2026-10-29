@@ -47,6 +47,8 @@ description: |
   cluster.accepted-secrets    Extra secrets accepted while rotating
   cluster.data-dir            Quorium state  (default: $SNAP_COMMON/quorium)
   cluster.bus                 notify or mesh (default follows the backend)
+  cluster.tls-ca / tls-cert / tls-key
+                              Mutual TLS between nodes (internal-url must be https)
   cluster.replace-absent-voter-after-secs
                               Replace a voter whose server is gone (0: never)
   config.managed              true when a charm writes server.toml itself
