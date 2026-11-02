@@ -7,5 +7,6 @@ members = [
     "harvest-cli",
     "tui",
     "squall",
+    "quorium",
 ]
 resolver = "2"

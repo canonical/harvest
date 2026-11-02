@@ -11,11 +11,13 @@ use serde_json::json;
 use crate::cluster::node::VERSION;
 use crate::machines::MachineRegistry;
 use crate::projects::live::ProjectLive;
+use crate::turns::admission::TurnAdmission;
 
 pub struct HealthState {
     pub db: Arc<Db>,
     pub live: Arc<ProjectLive>,
     pub registry: Arc<MachineRegistry>,
+    pub admission: Arc<TurnAdmission>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -23,19 +25,22 @@ pub struct Readiness {
     pub database: bool,
     pub bus: bool,
     pub draining: bool,
+    pub cluster: bool,
 }
 
 impl Readiness {
     pub fn ready(&self) -> bool {
-        self.database && self.bus && !self.draining
+        self.database && self.bus && !self.draining && self.cluster
     }
 }
 
 pub async fn readiness(state: &HealthState) -> Readiness {
+    let node = state.live.node();
     Readiness {
         database: state.db.ping().await.is_ok(),
         bus: state.live.bus().is_listening(),
-        draining: state.live.node().is_draining(),
+        draining: node.is_draining(),
+        cluster: !node.is_fenced() && node.membership_health().quorum,
     }
 }
 
@@ -53,6 +58,9 @@ pub async fn ready(State(state): State<Arc<HealthState>>) -> Response {
             "database": readiness.database,
             "bus":      readiness.bus,
             "draining": readiness.draining,
+            "cluster":  readiness.cluster,
+            "bus_degraded": state.live.bus().degraded_peers(),
+            "membership": state.live.node().membership_health(),
             "node_id":  state.live.node().node_id(),
         })),
     )
@@ -90,12 +98,41 @@ pub async fn metrics(State(state): State<Arc<HealthState>>) -> Response {
     let _ = writeln!(out, "harvest_bus_listening {}", u8::from(readiness.bus));
     let _ = writeln!(out, "# TYPE harvest_draining gauge");
     let _ = writeln!(out, "harvest_draining {}", u8::from(readiness.draining));
+    let membership = state.live.node().membership_health();
+    let _ = writeln!(out, "# TYPE harvest_cluster_quorum gauge");
+    let _ = writeln!(
+        out,
+        "harvest_cluster_quorum{{backend=\"{}\"}} {}",
+        membership.backend,
+        u8::from(membership.quorum)
+    );
+    let _ = writeln!(out, "# TYPE harvest_cluster_fenced gauge");
+    let _ = writeln!(
+        out,
+        "harvest_cluster_fenced {}",
+        u8::from(state.live.node().is_fenced())
+    );
+    let _ = writeln!(out, "# TYPE harvest_cluster_term gauge");
+    let _ = writeln!(out, "harvest_cluster_term {}", membership.term);
+    let _ = writeln!(out, "# TYPE harvest_cluster_apply_lag gauge");
+    let _ = writeln!(out, "harvest_cluster_apply_lag {}", membership.apply_lag);
+    let _ = writeln!(out, "# TYPE harvest_cluster_leader_changes_total counter");
+    let _ = writeln!(
+        out,
+        "harvest_cluster_leader_changes_total {}",
+        membership.leader_changes
+    );
+    let _ = writeln!(out, "# TYPE harvest_cluster_voters gauge");
+    let _ = writeln!(out, "harvest_cluster_voters {}", membership.voters);
     let _ = writeln!(out, "# TYPE harvest_local_active_turns gauge");
     let _ = writeln!(out, "harvest_local_active_turns {local_turns}");
     let _ = writeln!(out, "# TYPE harvest_local_connected_agents gauge");
     let _ = writeln!(out, "harvest_local_connected_agents {local_agents}");
     let _ = writeln!(out, "# TYPE harvest_db_pool_max_size gauge");
     let _ = writeln!(out, "harvest_db_pool_max_size {pool_size}");
+    let _ = writeln!(out, "# TYPE harvest_admitted_turns gauge");
+    let _ = writeln!(out, "harvest_admitted_turns {}", state.admission.active());
+    crate::metrics::render(&mut out);
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], out).into_response()
 }
 
@@ -108,25 +145,36 @@ mod tests {
         assert!(Readiness {
             database: true,
             bus: true,
-            draining: false
+            draining: false,
+            cluster: true
         }
         .ready());
         assert!(!Readiness {
             database: false,
             bus: true,
-            draining: false
+            draining: false,
+            cluster: true
         }
         .ready());
         assert!(!Readiness {
             database: true,
             bus: false,
-            draining: false
+            draining: false,
+            cluster: true
         }
         .ready());
         assert!(!Readiness {
             database: true,
             bus: true,
-            draining: true
+            draining: true,
+            cluster: true
+        }
+        .ready());
+        assert!(!Readiness {
+            database: true,
+            bus: true,
+            draining: false,
+            cluster: false
         }
         .ready());
     }

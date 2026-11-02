@@ -22,3 +22,42 @@ groups:
           severity: warning
         annotations:
           summary: Harvest unit {{ $labels.juju_unit }} lost its cluster event bus listener
+      - alert: HarvestClusterQuorumLost
+        expr: harvest_cluster_quorum == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Harvest unit {{ $labels.juju_unit }} has no quorum in the {{ $labels.backend }} control plane
+      - alert: HarvestClusterLeaderFlapping
+        expr: increase(harvest_cluster_leader_changes_total[10m]) > 3
+        labels:
+          severity: warning
+        annotations:
+          summary: The quorium leader changed more than three times in ten minutes
+      - alert: HarvestClusterFenced
+        expr: increase(harvest_cluster_lapses_total[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Harvest unit {{ $labels.juju_unit }} lost its membership and aborted its turns
+      - alert: HarvestMeshResyncStorm
+        expr: sum by (juju_unit) (increase(harvest_mesh_resyncs_total[5m])) > 20
+        labels:
+          severity: warning
+        annotations:
+          summary: Watchers on {{ $labels.juju_unit }} keep resynchronising; mesh links drop batches
+      - alert: HarvestTurnsRejected
+        expr: sum by (juju_unit) (rate(harvest_turns_rejected_total{reason="node"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Harvest unit {{ $labels.juju_unit }} is at its turn capacity
+      - alert: HarvestLlmBreakerOpen
+        expr: harvest_llm_breaker_open == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: LLM provider {{ $labels.provider }} keeps failing and is being skipped

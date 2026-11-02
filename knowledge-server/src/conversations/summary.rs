@@ -1,11 +1,10 @@
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use harvest_db::Db;
 use serde_json::{json, Value};
 
-use crate::agent::{Agent, HistoryMessage};
-use crate::conversations::handlers::history_messages_from_raw;
+use crate::agent::Agent;
+use crate::conversations::store::{load_context, ConversationContext, Owner};
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StoredSummary {
@@ -24,39 +23,15 @@ impl StoredSummary {
     }
 }
 
-pub fn effective_history(
-    history: &[HistoryMessage],
-    summary: Option<&StoredSummary>,
-) -> Vec<HistoryMessage> {
-    let Some(summary) = summary.filter(|s| s.upto <= history.len()) else {
-        return history.to_vec();
-    };
-    let mut out = Vec::with_capacity(1 + history.len() - summary.upto);
-    out.push(HistoryMessage {
-        role: "summary".into(),
-        text: summary.text.clone(),
-        ..Default::default()
-    });
-    out.extend_from_slice(&history[summary.upto..]);
-    out
-}
-
-pub async fn next_summary(
-    agent: &Agent,
-    history: &[HistoryMessage],
-    previous: Option<&StoredSummary>,
-) -> Option<StoredSummary> {
-    let start = previous
-        .filter(|s| s.upto <= history.len())
-        .map_or(0, |s| s.upto);
-    if history.len() - start <= agent.compaction_keep_last() {
+pub async fn next_summary(agent: &Agent, context: &ConversationContext) -> Option<StoredSummary> {
+    let recent = context.recent_history();
+    if recent.len() <= agent.compaction_keep_last() {
         return None;
     }
-    let effective = effective_history(history, previous);
-    let (text, kept) = agent.summarize_history(&effective).await?;
+    let (text, kept) = agent.summarize_history(&context.history()).await?;
     Some(StoredSummary {
         text,
-        upto: history.len() - kept,
+        upto: context.message_count - kept,
     })
 }
 
@@ -73,58 +48,56 @@ pub async fn store(db: &Db, conv_id: &str, summary: &StoredSummary) -> bool {
     .unwrap_or(false)
 }
 
-fn refreshing() -> &'static Mutex<HashSet<String>> {
-    static REFRESHING: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    REFRESHING.get_or_init(Default::default)
+const SUMMARY_LEASE_SECS: f64 = 120.0;
+
+async fn claim_refresh(db: &Db, conv_id: &str) -> Result<bool, anyhow::Error> {
+    let claimed = db
+        .query(
+            "UPDATE conversations
+             SET summary_lease_until = now() + make_interval(secs => $lease::float8)
+             WHERE id = $cid AND (summary_lease_until IS NULL OR summary_lease_until < now())
+             RETURNING id",
+            json!({ "cid": conv_id, "lease": SUMMARY_LEASE_SECS }),
+        )
+        .await?;
+    Ok(!claimed.is_empty())
 }
 
-struct RefreshGuard(String);
-
-impl RefreshGuard {
-    fn acquire(conv_id: &str) -> Option<Self> {
-        let mut set = refreshing().lock().unwrap_or_else(|e| e.into_inner());
-        set.insert(conv_id.to_string())
-            .then(|| Self(conv_id.to_string()))
-    }
-}
-
-impl Drop for RefreshGuard {
-    fn drop(&mut self) {
-        refreshing()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.0);
+async fn release_refresh(db: &Db, conv_id: &str) {
+    let released = db
+        .execute(
+            "UPDATE conversations SET summary_lease_until = NULL WHERE id = $cid",
+            json!({ "cid": conv_id }),
+        )
+        .await;
+    if let Err(e) = released {
+        tracing::warn!(error = %e, conv_id, "could not release the summary lease");
     }
 }
 
 pub async fn refresh(db: &Db, agent: &Agent, conv_id: &str) {
-    let Some(_guard) = RefreshGuard::acquire(conv_id) else {
-        return;
-    };
-    let rows = match db
-        .query(
-            "SELECT messages, summary, summary_upto FROM conversations WHERE id = $cid",
-            json!({ "cid": conv_id }),
-        )
-        .await
-    {
-        Ok(rows) => rows,
+    match claim_refresh(db, conv_id).await {
+        Ok(true) => {
+            summarize(db, agent, conv_id).await;
+            release_refresh(db, conv_id).await;
+        }
+        Ok(false) => tracing::debug!(
+            conv_id,
+            "another node is already summarizing this conversation"
+        ),
+        Err(e) => tracing::warn!(error = %e, conv_id, "could not claim the summary refresh"),
+    }
+}
+
+async fn summarize(db: &Db, agent: &Agent, conv_id: &str) {
+    let context = match load_context(db, Owner::Unscoped, conv_id).await {
+        Ok(context) => context,
         Err(e) => {
             tracing::warn!(error = %e, conv_id, "could not load conversation for summary refresh");
             return;
         }
     };
-    let Some(row) = rows.into_iter().next() else {
-        return;
-    };
-    let raw: Vec<Value> = row
-        .get("messages")
-        .and_then(|v| v.as_str())
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-    let history = history_messages_from_raw(&raw);
-    let previous = StoredSummary::from_row(&row);
-    if let Some(next) = next_summary(agent, &history, previous.as_ref()).await {
+    if let Some(next) = next_summary(agent, &context).await {
         if store(db, conv_id, &next).await {
             tracing::info!(conv_id, upto = next.upto, "stored conversation summary");
         }
@@ -138,23 +111,31 @@ pub fn spawn_refresh(db: Arc<Db>, agent: Arc<Agent>, conv_id: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::HistoryMessage;
     use crate::llm::types::{
         LlmResponse, Message, MessageContent, ModelInfo, ToolDefinition, Usage,
     };
     use crate::llm::LlmProvider;
     use anyhow::Result;
     use async_trait::async_trait;
+    use std::sync::Mutex;
 
     struct RecordingLlm {
         reply: Option<String>,
         prompts: Mutex<Vec<String>>,
+        delay: std::time::Duration,
     }
 
     impl RecordingLlm {
         fn new(reply: Option<&str>) -> Arc<Self> {
+            Self::slow(reply, std::time::Duration::ZERO)
+        }
+
+        fn slow(reply: Option<&str>, delay: std::time::Duration) -> Arc<Self> {
             Arc::new(Self {
                 reply: reply.map(str::to_string),
                 prompts: Mutex::new(vec![]),
+                delay,
             })
         }
 
@@ -192,6 +173,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n");
             self.prompts.lock().unwrap().push(prompt);
+            tokio::time::sleep(self.delay).await;
             match &self.reply {
                 Some(text) => Ok(LlmResponse::Message {
                     text: text.clone(),
@@ -228,42 +210,21 @@ mod tests {
             .collect()
     }
 
+    fn context(turns: usize, previous: Option<&StoredSummary>) -> ConversationContext {
+        let history = conversation(turns);
+        let upto = previous.map_or(0, |p| p.upto);
+        ConversationContext {
+            summary: previous.cloned(),
+            recent: history[upto..]
+                .iter()
+                .map(|m| json!({ "role": m.role, "text": m.text }))
+                .collect(),
+            message_count: history.len(),
+        }
+    }
+
     fn agent(llm: Arc<RecordingLlm>, threshold: usize, keep_last: usize) -> Agent {
         Agent::new(llm, vec![], 5).with_compaction(threshold, keep_last)
-    }
-
-    #[test]
-    fn effective_history_without_summary_is_the_full_history() {
-        let history = conversation(3);
-        assert_eq!(texts(&effective_history(&history, None)), texts(&history));
-    }
-
-    #[test]
-    fn effective_history_replaces_covered_messages_with_the_summary() {
-        let history = conversation(3);
-        let summary = StoredSummary {
-            text: "earlier".into(),
-            upto: 4,
-        };
-        let effective = effective_history(&history, Some(&summary));
-        assert_eq!(effective.len(), 3);
-        assert_eq!(effective[0].role, "summary");
-        assert_eq!(effective[0].text, "earlier");
-        assert_eq!(effective[1].text, "question 2");
-        assert_eq!(effective[2].text, "answer 2");
-    }
-
-    #[test]
-    fn effective_history_ignores_a_summary_beyond_the_history() {
-        let history = conversation(1);
-        let summary = StoredSummary {
-            text: "stale".into(),
-            upto: 6,
-        };
-        assert_eq!(
-            texts(&effective_history(&history, Some(&summary))),
-            texts(&history)
-        );
     }
 
     #[test]
@@ -289,7 +250,7 @@ mod tests {
     async fn next_summary_skips_history_under_the_threshold() {
         let llm = RecordingLlm::new(Some("unused"));
         let agent = agent(llm.clone(), 10_000, 2);
-        assert_eq!(next_summary(&agent, &conversation(5), None).await, None);
+        assert_eq!(next_summary(&agent, &context(5, None)).await, None);
         assert!(llm.prompts().is_empty());
     }
 
@@ -297,7 +258,7 @@ mod tests {
     async fn next_summary_covers_all_but_the_kept_messages() {
         let llm = RecordingLlm::new(Some("summary v1"));
         let agent = agent(llm.clone(), 10, 2);
-        let next = next_summary(&agent, &conversation(5), None).await;
+        let next = next_summary(&agent, &context(5, None)).await;
         assert_eq!(
             next,
             Some(StoredSummary {
@@ -315,7 +276,7 @@ mod tests {
             text: "summary v1".into(),
             upto: 6,
         };
-        let next = next_summary(&agent, &conversation(6), Some(&previous)).await;
+        let next = next_summary(&agent, &context(6, Some(&previous))).await;
         assert_eq!(
             next,
             Some(StoredSummary {
@@ -345,7 +306,7 @@ mod tests {
             upto: 8,
         };
         assert_eq!(
-            next_summary(&agent, &conversation(5), Some(&previous)).await,
+            next_summary(&agent, &context(5, Some(&previous))).await,
             None
         );
         assert!(llm.prompts().is_empty());
@@ -354,7 +315,7 @@ mod tests {
     #[tokio::test]
     async fn next_summary_returns_none_when_the_llm_fails() {
         let agent = agent(RecordingLlm::new(None), 10, 2);
-        assert_eq!(next_summary(&agent, &conversation(5), None).await, None);
+        assert_eq!(next_summary(&agent, &context(5, None)).await, None);
     }
 
     async fn insert_conversation(db: &Db, messages: &[HistoryMessage]) -> (String, String) {
@@ -370,11 +331,20 @@ mod tests {
             .iter()
             .map(|m| json!({ "role": m.role, "text": m.text }))
             .collect();
-        db.query(
-            "INSERT INTO conversations (id, user_id, title, messages, message_count, created_at, updated_at)
-             VALUES ($cid, $uid, 't', $messages, $count, now(), now()) RETURNING id",
-            json!({ "cid": cid, "uid": uid, "messages": serde_json::to_string(&raw).unwrap(), "count": raw.len() as i64 }),
-        ).await.unwrap();
+        let now = harvest_db::now_rfc3339();
+        crate::conversations::store::ensure_user_conversation(db, &uid, &cid, "t", &now)
+            .await
+            .unwrap();
+        crate::conversations::store::append(
+            db,
+            Owner::User(&uid),
+            crate::conversations::store::Guard::Unguarded,
+            &cid,
+            &raw,
+            &now,
+        )
+        .await
+        .unwrap();
         (uid, cid)
     }
 
@@ -405,13 +375,12 @@ mod tests {
                 upto: 8
             })
         );
-        let (raw, history) =
-            crate::conversations::handlers::load_conversation_context(&test_db.db, &uid, &cid)
-                .await
-                .unwrap();
-        assert_eq!(raw.len(), 10);
+        let loaded = load_context(&test_db.db, Owner::User(&uid), &cid)
+            .await
+            .unwrap();
+        assert_eq!(loaded.message_count, 10);
         assert_eq!(
-            texts(&history),
+            texts(&loaded.history()),
             vec![
                 ("summary".to_string(), "summary v1".to_string()),
                 ("user".to_string(), "question 4".to_string()),
@@ -439,12 +408,17 @@ mod tests {
         assert_eq!(stored(&test_db.db, &cid).await, Some(newer));
     }
 
-    #[test]
-    fn refresh_guard_allows_one_refresh_per_conversation() {
-        let first = RefreshGuard::acquire("conv-guard-test");
-        assert!(first.is_some());
-        assert!(RefreshGuard::acquire("conv-guard-test").is_none());
-        drop(first);
-        assert!(RefreshGuard::acquire("conv-guard-test").is_some());
+    #[tokio::test]
+    #[ignore = "needs HARVEST_TEST_DATABASE_URL"]
+    async fn concurrent_refreshes_summarize_once() {
+        let test_db = harvest_db::test_support::TestDb::new().await;
+        let (_, cid) = insert_conversation(&test_db.db, &conversation(5)).await;
+        let llm = RecordingLlm::slow(Some("summary v1"), std::time::Duration::from_millis(300));
+        let agent = agent(llm.clone(), 10, 2);
+        tokio::join!(
+            refresh(&test_db.db, &agent, &cid),
+            refresh(&test_db.db, &agent, &cid)
+        );
+        assert_eq!(llm.prompts().len(), 1);
     }
 }

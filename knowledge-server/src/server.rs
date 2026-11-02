@@ -17,8 +17,8 @@ use crate::agent::{graph_tools, Agent};
 use crate::api::{AppState, GraphCache, ProjectAgentBuilder};
 use crate::auth::{api_keys::ApiKeyStore, user_keys::UserKeyStore};
 use crate::cluster::bus::ClusterBus;
-use crate::cluster::node::ClusterNode;
-use crate::cluster::peer::require_secret;
+use crate::cluster::node::{ClusterNode, NodeStanding};
+use crate::cluster::peer::{require_secret, ClusterSecrets, PeerClient};
 use crate::cluster::{singleton, Shutdown};
 use crate::config::Config;
 use crate::crypto::Crypto;
@@ -30,12 +30,14 @@ use harvest_db::Db;
 
 const SCHEMA_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const SERVE_GRACE: Duration = Duration::from_secs(5);
+const TURN_REQUEST_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub struct RunningServer {
     pub public_addr: SocketAddr,
     pub internal_addr: Option<SocketAddr>,
     pub node: Arc<ClusterNode>,
     pub live: Arc<ProjectLive>,
+    evicted: Shutdown,
     drain: Option<tokio::sync::oneshot::Sender<()>>,
     finished: tokio::task::JoinHandle<()>,
 }
@@ -54,6 +56,14 @@ impl RunningServer {
 
     pub async fn wait(self) {
         let _ = self.finished.await;
+    }
+
+    pub fn evicted(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.evicted.wait()
+    }
+
+    pub fn was_evicted(&self) -> bool {
+        self.evicted.is_triggered()
     }
 }
 
@@ -96,7 +106,7 @@ async fn turn_snapshot(
 fn internal_router(
     live: Arc<ProjectLive>,
     registry: Arc<MachineRegistry>,
-    secret: Arc<String>,
+    secrets: Arc<ClusterSecrets>,
 ) -> Router {
     Router::new()
         .route(
@@ -108,7 +118,10 @@ fn internal_router(
             get(turn_snapshot).with_state(live),
         )
         .merge(crate::machines::internal::router(registry))
-        .layer(axum::middleware::from_fn_with_state(secret, require_secret))
+        .layer(axum::middleware::from_fn_with_state(
+            secrets,
+            require_secret,
+        ))
 }
 
 async fn reap(db: &Db, live: &ProjectLive, directory: &AgentDirectory) {
@@ -122,18 +135,46 @@ async fn reap(db: &Db, live: &ProjectLive, directory: &AgentDirectory) {
         tracing::warn!(error = %e, "reaping ingestion jobs of lost nodes failed");
     }
     let _ = crate::auth::ephemeral::purge_expired(db).await;
+    let _ = crate::turns::idempotency::purge(db, TURN_REQUEST_RETENTION).await;
     let _ = db
         .execute(
             "DELETE FROM bus_payloads WHERE created_at < now() - interval '10 minutes'",
             json!({}),
         )
         .await;
-    let _ = db
-        .execute(
-            "DELETE FROM cluster_nodes WHERE heartbeat_at < now() - interval '1 hour'",
-            json!({}),
-        )
-        .await;
+    let _ = live.node().prune().await;
+}
+
+fn spawn_fence_guard(node: Arc<ClusterNode>, live: Arc<ProjectLive>, evicted: Shutdown) {
+    let mut standing = node.watch_standing();
+    let mut lapses = node.watch_lapses();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                changed = lapses.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    lapses.borrow_and_update();
+                    let aborted = live.abort_local_turns().await;
+                    tracing::error!(node_id = node.node_id(), aborted, "cluster membership lapsed: aborted local turns");
+                }
+                changed = standing.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    let current = *standing.borrow_and_update();
+                    tracing::warn!(node_id = node.node_id(), ?current, "cluster standing changed");
+                    if current == NodeStanding::Evicted {
+                        let aborted = live.abort_local_turns().await;
+                        tracing::error!(node_id = node.node_id(), aborted, "node evicted from the cluster: shutting down");
+                        evicted.trigger();
+                        return;
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn spawn_reaper(
@@ -150,7 +191,9 @@ fn spawn_reaper(
             ticker.tick().await;
             let result = singleton::run_exclusive(&db, "reaper", || async {
                 reap(&db, &live, &directory).await;
-                collocate.reap_dead_nodes(live.node().timeout_secs()).await;
+                if let Ok(alive) = live.node().live_node_ids().await {
+                    collocate.reap_dead_nodes(&alive).await;
+                }
             })
             .await;
             if let Err(e) = result {
@@ -242,12 +285,19 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     }
 
     let shutdown = Shutdown::new();
-    let runtime = crate::cluster::runtime::start(Arc::clone(&db), &cluster_config, internal_addr)
-        .await
-        .context("starting cluster runtime")?;
-    let node = runtime.node;
-    let bus = runtime.bus;
-    let peers = runtime.peers;
+    let mut cluster =
+        crate::cluster::runtime::start(&cluster_config, &db, internal_listener, &shutdown).await?;
+    let node = Arc::clone(&cluster.node);
+    let bus = Arc::clone(&cluster.bus);
+    let quorium = cluster.quorium.clone();
+    let peers = match (cluster_config.effective_shared_secret(), internal_addr) {
+        (Some(secret), Some(_)) => Some(PeerClient::secured(
+            node.node_id(),
+            secret,
+            cluster.tls.as_deref(),
+        )?),
+        _ => None,
+    };
     let live = ProjectLive::new(
         Arc::clone(&db),
         Arc::clone(&node),
@@ -395,7 +445,10 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     let reap_interval = node.heartbeat_interval().max(Duration::from_millis(200)) * 2;
     let drain_grace = Duration::from_secs(cluster_config.drain_grace_secs);
     let drain_timeout = Duration::from_secs(cluster_config.drain_timeout_secs);
-    let secret = Arc::new(cluster_config.shared_secret.clone().unwrap_or_default());
+    let secrets = ClusterSecrets::new(
+        cluster_config.effective_shared_secret(),
+        &cluster_config.accepted_secrets,
+    );
 
     let collocate_reaper = Arc::clone(&collocate_registry);
     let state = AppState {
@@ -418,6 +471,10 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         pricing,
         semantic: semantic_handle,
         live: Arc::clone(&live),
+        admission: crate::turns::admission::TurnAdmission::new(
+            config.agent.max_active_turns,
+            config.agent.max_active_turns_per_user,
+        ),
     };
 
     let cache: Arc<GraphCache> = Arc::new(RwLock::new(HashMap::new()));
@@ -452,22 +509,11 @@ pub async fn start(config: Config) -> Result<RunningServer> {
             .await;
         }
     });
-    let internal = internal_listener.map(|listener| {
-        let app = app.clone().merge(internal_router(
-            Arc::clone(&live),
-            Arc::clone(&machine_registry),
-            secret,
-        ));
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            let _ = axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(shutdown.wait())
-            .await;
-        })
-    });
+    let internal = cluster.serve(app.clone().merge(internal_router(
+        Arc::clone(&live),
+        Arc::clone(&machine_registry),
+        secrets,
+    )));
 
     let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
     let finished = tokio::spawn({
@@ -488,14 +534,21 @@ pub async fn start(config: Config) -> Result<RunningServer> {
             if let Some(internal) = internal {
                 let _ = tokio::time::timeout(SERVE_GRACE, internal).await;
             }
+            if let Some(quorium) = quorium {
+                quorium.shutdown().await;
+            }
         }
     });
+
+    let evicted = Shutdown::new();
+    spawn_fence_guard(Arc::clone(&node), Arc::clone(&live), evicted.clone());
 
     Ok(RunningServer {
         public_addr,
         internal_addr,
         node,
         live,
+        evicted,
         drain: Some(drain_tx),
         finished,
     })
@@ -525,8 +578,15 @@ pub async fn wait_for_termination() {
 
 pub async fn run(config: Config) -> Result<()> {
     let mut server = start(config).await?;
-    wait_for_termination().await;
+    tokio::select! {
+        _ = wait_for_termination() => {}
+        _ = server.evicted() => {}
+    }
+    let evicted = server.was_evicted();
     server.request_drain();
     server.wait().await;
+    if evicted {
+        anyhow::bail!("this node was evicted from the cluster; restart it to rejoin");
+    }
     Ok(())
 }

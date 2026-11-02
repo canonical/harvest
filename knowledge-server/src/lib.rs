@@ -15,6 +15,8 @@ pub mod ingestion;
 pub mod llm;
 pub mod lxd;
 pub mod machines;
+pub mod metrics;
 pub mod projects;
 pub mod server;
 pub mod skills;
+pub mod turns;

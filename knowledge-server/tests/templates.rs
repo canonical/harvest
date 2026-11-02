@@ -1,5 +1,5 @@
 use harvest_db::Db;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -262,7 +262,7 @@ fn multipart_body(boundary: &str, filename: &str, content: &[u8]) -> Vec<u8> {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_templates_returns_all_templates_globally() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = templates_app(Arc::clone(&db));
 
     let _ = send(
@@ -297,7 +297,7 @@ async fn list_templates_returns_all_templates_globally() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn upload_harvest_creates_template_with_skills_and_artifacts() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = templates_app(Arc::clone(&db));
 
     let zip_bytes = build_harvest_zip();

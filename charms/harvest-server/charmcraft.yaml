@@ -86,6 +86,13 @@ config:
       type: int
       default: 120
       description: Seconds a stopping unit waits for running turns before aborting them.
+    cluster-backend:
+      type: string
+      default: postgres
+      description: |
+        Cluster control plane: postgres (heartbeats and NOTIFY in PostgreSQL) or quorium
+        (an embedded raft cluster across the units, with a peer mesh event bus).
+        Run at least three units with quorium to survive the loss of one.
     active-active:
       type: boolean
       default: true
@@ -105,15 +112,23 @@ actions:
   cluster-rebalance:
     description: Trigger a configuration reconcile on all units.
   cluster-evacuate:
-    description: Mark a unit as evacuated in peer state.
+    description: Stop routing new turns to a unit and let its running turns finish.
     params:
       unit:
         type: string
         description: Unit name to evacuate, for example harvest-server/1.
     required:
       - unit
+  cluster-restore:
+    description: Return an evacuated unit to service.
+    params:
+      unit:
+        type: string
+        description: Unit name to restore, for example harvest-server/1.
+    required:
+      - unit
   cluster-remove:
-    description: Remove a unit from peer cluster membership records.
+    description: Remove a unit from the quorium voters and the evacuation records.
     params:
       unit:
         type: string
@@ -121,4 +136,6 @@ actions:
     required:
       - unit
   cluster-rotate-secrets:
-    description: Rotate the cluster shared secret and reconcile configuration.
+    description: |
+      Rotate the cluster shared secret without downtime: every unit first accepts the new
+      secret, then switches to it, then stops accepting the old one.

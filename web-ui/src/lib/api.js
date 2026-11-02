@@ -9,6 +9,15 @@ const CONVERSATIONS_URL = '/conversations';
 const LLM_PROVIDERS_URL = '/llm/providers';
 const API_KEYS_URL = '/api-keys';
 
+export function pageQuery(page) {
+  if (!page) return '';
+  const params = new URLSearchParams();
+  if (page.before != null) params.set('before', String(page.before));
+  if (page.limit != null) params.set('limit', String(page.limit));
+  const query = params.toString();
+  return query ? `?${query}` : '';
+}
+
 async function convFetch(url, options = {}) {
   const res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...options });
   if (!res.ok) {
@@ -20,7 +29,7 @@ async function convFetch(url, options = {}) {
 
 export const listConversations   = ()            => convFetch(CONVERSATIONS_URL);
 export const createConversation  = (title)       => convFetch(CONVERSATIONS_URL, { method: 'POST', body: JSON.stringify({ title }) });
-export const getConversation     = (id)          => convFetch(`${CONVERSATIONS_URL}/${id}`);
+export const getConversation     = (id, page)    => convFetch(`${CONVERSATIONS_URL}/${id}${pageQuery(page)}`);
 export const updateConversation  = (id, payload) => convFetch(`${CONVERSATIONS_URL}/${id}`, { method: 'PUT', body: JSON.stringify(payload) });
 export const deleteConversation  = (id)          => convFetch(`${CONVERSATIONS_URL}/${id}`, { method: 'DELETE' });
 
@@ -357,24 +366,52 @@ export const deleteProject      = (id)       => projectFetch(projectUrl(id), { m
 
 export const listProjectConversations   = (projectId) => projectFetch(`${projectUrl(projectId)}/conversations`);
 export const createProjectConversation  = (projectId, body)     => projectFetch(`${projectUrl(projectId)}/conversations`, { method: 'POST', body: JSON.stringify(body) });
-export const getProjectConversation     = (projectId, convId)   => projectFetch(conversationUrl(projectId, convId));
+export const getProjectConversation     = (projectId, convId, page) => projectFetch(`${conversationUrl(projectId, convId)}${pageQuery(page)}`);
 export const updateProjectConversation  = (projectId, convId, body) => projectFetch(conversationUrl(projectId, convId), { method: 'PUT',  body: JSON.stringify(body) });
 export const deleteProjectConversation  = (projectId, convId)   => projectFetch(conversationUrl(projectId, convId), { method: 'DELETE' });
 
-export async function projectQueryStart(projectId, query, conversationId, attachments, providerSelection) {
+const START_ATTEMPTS = 3;
+const START_RETRY_MS = 500;
+
+export function newIdempotencyKey() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export async function projectQueryStart(projectId, query, conversationId, attachments, providerSelection, { retryMs = START_RETRY_MS } = {}) {
   const url = `${projectUrl(projectId)}/query/stream`;
   const body = withProviderSelection({ query, conversation_id: conversationId, attachments }, providerSelection);
-  const response = await fetch(url, {
+  const request = {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': newIdempotencyKey() },
     body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    handleUnauthorized(response.status);
-    const data = await response.json().catch(() => ({}));
-    const e = new Error(data.error || `Server error: ${response.status}`);
-    e.status = response.status;
-    throw e;
+  };
+  for (let attempt = 1; ; attempt++) {
+    const lastAttempt = attempt >= START_ATTEMPTS;
+    let response;
+    try {
+      response = await fetch(url, request);
+    } catch (e) {
+      if (lastAttempt) throw e;
+      await sleep(retryMs * attempt);
+      continue;
+    }
+    if (response.status === 503 && !lastAttempt) {
+      await sleep(retryMs * attempt);
+      continue;
+    }
+    if (!response.ok) {
+      handleUnauthorized(response.status);
+      const data = await response.json().catch(() => ({}));
+      const e = new Error(data.error || `Server error: ${response.status}`);
+      e.status = response.status;
+      throw e;
+    }
+    return response.json().catch(() => ({}));
   }
 }
 

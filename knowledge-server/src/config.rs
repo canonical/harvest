@@ -202,22 +202,40 @@ fn default_drain_grace_secs() -> u64 {
 fn default_drain_timeout_secs() -> u64 {
     120
 }
-
-fn default_cluster_backend() -> ClusterBackend {
-    ClusterBackend::Postgres
+fn default_election_timeout_ms() -> u64 {
+    1_000
+}
+fn default_join_timeout_secs() -> u64 {
+    60
+}
+fn default_snapshot_logs() -> u64 {
+    1_000
 }
 
-#[derive(Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
 pub enum ClusterBackend {
+    #[default]
     Postgres,
     Quorium,
 }
 
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BusTransport {
+    Notify,
+    Mesh,
+}
+
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ClusterBootstrap {
+    Init,
+    Join,
+}
+
 #[derive(Deserialize, Clone, Debug)]
 pub struct ClusterConfig {
-    #[serde(default = "default_cluster_backend")]
-    pub backend: ClusterBackend,
     #[serde(default)]
     pub node_name: Option<String>,
     #[serde(default)]
@@ -236,12 +254,35 @@ pub struct ClusterConfig {
     pub drain_grace_secs: u64,
     #[serde(default = "default_drain_timeout_secs")]
     pub drain_timeout_secs: u64,
+    #[serde(default)]
+    pub backend: ClusterBackend,
+    #[serde(default)]
+    pub bus: Option<BusTransport>,
+    #[serde(default)]
+    pub data_dir: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub bootstrap: Option<ClusterBootstrap>,
+    #[serde(default)]
+    pub join_token: Option<String>,
+    #[serde(default)]
+    pub join_addresses: Vec<String>,
+    #[serde(default)]
+    pub accepted_secrets: Vec<String>,
+    #[serde(default = "default_election_timeout_ms")]
+    pub election_timeout_ms: u64,
+    #[serde(default = "default_join_timeout_secs")]
+    pub join_timeout_secs: u64,
+    #[serde(default = "default_snapshot_logs")]
+    pub snapshot_logs: u64,
+    #[serde(default)]
+    pub replace_absent_voter_after_secs: u64,
+    #[serde(default)]
+    pub tls: Option<crate::cluster::tls::TlsPaths>,
 }
 
 impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
-            backend: default_cluster_backend(),
             node_name: None,
             internal_listen: None,
             internal_url: None,
@@ -251,6 +292,18 @@ impl Default for ClusterConfig {
             bus_batch_window_ms: default_bus_batch_window_ms(),
             drain_grace_secs: default_drain_grace_secs(),
             drain_timeout_secs: default_drain_timeout_secs(),
+            backend: ClusterBackend::default(),
+            bus: None,
+            data_dir: None,
+            bootstrap: None,
+            join_token: None,
+            join_addresses: Vec::new(),
+            accepted_secrets: Vec::new(),
+            election_timeout_ms: default_election_timeout_ms(),
+            join_timeout_secs: default_join_timeout_secs(),
+            snapshot_logs: default_snapshot_logs(),
+            replace_absent_voter_after_secs: 0,
+            tls: None,
         }
     }
 }
@@ -263,18 +316,25 @@ impl ClusterConfig {
         if bound.ip().is_unspecified() {
             anyhow::bail!("cluster.internal_url is required when cluster.internal_listen binds every interface");
         }
-        Ok(format!("http://{bound}"))
+        let scheme = if self.tls.is_some() { "https" } else { "http" };
+        Ok(format!("{scheme}://{bound}"))
+    }
+
+    pub fn effective_shared_secret(&self) -> Option<String> {
+        self.shared_secret
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                let token = self.join_token.as_deref().filter(|t| !t.is_empty())?;
+                quorium::JoinToken::decode(token)
+                    .ok()
+                    .map(|t| t.shared_secret)
+                    .filter(|s| !s.is_empty())
+            })
     }
 
     pub fn validate(&self) -> Result<()> {
-        if matches!(self.backend, ClusterBackend::Quorium) {
-            anyhow::bail!(
-                "cluster.backend=quorium is configured but Quorium runtime is not implemented"
-            );
-        }
-        if self.internal_listen.is_some()
-            && self.shared_secret.as_deref().map_or(true, str::is_empty)
-        {
+        if self.internal_listen.is_some() && self.effective_shared_secret().is_none() {
             anyhow::bail!("cluster.shared_secret is required when cluster.internal_listen is set");
         }
         if self.node_timeout_ms < self.heartbeat_interval_ms.saturating_mul(2) {
@@ -282,7 +342,64 @@ impl ClusterConfig {
                 "cluster.node_timeout_ms must be at least twice cluster.heartbeat_interval_ms"
             );
         }
+        if self.backend == ClusterBackend::Quorium {
+            self.validate_quorium()?;
+        }
+        if self.tls.is_some()
+            && self
+                .internal_url
+                .as_deref()
+                .is_some_and(|url| !url.starts_with("https://"))
+        {
+            anyhow::bail!("cluster.internal_url must use https:// when cluster.tls is set");
+        }
+        if self.bus_transport() == BusTransport::Mesh && self.internal_listen.is_none() {
+            anyhow::bail!("cluster.bus = \"mesh\" requires cluster.internal_listen");
+        }
         Ok(())
+    }
+
+    fn validate_quorium(&self) -> Result<()> {
+        if self.internal_listen.is_none() {
+            anyhow::bail!("cluster.backend = \"quorium\" requires cluster.internal_listen");
+        }
+        if self.data_dir.is_none() {
+            anyhow::bail!("cluster.backend = \"quorium\" requires cluster.data_dir");
+        }
+        if self.bootstrap == Some(ClusterBootstrap::Join)
+            && self.join_token.as_deref().map_or(true, str::is_empty)
+            && self.join_addresses.is_empty()
+        {
+            anyhow::bail!(
+                "cluster.bootstrap = \"join\" requires cluster.join_token or cluster.join_addresses"
+            );
+        }
+        if self.snapshot_logs == 0 {
+            anyhow::bail!("cluster.snapshot_logs must be positive");
+        }
+        let replace_after = self.replace_absent_voter_after_secs.saturating_mul(1_000);
+        if replace_after > 0 && replace_after <= self.node_timeout_ms {
+            anyhow::bail!(
+                "cluster.replace_absent_voter_after_secs must be longer than cluster.node_timeout_ms"
+            );
+        }
+        let election_worst_case = self
+            .election_timeout_ms
+            .saturating_mul(2)
+            .saturating_add(self.heartbeat_interval_ms);
+        if self.node_timeout_ms <= election_worst_case {
+            anyhow::bail!(
+                "cluster.node_timeout_ms must exceed twice cluster.election_timeout_ms plus cluster.heartbeat_interval_ms"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn bus_transport(&self) -> BusTransport {
+        self.bus.unwrap_or(match self.backend {
+            ClusterBackend::Postgres => BusTransport::Notify,
+            ClusterBackend::Quorium => BusTransport::Mesh,
+        })
     }
 }
 
@@ -540,6 +657,10 @@ pub struct AgentBehaviorConfig {
     pub compaction_threshold_chars: usize,
     #[serde(default = "default_compaction_keep_last")]
     pub compaction_keep_last: usize,
+    #[serde(default = "default_max_active_turns")]
+    pub max_active_turns: usize,
+    #[serde(default = "default_max_active_turns_per_user")]
+    pub max_active_turns_per_user: usize,
 }
 
 impl Default for AgentBehaviorConfig {
@@ -548,8 +669,18 @@ impl Default for AgentBehaviorConfig {
             max_iterations: default_max_iterations(),
             compaction_threshold_chars: default_compaction_threshold_chars(),
             compaction_keep_last: default_compaction_keep_last(),
+            max_active_turns: default_max_active_turns(),
+            max_active_turns_per_user: default_max_active_turns_per_user(),
         }
     }
+}
+
+fn default_max_active_turns() -> usize {
+    200
+}
+
+fn default_max_active_turns_per_user() -> usize {
+    10
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -602,6 +733,10 @@ pub enum LlmProviderConfig {
         user_provided_key: bool,
         #[serde(default)]
         pricing: Option<PricingConfig>,
+        #[serde(default)]
+        max_concurrency: usize,
+        #[serde(default)]
+        context_window: Option<usize>,
     },
     Gemini {
         model: String,
@@ -624,6 +759,10 @@ pub enum LlmProviderConfig {
         user_provided_key: bool,
         #[serde(default)]
         pricing: Option<PricingConfig>,
+        #[serde(default)]
+        max_concurrency: usize,
+        #[serde(default)]
+        context_window: Option<usize>,
     },
     #[serde(rename = "openai-compatible")]
     OpenAiCompat {
@@ -650,7 +789,68 @@ pub enum LlmProviderConfig {
         pricing: Option<PricingConfig>,
         #[serde(default)]
         enable_prompt_caching: bool,
+        #[serde(default)]
+        max_concurrency: usize,
+        #[serde(default)]
+        context_window: Option<usize>,
     },
+    Mock {
+        #[serde(default = "default_mock_model")]
+        model: String,
+        #[serde(default)]
+        id: String,
+        #[serde(default)]
+        priority: u32,
+        #[serde(default = "default_true")]
+        expose_to_ui: bool,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(flatten)]
+        behaviour: MockBehaviour,
+        #[serde(default)]
+        max_concurrency: usize,
+        #[serde(default)]
+        context_window: Option<usize>,
+    },
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MockBehaviour {
+    #[serde(default = "default_mock_chunks")]
+    pub chunks: usize,
+    #[serde(default = "default_mock_chunk_delay_ms")]
+    pub chunk_delay_ms: u64,
+    #[serde(default = "default_mock_first_token_ms")]
+    pub first_token_ms: u64,
+    #[serde(default)]
+    pub reply: Option<String>,
+}
+
+impl Default for MockBehaviour {
+    fn default() -> Self {
+        Self {
+            chunks: default_mock_chunks(),
+            chunk_delay_ms: default_mock_chunk_delay_ms(),
+            first_token_ms: default_mock_first_token_ms(),
+            reply: None,
+        }
+    }
+}
+
+fn default_mock_model() -> String {
+    "mock".to_string()
+}
+
+fn default_mock_chunks() -> usize {
+    8
+}
+
+fn default_mock_chunk_delay_ms() -> u64 {
+    20
+}
+
+fn default_mock_first_token_ms() -> u64 {
+    100
 }
 
 impl LlmProviderConfig {
@@ -659,6 +859,7 @@ impl LlmProviderConfig {
             Self::Anthropic { priority, .. } => *priority,
             Self::Gemini { priority, .. } => *priority,
             Self::OpenAiCompat { priority, .. } => *priority,
+            Self::Mock { priority, .. } => *priority,
         }
     }
 
@@ -667,6 +868,7 @@ impl LlmProviderConfig {
             Self::Anthropic { id, .. } => id,
             Self::Gemini { id, .. } => id,
             Self::OpenAiCompat { id, .. } => id,
+            Self::Mock { id, .. } => id,
         }
     }
 
@@ -675,6 +877,7 @@ impl LlmProviderConfig {
             Self::Anthropic { id, .. } => id,
             Self::Gemini { id, .. } => id,
             Self::OpenAiCompat { id, .. } => id,
+            Self::Mock { id, .. } => id,
         }
     }
 
@@ -683,6 +886,7 @@ impl LlmProviderConfig {
             Self::Anthropic { .. } => "anthropic",
             Self::Gemini { .. } => "gemini",
             Self::OpenAiCompat { .. } => "openai-compatible",
+            Self::Mock { .. } => "mock",
         }
     }
 
@@ -691,6 +895,7 @@ impl LlmProviderConfig {
             Self::Anthropic { expose_to_ui, .. } => *expose_to_ui,
             Self::Gemini { expose_to_ui, .. } => *expose_to_ui,
             Self::OpenAiCompat { expose_to_ui, .. } => *expose_to_ui,
+            Self::Mock { expose_to_ui, .. } => *expose_to_ui,
         }
     }
 
@@ -699,6 +904,7 @@ impl LlmProviderConfig {
             Self::Anthropic { name, .. } => name.as_deref(),
             Self::Gemini { name, .. } => name.as_deref(),
             Self::OpenAiCompat { name, .. } => name.as_deref(),
+            Self::Mock { name, .. } => name.as_deref(),
         }
     }
 
@@ -707,6 +913,7 @@ impl LlmProviderConfig {
             Self::Anthropic { models, .. } => models.as_deref(),
             Self::Gemini { models, .. } => models.as_deref(),
             Self::OpenAiCompat { models, .. } => models.as_deref(),
+            Self::Mock { .. } => None,
         }
     }
 
@@ -721,6 +928,7 @@ impl LlmProviderConfig {
             Self::OpenAiCompat {
                 user_provided_key, ..
             } => *user_provided_key,
+            Self::Mock { .. } => false,
         }
     }
 
@@ -729,6 +937,7 @@ impl LlmProviderConfig {
             Self::Anthropic { api_key, .. } => api_key,
             Self::Gemini { api_key, .. } => api_key,
             Self::OpenAiCompat { api_key, .. } => api_key,
+            Self::Mock { .. } => "",
         }
     }
 
@@ -737,6 +946,7 @@ impl LlmProviderConfig {
             Self::Anthropic { timeout_secs, .. } => *timeout_secs,
             Self::Gemini { timeout_secs, .. } => *timeout_secs,
             Self::OpenAiCompat { timeout_secs, .. } => *timeout_secs,
+            Self::Mock { .. } => default_timeout_secs(),
         }
     }
 
@@ -745,6 +955,7 @@ impl LlmProviderConfig {
             Self::Anthropic { max_retries, .. } => *max_retries,
             Self::Gemini { max_retries, .. } => *max_retries,
             Self::OpenAiCompat { max_retries, .. } => *max_retries,
+            Self::Mock { .. } => 0,
         }
     }
 
@@ -770,6 +981,33 @@ impl LlmProviderConfig {
             Self::Anthropic { pricing, .. } => pricing.as_ref(),
             Self::Gemini { pricing, .. } => pricing.as_ref(),
             Self::OpenAiCompat { pricing, .. } => pricing.as_ref(),
+            Self::Mock { .. } => None,
+        }
+    }
+
+    pub fn max_concurrency(&self) -> usize {
+        match self {
+            Self::Anthropic {
+                max_concurrency, ..
+            }
+            | Self::Gemini {
+                max_concurrency, ..
+            }
+            | Self::OpenAiCompat {
+                max_concurrency, ..
+            }
+            | Self::Mock {
+                max_concurrency, ..
+            } => *max_concurrency,
+        }
+    }
+
+    pub fn context_window(&self) -> Option<usize> {
+        match self {
+            Self::Anthropic { context_window, .. }
+            | Self::Gemini { context_window, .. }
+            | Self::OpenAiCompat { context_window, .. }
+            | Self::Mock { context_window, .. } => *context_window,
         }
     }
 
@@ -778,6 +1016,7 @@ impl LlmProviderConfig {
             Self::Anthropic { model, .. } => model,
             Self::Gemini { model, .. } => model,
             Self::OpenAiCompat { model, .. } => model,
+            Self::Mock { model, .. } => model,
         }
     }
 }
@@ -1833,7 +2072,6 @@ mod cluster_config_tests {
     #[test]
     fn cluster_defaults_without_a_cluster_section() {
         let cfg = with_sections("");
-        assert_eq!(cfg.cluster.backend, ClusterBackend::Postgres);
         assert!(cfg.cluster.internal_listen.is_none());
         assert!(cfg.cluster.internal_url.is_none());
         assert!(cfg.cluster.shared_secret.is_none());
@@ -1853,7 +2091,6 @@ mod cluster_config_tests {
             [database]
             url = "postgres://harvest:pw@localhost:5432/harvest"
             [cluster]
-            backend = "postgres"
             node_name = "harvest-server-0"
             internal_listen = "0.0.0.0:8081"
             internal_url = "http://10.0.0.11:8081"
@@ -1872,7 +2109,6 @@ mod cluster_config_tests {
         "#,
         )
         .unwrap();
-        assert_eq!(cfg.cluster.backend, ClusterBackend::Postgres);
         assert_eq!(cfg.cluster.node_name.as_deref(), Some("harvest-server-0"));
         assert_eq!(cfg.cluster.internal_listen.as_deref(), Some("0.0.0.0:8081"));
         assert_eq!(
@@ -1895,13 +2131,6 @@ mod cluster_config_tests {
         assert!(cfg.validate().is_err());
         cfg.cluster.shared_secret = Some("s".into());
         assert!(cfg.validate().is_ok());
-    }
-
-    #[test]
-    fn cluster_validation_rejects_quorium_backend() {
-        let mut cfg = with_sections("");
-        cfg.cluster.backend = ClusterBackend::Quorium;
-        assert!(cfg.validate().is_err());
     }
 
     #[test]
@@ -1936,6 +2165,129 @@ mod cluster_config_tests {
         let mut cfg = with_sections("");
         cfg.cluster.heartbeat_interval_ms = 5_000;
         cfg.cluster.node_timeout_ms = 6_000;
+        assert!(cfg.validate().is_err());
+    }
+
+    fn quorium_config() -> Config {
+        with_sections(
+            r#"
+            [cluster]
+            backend = "quorium"
+            internal_listen = "0.0.0.0:8081"
+            internal_url = "http://10.0.0.11:8081"
+            shared_secret = "s"
+            data_dir = "/var/snap/harvest/common/quorium"
+            bootstrap = "init"
+            heartbeat_interval_ms = 1000
+            node_timeout_ms = 5000
+            "#,
+        )
+    }
+
+    #[test]
+    fn the_postgres_backend_and_notify_bus_are_the_defaults() {
+        let cfg = with_sections("");
+        assert_eq!(cfg.cluster.backend, ClusterBackend::Postgres);
+        assert_eq!(cfg.cluster.bus_transport(), BusTransport::Notify);
+    }
+
+    #[test]
+    fn quorium_defaults_to_the_mesh_bus_and_validates() {
+        let cfg = quorium_config();
+        assert_eq!(cfg.cluster.backend, ClusterBackend::Quorium);
+        assert_eq!(cfg.cluster.bootstrap, Some(ClusterBootstrap::Init));
+        assert_eq!(cfg.cluster.bus_transport(), BusTransport::Mesh);
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn quorium_requires_a_data_dir_and_a_token_to_join() {
+        let mut cfg = quorium_config();
+        cfg.cluster.data_dir = None;
+        assert!(cfg.validate().is_err());
+        let mut cfg = quorium_config();
+        cfg.cluster.bootstrap = Some(ClusterBootstrap::Join);
+        assert!(cfg.validate().is_err());
+        cfg.cluster.join_token = Some("token".into());
+        assert!(cfg.validate().is_ok());
+        cfg.cluster.join_token = None;
+        cfg.cluster.join_addresses = vec!["http://10.0.0.10:8081".into()];
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn absent_voters_are_replaced_only_after_their_session_expired() {
+        let mut cfg = quorium_config();
+        assert_eq!(cfg.cluster.replace_absent_voter_after_secs, 0);
+        cfg.cluster.replace_absent_voter_after_secs = 3;
+        assert!(cfg.validate().is_err());
+        cfg.cluster.replace_absent_voter_after_secs = 600;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn quorium_sessions_must_outlive_an_election() {
+        let mut cfg = quorium_config();
+        cfg.cluster.election_timeout_ms = 2_000;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn a_join_token_supplies_the_shared_secret() {
+        let mut cfg = quorium_config();
+        cfg.cluster.shared_secret = None;
+        cfg.cluster.bootstrap = Some(ClusterBootstrap::Join);
+        cfg.cluster.join_token = Some(
+            quorium::JoinToken {
+                cluster_id: "c".into(),
+                addresses: vec![],
+                secret: "once".into(),
+                shared_secret: "from-token".into(),
+            }
+            .encode(),
+        );
+        assert_eq!(
+            cfg.cluster.effective_shared_secret().as_deref(),
+            Some("from-token")
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn a_mock_provider_parses_with_defaults_and_overrides() {
+        let cfg = toml::from_str::<Config>(
+            r#"
+            [server]
+            [database]
+            url = "postgres://harvest:pw@localhost:5432/harvest"
+            [auth]
+            jwt_secret = "secret"
+            [[llm]]
+            provider = "mock"
+            chunks = 40
+            first_token_ms = 250
+            max_concurrency = 8
+            context_window = 32000
+        "#,
+        )
+        .unwrap();
+        let llm = &cfg.llm[0];
+        assert_eq!(llm.kind(), "mock");
+        assert_eq!(llm.model(), "mock");
+        assert_eq!(llm.max_concurrency(), 8);
+        assert_eq!(llm.context_window(), Some(32_000));
+        let LlmProviderConfig::Mock { behaviour, .. } = llm else {
+            panic!("expected a mock provider");
+        };
+        assert_eq!(behaviour.chunks, 40);
+        assert_eq!(behaviour.first_token_ms, 250);
+        assert_eq!(behaviour.chunk_delay_ms, 20);
+    }
+
+    #[test]
+    fn the_mesh_bus_needs_the_internal_listener() {
+        let mut cfg = with_sections("");
+        cfg.cluster.bus = Some(BusTransport::Mesh);
         assert!(cfg.validate().is_err());
     }
 

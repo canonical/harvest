@@ -212,6 +212,6 @@ describe('ChatPaneContent — cluster failover events', () => {
     await flushPromises();
 
     expect(api.listProjectConversations).toHaveBeenCalledWith('proj-1');
-    expect(api.getProjectConversation).toHaveBeenCalledWith('proj-1', 'conv-1');
+    expect(api.getProjectConversation).toHaveBeenCalledWith('proj-1', 'conv-1', { limit: 50 });
   });
 });

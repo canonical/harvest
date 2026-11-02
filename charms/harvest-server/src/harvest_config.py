@@ -1,9 +1,11 @@
-from dataclasses import dataclass
-from typing import Mapping, Optional
+from dataclasses import dataclass, field
+from typing import Mapping, Optional, Sequence
 from urllib.parse import quote
 
 SERVER_PORT = 8080
 INTERNAL_PORT = 8081
+QUORIUM_DATA_DIR = "/var/snap/harvest/common/quorium"
+BACKENDS = ("postgres", "quorium")
 
 API_PATHS = [
     "/admin",
@@ -60,6 +62,10 @@ class ServerSettings:
     oidc: Optional[Mapping[str, str]]
     google: Optional[Mapping[str, str]]
     extra_toml: str
+    backend: str = "postgres"
+    bootstrap: Optional[str] = None
+    join_addresses: Sequence[str] = field(default_factory=tuple)
+    accepted_secrets: Sequence[str] = field(default_factory=tuple)
 
 
 def _hosts(*lists: str) -> list:
@@ -89,6 +95,37 @@ def _bool(value: bool) -> str:
     return "true" if value else "false"
 
 
+def _list(values: Sequence[str]) -> str:
+    return "[" + ", ".join(_quote(v) for v in values) + "]"
+
+
+def _cluster_lines(s: ServerSettings) -> list:
+    lines = [
+        "[cluster]",
+        f"node_name = {_quote(s.node_name)}",
+        f'internal_listen = "0.0.0.0:{INTERNAL_PORT}"',
+        f"internal_url = {_quote(s.internal_url)}",
+        f"shared_secret = {_quote(s.cluster_secret)}",
+        f"drain_timeout_secs = {s.drain_timeout_secs}",
+    ]
+    if s.accepted_secrets:
+        lines.append(f"accepted_secrets = {_list(s.accepted_secrets)}")
+    if s.backend != "quorium":
+        return lines
+    lines += [
+        'backend = "quorium"',
+        f"data_dir = {_quote(QUORIUM_DATA_DIR)}",
+        "heartbeat_interval_ms = 1000",
+        "node_timeout_ms = 5000",
+        "election_timeout_ms = 1000",
+    ]
+    if s.bootstrap:
+        lines.append(f"bootstrap = {_quote(s.bootstrap)}")
+    if s.join_addresses:
+        lines.append(f"join_addresses = {_list(s.join_addresses)}")
+    return lines
+
+
 def render_server_toml(s: ServerSettings) -> str:
     lines = [
         "[server]",
@@ -102,14 +139,8 @@ def render_server_toml(s: ServerSettings) -> str:
     ]
     if s.database_ca_file:
         lines.append(f"ca_file = {_quote(s.database_ca_file)}")
+    lines += ["", *_cluster_lines(s)]
     lines += [
-        "",
-        "[cluster]",
-        f"node_name = {_quote(s.node_name)}",
-        f'internal_listen = "0.0.0.0:{INTERNAL_PORT}"',
-        f"internal_url = {_quote(s.internal_url)}",
-        f"shared_secret = {_quote(s.cluster_secret)}",
-        f"drain_timeout_secs = {s.drain_timeout_secs}",
         "",
         "[agent]",
         f"max_iterations = {s.max_iterations}",

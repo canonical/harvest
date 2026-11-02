@@ -136,3 +136,24 @@ def test_api_paths_cover_every_server_route_prefix():
                    "/repositories", "/graph", "/conversations", "/admin", "/skills", "/artifacts"]:
         assert prefix in API_PATHS
     assert all(p.startswith("/") and not p.endswith("/") for p in API_PATHS)
+
+
+def test_the_postgres_backend_renders_no_quorium_keys():
+    cluster = tomllib.loads(render_server_toml(settings()))["cluster"]
+    assert "backend" not in cluster
+    assert "accepted_secrets" not in cluster
+
+
+def test_the_quorium_backend_renders_its_bootstrap_and_timings():
+    cluster = tomllib.loads(render_server_toml(settings(
+        backend="quorium",
+        bootstrap="join",
+        join_addresses=("http://10.0.0.12:8081", "http://10.0.0.13:8081"),
+        accepted_secrets=("next",),
+    )))["cluster"]
+    assert cluster["backend"] == "quorium"
+    assert cluster["data_dir"] == "/var/snap/harvest/common/quorium"
+    assert cluster["bootstrap"] == "join"
+    assert cluster["join_addresses"] == ["http://10.0.0.12:8081", "http://10.0.0.13:8081"]
+    assert cluster["accepted_secrets"] == ["next"]
+    assert cluster["node_timeout_ms"] > 2 * cluster["election_timeout_ms"] + cluster["heartbeat_interval_ms"]

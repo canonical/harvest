@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import logging
 import secrets
 import time
@@ -14,6 +15,7 @@ from charms.rolling_ops.v0.rollingops import RollingOpsManager
 
 from harvest_config import (
     API_PATHS,
+    BACKENDS,
     INTERNAL_PORT,
     SERVER_PORT,
     DatabaseInfo,
@@ -22,7 +24,19 @@ from harvest_config import (
     database_hosts,
     render_server_toml,
 )
-from harvest_workload import AGENT_BINARY, CA_PATH, CONFIG_PATH, Workload, WorkloadError
+from harvest_workload import AGENT_BINARY, CA_PATH, CONFIG_PATH, ClusterAdmin, Workload, WorkloadError
+from quorium_cluster import (
+    PHASE,
+    RotationInProgress,
+    advance_rotation,
+    join_plan,
+    rendered_secrets,
+    report_fields,
+    report_from,
+    restart_is_safe,
+    stage_rotation,
+    stale_servers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +45,8 @@ SECRET_LABEL = "harvest-cluster"
 SECRET_ID_KEY = "cluster-secret-id"
 SCHEMA_KEY = "schema-version"
 EVACUATED_KEY = "evacuated-units"
+SEED_KEY = "quorium-seed"
+ADDRESS_KEY = "internal-url"
 READY_TIMEOUT = 240
 MEMBER_WAIT = 600
 
@@ -48,7 +64,7 @@ class HarvestServerCharm(ops.CharmBase):
 
     def __init__(self, framework: ops.Framework):
         super().__init__(framework)
-        self._stored.set_default(member_wait_since=0.0)
+        self._stored.set_default(member_wait_since=0.0, join_addresses=[], restart_pending=False)
         self.workload = Workload(service="server", port=SERVER_PORT, ready_path="/health/ready")
         self.database = DatabaseRequires(self, relation_name="database", database_name="harvest")
         self.route = HaproxyRouteRequirer(
@@ -105,6 +121,7 @@ class HarvestServerCharm(ops.CharmBase):
         framework.observe(self.on.cluster_rebalance_action, self._on_cluster_rebalance)
         framework.observe(self.on.cluster_evacuate_action, self._on_cluster_evacuate)
         framework.observe(self.on.cluster_remove_action, self._on_cluster_remove)
+        framework.observe(self.on.cluster_restore_action, self._on_cluster_restore)
         framework.observe(self.on.cluster_rotate_secrets_action, self._on_cluster_rotate_secrets)
         framework.observe(self.on.stop, self._on_stop)
 
@@ -126,6 +143,91 @@ class HarvestServerCharm(ops.CharmBase):
             return self.model.get_secret(id=secret_id).get_content(refresh=True)
         except (ops.SecretNotFoundError, ops.ModelError) as e:
             raise Blocked(f"cannot read secret {option}: grant it to the application") from e
+
+    def _backend(self) -> str:
+        backend = str(self.config.get("cluster-backend", "postgres")).strip().lower()
+        if backend not in BACKENDS:
+            raise Blocked(f"cluster-backend must be one of: {', '.join(BACKENDS)}")
+        return backend
+
+    def _unit_databags(self) -> list:
+        relation = self._peer
+        if relation is None:
+            return []
+        return [relation.data[self.unit], *(relation.data[unit] for unit in relation.units)]
+
+    def _peer_addresses(self) -> dict:
+        relation = self._peer
+        if relation is None:
+            return {}
+        units = [self.unit, *relation.units]
+        addresses = {unit.name: relation.data[unit].get(ADDRESS_KEY, "") for unit in units}
+        return {name: url for name, url in addresses.items() if url}
+
+    def _every_peer_published(self) -> bool:
+        relation = self._peer
+        return relation is not None and len(self._peer_addresses()) == len(relation.units) + 1
+
+    def _seed(self) -> Optional[str]:
+        relation = self._peer
+        if relation is None:
+            return None
+        seed = relation.data[self.app].get(SEED_KEY)
+        if seed or not self.unit.is_leader():
+            return seed
+        relation.data[self.app][SEED_KEY] = self.unit.name
+        return self.unit.name
+
+    def _join_plan(self, backend: str) -> tuple:
+        if backend != "quorium":
+            return None, ()
+        bootstrap, addresses = join_plan(self.unit.name, self._seed(), self._peer_addresses())
+        if bootstrap is None:
+            raise Waiting("waiting for the leader to seed the quorium cluster")
+        if bootstrap == "join":
+            if not self._stored.join_addresses:
+                if not addresses:
+                    raise Waiting("waiting for a peer address to join")
+                self._stored.join_addresses = list(addresses)
+            addresses = tuple(self._stored.join_addresses)
+        return bootstrap, addresses
+
+    def _secret_handle(self) -> Optional[ops.Secret]:
+        peer = self._peer
+        secret_id = peer.data[self.app].get(SECRET_ID_KEY) if peer else None
+        return self.model.get_secret(id=secret_id) if secret_id else None
+
+    def _advance_rotation(self, cluster: dict) -> dict:
+        if not self.unit.is_leader():
+            return cluster
+        updated = advance_rotation(cluster, (report_from(data) for data in self._unit_databags()))
+        if updated is None:
+            return cluster
+        self._secret_handle().set_content(updated)
+        self._peer.data[self.app][PHASE] = updated.get(PHASE, "")
+        logger.info("cluster secret rotation advanced to %s", updated.get(PHASE) or "done")
+        return updated
+
+    def _local_admin(self, cluster: dict) -> ClusterAdmin:
+        return ClusterAdmin(f"http://127.0.0.1:{INTERNAL_PORT}", rendered_secrets(cluster)[0])
+
+    def _prune_departed_servers(self, cluster: dict) -> None:
+        if not self.unit.is_leader() or not self._every_peer_published():
+            return
+        admin = self._local_admin(cluster)
+        try:
+            for address in stale_servers(admin.servers(), self._peer_addresses().values()):
+                logger.info("removing departed quorium server %s", address)
+                admin.remove_server(address)
+        except WorkloadError as e:
+            logger.warning("could not prune departed quorium servers: %s", e)
+
+    def _publish_running_secrets(self, cluster: dict) -> None:
+        relation = self._peer
+        if relation is None or self._stored.restart_pending:
+            return
+        primary, accepted = rendered_secrets(cluster)
+        relation.data[self.unit].update(report_fields(primary, accepted))
 
     def _cluster_secrets(self) -> dict:
         peer = self._peer
@@ -320,6 +422,9 @@ class HarvestServerCharm(ops.CharmBase):
         return "\n".join(lines).strip()
 
     def _settings(self, cluster: dict, info: DatabaseInfo, ca: Optional[str]) -> ServerSettings:
+        backend = self._backend()
+        bootstrap, join_addresses = self._join_plan(backend)
+        primary, accepted = rendered_secrets(cluster)
         llm = self._llm_providers()
         public_url = self._public_url()
         oidc, google = self._auth_providers(public_url)
@@ -332,7 +437,7 @@ class HarvestServerCharm(ops.CharmBase):
             pool_size=int(self.config.get("pool-size", 16)),
             node_name=self.unit.name.replace("/", "-"),
             internal_url=self._internal_url(),
-            cluster_secret=cluster["cluster-secret"],
+            cluster_secret=primary,
             jwt_secret=cluster["jwt-secret"],
             user_key_encryption_key=cluster["user-key-encryption-key"],
             public_url=public_url,
@@ -344,6 +449,10 @@ class HarvestServerCharm(ops.CharmBase):
             oidc=oidc,
             google=google,
             extra_toml=self.config.get("extra-toml") or "",
+            backend=backend,
+            bootstrap=bootstrap,
+            join_addresses=join_addresses,
+            accepted_secrets=accepted,
         )
 
     def _ensure_installed(self) -> None:
@@ -387,7 +496,8 @@ class HarvestServerCharm(ops.CharmBase):
             self.unit.open_port("tcp", INTERNAL_PORT)
             if not self.config.get("active-active", True) and self.app.planned_units() > 1:
                 raise Blocked("active-active is false: scale to one unit")
-            cluster = self._cluster_secrets()
+            cluster = self._advance_rotation(self._cluster_secrets())
+            self._peer.data[self.unit][ADDRESS_KEY] = self._internal_url()
             info, ca = self._database_info()
             self._wait_for_members(info)
             settings = self._settings(cluster, info, ca)
@@ -404,10 +514,15 @@ class HarvestServerCharm(ops.CharmBase):
             if not self.workload.running():
                 self.unit.status = ops.MaintenanceStatus("starting harvest")
                 self.workload.start()
-            elif changed:
+                self._stored.restart_pending = False
+            elif changed or self._stored.restart_pending:
+                self._stored.restart_pending = True
                 self.on[self.restart_manager.name].acquire_lock.emit()
             self._publish(settings.public_url)
             if self.workload.ready():
+                self._publish_running_secrets(cluster)
+                if settings.backend == "quorium":
+                    self._prune_departed_servers(cluster)
                 self.unit.status = self._ready_status()
             else:
                 self.unit.status = ops.WaitingStatus("waiting for harvest to become ready")
@@ -419,12 +534,28 @@ class HarvestServerCharm(ops.CharmBase):
             logger.error("workload error: %s", e)
             self.unit.status = ops.BlockedStatus(f"workload error: {e}")
 
+    def _restart_is_safe(self, cluster: dict) -> bool:
+        if self.config.get("cluster-backend", "postgres") != "quorium" or not self.workload.running():
+            return True
+        try:
+            status = self._local_admin(cluster).status()
+        except WorkloadError as e:
+            logger.warning("cannot read cluster status before restarting: %s", e)
+            return False
+        return bool(status.get("membership", {}).get("quorum")) and restart_is_safe(status, self._internal_url())
+
     def _restart(self, _event: ops.EventBase) -> None:
+        cluster = self._cluster_secrets()
+        if not self._restart_is_safe(cluster):
+            self.unit.status = ops.WaitingStatus("waiting for a quorum-safe moment to restart")
+            return
         self.unit.status = ops.MaintenanceStatus("restarting harvest")
         self.workload.restart()
         if not self.workload.wait_ready(READY_TIMEOUT):
             self.unit.status = ops.WaitingStatus("harvest did not become ready after restart")
             return
+        self._stored.restart_pending = False
+        self._publish_running_secrets(cluster)
         self.unit.status = self._ready_status()
 
     def _ready_status(self) -> ops.ActiveStatus:
@@ -480,41 +611,87 @@ class HarvestServerCharm(ops.CharmBase):
             return
         relation.data[self.app][EVACUATED_KEY] = ",".join(sorted(units))
 
+    def _admin_status(self) -> Optional[dict]:
+        try:
+            return self._local_admin(self._cluster_secrets()).status()
+        except (WorkloadError, Waiting, KeyError) as e:
+            logger.info("cluster status is unavailable: %s", e)
+            return None
+
     def _on_cluster_status(self, event: ops.ActionEvent) -> None:
+        peer = self._peer
         event.set_results({
             "managed": True,
+            "backend": str(self.config.get("cluster-backend", "postgres")),
             "local-unit": self.unit.name,
             "node-id": self.workload.node_id() or "",
+            "seed": (peer.data[self.app].get(SEED_KEY, "") if peer else ""),
             "peer-units": json.dumps(self._peer_units()),
             "evacuated-units": json.dumps(sorted(self._evacuated_units())),
             "active-active": bool(self.config.get("active-active", True)),
+            "cluster": json.dumps(self._admin_status() or {}),
         })
 
     def _on_cluster_rebalance(self, event: ops.ActionEvent) -> None:
         self._reconcile(event)
         event.set_results({"status": "reconciled"})
 
-    def _on_cluster_evacuate(self, event: ops.ActionEvent) -> None:
+    def _target_unit(self, event: ops.ActionEvent, action: str) -> Optional[tuple]:
         if not self.unit.is_leader():
-            event.fail("cluster-evacuate must run on the leader")
-            return
+            event.fail(f"{action} must run on the leader")
+            return None
         target = str(event.params.get("unit") or "").strip()
         if not target:
             event.fail("unit is required")
+            return None
+        return target, self._peer_addresses().get(target)
+
+    def _remote_admin(self, address: str) -> ClusterAdmin:
+        return ClusterAdmin(address, rendered_secrets(self._cluster_secrets())[0])
+
+    def _on_cluster_evacuate(self, event: ops.ActionEvent) -> None:
+        resolved = self._target_unit(event, "cluster-evacuate")
+        if resolved is None:
             return
+        target, address = resolved
+        if address and self.workload.running():
+            try:
+                self._remote_admin(address).evacuate()
+            except WorkloadError as e:
+                event.fail(f"could not evacuate {target}: {e}")
+                return
         units = self._evacuated_units()
         units.add(target)
         self._set_evacuated_units(units)
         event.set_results({"evacuated": target})
 
+    def _on_cluster_restore(self, event: ops.ActionEvent) -> None:
+        resolved = self._target_unit(event, "cluster-restore")
+        if resolved is None:
+            return
+        target, address = resolved
+        if address and self.workload.running():
+            try:
+                self._remote_admin(address).restore()
+            except WorkloadError as e:
+                event.fail(f"could not restore {target}: {e}")
+                return
+        units = self._evacuated_units()
+        units.discard(target)
+        self._set_evacuated_units(units)
+        event.set_results({"restored": target})
+
     def _on_cluster_remove(self, event: ops.ActionEvent) -> None:
-        if not self.unit.is_leader():
-            event.fail("cluster-remove must run on the leader")
+        resolved = self._target_unit(event, "cluster-remove")
+        if resolved is None:
             return
-        target = str(event.params.get("unit") or "").strip()
-        if not target:
-            event.fail("unit is required")
-            return
+        target, address = resolved
+        if address and self.config.get("cluster-backend") == "quorium" and self.workload.running():
+            try:
+                self._local_admin(self._cluster_secrets()).remove_server(address)
+            except WorkloadError as e:
+                event.fail(f"could not remove {target}: {e}")
+                return
         units = self._evacuated_units()
         units.discard(target)
         self._set_evacuated_units(units)
@@ -524,21 +701,18 @@ class HarvestServerCharm(ops.CharmBase):
         if not self.unit.is_leader():
             event.fail("cluster-rotate-secrets must run on the leader")
             return
-        peer = self._peer
-        if peer is None:
-            event.fail("waiting for peer relation")
-            return
-        secret_id = peer.data[self.app].get(SECRET_ID_KEY)
-        if not secret_id:
+        secret = self._secret_handle()
+        if secret is None:
             event.fail("cluster secret is not initialized yet")
             return
-        secret = self.model.get_secret(id=secret_id)
-        content = secret.get_content(refresh=True)
-        content["cluster-secret"] = secrets.token_urlsafe(32)
-        secret.set_content(content)
-        self._reconcile(event)
-        event.set_results({"rotated": True})
-
+        try:
+            staged = stage_rotation(secret.get_content(refresh=True), secrets.token_urlsafe(32))
+        except RotationInProgress as e:
+            event.fail(str(e))
+            return
+        secret.set_content(staged)
+        self._peer.data[self.app][PHASE] = staged[PHASE]
+        event.set_results({"rotated": True, "phase": staged[PHASE]})
 
 if __name__ == "__main__":
     ops.main(HarvestServerCharm)

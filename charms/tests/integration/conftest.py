@@ -13,6 +13,8 @@ def pytest_addoption(parser):
     parser.addoption("--llm-openai-compatible-charm", default=os.environ.get("HARVEST_LLM_OPENAI_COMPATIBLE_CHARM"))
     parser.addoption("--harvest-snap", default=os.environ.get("HARVEST_SNAP"))
     parser.addoption("--keep-models", action="store_true", default=False)
+    parser.addoption("--cluster-backend", choices=["postgres", "quorium"],
+                     default=os.environ.get("HARVEST_CLUSTER_BACKEND", "postgres"))
 
 
 @pytest.fixture(scope="session")
@@ -33,6 +35,17 @@ def llm_openai_compatible_charm(request):
 @pytest.fixture(scope="session")
 def harvest_snap(request):
     return Path(request.config.getoption("--harvest-snap")).resolve()
+
+
+@pytest.fixture(scope="session")
+def cluster_backend(request):
+    return request.config.getoption("--cluster-backend")
+
+
+@pytest.fixture
+def quorium_only(cluster_backend):
+    if cluster_backend != "quorium":
+        pytest.skip("needs --cluster-backend=quorium")
 
 
 @pytest.fixture(scope="module")

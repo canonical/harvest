@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 
 use knowledge_server::{
-    agent::{tool::Tool, Agent},
+    agent::Agent,
     api::{
         docs::{handle_get_index, handle_get_page},
         query::{handle_query, handle_query_stream},
@@ -106,6 +106,7 @@ fn query_app(agent: Arc<Agent>) -> Router {
         compaction_keep_last: 6,
         pricing: Arc::new(knowledge_server::cost::PricingTable::default()),
         semantic: None,
+        admission: knowledge_server::turns::admission::TurnAdmission::unlimited(),
     });
     Router::new()
         .route("/query", post(handle_query))
@@ -445,6 +446,7 @@ fn query_app_with_db(agent: Arc<Agent>, db: Arc<Db>) -> Router {
         compaction_keep_last: 6,
         pricing: Arc::new(knowledge_server::cost::PricingTable::default()),
         semantic: None,
+        admission: knowledge_server::turns::admission::TurnAdmission::unlimited(),
     });
     let query_router = Router::new()
         .route("/query/stream", post(handle_query_stream))
