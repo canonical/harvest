@@ -15,6 +15,39 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 const SECRET: &str = "e2e-cluster-secret";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Backend {
+    Postgres,
+    Quorium,
+}
+
+impl Backend {
+    fn smallest_cluster(self, wanted: usize) -> usize {
+        match self {
+            Backend::Postgres => wanted,
+            Backend::Quorium => wanted.max(3),
+        }
+    }
+}
+
+enum Bootstrap {
+    Init,
+    Join(String),
+}
+
+impl Bootstrap {
+    fn settings(&self, data_dir: &std::path::Path) -> String {
+        let (mode, token) = match self {
+            Bootstrap::Init => ("init", String::new()),
+            Bootstrap::Join(token) => ("join", format!("join_token = \"{token}\"\n")),
+        };
+        format!(
+            "backend = \"quorium\"\ndata_dir = \"{}\"\nbootstrap = \"{mode}\"\nelection_timeout_ms = 300\n{token}",
+            data_dir.display()
+        )
+    }
+}
 const JWT_SECRET: &str = "e2e-jwt-secret-that-is-long-enough-for-hs256";
 
 struct MockLlm {
@@ -86,6 +119,7 @@ struct Node {
     name: String,
     child: Option<Child>,
     base: String,
+    internal: String,
     config_path: PathBuf,
     log_path: PathBuf,
 }
@@ -95,11 +129,31 @@ impl Node {
         format!("{}{}", self.base, path)
     }
 
+    fn internal_url(&self, path: &str) -> String {
+        format!("{}{}", self.internal, path)
+    }
+
     fn kill(&mut self) {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+
+    fn signal(&self, signal: &str) {
+        if let Some(child) = &self.child {
+            let _ = Command::new("kill")
+                .args([signal, &child.id().to_string()])
+                .status();
+        }
+    }
+
+    fn pause(&self) {
+        self.signal("-STOP");
+    }
+
+    fn resume(&self) {
+        self.signal("-CONT");
     }
 
     fn terminate(&mut self) {
@@ -126,6 +180,21 @@ impl Node {
         false
     }
 
+    fn rewrite_config(&self, edit: impl Fn(&str) -> String) {
+        let config = std::fs::read_to_string(&self.config_path).unwrap();
+        std::fs::write(&self.config_path, edit(&config)).unwrap();
+    }
+
+    fn start_again(&mut self) {
+        self.child = Some(spawn_server(&self.config_path, &self.log_path, &[]));
+    }
+
+    fn recover(&self) -> std::process::ExitStatus {
+        spawn_server(&self.config_path, &self.log_path, &["recover-cluster"])
+            .wait()
+            .unwrap()
+    }
+
     fn log(&self) -> String {
         std::fs::read_to_string(&self.log_path).unwrap_or_default()
     }
@@ -138,9 +207,35 @@ impl Drop for Node {
     }
 }
 
-fn start_node(name: &str, db_url: &str, llm_url: &str, dir: &std::path::Path) -> Node {
+fn tls_settings(name: &str, tls: Option<&std::path::Path>) -> String {
+    let Some(dir) = tls else {
+        return String::new();
+    };
+    let issued =
+        knowledge_server::cluster::tls::issue(dir, name, &["127.0.0.1".to_string()]).unwrap();
+    format!(
+        "[cluster.tls]\nca_cert = \"{}\"\ncert = \"{}\"\nkey = \"{}\"\n",
+        issued.ca_cert.display(),
+        issued.cert.display(),
+        issued.key.display()
+    )
+}
+
+fn start_node(
+    name: &str,
+    db_url: &str,
+    llm_url: &str,
+    dir: &std::path::Path,
+    bootstrap: Option<Bootstrap>,
+    tls: Option<&std::path::Path>,
+) -> Node {
     let port = free_port();
     let internal_port = free_port();
+    let quorium = bootstrap
+        .map(|b| b.settings(&dir.join(format!("{name}-quorium"))))
+        .unwrap_or_default();
+    let tls_section = tls_settings(name, tls);
+    let scheme = if tls.is_some() { "https" } else { "http" };
     let config = format!(
         r#"
 [server]
@@ -160,6 +255,8 @@ node_timeout_ms = 1500
 bus_batch_window_ms = 10
 drain_grace_secs = 1
 drain_timeout_secs = 5
+{quorium}
+{tls_section}
 
 [auth]
 jwt_secret = "{JWT_SECRET}"
@@ -180,22 +277,108 @@ max_retries = 0
     let config_path = dir.join(format!("{name}.toml"));
     let log_path = dir.join(format!("{name}.log"));
     std::fs::write(&config_path, config).unwrap();
-    let log = std::fs::File::create(&log_path).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_knowledge-server"))
-        .arg("--config")
-        .arg(&config_path)
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::from(log.try_clone().unwrap()))
-        .stderr(Stdio::from(log))
-        .spawn()
-        .expect("starting knowledge-server");
+    let child = spawn_server(&config_path, &log_path, &[]);
     Node {
         name: name.to_string(),
         child: Some(child),
         base: format!("http://127.0.0.1:{port}"),
+        internal: format!("{scheme}://127.0.0.1:{internal_port}"),
         config_path,
         log_path,
     }
+}
+
+fn spawn_server(config_path: &std::path::Path, log_path: &std::path::Path, args: &[&str]) -> Child {
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .unwrap();
+    Command::new(env!("CARGO_BIN_EXE_knowledge-server"))
+        .arg("--config")
+        .arg(config_path)
+        .args(args)
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::from(log.try_clone().unwrap()))
+        .stderr(Stdio::from(log))
+        .spawn()
+        .expect("starting knowledge-server")
+}
+
+fn internal_client(tls: Option<&std::path::Path>) -> reqwest::Client {
+    let builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
+    let Some(dir) = tls else {
+        return builder.build().unwrap();
+    };
+    let issued =
+        knowledge_server::cluster::tls::issue(dir, "operator", &["operator".to_string()]).unwrap();
+    let tls = knowledge_server::cluster::tls::ClusterTls::load(
+        &knowledge_server::cluster::tls::TlsPaths {
+            ca_cert: issued.ca_cert,
+            cert: issued.cert,
+            key: issued.key,
+        },
+    )
+    .unwrap();
+    tls.http_client(builder).unwrap().build().unwrap()
+}
+
+fn node_name(index: usize) -> String {
+    format!("node-{}", (b'a' + index as u8) as char)
+}
+
+async fn join_token(http: &reqwest::Client, seed: &Node) -> String {
+    let response: Value = http
+        .post(seed.internal_url("/internal/cluster/tokens"))
+        .header("x-harvest-cluster-secret", SECRET)
+        .json(&json!({ "ttl_secs": 600 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    response["token"].as_str().expect("join token").to_string()
+}
+
+fn expected_voters(servers: usize) -> usize {
+    let odd = if servers % 2 == 0 {
+        servers - 1
+    } else {
+        servers
+    };
+    odd.clamp(1, 5)
+}
+
+async fn wait_for_voters(http: &reqwest::Client, node: &Node, voters: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = cluster_status(http, node).await;
+        let promoted = status["quorium"]["servers"]
+            .as_array()
+            .map_or(0, |servers| {
+                servers.iter().filter(|s| s["voter"] == true).count()
+            });
+        if promoted >= voters {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "only {promoted} of {voters} voters after 30s: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn cluster_status(http: &reqwest::Client, node: &Node) -> Value {
+    http.get(node.internal_url("/internal/cluster/status"))
+        .header("x-harvest-cluster-secret", SECRET)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
 }
 
 async fn wait_ready(http: &reqwest::Client, node: &Node) {
@@ -213,40 +396,91 @@ async fn wait_ready(http: &reqwest::Client, node: &Node) {
     }
 }
 
+static ONE_CLUSTER_AT_A_TIME: std::sync::LazyLock<Arc<tokio::sync::Mutex<()>>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
+
 struct Cluster {
-    _db: TestDb,
     db_url: String,
     nodes: Vec<Node>,
     http: reqwest::Client,
     token: String,
     project_id: String,
     mock: Arc<MockLlm>,
+    llm_url: String,
+    internal_http: reqwest::Client,
     _dir: tempfile::TempDir,
+    _db: TestDb,
+    _exclusive: tokio::sync::OwnedMutexGuard<()>,
 }
 
 impl Cluster {
-    async fn start(count: usize) -> Self {
+    async fn start(backend: Backend, wanted: usize) -> Self {
+        Self::start_secured(backend, wanted, None).await
+    }
+
+    async fn start_secured(
+        backend: Backend,
+        wanted: usize,
+        tls: Option<std::path::PathBuf>,
+    ) -> Self {
+        let exclusive = Arc::clone(&ONE_CLUSTER_AT_A_TIME).lock_owned().await;
+        let count = backend.smallest_cluster(wanted);
         let db = TestDb::new().await;
         let db_url = db.url.clone();
         let (llm_url, mock) = start_mock_llm().await;
         let dir = tempfile::tempdir().unwrap();
-        let nodes: Vec<Node> = (0..count)
-            .map(|i| {
-                start_node(
-                    &format!("node-{}", (b'a' + i as u8) as char),
-                    &db_url,
-                    &llm_url,
-                    dir.path(),
-                )
-            })
-            .collect();
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
             .unwrap();
-        for node in &nodes {
-            wait_ready(&http, node).await;
-        }
+        let internal_http = internal_client(tls.as_deref());
+        let nodes = match backend {
+            Backend::Postgres => {
+                let nodes: Vec<Node> = (0..count)
+                    .map(|i| {
+                        start_node(
+                            &node_name(i),
+                            &db_url,
+                            &llm_url,
+                            dir.path(),
+                            None,
+                            tls.as_deref(),
+                        )
+                    })
+                    .collect();
+                for node in &nodes {
+                    wait_ready(&http, node).await;
+                }
+                nodes
+            }
+            Backend::Quorium => {
+                let seed = start_node(
+                    &node_name(0),
+                    &db_url,
+                    &llm_url,
+                    dir.path(),
+                    Some(Bootstrap::Init),
+                    tls.as_deref(),
+                );
+                wait_ready(&http, &seed).await;
+                let mut nodes = vec![seed];
+                for i in 1..count {
+                    let token = join_token(&internal_http, &nodes[0]).await;
+                    let node = start_node(
+                        &node_name(i),
+                        &db_url,
+                        &llm_url,
+                        dir.path(),
+                        Some(Bootstrap::Join(token)),
+                        tls.as_deref(),
+                    );
+                    wait_ready(&http, &node).await;
+                    nodes.push(node);
+                }
+                wait_for_voters(&internal_http, &nodes[0], expected_voters(count)).await;
+                nodes
+            }
+        };
 
         let response = http.post(nodes[0].url("/auth/register"))
             .json(&json!({ "email": "admin@example.com", "name": "Admin", "password": "correct-horse" }))
@@ -297,7 +531,10 @@ impl Cluster {
             token,
             project_id,
             mock,
+            llm_url,
+            internal_http,
             _dir: dir,
+            _exclusive: exclusive,
         }
     }
 
@@ -313,7 +550,10 @@ impl Cluster {
             .json()
             .await
             .unwrap();
-        conv["id"].as_str().unwrap().to_string()
+        conv["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("creating a conversation failed: {conv}"))
+            .to_string()
     }
 
     async fn send(&self, node: usize, conv: &str, query: &str) -> reqwest::StatusCode {
@@ -406,10 +646,8 @@ fn expected_answer(chunks: usize) -> String {
     (0..chunks).map(|i| format!("chunk{i} ")).collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn three_nodes_serve_one_cluster() {
-    let cluster = Cluster::start(3).await;
+async fn three_nodes_serve_one_cluster(backend: Backend) {
+    let cluster = Cluster::start(backend, 3).await;
     let nodes: Value = cluster
         .http
         .get(cluster.nodes[0].url("/version"))
@@ -420,15 +658,15 @@ async fn three_nodes_serve_one_cluster() {
         .await
         .unwrap();
     assert_eq!(nodes["schema_version"], harvest_db::LATEST_SCHEMA_VERSION);
-    let db = cluster.db().await;
-    let alive = db.query("SELECT count(*) AS n FROM cluster_nodes WHERE heartbeat_at > now() - interval '2 seconds'", json!({})).await.unwrap();
-    assert_eq!(alive[0]["n"], 3);
+    for node in &cluster.nodes {
+        let status = cluster_status(&cluster.internal_http, node).await;
+        assert_eq!(status["members"].as_array().unwrap().len(), 3, "{status}");
+        assert_eq!(status["membership"]["quorum"], true);
+    }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn a_turn_started_on_one_node_streams_to_watchers_on_every_node() {
-    let cluster = Cluster::start(3).await;
+async fn a_turn_started_on_one_node_streams_to_watchers_on_every_node(backend: Backend) {
+    let cluster = Cluster::start(backend, 3).await;
     cluster.mock.chunks.store(8, Ordering::SeqCst);
     let conv = cluster.new_conversation(1).await;
     let mut on_b = cluster.events(1, Some(&conv)).await;
@@ -492,10 +730,8 @@ async fn a_turn_started_on_one_node_streams_to_watchers_on_every_node() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn a_conversation_lock_is_enforced_across_nodes() {
-    let cluster = Cluster::start(3).await;
+async fn a_conversation_lock_is_enforced_across_nodes(backend: Backend) {
+    let cluster = Cluster::start(backend, 3).await;
     cluster.mock.chunks.store(30, Ordering::SeqCst);
     cluster.mock.chunk_delay_ms.store(100, Ordering::SeqCst);
     let conv = cluster.new_conversation(0).await;
@@ -524,10 +760,10 @@ async fn a_conversation_lock_is_enforced_across_nodes() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn a_watcher_joining_mid_turn_on_another_node_catches_up_without_gaps_or_duplicates() {
-    let cluster = Cluster::start(3).await;
+async fn a_watcher_joining_mid_turn_on_another_node_catches_up_without_gaps_or_duplicates(
+    backend: Backend,
+) {
+    let cluster = Cluster::start(backend, 3).await;
     cluster.mock.chunks.store(40, Ordering::SeqCst);
     cluster.mock.chunk_delay_ms.store(50, Ordering::SeqCst);
     let conv = cluster.new_conversation(0).await;
@@ -557,10 +793,8 @@ async fn a_watcher_joining_mid_turn_on_another_node_catches_up_without_gaps_or_d
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn presence_is_shared_across_nodes() {
-    let cluster = Cluster::start(2).await;
+async fn presence_is_shared_across_nodes(backend: Backend) {
+    let cluster = Cluster::start(backend, 2).await;
     let conv = cluster.new_conversation(0).await;
     let mut on_a = cluster.events(0, Some(&conv)).await;
     wait_for(&mut on_a, Duration::from_secs(10), |e| {
@@ -593,10 +827,8 @@ async fn presence_is_shared_across_nodes() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn a_crashed_node_aborts_its_turn_and_releases_the_lock() {
-    let mut cluster = Cluster::start(3).await;
+async fn a_crashed_node_aborts_its_turn_and_releases_the_lock(backend: Backend) {
+    let mut cluster = Cluster::start(backend, 3).await;
     cluster.mock.chunks.store(200, Ordering::SeqCst);
     cluster.mock.chunk_delay_ms.store(100, Ordering::SeqCst);
     let conv = cluster.new_conversation(1).await;
@@ -633,10 +865,8 @@ async fn a_crashed_node_aborts_its_turn_and_releases_the_lock() {
     .await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn a_drained_node_fails_readiness_refuses_turns_and_exits_cleanly() {
-    let mut cluster = Cluster::start(2).await;
+async fn a_drained_node_fails_readiness_refuses_turns_and_exits_cleanly(backend: Backend) {
+    let mut cluster = Cluster::start(backend, 2).await;
     let conv = cluster.new_conversation(0).await;
     let mut watch = cluster.events(1, Some(&conv)).await;
     wait_for(&mut watch, Duration::from_secs(10), |e| {
@@ -670,15 +900,15 @@ async fn a_drained_node_fails_readiness_refuses_turns_and_exits_cleanly() {
         cluster.nodes[0].log()
     );
 
-    let db = cluster.db().await;
-    let rows = db
-        .query(
-            "SELECT count(*) AS n FROM cluster_nodes WHERE node_id LIKE 'node-a-%'",
-            json!({}),
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows[0]["n"], 0, "a drained node deregisters itself");
+    let status = cluster_status(&cluster.internal_http, &cluster.nodes[1]).await;
+    assert!(
+        status["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| !m["node_id"].as_str().unwrap().starts_with("node-a-")),
+        "a drained node deregisters itself: {status}"
+    );
 
     assert_eq!(cluster.send(1, &conv, "served by the survivor").await, 200);
     wait_for(&mut watch, Duration::from_secs(30), |e| {
@@ -725,10 +955,8 @@ async fn connect_fake_agent(
     (agent_id, agent_token, events)
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn an_agent_connected_to_one_node_runs_commands_requested_on_another() {
-    let cluster = Cluster::start(3).await;
+async fn an_agent_connected_to_one_node_runs_commands_requested_on_another(backend: Backend) {
+    let cluster = Cluster::start(backend, 3).await;
     let (agent_id, agent_token, mut agent_events) = connect_fake_agent(&cluster, 0).await;
 
     let agents: Value = cluster
@@ -779,10 +1007,8 @@ async fn an_agent_connected_to_one_node_runs_commands_requested_on_another() {
     assert_eq!(response["exit_code"], 0);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts three server processes"]
-async fn an_agent_reconnects_to_a_survivor_when_its_node_crashes() {
-    let mut cluster = Cluster::start(2).await;
+async fn an_agent_reconnects_to_a_survivor_when_its_node_crashes(backend: Backend) {
+    let mut cluster = Cluster::start(backend, 2).await;
     let (agent_id, _token, _events) = connect_fake_agent(&cluster, 0).await;
     cluster.nodes[0].kill();
     tokio::time::sleep(Duration::from_secs(3)).await;
@@ -847,3 +1073,419 @@ async fn connect_fake_agent_with_token(
     .await;
     (String::new(), token.to_string(), events)
 }
+
+async fn wait_ready_again(http: &reqwest::Client, node: &Node, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(response) = http.get(node.url("/health/ready")).send().await {
+            if response.status() == 200 {
+                return true;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
+}
+
+async fn a_frozen_node_is_fenced_and_cannot_overwrite_the_takeover(backend: Backend) {
+    let mut cluster = Cluster::start(backend, 3).await;
+    cluster.mock.chunks.store(150, Ordering::SeqCst);
+    cluster.mock.chunk_delay_ms.store(100, Ordering::SeqCst);
+    let conv = cluster.new_conversation(1).await;
+    let mut watch = cluster.events(2, Some(&conv)).await;
+
+    assert_eq!(cluster.send(0, &conv, "frozen").await, 200);
+    wait_for(&mut watch, Duration::from_secs(10), |e| {
+        e["type"] == "text_delta"
+    })
+    .await;
+    cluster.nodes[0].pause();
+    wait_for(&mut watch, Duration::from_secs(15), |e| {
+        e["type"] == "turn_aborted" && e["conv_id"] == conv
+    })
+    .await;
+
+    cluster.mock.chunks.store(3, Ordering::SeqCst);
+    cluster.mock.chunk_delay_ms.store(5, Ordering::SeqCst);
+    wait_for(&mut watch, Duration::from_secs(5), |e| {
+        e["type"] == "unlock" && e["conv_id"] == conv
+    })
+    .await;
+    assert_eq!(cluster.send(1, &conv, "taken over").await, 200);
+    wait_for(&mut watch, Duration::from_secs(30), |e| {
+        e["type"] == "done" && e["conv_id"] == conv
+    })
+    .await;
+
+    cluster.nodes[0].resume();
+    match backend {
+        Backend::Quorium => assert!(
+            cluster.nodes[0].wait_exit(Duration::from_secs(20)),
+            "an evicted node must exit:\n{}",
+            cluster.nodes[0].log()
+        ),
+        Backend::Postgres => assert!(
+            wait_ready_again(&cluster.http, &cluster.nodes[0], Duration::from_secs(20)).await,
+            "a fenced node rejoins once its heartbeat is confirmed:\n{}",
+            cluster.nodes[0].log()
+        ),
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let saved: Value = cluster
+        .http
+        .get(cluster.nodes[1].url(&format!(
+            "/projects/{}/conversations/{conv}",
+            cluster.project_id
+        )))
+        .bearer_auth(&cluster.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let messages = saved["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.len(),
+        4,
+        "the interrupted turn and the takeover are each saved once: {messages:?}"
+    );
+    assert_eq!(messages[0]["text"], "frozen");
+    assert_eq!(messages[1]["status"], "interrupted");
+    assert_eq!(messages[2]["text"], "taken over");
+    assert_eq!(
+        messages[3]["text"].as_str().unwrap().trim(),
+        expected_answer(3).trim()
+    );
+}
+
+struct LoadProfile {
+    backend: Backend,
+    turns: usize,
+    concurrency: usize,
+    chunks: usize,
+    chunk_delay_ms: u64,
+}
+
+impl LoadProfile {
+    fn from_env() -> Option<Self> {
+        let number = |name: &str, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default)
+        };
+        let turns = number("HARVEST_LOAD_TURNS", 0);
+        if turns == 0 {
+            return None;
+        }
+        let backend = match std::env::var("HARVEST_LOAD_BACKEND").as_deref() {
+            Ok("quorium") => Backend::Quorium,
+            _ => Backend::Postgres,
+        };
+        Some(Self {
+            backend,
+            turns,
+            concurrency: number("HARVEST_LOAD_CONCURRENCY", 8),
+            chunks: number("HARVEST_LOAD_CHUNKS", 20),
+            chunk_delay_ms: number("HARVEST_LOAD_CHUNK_DELAY_MS", 20) as u64,
+        })
+    }
+}
+
+#[derive(Default)]
+struct TurnTimings {
+    first_token: Vec<Duration>,
+    completed: Vec<Duration>,
+    rejected: usize,
+    failed: usize,
+}
+
+fn percentile(samples: &mut [Duration], p: f64) -> u128 {
+    if samples.is_empty() {
+        return 0;
+    }
+    samples.sort();
+    let rank = ((samples.len() as f64 - 1.0) * p).round() as usize;
+    samples[rank].as_millis()
+}
+
+async fn timed_turn(cluster: &Cluster, index: usize) -> Result<(Duration, Duration), u16> {
+    let nodes = cluster.nodes.len();
+    let conv = cluster.new_conversation(index % nodes).await;
+    let mut watch = cluster.events((index + 1) % nodes, Some(&conv)).await;
+    let started = Instant::now();
+    let status = cluster.send(index % nodes, &conv, "load").await;
+    if status != 200 {
+        return Err(status.as_u16());
+    }
+    let mut first_token = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let event = tokio::time::timeout_at(deadline, watch.recv())
+            .await
+            .map_err(|_| 504u16)?
+            .ok_or(502u16)?;
+        if event["conv_id"] != conv {
+            continue;
+        }
+        if event["type"] == "text_delta" && first_token.is_none() {
+            first_token = Some(started.elapsed());
+        }
+        if event["type"] == "done" {
+            return Ok((first_token.unwrap_or_default(), started.elapsed()));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "load profile: set HARVEST_LOAD_TURNS"]
+async fn load_profile_reports_latency_percentiles() {
+    let Some(profile) = LoadProfile::from_env() else {
+        return;
+    };
+    let cluster = Arc::new(Cluster::start(profile.backend, 3).await);
+    cluster.mock.chunks.store(profile.chunks, Ordering::SeqCst);
+    cluster
+        .mock
+        .chunk_delay_ms
+        .store(profile.chunk_delay_ms, Ordering::SeqCst);
+    let permits = Arc::new(tokio::sync::Semaphore::new(profile.concurrency));
+    let mut runs = tokio::task::JoinSet::new();
+    let wall = Instant::now();
+    for index in 0..profile.turns {
+        let permit = Arc::clone(&permits).acquire_owned().await.unwrap();
+        let cluster = Arc::clone(&cluster);
+        runs.spawn(async move {
+            let outcome = timed_turn(&cluster, index).await;
+            drop(permit);
+            outcome
+        });
+    }
+    let mut timings = TurnTimings::default();
+    while let Some(outcome) = runs.join_next().await {
+        match outcome.unwrap() {
+            Ok((first_token, completed)) => {
+                timings.first_token.push(first_token);
+                timings.completed.push(completed);
+            }
+            Err(429) | Err(503) => timings.rejected += 1,
+            Err(_) => timings.failed += 1,
+        }
+    }
+    let wall = wall.elapsed();
+    let report = json!({
+        "backend": format!("{:?}", profile.backend).to_lowercase(),
+        "turns": profile.turns,
+        "concurrency": profile.concurrency,
+        "mock_stream_ms": profile.chunks as u64 * profile.chunk_delay_ms,
+        "completed": timings.completed.len(),
+        "rejected": timings.rejected,
+        "failed": timings.failed,
+        "turns_per_second": timings.completed.len() as f64 / wall.as_secs_f64(),
+        "first_token_ms": {
+            "p50": percentile(&mut timings.first_token, 0.50),
+            "p95": percentile(&mut timings.first_token, 0.95),
+            "p99": percentile(&mut timings.first_token, 0.99),
+        },
+        "completion_ms": {
+            "p50": percentile(&mut timings.completed, 0.50),
+            "p95": percentile(&mut timings.completed, 0.95),
+            "p99": percentile(&mut timings.completed, 0.99),
+        },
+    });
+    let path = std::env::var("HARVEST_LOAD_REPORT").unwrap_or_else(|_| "harvest-load.json".into());
+    std::fs::write(&path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
+    println!("{report}");
+    assert_eq!(timings.failed, 0, "{report}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts server processes"]
+async fn a_cluster_that_lost_quorum_is_recovered_from_its_survivor() {
+    let mut cluster = Cluster::start(Backend::Quorium, 3).await;
+    cluster.nodes[1].kill();
+    cluster.nodes[2].kill();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while cluster
+        .http
+        .get(cluster.nodes[0].url("/health/ready"))
+        .send()
+        .await
+        .is_ok_and(|r| r.status() == 200)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "a survivor without quorum must fail readiness"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    cluster.nodes[0].kill();
+    assert!(
+        cluster.nodes[0].recover().success(),
+        "{}",
+        cluster.nodes[0].log()
+    );
+    cluster.nodes[0].start_again();
+    wait_ready(&cluster.http, &cluster.nodes[0]).await;
+
+    for index in 1..3 {
+        let token = join_token(&cluster.internal_http, &cluster.nodes[0]).await;
+        let replacement = start_node(
+            &format!("node-r{index}"),
+            &cluster.db_url,
+            &cluster.llm_url,
+            cluster._dir.path(),
+            Some(Bootstrap::Join(token)),
+            None,
+        );
+        wait_ready(&cluster.http, &replacement).await;
+        cluster.nodes[index] = replacement;
+    }
+    wait_for_voters(&cluster.internal_http, &cluster.nodes[0], 3).await;
+
+    let conv = cluster.new_conversation(1).await;
+    let mut watch = cluster.events(2, Some(&conv)).await;
+    assert_eq!(cluster.send(1, &conv, "after recovery").await, 200);
+    wait_for(&mut watch, Duration::from_secs(30), |e| {
+        e["type"] == "done" && e["conv_id"] == conv
+    })
+    .await;
+}
+
+fn secrets_line(primary: &str, accepted: &[&str]) -> String {
+    let accepted: Vec<String> = accepted.iter().map(|s| format!("\"{s}\"")).collect();
+    format!(
+        "shared_secret = \"{primary}\"\naccepted_secrets = [{}]",
+        accepted.join(", ")
+    )
+}
+
+fn with_secrets(config: &str, primary: &str, accepted: &[&str]) -> String {
+    config
+        .lines()
+        .filter(|line| !line.starts_with("accepted_secrets"))
+        .map(|line| {
+            if line.starts_with("shared_secret") {
+                secrets_line(primary, accepted)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+async fn restart_one_by_one(cluster: &mut Cluster, primary: &str, accepted: &[&str]) {
+    for index in 0..cluster.nodes.len() {
+        cluster.nodes[index].terminate();
+        assert!(cluster.nodes[index].wait_exit(Duration::from_secs(30)));
+        cluster.nodes[index].rewrite_config(|config| with_secrets(config, primary, accepted));
+        cluster.nodes[index].start_again();
+        wait_ready(&cluster.http, &cluster.nodes[index]).await;
+    }
+}
+
+async fn streams_across_nodes(cluster: &Cluster, query: &str) {
+    let conv = cluster.new_conversation(0).await;
+    let mut watch = cluster.events(2, Some(&conv)).await;
+    assert_eq!(cluster.send(1, &conv, query).await, 200);
+    let events = wait_for(&mut watch, Duration::from_secs(30), |e| {
+        e["type"] == "done" && e["conv_id"] == conv
+    })
+    .await;
+    assert!(events.iter().any(|e| e["type"] == "text_delta"));
+}
+
+async fn the_cluster_secret_rotates_without_downtime(backend: Backend) {
+    let mut cluster = Cluster::start(backend, 3).await;
+    let next = "e2e-rotated-secret";
+    restart_one_by_one(&mut cluster, SECRET, &[next]).await;
+    streams_across_nodes(&cluster, "after staging").await;
+    restart_one_by_one(&mut cluster, next, &[SECRET]).await;
+    streams_across_nodes(&cluster, "after committing").await;
+    restart_one_by_one(&mut cluster, next, &[]).await;
+    streams_across_nodes(&cluster, "after finishing").await;
+    let rejected = cluster
+        .http
+        .get(cluster.nodes[0].internal_url("/internal/cluster/status"))
+        .header("x-harvest-cluster-secret", SECRET)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(rejected, 401, "the retired secret is no longer accepted");
+}
+
+async fn internal_peers_authenticate_with_certificates(backend: Backend) {
+    let certificates = tempfile::tempdir().unwrap();
+    let cluster = Cluster::start_secured(backend, 3, Some(certificates.path().to_path_buf())).await;
+    assert!(cluster.nodes[0].internal.starts_with("https://"));
+    streams_across_nodes(&cluster, "over mutual tls").await;
+    let status = cluster_status(&cluster.internal_http, &cluster.nodes[0]).await;
+    assert_eq!(status["members"].as_array().unwrap().len(), 3, "{status}");
+
+    let stranger = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let refused = stranger
+        .get(cluster.nodes[0].internal_url("/internal/cluster/status"))
+        .header("x-harvest-cluster-secret", SECRET)
+        .send()
+        .await;
+    assert!(
+        refused.is_err(),
+        "a client without a certificate is refused"
+    );
+
+    let other_ca = tempfile::tempdir().unwrap();
+    let impostor = internal_client(Some(other_ca.path()));
+    let refused = impostor
+        .get(cluster.nodes[0].internal_url("/internal/cluster/status"))
+        .header("x-harvest-cluster-secret", SECRET)
+        .send()
+        .await;
+    assert!(
+        refused.is_err(),
+        "a certificate from another authority is refused"
+    );
+}
+
+macro_rules! on_every_backend {
+    ($($scenario:ident),* $(,)?) => {
+        $(
+            mod $scenario {
+                #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+                #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts server processes"]
+                async fn postgres() {
+                    super::$scenario(super::Backend::Postgres).await
+                }
+
+                #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+                #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL); starts server processes"]
+                async fn quorium() {
+                    super::$scenario(super::Backend::Quorium).await
+                }
+            }
+        )*
+    };
+}
+
+on_every_backend!(
+    internal_peers_authenticate_with_certificates,
+    the_cluster_secret_rotates_without_downtime,
+    a_frozen_node_is_fenced_and_cannot_overwrite_the_takeover,
+    three_nodes_serve_one_cluster,
+    a_turn_started_on_one_node_streams_to_watchers_on_every_node,
+    a_conversation_lock_is_enforced_across_nodes,
+    a_watcher_joining_mid_turn_on_another_node_catches_up_without_gaps_or_duplicates,
+    presence_is_shared_across_nodes,
+    a_crashed_node_aborts_its_turn_and_releases_the_lock,
+    a_drained_node_fails_readiness_refuses_turns_and_exits_cleanly,
+    an_agent_connected_to_one_node_runs_commands_requested_on_another,
+    an_agent_reconnects_to_a_survivor_when_its_node_crashes,
+);

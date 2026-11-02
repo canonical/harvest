@@ -15,6 +15,8 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame as TungsteniteCloseFrame;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 
+use crate::cluster::tls::ClusterTls;
+
 pub const SECRET_HEADER: &str = "x-harvest-cluster-secret";
 pub const FORWARDED_HEADER: &str = "x-harvest-forwarded-by";
 
@@ -47,20 +49,31 @@ pub struct PeerClient {
     http: reqwest::Client,
     secret: String,
     node_id: String,
+    connector: Option<tokio_tungstenite::Connector>,
 }
 
 impl PeerClient {
     pub fn new(node_id: impl Into<String>, secret: impl Into<String>) -> Arc<Self> {
-        let http = reqwest::Client::builder()
+        Self::secured(node_id, secret, None).expect("building the peer http client")
+    }
+
+    pub fn secured(
+        node_id: impl Into<String>,
+        secret: impl Into<String>,
+        tls: Option<&ClusterTls>,
+    ) -> Result<Arc<Self>> {
+        let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("building the peer http client");
-        Arc::new(Self {
-            http,
+            .redirect(reqwest::redirect::Policy::none());
+        if let Some(tls) = tls {
+            builder = tls.http_client(builder)?;
+        }
+        Ok(Arc::new(Self {
+            http: builder.build()?,
             secret: secret.into(),
             node_id: node_id.into(),
-        })
+            connector: tls.map(ClusterTls::websocket_connector).transpose()?,
+        }))
     }
 
     pub fn node_id(&self) -> &str {
@@ -214,10 +227,15 @@ impl PeerClient {
         if let Ok(v) = HeaderValue::from_str(&self.node_id) {
             request.headers_mut().insert(FORWARDED_HEADER, v);
         }
+        let connector = self.connector.clone();
         upgrade
             .max_message_size(max_message_size)
             .on_upgrade(move |socket| async move {
-                match tokio_tungstenite::connect_async(request).await {
+                match tokio_tungstenite::connect_async_tls_with_config(
+                    request, None, false, connector,
+                )
+                .await
+                {
                     Ok((upstream, _)) => bridge(socket, upstream).await,
                     Err(e) => {
                         tracing::warn!(error = %e, "websocket forward to peer failed");
@@ -295,8 +313,29 @@ where
     }
 }
 
+pub struct ClusterSecrets {
+    accepted: Vec<String>,
+}
+
+impl ClusterSecrets {
+    pub fn new(primary: Option<String>, also_accepted: &[String]) -> Arc<Self> {
+        let accepted = primary
+            .into_iter()
+            .chain(also_accepted.iter().cloned())
+            .filter(|s| !s.is_empty())
+            .collect();
+        Arc::new(Self { accepted })
+    }
+
+    pub fn admits(&self, presented: &str) -> bool {
+        self.accepted.iter().fold(false, |ok, secret| {
+            ok | constant_time_eq(presented.as_bytes(), secret.as_bytes())
+        })
+    }
+}
+
 pub async fn require_secret(
-    State(secret): State<Arc<String>>,
+    State(secrets): State<Arc<ClusterSecrets>>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -305,7 +344,7 @@ pub async fn require_secret(
         .get(SECRET_HEADER)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if secret.is_empty() || !constant_time_eq(presented.as_bytes(), secret.as_bytes()) {
+    if !secrets.admits(presented) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     next.run(request).await
@@ -483,7 +522,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_secret_middleware_rejects_missing_or_wrong_secrets() {
-        let secret = Arc::new("right".to_string());
+        let secret = ClusterSecrets::new(Some("right".into()), &[]);
         let router = Router::new()
             .route("/internal/ok", get(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(secret, require_secret));
@@ -515,6 +554,16 @@ mod tests {
                 .status(),
             200
         );
+    }
+
+    #[test]
+    fn rotation_accepts_the_primary_and_the_extra_secrets_only() {
+        let secrets = ClusterSecrets::new(Some("new".into()), &["old".into()]);
+        assert!(secrets.admits("new"));
+        assert!(secrets.admits("old"));
+        assert!(!secrets.admits("other"));
+        assert!(!secrets.admits(""));
+        assert!(!ClusterSecrets::new(None, &[]).admits(""));
     }
 
     #[test]

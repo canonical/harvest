@@ -7,7 +7,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
     middleware::from_fn_with_state,
-    routing::{delete as route_delete, get as route_get, post as route_post, put as route_put},
+    routing::{get as route_get, post as route_post},
     Router,
 };
 use harvest_db::test_support::TestDb;
@@ -290,6 +290,23 @@ async fn wait_for_message_count(app: Router, uri: &str, token: &str, expected: u
     panic!("conversation at {uri} never reached {expected} messages");
 }
 
+async fn wait_until_unlocked(db: &Db, conv_id: &str) {
+    for _ in 0..40 {
+        let held = db
+            .query(
+                "SELECT 1 FROM active_turns WHERE conv_id = $cid",
+                json!({ "cid": conv_id }),
+            )
+            .await
+            .unwrap();
+        if held.is_empty() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("conversation {conv_id} stayed locked");
+}
+
 async fn wait_for_message_text(app: Router, uri: &str, token: &str, expected_text: &str) -> Value {
     for _ in 0..40 {
         let (_, conv) = send(app.clone(), req_get(uri, token)).await;
@@ -569,7 +586,7 @@ async fn delete_project_removes_it_for_group_member() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn admin_can_list_all_projects() {
+async fn admins_list_only_the_projects_of_their_groups() {
     db!(c, db);
     let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, admin_tok) = make_user(&db, "z@x.com", "Admin", "admin").await;
@@ -583,9 +600,13 @@ async fn admin_can_list_all_projects() {
     )
     .await;
 
-    let (status, body) = send(app, req_get("/projects", &admin_tok)).await;
+    let (status, body) = send(app.clone(), req_get("/projects", &admin_tok)).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!body.as_array().unwrap().is_empty());
+    assert!(body.as_array().unwrap().is_empty());
+
+    let (status, body) = send(app, req_get("/projects", &alice_tok)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -955,6 +976,7 @@ async fn second_turn_preserves_first_turns_sources_and_chain() {
     .await;
     assert_eq!(status, StatusCode::OK);
     wait_for_message_count(app.clone(), &conv_uri, &tok, 2).await;
+    wait_until_unlocked(&db, &cid).await;
 
     let (status, _) = send(
         app.clone(),

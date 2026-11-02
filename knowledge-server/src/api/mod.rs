@@ -103,6 +103,7 @@ pub struct QueryState {
     pub compaction_keep_last: usize,
     pub pricing: Arc<crate::cost::PricingTable>,
     pub semantic: Option<Arc<graph_tools::SemanticHandle>>,
+    pub admission: Arc<crate::turns::admission::TurnAdmission>,
 }
 
 #[derive(Clone)]
@@ -126,6 +127,7 @@ pub struct AppState {
     pub pricing: Arc<crate::cost::PricingTable>,
     pub semantic: Option<Arc<graph_tools::SemanticHandle>>,
     pub live: Arc<crate::projects::live::ProjectLive>,
+    pub admission: Arc<crate::turns::admission::TurnAdmission>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -506,6 +508,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         db: Arc::clone(&state.db),
         live: Arc::clone(&state.live),
         registry: Arc::clone(&state.machine_registry),
+        admission: Arc::clone(&state.admission),
     });
 
     let conv_state = Arc::new(ConvState {
@@ -556,6 +559,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         compaction_keep_last: state.agent_builder.compaction_keep_last,
         pricing: Arc::clone(&state.pricing),
         semantic: state.semantic.clone(),
+        admission: Arc::clone(&state.admission),
     });
     let agent_router = Router::new()
         .route("/query", post(query::handle_query))
@@ -672,18 +676,21 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         )
         .with_state(Arc::clone(&chat_layout_state));
 
-    let project_state = Arc::new(ProjectState::with_live(
-        Arc::clone(&state.db),
-        Arc::clone(&state.agent),
-        Arc::clone(&state.agent_builder),
-        Arc::clone(&state.llm),
-        Arc::clone(&state.llm_configs),
-        state.system_one_config.clone(),
-        state.user_key_store.clone(),
-        Arc::clone(&state.pricing),
-        Arc::clone(&state.collocate_registry),
-        Arc::clone(&state.live),
-    ));
+    let project_state = Arc::new(
+        ProjectState::with_live(
+            Arc::clone(&state.db),
+            Arc::clone(&state.agent),
+            Arc::clone(&state.agent_builder),
+            Arc::clone(&state.llm),
+            Arc::clone(&state.llm_configs),
+            state.system_one_config.clone(),
+            state.user_key_store.clone(),
+            Arc::clone(&state.pricing),
+            Arc::clone(&state.collocate_registry),
+            Arc::clone(&state.live),
+        )
+        .with_admission(Arc::clone(&state.admission)),
+    );
 
     let skill_store = Arc::new(SkillStore::new(Arc::clone(&state.db)));
 

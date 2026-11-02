@@ -14,6 +14,9 @@ use crate::cluster::node::ClusterNode;
 use crate::cluster::peer::PeerClient;
 use crate::cluster::Shutdown;
 use crate::config::ClusterConfig;
+use crate::projects::interruption::{partial_answer, Interruption};
+use crate::turns::admission::TurnPermit;
+use crate::turns::metrics::TURNS;
 
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -143,6 +146,8 @@ struct LocalTurn {
     state: InFlightState,
     seq: u64,
     abort: Option<tokio::task::AbortHandle>,
+    permit: Option<TurnPermit>,
+    continuation: bool,
 }
 
 pub struct ProjectLive {
@@ -219,6 +224,10 @@ impl ProjectLive {
         query: &str,
         attachments: &[Value],
     ) -> Result<bool> {
+        if self.node.is_fenced() {
+            return Ok(false);
+        }
+        let alive = self.node.live_node_ids().await?;
         let rows = self.db.query(
             "INSERT INTO active_turns (conv_id, project_id, turn_id, node_id, locked_by, query, attachments)
              VALUES ($cid, $pid, $tid, $node, $by, $query, $attachments)
@@ -226,16 +235,11 @@ impl ProjectLive {
                  project_id = EXCLUDED.project_id, turn_id = EXCLUDED.turn_id, node_id = EXCLUDED.node_id,
                  locked_by = EXCLUDED.locked_by, query = EXCLUDED.query, attachments = EXCLUDED.attachments,
                  started_at = now()
-             WHERE active_turns.node_id <> $node
-               AND NOT EXISTS (
-                   SELECT 1 FROM cluster_nodes n
-                   WHERE n.node_id = active_turns.node_id
-                     AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8))
+             WHERE NOT (active_turns.node_id = ANY($alive::text[]))
              RETURNING turn_id",
             json!({
                 "cid": conv_id, "pid": project_id, "tid": turn_id, "node": self.node.node_id(),
-                "by": by, "query": query, "attachments": attachments,
-                "timeout": self.node.timeout_secs(),
+                "by": by, "query": query, "attachments": attachments, "alive": alive,
             }),
         ).await?;
         if rows.is_empty() {
@@ -254,9 +258,30 @@ impl ProjectLive {
                 },
                 seq: 0,
                 abort: None,
+                permit: None,
+                continuation: false,
             },
         );
         Ok(true)
+    }
+
+    pub async fn mark_continuation(&self, conv_id: &str, turn_id: &str) -> Result<()> {
+        if let Some(turn) = self.turns.write().await.get_mut(conv_id) {
+            turn.continuation = true;
+        }
+        self.db
+            .execute(
+                "UPDATE active_turns SET continuation = true WHERE conv_id = $cid AND turn_id = $tid",
+                json!({ "cid": conv_id, "tid": turn_id }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn hold_permit(&self, conv_id: &str, permit: TurnPermit) {
+        if let Some(turn) = self.turns.write().await.get_mut(conv_id) {
+            turn.permit = Some(permit);
+        }
     }
 
     pub async fn set_abort_handle(&self, conv_id: &str, handle: tokio::task::AbortHandle) {
@@ -302,16 +327,16 @@ impl ProjectLive {
     }
 
     pub async fn locks(&self, project_id: &str) -> Result<Vec<(String, String)>> {
-        let rows = self.db.query(
-            "SELECT conv_id, locked_by FROM active_turns t
-             WHERE t.project_id = $pid
-               AND (t.node_id = $node OR EXISTS (
-                   SELECT 1 FROM cluster_nodes n
-                   WHERE n.node_id = t.node_id
-                     AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8)))
+        let alive = self.node.recently_live_node_ids().await?;
+        let rows = self
+            .db
+            .query(
+                "SELECT conv_id, locked_by FROM active_turns t
+             WHERE t.project_id = $pid AND t.node_id = ANY($alive::text[])
              ORDER BY t.started_at",
-            json!({ "pid": project_id, "node": self.node.node_id(), "timeout": self.node.timeout_secs() }),
-        ).await?;
+                json!({ "pid": project_id, "alive": alive }),
+            )
+            .await?;
         Ok(rows
             .into_iter()
             .map(|r| {
@@ -414,17 +439,16 @@ impl ProjectLive {
     }
 
     pub async fn presence(&self, project_id: &str) -> Result<Vec<Value>> {
-        self.db.query(
-            "SELECT DISTINCT ON (p.user_id) p.user_id, p.name, p.conv_id
+        let alive = self.node.recently_live_node_ids().await?;
+        self.db
+            .query(
+                "SELECT DISTINCT ON (p.user_id) p.user_id, p.name, p.conv_id
              FROM project_presence p
-             WHERE p.project_id = $pid
-               AND (p.node_id = $node OR EXISTS (
-                   SELECT 1 FROM cluster_nodes n
-                   WHERE n.node_id = p.node_id
-                     AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8)))
+             WHERE p.project_id = $pid AND p.node_id = ANY($alive::text[])
              ORDER BY p.user_id, p.connected_at DESC",
-            json!({ "pid": project_id, "node": self.node.node_id(), "timeout": self.node.timeout_secs() }),
-        ).await
+                json!({ "pid": project_id, "alive": alive }),
+            )
+            .await
     }
 
     pub async fn save_paused(
@@ -501,40 +525,61 @@ impl ProjectLive {
     }
 
     pub async fn reap_dead_nodes(&self) -> Result<usize> {
-        let turns = self
+        let alive = self.node.live_node_ids().await?;
+        let orphans = self
             .db
             .query(
-                "DELETE FROM active_turns t
-             WHERE t.node_id <> $node AND NOT EXISTS (
-                 SELECT 1 FROM cluster_nodes n
-                 WHERE n.node_id = t.node_id
-                   AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8))
-             RETURNING project_id, conv_id",
-                json!({ "node": self.node.node_id(), "timeout": self.node.timeout_secs() }),
+                "SELECT project_id, conv_id, turn_id, locked_by, query, attachments, continuation
+             FROM active_turns t
+             WHERE NOT (t.node_id = ANY($alive::text[]))",
+                json!({ "alive": alive }),
             )
             .await?;
-        for row in &turns {
-            let project_id = row["project_id"].as_str().unwrap_or_default();
-            let conv_id = row["conv_id"].as_str().unwrap_or_default();
-            tracing::warn!(project_id, conv_id, "turn owned by a lost node was aborted");
-            self.announce_abort(project_id, conv_id);
+        let mut turns = 0;
+        for row in &orphans {
+            let text = |key: &str| row[key].as_str().unwrap_or_default();
+            if row["continuation"].as_bool() != Some(true) {
+                self.record_interruption(Interruption {
+                    project_id: text("project_id"),
+                    conv_id: text("conv_id"),
+                    turn_id: text("turn_id"),
+                    username: text("locked_by"),
+                    query: text("query"),
+                    attachments: row["attachments"].as_array().map_or(&[], Vec::as_slice),
+                    partial_answer: String::new(),
+                })
+                .await;
+            }
+            let released = self
+                .db
+                .execute(
+                    "DELETE FROM active_turns WHERE conv_id = $cid AND turn_id = $tid",
+                    json!({ "cid": text("conv_id"), "tid": text("turn_id") }),
+                )
+                .await?;
+            if released > 0 {
+                turns += 1;
+                tracing::warn!(
+                    project_id = text("project_id"),
+                    conv_id = text("conv_id"),
+                    "turn owned by a lost node was aborted"
+                );
+                self.announce_abort(text("project_id"), text("conv_id"));
+            }
         }
         let presence = self
             .db
             .query(
                 "DELETE FROM project_presence p
-             WHERE p.node_id <> $node AND NOT EXISTS (
-                 SELECT 1 FROM cluster_nodes n
-                 WHERE n.node_id = p.node_id
-                   AND n.heartbeat_at > now() - make_interval(secs => $timeout::float8))
+             WHERE NOT (p.node_id = ANY($alive::text[]))
              RETURNING project_id, user_id, name",
-                json!({ "node": self.node.node_id(), "timeout": self.node.timeout_secs() }),
+                json!({ "alive": alive }),
             )
             .await?;
         for row in &presence {
             self.announce_leave_if_gone(row).await;
         }
-        Ok(turns.len() + presence.len())
+        Ok(turns + presence.len())
     }
 
     pub async fn abort_local_turns(&self) -> usize {
@@ -542,6 +587,18 @@ impl ProjectLive {
         for (conv_id, turn) in &drained {
             if let Some(abort) = &turn.abort {
                 abort.abort();
+            }
+            if !turn.continuation {
+                self.record_interruption(Interruption {
+                    project_id: &turn.project_id,
+                    conv_id,
+                    turn_id: &turn.turn_id,
+                    username: &turn.state.username,
+                    query: &turn.state.query,
+                    attachments: &turn.state.attachments,
+                    partial_answer: partial_answer(&turn.state),
+                })
+                .await;
             }
             let _ = self
                 .db
@@ -552,7 +609,18 @@ impl ProjectLive {
                 .await;
             self.announce_abort(&turn.project_id, conv_id);
         }
+        TURNS.aborted(drained.len());
         drained.len()
+    }
+
+    async fn record_interruption(&self, interruption: Interruption<'_>) {
+        match interruption.record(&self.db).await {
+            Ok(true) => TURNS.interrupted(),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, conv_id = interruption.conv_id, "could not record an interrupted turn")
+            }
+        }
     }
 
     pub async fn release_presence(&self) -> Result<()> {

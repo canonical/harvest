@@ -15,6 +15,9 @@ const env = Object.fromEntries(fs.readFileSync(path.join(LAB, 'env'), 'utf8').tr
   const i = l.indexOf('=');
   return [l.slice(0, i), l.slice(i + 1)];
 }));
+const BACKEND = process.env.HA_BACKEND ?? 'postgres';
+const CLUSTER_SECRET = 'lab-cluster-secret';
+const internalUrl = i => `http://${env.HOST_IP}:${19080 + i}`;
 const LB = `http://${env.LB_IP}`;
 const LB_WS = `ws://${env.LB_IP}`;
 const API_PATHS = ['/admin', '/agent', '/agents', '/artifacts', '/auth', '/chat-layouts', '/conversations', '/docs', '/graph',
@@ -71,6 +74,41 @@ function startMockLlm() {
   return new Promise(resolve => server.listen(0, env.HOST_IP, () => resolve(`http://${env.HOST_IP}:${server.address().port}`)));
 }
 
+function quoriumSettings(i) {
+  if (BACKEND !== 'quorium') return '';
+  const bootstrap = i === 0 ? 'bootstrap = "init"' : `bootstrap = "join"\njoin_addresses = ["${internalUrl(0)}"]`;
+  return `backend = "quorium"
+internal_url = "${internalUrl(i)}"
+data_dir = "${path.join(LAB, 'nodes', `raft-${i}`)}"
+election_timeout_ms = 1500
+${bootstrap}`;
+}
+
+function resetRaftState() {
+  for (const i of [0, 1, 2]) fs.rmSync(path.join(LAB, 'nodes', `raft-${i}`), { recursive: true, force: true });
+}
+
+async function clusterStatus(i) {
+  try {
+    const res = await fetch(`${internalUrl(i)}/internal/cluster/status`, {
+      headers: { 'x-harvest-cluster-secret': CLUSTER_SECRET }, signal: AbortSignal.timeout(3000),
+    });
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function raftLeader(among) {
+  for (const i of among) {
+    const report = await clusterStatus(i);
+    const leader = report?.quorium?.leader;
+    if (leader == null || !report.membership?.quorum) continue;
+    for (const j of among) if ((await clusterStatus(j))?.quorium?.server_id === leader) return j;
+  }
+  return null;
+}
+
 const nodes = [];
 function nodeConfig(i, llmUrl) {
   return `
@@ -87,12 +125,13 @@ migrate_on_start = ${i === 0}
 [cluster]
 node_name = "lab-node-${i}"
 internal_listen = "${env.HOST_IP}:${19080 + i}"
-shared_secret = "lab-cluster-secret"
+shared_secret = "${CLUSTER_SECRET}"
 heartbeat_interval_ms = 1000
 node_timeout_ms = 5000
 bus_batch_window_ms = 20
 drain_grace_secs = 16
 drain_timeout_secs = 30
+${quoriumSettings(i)}
 
 [auth]
 jwt_secret = "lab-jwt-secret-that-is-long-enough-for-hs256"
@@ -316,8 +355,9 @@ function answerFrom(events, convId) {
 }
 
 async function main() {
-  const report = { started: new Date().toISOString(), environment: { lb: env.LB_IP, nodes: 3, postgres: [env.PG_A_IP, env.PG_B_IP] } };
+  const report = { started: new Date().toISOString(), environment: { lb: env.LB_IP, nodes: 3, backend: BACKEND, postgres: [env.PG_A_IP, env.PG_B_IP] } };
   resetDatabase();
+  resetRaftState();
   const llmUrl = await startMockLlm();
   startNode(0, llmUrl);
   await waitNodeReady(0);
@@ -419,6 +459,31 @@ async function main() {
       { killed_node: ownerNode, detection_ms: detectedMs, retry_status: retry, api_requests_ok: loadResult.ok, api_requests_failed: loadResult.failed, failures: loadResult.failures });
     startNode(victim, llmUrl);
     await waitNodeReady(victim);
+    await sleep(11000);
+  }
+
+  if (BACKEND === 'quorium') {
+    const load = new LoadLoop(admin, pid); load.start();
+    await sleep(3000);
+    const leader = await raftLeader([0, 1, 2]);
+    const survivors = [0, 1, 2].filter(i => i !== leader);
+    const killedAt = Date.now();
+    nodes[leader].child.kill('SIGKILL');
+    let successor = null;
+    await waitFor(async () => { successor = await raftLeader(survivors); return successor !== null; }, 30000, 'a new raft leader');
+    const electedMs = Date.now() - killedAt;
+    const conv = (await admin.json('POST', `/projects/${pid}/conversations`, {})).data.id;
+    mock.chunks = 3; mock.delayMs = 5;
+    const code = await chat(admin, pid, conv, 'after losing the raft leader');
+    await sleep(10000);
+    const loadResult = await load.stop();
+    record('killing the raft leader elects a successor without failed requests',
+      leader !== null && electedMs < 10000 && code === 200 && loadResult.failed === 0,
+      { killed_node: leader, successor, election_ms: electedMs, chat_status: code,
+        api_requests_ok: loadResult.ok, api_requests_failed: loadResult.failed, failures: loadResult.failures });
+    startNode(leader, llmUrl);
+    await waitNodeReady(leader);
+    await waitFor(async () => (await clusterStatus(leader))?.membership?.voters === 3, 60000, 'three voters again');
     await sleep(11000);
   }
 

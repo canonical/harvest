@@ -6,6 +6,7 @@ import * as api from '../../src/lib/api.js';
 describe('useLlmStore', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.spyOn(api, 'fetchLlmUserKeys').mockResolvedValue({ providers: [] });
   });
 
   it('starts with no selection before providers load', () => {

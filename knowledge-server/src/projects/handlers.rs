@@ -16,41 +16,23 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use tokio::sync::mpsc;
 use tokio_stream::{wrappers::BroadcastStream, Stream};
 use uuid::Uuid;
 
 use super::live::{build_catchup_events, seq_filter, ProjectLive};
-use crate::agent::{
-    Agent, AgentEvent, Attachment, HistoryMessage, PausedTurn, PendingConfirmCall, Source,
-    ToolResumeResult,
-};
+use super::turn::{load_project_context, PausedConfirm, ResolvedConfirmItem, TurnLaunch, TurnWork};
+use crate::agent::{Agent, Attachment, ToolResumeResult};
 use crate::api::ProjectAgentBuilder;
 use crate::auth::jwt::Claims;
-use crate::conversations::summary::{effective_history, refresh as refresh_summary, StoredSummary};
-use crate::conversations::title_generation::maybe_regenerate_title;
-use crate::llm::types::{Message, ProviderSelection, Usage, UsedProvider};
+use crate::conversations::store::{self, Guard, Owner, Page};
+use crate::llm::types::ProviderSelection;
+use crate::turns::admission::TurnAdmission;
+use crate::turns::idempotency::{self, Reservation};
+use crate::turns::metrics::{Stage, TURNS};
 use harvest_db::Db;
 
 const PROJECT_NAME_MAX_CHARS: usize = 100;
 const PAUSED_TURN_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct ResolvedConfirmItem {
-    content: String,
-    is_error: bool,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-struct PausedConfirm {
-    messages: Vec<Message>,
-    iterations: usize,
-    pending: Vec<PendingConfirmCall>,
-    #[serde(default)]
-    resolved: HashMap<String, ResolvedConfirmItem>,
-    selection: Option<ProviderSelection>,
-    elapsed_ms: u64,
-}
 
 fn selection_from_parts(
     provider_id: &Option<String>,
@@ -75,6 +57,7 @@ pub struct ProjectState {
     pub pricing: Arc<crate::cost::PricingTable>,
     pub collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
     pub live: Arc<ProjectLive>,
+    pub admission: Arc<TurnAdmission>,
 }
 
 impl ProjectState {
@@ -129,7 +112,13 @@ impl ProjectState {
             pricing,
             collocate_registry,
             live,
+            admission: TurnAdmission::unlimited(),
         }
+    }
+
+    pub fn with_admission(mut self, admission: Arc<TurnAdmission>) -> Self {
+        self.admission = admission;
+        self
     }
 
     async fn broadcast(&self, project_id: &str, msg: String) {
@@ -306,289 +295,38 @@ pub async fn project_events(
     response
 }
 
-async fn load_project_messages_raw(db: &Db, project_id: &str, conv_id: &str) -> Vec<Value> {
-    load_project_conversation(db, project_id, conv_id).await.0
-}
-
-async fn load_project_conversation(
-    db: &Db,
-    project_id: &str,
-    conv_id: &str,
-) -> (Vec<Value>, Option<StoredSummary>) {
-    let rows = db.query(
-        "SELECT messages, summary, summary_upto FROM conversations WHERE id = $cid AND project_id = $pid",
-        json!({ "pid": project_id, "cid": conv_id }),
-    ).await.unwrap_or_default();
-
-    let Some(row) = rows.into_iter().next() else {
-        return (vec![], None);
-    };
-    let messages = row
-        .get("messages")
-        .and_then(|v| v.as_str())
-        .and_then(|s| serde_json::from_str::<Vec<Value>>(s).ok())
-        .unwrap_or_default();
-    (messages, StoredSummary::from_row(&row))
-}
-
-fn history_messages_from_raw(raw: &[Value]) -> Vec<HistoryMessage> {
-    raw.iter()
-        .filter_map(|v| serde_json::from_value(v.clone()).ok())
-        .collect()
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn save_project_turn(
-    db: &Db,
-    project_id: &str,
-    conv_id: &str,
-    now: &str,
-    user_text: &str,
-    username: &str,
-    attachments_meta: Vec<Value>,
-    prior_messages: Vec<Value>,
-    assistant_text: &str,
-    sources: &[Source],
-    tool_calls_made: usize,
-    chain: Vec<Value>,
-    question: Option<Value>,
-    provider_used: Option<&UsedProvider>,
-    duration_ms: u64,
-    usage: &Usage,
-    llm_call_count: usize,
-    turn_id: &str,
-    user_id: &str,
-    pricing: &crate::cost::PricingTable,
-    release_lock: bool,
-) {
-    let mut messages = prior_messages;
-    messages.push(json!({
-        "role": "user",
-        "text": user_text,
-        "username": username,
-        "attachments": attachments_meta,
-    }));
-    let (chain, enumerations) = crate::agent::chain::split_enumerations(chain);
-    let mut assistant_message = json!({
-        "role": "assistant",
-        "text": assistant_text,
-        "sources": sources,
-        "chain": chain,
-        "tool_calls_made": tool_calls_made,
-        "duration_ms": duration_ms,
-        "usage": usage,
-        "llm_call_count": llm_call_count,
-        "cost_microusd": pricing.price_call(usage, provider_used.map(|p| p.kind.as_str()).unwrap_or(""), provider_used.map(|p| p.model.as_str()).unwrap_or("")),
-    });
-    if !enumerations.is_empty() {
-        assistant_message["enumerations"] = json!(enumerations);
-    }
-    if let Some(question) = question {
-        assistant_message["question"] = question;
-    }
-    if let Some(provider_used) = provider_used {
-        assistant_message["provider"] = json!({
-            "provider_id": provider_used.provider_id,
-            "kind": provider_used.kind,
-            "model": provider_used.model,
-        });
-    }
-    messages.push(assistant_message);
-
-    let messages_json = match serde_json::to_string(&messages) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error=%e, "failed to serialize conversation");
-            return;
-        }
-    };
-    let count = messages.len() as i64;
-
-    let _ = db
-        .query(
-            "WITH released AS (
-             DELETE FROM active_turns WHERE conv_id = $cid AND turn_id = $tid AND $release::bool
-         )
-         UPDATE conversations
-         SET messages = $messages, message_count = $count, updated_at = $now
-         WHERE id = $cid AND project_id = $pid
-         RETURNING id",
-            json!({
-                "pid": project_id, "cid": conv_id,
-                "messages": messages_json, "count": count, "now": now,
-                "tid": turn_id, "release": release_lock,
-            }),
-        )
-        .await;
-
-    if let Some(record) = crate::cost::build_turn_record(
-        crate::cost::CostScope::Chat,
-        turn_id,
-        user_id,
-        provider_used,
-        usage,
-        llm_call_count,
-        pricing,
-        duration_ms,
-        Some(project_id),
-        Some(conv_id),
-        None,
-        None,
-        None,
-    ) {
-        let _ = crate::cost::record_llm_call(db, &record).await;
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn update_last_assistant_turn(
-    db: &Db,
-    project_id: &str,
-    conv_id: &str,
-    now: &str,
-    assistant_text: &str,
-    sources: &[Source],
-    tool_calls_made: usize,
-    new_chain: Vec<Value>,
-    question: Option<Value>,
-    provider_used: Option<&UsedProvider>,
-    duration_ms: u64,
-    usage: &Usage,
-    llm_call_count: usize,
-    turn_id: &str,
-    user_id: &str,
-    pricing: &crate::cost::PricingTable,
-    release_lock: bool,
-) {
-    let mut messages = load_project_messages_raw(db, project_id, conv_id).await;
-    let Some(last) = messages.last_mut() else {
-        return;
-    };
-
-    let mut chain = last["chain"].as_array().cloned().unwrap_or_default();
-    chain.extend(new_chain);
-
-    last["text"] = json!(assistant_text);
-    last["sources"] = json!(sources);
-    last["chain"] = json!(chain);
-    last["tool_calls_made"] = json!(tool_calls_made);
-    last["duration_ms"] = json!(duration_ms);
-    last["usage"] = json!(usage);
-    last["llm_call_count"] = json!(llm_call_count);
-    last["cost_microusd"] = json!(pricing.price_call(
-        usage,
-        provider_used.map(|p| p.kind.as_str()).unwrap_or(""),
-        provider_used.map(|p| p.model.as_str()).unwrap_or("")
-    ));
-    match question {
-        Some(question) => last["question"] = question,
-        None => {
-            if let Some(obj) = last.as_object_mut() {
-                obj.remove("question");
-            }
-        }
-    }
-    if let Some(provider_used) = provider_used {
-        last["provider"] = json!({
-            "provider_id": provider_used.provider_id,
-            "kind": provider_used.kind,
-            "model": provider_used.model,
-        });
-    }
-
-    let messages_json = match serde_json::to_string(&messages) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error=%e, "failed to serialize conversation");
-            return;
-        }
-    };
-    let count = messages.len() as i64;
-
-    let _ = db
-        .query(
-            "WITH released AS (
-             DELETE FROM active_turns WHERE conv_id = $cid AND turn_id = $tid AND $release::bool
-         )
-         UPDATE conversations
-         SET messages = $messages, message_count = $count, updated_at = $now
-         WHERE id = $cid AND project_id = $pid
-         RETURNING id",
-            json!({
-                "pid": project_id, "cid": conv_id,
-                "messages": messages_json, "count": count, "now": now,
-                "tid": turn_id, "release": release_lock,
-            }),
-        )
-        .await;
-
-    if let Some(record) = crate::cost::build_turn_record(
-        crate::cost::CostScope::Chat,
-        turn_id,
-        user_id,
-        provider_used,
-        usage,
-        llm_call_count,
-        pricing,
-        duration_ms,
-        Some(project_id),
-        Some(conv_id),
-        None,
-        None,
-        None,
-    ) {
-        let _ = crate::cost::record_llm_call(db, &record).await;
-    }
-}
-
 async fn mark_confirm_action_statuses(
     db: &Db,
     project_id: &str,
     conv_id: &str,
     results: &[ResumeConfirmItem],
 ) {
-    let mut messages = load_project_messages_raw(db, project_id, conv_id).await;
-    let Some(last) = messages.last_mut() else {
-        return;
-    };
-    let Some(chain) = last["chain"].as_array_mut() else {
-        return;
-    };
-    for entry in chain.iter_mut() {
-        if entry["type"] != "confirm_action" {
-            continue;
-        }
-        let Some(id) = entry["id"].as_str() else {
-            continue;
-        };
-        if let Some(item) = results.iter().find(|r| r.tool_call_id == id) {
-            entry["status"] = json!(item.status);
-            entry["result_text"] = json!(item.result_text);
-        }
-    }
-
-    let messages_json = match serde_json::to_string(&messages) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(error=%e, "failed to serialize conversation");
-            return;
-        }
-    };
-    let count = messages.len() as i64;
     let now = harvest_db::now_rfc3339();
-
-    let _ = db
-        .query(
-            "UPDATE conversations
-         SET messages = $messages, message_count = $count, updated_at = $now
-         WHERE id = $cid AND project_id = $pid
-         RETURNING id",
-            json!({
-                "pid": project_id, "cid": conv_id,
-                "messages": messages_json, "count": count, "now": now,
-            }),
-        )
-        .await;
+    let edited = store::update_last(
+        db,
+        Owner::Project(project_id),
+        Guard::Unguarded,
+        conv_id,
+        &now,
+        |last| {
+            let Some(chain) = last["chain"].as_array_mut() else {
+                return;
+            };
+            for entry in chain.iter_mut().filter(|e| e["type"] == "confirm_action") {
+                let Some(id) = entry["id"].as_str() else {
+                    continue;
+                };
+                if let Some(item) = results.iter().find(|r| r.tool_call_id == id) {
+                    entry["status"] = json!(item.status);
+                    entry["result_text"] = json!(item.result_text);
+                }
+            }
+        },
+    )
+    .await;
+    if let Err(e) = edited {
+        tracing::error!(error = %e, conv_id, "failed to record confirmation statuses");
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -609,387 +347,16 @@ pub struct ProjectQueryStreamBody {
     pub model: Option<String>,
 }
 
-enum TurnPersist {
-    New {
-        prior_messages: Vec<Value>,
-        attachment_meta: Vec<Value>,
-    },
-    Continuation,
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
-async fn drive_turn(
-    live: Arc<ProjectLive>,
-    db: Arc<Db>,
-    llm: Arc<dyn crate::llm::LlmProvider>,
-    registry: Arc<crate::machines::MachineRegistry>,
-    project_id: String,
-    conv_id: String,
-    query: String,
-    username: String,
-    history: Vec<HistoryMessage>,
-    persist: TurnPersist,
-    selection: Option<ProviderSelection>,
-    mut agent_rx: mpsc::Receiver<AgentEvent>,
-    paused_rx: tokio::sync::oneshot::Receiver<Option<PausedTurn>>,
-    user_id: String,
-    pricing: Arc<crate::cost::PricingTable>,
-    turn_id: String,
-) {
-    let mut chain_builder = crate::agent::chain::ChainBuilder::new();
-    let mut pending_question: Option<Value> = None;
-    let mut confirmation_requested = false;
-    let mut released = false;
-
-    while let Some(event) = agent_rx.recv().await {
-        if matches!(event, AgentEvent::ConfirmAction { .. }) {
-            confirmation_requested = true;
-        }
-        let (description, hostname) = if let AgentEvent::ToolCall { name, input } = &event {
-            if name == "run_command" {
-                let host = match input["agent_id"].as_str() {
-                    Some(id) => registry.hostname_of(id).await,
-                    None => None,
-                };
-                (None, host)
-            } else {
-                (None, None)
-            }
-        } else {
-            (None, None)
-        };
-
-        match &event {
-            AgentEvent::TextDelta { text } => chain_builder.text_delta(text),
-            AgentEvent::ThinkingDelta { text } => chain_builder.thinking_delta(text),
-            AgentEvent::Thinking { text } => chain_builder.thinking(text),
-            AgentEvent::ToolCall { name, input } => {
-                chain_builder.tool_call(name, input, description.as_deref(), hostname.as_deref());
-            }
-            AgentEvent::ToolResult { name, preview } => chain_builder.tool_result(name, preview),
-            AgentEvent::Enumeration {
-                tool,
-                input,
-                result,
-            } => chain_builder.enumeration(tool, input, result),
-            AgentEvent::Question { question, choices } => {
-                pending_question = Some(json!({ "question": question, "choices": choices }));
-            }
-            AgentEvent::ConfirmAction {
-                id,
-                name,
-                input,
-                description,
-            } => {
-                chain_builder.confirm_action(id, name, input, description);
-            }
-            AgentEvent::ParallelResearchStarted { leads } => {
-                chain_builder.parallel_research_started(leads);
-            }
-            AgentEvent::ParallelResearchLeadDone {
-                index,
-                iterations,
-                preview,
-                duration_ms,
-            } => {
-                chain_builder.parallel_research_lead_done(
-                    *index,
-                    *iterations,
-                    preview,
-                    *duration_ms,
-                );
-            }
-            AgentEvent::ParallelResearchMergeStarted { duration_ms } => {
-                chain_builder.parallel_research_merge_started(*duration_ms);
-            }
-            _ => {}
-        }
-
-        let seq = live
-            .record(&conv_id, &event, description.clone(), hostname.clone())
-            .await;
-
-        if let Some(mut data) = turn_event_json(
-            &event,
-            &conv_id,
-            description.as_deref(),
-            hostname.as_deref(),
-            &pricing,
-        ) {
-            data["seq"] = json!(seq);
-            live.broadcast(&project_id, data.to_string());
-        }
-        if let AgentEvent::Done {
-            answer,
-            sources,
-            tool_calls_made,
-            provider_used,
-            duration_ms,
-            usage,
-            llm_call_count,
-            ..
-        } = &event
-        {
-            let save_now = harvest_db::now_rfc3339();
-            let chain = std::mem::take(&mut chain_builder).finish();
-            match &persist {
-                TurnPersist::New {
-                    prior_messages,
-                    attachment_meta,
-                } => {
-                    save_project_turn(
-                        &db,
-                        &project_id,
-                        &conv_id,
-                        &save_now,
-                        &query,
-                        &username,
-                        attachment_meta.clone(),
-                        prior_messages.clone(),
-                        answer,
-                        sources,
-                        *tool_calls_made,
-                        chain,
-                        pending_question.clone(),
-                        provider_used.as_ref(),
-                        *duration_ms,
-                        usage,
-                        *llm_call_count,
-                        &turn_id,
-                        &user_id,
-                        &pricing,
-                        !confirmation_requested,
-                    )
-                    .await;
-                }
-                TurnPersist::Continuation => {
-                    update_last_assistant_turn(
-                        &db,
-                        &project_id,
-                        &conv_id,
-                        &save_now,
-                        answer,
-                        sources,
-                        *tool_calls_made,
-                        chain,
-                        pending_question.clone(),
-                        provider_used.as_ref(),
-                        *duration_ms,
-                        usage,
-                        *llm_call_count,
-                        &turn_id,
-                        &user_id,
-                        &pricing,
-                        !confirmation_requested,
-                    )
-                    .await;
-                }
-            }
-            live.broadcast(
-                &project_id,
-                json!({
-                    "type": "conversation_updated",
-                    "conv_id": conv_id,
-                    "updated_at": save_now,
-                })
-                .to_string(),
-            );
-
-            if !confirmation_requested && !released {
-                if let Err(e) = live.finish(&conv_id, &turn_id).await {
-                    tracing::warn!(error = %e, conv_id, "failed to release conversation lock");
-                }
-                live.broadcast(
-                    &project_id,
-                    json!({"type": "unlock", "conv_id": conv_id}).to_string(),
-                );
-                released = true;
-            }
-
-            let llm_t = Arc::clone(&llm);
-            let db_t = Arc::clone(&db);
-            let live_t = Arc::clone(&live);
-            let pid_t = project_id.clone();
-            let cid_t = conv_id.clone();
-            let query_t = query.clone();
-            let answer_t = answer.clone();
-            let prior_t = history.clone();
-            let count_t = match &persist {
-                TurnPersist::New { prior_messages, .. } => prior_messages.len() + 2,
-                TurnPersist::Continuation => history.len() + 2,
-            };
-            tokio::spawn(async move {
-                if let Some(new_title) = maybe_regenerate_title(
-                    &db_t, &*llm_t, &cid_t, &prior_t, &query_t, &answer_t, count_t,
-                )
-                .await
-                {
-                    let data = json!({
-                        "type": "title_updated",
-                        "conv_id": cid_t,
-                        "title": new_title,
-                    })
-                    .to_string();
-                    live_t.broadcast(&pid_t, data);
-                }
-            });
-        }
-    }
-
-    if let Ok(Some(paused_turn)) = paused_rx.await {
-        let paused = PausedConfirm {
-            messages: paused_turn.messages,
-            iterations: paused_turn.iterations,
-            pending: paused_turn.pending,
-            resolved: HashMap::new(),
-            selection,
-            elapsed_ms: paused_turn.elapsed_ms,
-        };
-        match serde_json::to_value(&paused) {
-            Ok(payload) => {
-                if let Err(e) = live.save_paused(&project_id, &conv_id, &payload).await {
-                    tracing::error!(error = %e, conv_id, "failed to persist paused confirmation");
-                }
-            }
-            Err(e) => {
-                tracing::error!(error = %e, conv_id, "failed to serialize paused confirmation")
-            }
-        }
-    }
-
-    if !released {
-        if let Err(e) = live.finish(&conv_id, &turn_id).await {
-            tracing::warn!(error = %e, conv_id, "failed to release conversation lock");
-        }
-        live.broadcast(
-            &project_id,
-            json!({"type": "unlock", "conv_id": conv_id}).to_string(),
-        );
-    }
-}
-
-fn turn_event_json(
-    event: &AgentEvent,
-    conv_id: &str,
-    description: Option<&str>,
-    hostname: Option<&str>,
-    pricing: &crate::cost::PricingTable,
-) -> Option<Value> {
-    match event {
-        AgentEvent::TextDelta { text } => Some(json!({
-            "type": "text_delta", "conv_id": conv_id, "text": text,
-        })),
-        AgentEvent::ThinkingDelta { text } => Some(json!({
-            "type": "thinking_delta", "conv_id": conv_id, "text": text,
-        })),
-        AgentEvent::Thinking { text } => Some(json!({
-            "type": "thinking", "conv_id": conv_id, "text": text,
-        })),
-        AgentEvent::ToolCall { name, input } => {
-            let mut v = json!({
-                "type": "tool_call", "conv_id": conv_id,
-                "name": name, "input": input,
-            });
-            if let Some(d) = description {
-                v["description"] = json!(d);
-            }
-            if let Some(h) = hostname {
-                v["hostname"] = json!(h);
-            }
-            Some(v)
-        }
-        AgentEvent::ToolResult { name, preview } => Some(json!({
-            "type": "tool_result", "conv_id": conv_id,
-            "name": name, "preview": preview,
-        })),
-        AgentEvent::Phase { label } => Some(json!({
-            "type": "phase", "conv_id": conv_id, "label": label,
-        })),
-        AgentEvent::Intent { mode } => Some(json!({
-            "type": "intent", "conv_id": conv_id,
-            "mode": format!("{:?}", mode).to_lowercase(),
-        })),
-        AgentEvent::ParallelResearchStarted { leads } => Some(json!({
-            "type": "parallel_research_started", "conv_id": conv_id, "leads": leads,
-        })),
-        AgentEvent::ParallelResearchLeadDone {
-            index,
-            iterations,
-            preview,
-            duration_ms,
-        } => Some(json!({
-            "type": "parallel_research_lead_done", "conv_id": conv_id,
-            "index": index, "iterations": iterations, "preview": preview, "duration_ms": duration_ms,
-        })),
-        AgentEvent::ParallelResearchMergeStarted { duration_ms } => Some(json!({
-            "type": "parallel_research_merge_started", "conv_id": conv_id, "duration_ms": duration_ms,
-        })),
-        AgentEvent::Done {
-            answer,
-            sources,
-            tool_calls_made,
-            provider_used,
-            duration_ms,
-            usage,
-            llm_call_count,
-            ..
-        } => {
-            let cost_microusd = pricing.price_call(
-                usage,
-                provider_used
-                    .as_ref()
-                    .map(|p| p.kind.as_str())
-                    .unwrap_or(""),
-                provider_used
-                    .as_ref()
-                    .map(|p| p.model.as_str())
-                    .unwrap_or(""),
-            );
-            Some(json!({
-                "type": "done", "conv_id": conv_id,
-                "answer": answer, "sources": sources,
-                "tool_calls_made": tool_calls_made,
-                "provider_used": provider_used,
-                "duration_ms": duration_ms,
-                "usage": usage,
-                "llm_call_count": llm_call_count,
-                "cost_microusd": cost_microusd,
-            }))
-        }
-        AgentEvent::Question { question, choices } => Some(json!({
-            "type": "question", "conv_id": conv_id,
-            "question": question, "choices": choices,
-        })),
-        AgentEvent::ConfirmAction {
-            id,
-            name,
-            input,
-            description,
-        } => Some(json!({
-            "type": "confirm_action", "conv_id": conv_id,
-            "id": id, "name": name, "input": input, "description": description,
-        })),
-        AgentEvent::Error { message } => Some(json!({
-            "type": "error", "conv_id": conv_id, "message": message,
-        })),
-        AgentEvent::TitleUpdated { title } => Some(json!({
-            "type": "title_updated", "conv_id": conv_id, "title": title,
-        })),
-        AgentEvent::Enumeration { .. } => None,
-    }
-}
-
 pub async fn project_query_stream(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
     Path(project_id): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<ProjectQueryStreamBody>,
 ) -> impl IntoResponse {
     if let Err(e) = require_project_access(&state.db, &user.sub, &user.role, &project_id).await {
         return e.into_response();
     }
-
     if state.live.node().is_draining() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -997,7 +364,44 @@ pub async fn project_query_stream(
         )
             .into_response();
     }
+    let idempotency_key = idempotency::key_from(&headers);
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    if let Some(key) = &idempotency_key {
+        match idempotency::reserve(&state.db, &user.sub, key, &body.conversation_id, &turn_id).await
+        {
+            Ok(Reservation::Fresh) => {}
+            Ok(Reservation::Replay { turn_id }) => {
+                TURNS.replayed();
+                return Json(json!({ "ok": true, "turn_id": turn_id, "replayed": true }))
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not reserve the turn request");
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "error": "could not register the request, retry" })),
+                )
+                    .into_response();
+            }
+        }
+    }
+    let response = start_project_turn(&user, &state, &project_id, body, turn_id).await;
+    if let Some(key) = idempotency_key.filter(|_| !response.status().is_success()) {
+        idempotency::release(&state.db, &user.sub, &key).await;
+    }
+    response
+}
 
+async fn start_project_turn(
+    user: &Claims,
+    state: &Arc<ProjectState>,
+    project_id: &str,
+    body: ProjectQueryStreamBody,
+    turn_id: String,
+) -> axum::response::Response {
+    let project_id = project_id.to_string();
+    let conversation_id = body.conversation_id.clone();
+    let turn_id_for_response = turn_id.clone();
     let attachments_for_broadcast: Vec<serde_json::Value> = body
         .attachments
         .as_ref()
@@ -1019,9 +423,13 @@ pub async fn project_query_stream(
                 .collect()
         })
         .unwrap_or_default();
-    let turn_id = uuid::Uuid::new_v4().to_string();
+    let permit = match state.admission.admit(&user.sub) {
+        Ok(permit) => permit,
+        Err(rejection) => return rejection.into_response(),
+    };
 
-    match state
+    let lock_started = std::time::Instant::now();
+    let locked = state
         .live
         .try_lock(
             &project_id,
@@ -1032,9 +440,10 @@ pub async fn project_query_stream(
             &body.query,
             &attachments_for_broadcast,
         )
-        .await
-    {
-        Ok(true) => {}
+        .await;
+    TURNS.stage(Stage::Lock, lock_started.elapsed());
+    match locked {
+        Ok(true) => state.live.hold_permit(&body.conversation_id, permit).await,
         Ok(false) => {
             return (
                 StatusCode::CONFLICT,
@@ -1052,40 +461,11 @@ pub async fn project_query_stream(
         }
     }
 
-    let user_llm = crate::api::resolve_user_llm(
-        &state.llm,
-        &state.llm_configs,
-        &state.user_key_store,
-        &user.sub,
-    )
-    .await;
-    let user_system_one = crate::api::resolve_user_system_one(
-        &state.system_one_config,
-        &state.llm_configs,
-        &state.user_key_store,
-        &user.sub,
-    )
-    .await;
-    let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm)
-        && user_system_one.is_none()
-    {
-        state
-            .agent_builder
-            .build_for_conversation(project_id.clone(), body.conversation_id.clone())
-    } else {
-        state
-            .agent_builder
-            .build_for_conversation_with_llm_and_system_one(
-                project_id.clone(),
-                body.conversation_id.clone(),
-                user_llm.clone(),
-                user_system_one.or_else(|| state.agent_builder.system_one.clone()),
-            )
-    };
-    let (raw_messages, stored_summary) =
-        load_project_conversation(&state.db, &project_id, &body.conversation_id).await;
-    let raw_history = history_messages_from_raw(&raw_messages);
-    let history = effective_history(&raw_history, stored_summary.as_ref());
+    let loading = std::time::Instant::now();
+    let context = load_project_context(&state.db, &project_id, &body.conversation_id).await;
+    TURNS.stage(Stage::LoadContext, loading.elapsed());
+    let history = context.history();
+    TURNS.started(context.recent.len());
 
     state
         .broadcast(
@@ -1112,93 +492,24 @@ pub async fn project_query_stream(
         )
         .await;
 
-    let live = Arc::clone(&state.live);
-    let db = Arc::clone(&state.db);
-    let llm = Arc::clone(agent.llm());
-    let registry = Arc::clone(&state.agent_builder.registry);
-    let collocate_registry = Arc::clone(&state.collocate_registry);
-    let project_id_owned = project_id.clone();
-    let query = body.query.clone();
-    let conv_id = body.conversation_id.clone();
-    let username = user.name.clone();
-    let selection = selection_from_parts(&body.provider_id, &body.model);
-    let attachments = body.attachments.unwrap_or_default();
-    let attachment_meta: Vec<Value> = attachments
-        .iter()
-        .map(|a| json!({ "name": a.name, "mime_type": a.mime_type, "data": a.data }))
-        .collect();
-    let prior_messages_for_save = raw_messages;
-    let pricing = Arc::clone(&state.pricing);
-    let user_id = user.sub.clone();
-
-    let task = tokio::spawn(async move {
-        let _collocate_guard = crate::collocate::sessions::SessionGuard::new(
-            Arc::clone(&collocate_registry),
-            project_id_owned.clone(),
-            conv_id.clone(),
-        );
-        let (agent_event_sender, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
-        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
-        let agent_clone = Arc::clone(&agent);
-        let history_for_agent = history.clone();
-        let query_for_agent = query.clone();
-        let selection_for_agent = selection.clone();
-        let _agent_task = AbortOnDrop(
-            tokio::spawn(async move {
-                let paused = agent_clone
-                    .query_streaming(
-                        &query_for_agent,
-                        &history_for_agent,
-                        &attachments,
-                        selection_for_agent.as_ref(),
-                        agent_event_sender,
-                    )
-                    .await;
-                let _ = paused_tx.send(paused);
-            })
-            .abort_handle(),
-        );
-
-        let db_for_summary = Arc::clone(&db);
-        let conv_for_summary = conv_id.clone();
-        drive_turn(
-            live,
-            db,
-            llm,
-            registry,
-            project_id_owned,
-            conv_id,
-            query,
-            username,
-            history,
-            TurnPersist::New {
-                prior_messages: prior_messages_for_save,
-                attachment_meta,
-            },
-            selection,
-            agent_rx,
-            paused_rx,
-            user_id,
-            pricing,
-            turn_id,
-        )
-        .await;
-        refresh_summary(&db_for_summary, &agent, &conv_for_summary).await;
-    });
-    state
-        .live
-        .set_abort_handle(&body.conversation_id, task.abort_handle())
-        .await;
-
-    Json(json!({"ok": true})).into_response()
-}
-
-struct AbortOnDrop(tokio::task::AbortHandle);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
+    TurnLaunch {
+        project_id: project_id.clone(),
+        conv_id: conversation_id,
+        turn_id,
+        user_id: user.sub.clone(),
+        username: user.name.clone(),
+        query: body.query,
+        history,
+        message_count: context.message_count,
+        selection: selection_from_parts(&body.provider_id, &body.model),
+        work: TurnWork::Ask {
+            attachments: body.attachments.unwrap_or_default(),
+        },
     }
+    .spawn(state)
+    .await;
+
+    Json(json!({ "ok": true, "turn_id": turn_id_for_response })).into_response()
 }
 
 pub async fn list_my_groups(
@@ -1430,9 +741,9 @@ pub async fn create_conversation(
     state
         .db
         .query(
-            "INSERT INTO conversations (id, project_id, title, messages, message_count,
+            "INSERT INTO conversations (id, project_id, title, message_count,
                                     created_by, created_at, updated_at)
-         VALUES ($id, $pid, $title, '[]', 0, $uid, $now, $now)
+         VALUES ($id, $pid, $title, 0, $uid, $now, $now)
          RETURNING id",
             json!({ "pid": project_id, "id": id, "title": title, "uid": user.sub, "now": now }),
         )
@@ -1463,12 +774,13 @@ pub async fn get_conversation(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
     Path((project_id, conv_id)): Path<(String, String)>,
+    Query(page): Query<Page>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
     let rows = state
         .db
         .query(
-            "SELECT id, title, messages, created_by, created_at, updated_at
+            "SELECT id, title, message_count, created_by, created_at, updated_at
          FROM conversations WHERE id = $cid AND project_id = $pid",
             json!({ "pid": project_id, "cid": conv_id }),
         )
@@ -1478,12 +790,12 @@ pub async fn get_conversation(
         .into_iter()
         .next()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+    let window = store::load_window(&state.db, Owner::Project(&project_id), &conv_id, page)
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     let mut obj = row.as_object().cloned().unwrap_or_default();
-    if let Some(Value::String(s)) = obj.get("messages") {
-        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-            obj.insert("messages".to_string(), parsed);
-        }
-    }
+    obj.insert("first_seq".to_string(), json!(window.first_seq));
+    obj.insert("messages".to_string(), Value::Array(window.messages));
     Ok(Json(Value::Object(obj)))
 }
 
@@ -1512,28 +824,17 @@ pub async fn update_conversation(
         return Err(err(StatusCode::NOT_FOUND, "not found"));
     }
     let now = harvest_db::now_rfc3339();
-    let message_count = body
-        .messages
-        .as_array()
-        .map(|a| a.len() as i64)
-        .unwrap_or(0);
-    let messages_json = body.messages.to_string();
-    state
-        .db
-        .query(
-            "UPDATE conversations
-         SET title = $title, messages = $messages, message_count = $count, updated_at = $now,
-             summary = NULL, summary_upto = 0
-         WHERE id = $cid AND project_id = $pid
-         RETURNING id",
-            json!({
-                "pid": project_id, "cid": conv_id,
-                "title": body.title, "messages": messages_json,
-                "count": message_count, "now": now,
-            }),
-        )
-        .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+    let messages = body.messages.as_array().cloned().unwrap_or_default();
+    store::replace_all(
+        &state.db,
+        Owner::Project(&project_id),
+        &conv_id,
+        &body.title,
+        &messages,
+        &now,
+    )
+    .await
+    .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1643,14 +944,12 @@ pub async fn resume_confirm_action(
         ));
     };
 
-    let (raw_messages, stored_summary) =
-        load_project_conversation(&state.db, &project_id, &conv_id).await;
-    let split = raw_messages.len().saturating_sub(2);
-    let (prior_raw, tail_raw) = raw_messages.split_at(split);
-    let prior_history = effective_history(
-        &history_messages_from_raw(prior_raw),
-        stored_summary.as_ref(),
-    );
+    let mut context = load_project_context(&state.db, &project_id, &conv_id).await;
+    let message_count = context.message_count;
+    let tail_raw = context
+        .recent
+        .split_off(context.recent.len().saturating_sub(2));
+    let prior_history = context.history();
     let (query, username) = tail_raw
         .iter()
         .find(|m| m["role"] == "user")
@@ -1663,6 +962,17 @@ pub async fn resume_confirm_action(
         .unwrap_or_default();
 
     let turn_id = uuid::Uuid::new_v4().to_string();
+    let permit = match state.admission.admit(&user.sub) {
+        Ok(permit) => permit,
+        Err(rejection) => {
+            let _ = state
+                .live
+                .save_paused(&project_id, &conv_id, &payload)
+                .await;
+            return Err(rejection.as_api_error());
+        }
+    };
+    let lock_started = std::time::Instant::now();
     let locked = state
         .live
         .try_lock(
@@ -1681,12 +991,17 @@ pub async fn resume_confirm_action(
                 "could not lock the conversation",
             )
         })?;
+    TURNS.stage(Stage::Lock, lock_started.elapsed());
     if !locked {
         let _ = state
             .live
             .save_paused(&project_id, &conv_id, &payload)
             .await;
         return Err(err(StatusCode::CONFLICT, "chat is locked"));
+    }
+    state.live.hold_permit(&conv_id, permit).await;
+    if let Err(e) = state.live.mark_continuation(&conv_id, &turn_id).await {
+        tracing::warn!(error = %e, conv_id, "could not mark the resumed turn");
     }
     state
         .broadcast(
@@ -1710,102 +1025,25 @@ pub async fn resume_confirm_action(
         })
         .collect();
 
-    let user_llm = crate::api::resolve_user_llm(
-        &state.llm,
-        &state.llm_configs,
-        &state.user_key_store,
-        &user.sub,
-    )
+    TurnLaunch {
+        project_id: project_id.clone(),
+        conv_id: conv_id.clone(),
+        turn_id,
+        user_id: user.sub.clone(),
+        username,
+        query,
+        history: prior_history,
+        message_count,
+        selection: paused.selection.clone(),
+        work: TurnWork::Resume {
+            messages: paused.messages,
+            iterations: paused.iterations,
+            results,
+            elapsed_ms: paused.elapsed_ms,
+        },
+    }
+    .spawn(&state)
     .await;
-    let user_system_one = crate::api::resolve_user_system_one(
-        &state.system_one_config,
-        &state.llm_configs,
-        &state.user_key_store,
-        &user.sub,
-    )
-    .await;
-    let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm)
-        && user_system_one.is_none()
-    {
-        state
-            .agent_builder
-            .build_for_conversation(project_id.clone(), conv_id.clone())
-    } else {
-        state
-            .agent_builder
-            .build_for_conversation_with_llm_and_system_one(
-                project_id.clone(),
-                conv_id.clone(),
-                user_llm.clone(),
-                user_system_one.or_else(|| state.agent_builder.system_one.clone()),
-            )
-    };
-
-    let live = Arc::clone(&state.live);
-    let db = Arc::clone(&state.db);
-    let llm = Arc::clone(agent.llm());
-    let registry = Arc::clone(&state.agent_builder.registry);
-    let collocate_registry = Arc::clone(&state.collocate_registry);
-    let project_id_owned = project_id.clone();
-    let conv_id_owned = conv_id.clone();
-    let pricing = Arc::clone(&state.pricing);
-    let user_id = user.sub.clone();
-    let selection = paused.selection.clone();
-
-    let task = tokio::spawn(async move {
-        let _collocate_guard = crate::collocate::sessions::SessionGuard::new(
-            Arc::clone(&collocate_registry),
-            project_id_owned.clone(),
-            conv_id_owned.clone(),
-        );
-        let (agent_event_sender, agent_rx) = tokio::sync::mpsc::channel::<AgentEvent>(64);
-        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
-        let agent_clone = Arc::clone(&agent);
-        let selection_for_agent = selection.clone();
-        let _agent_task = AbortOnDrop(
-            tokio::spawn(async move {
-                let out = agent_clone
-                    .resume_after_confirm(
-                        paused.messages,
-                        paused.iterations,
-                        results,
-                        selection_for_agent.as_ref(),
-                        agent_event_sender,
-                        paused.elapsed_ms,
-                    )
-                    .await;
-                let _ = paused_tx.send(out);
-            })
-            .abort_handle(),
-        );
-
-        let db_for_summary = Arc::clone(&db);
-        let conv_for_summary = conv_id_owned.clone();
-        drive_turn(
-            live,
-            db,
-            llm,
-            registry,
-            project_id_owned,
-            conv_id_owned,
-            query,
-            username,
-            prior_history,
-            TurnPersist::Continuation,
-            selection,
-            agent_rx,
-            paused_rx,
-            user_id,
-            pricing,
-            turn_id,
-        )
-        .await;
-        refresh_summary(&db_for_summary, &agent, &conv_for_summary).await;
-    });
-    state
-        .live
-        .set_abort_handle(&conv_id, task.abort_handle())
-        .await;
 
     Ok(Json(json!({ "ok": true, "resumed": true })))
 }
@@ -1843,6 +1081,7 @@ mod provider_selection_tests {
 #[cfg(test)]
 mod in_flight_tests {
     use super::*;
+    use crate::agent::AgentEvent;
     use crate::projects::live::{record_in_flight, InFlightState};
 
     fn empty_state() -> InFlightState {
@@ -2053,12 +1292,15 @@ mod in_flight_tests {
 
 #[cfg(test)]
 mod drive_turn_broadcast_tests {
+    use super::super::turn::{drive_turn, TurnPersist};
     use super::*;
+    use crate::agent::{AgentEvent, PausedTurn};
     use crate::cost::PricingTable;
     use crate::llm::types::{LlmResponse, Message, ModelInfo, ToolDefinition};
     use crate::machines::MachineRegistry;
     use async_trait::async_trait;
     use harvest_db::test_support::TestDb;
+    use tokio::sync::mpsc;
 
     struct NoopProvider;
     #[async_trait]
@@ -2154,6 +1396,7 @@ mod drive_turn_broadcast_tests {
             "query".into(),
             "tester".into(),
             vec![],
+            0,
             TurnPersist::Continuation,
             None,
             agent_rx,
@@ -2478,11 +1721,9 @@ pub async fn project_query(
         )
     };
     let history = match &body.conversation_id {
-        Some(conv_id) => {
-            let (raw, stored_summary) =
-                load_project_conversation(&state.db, &project_id, conv_id).await;
-            effective_history(&history_messages_from_raw(&raw), stored_summary.as_ref())
-        }
+        Some(conv_id) => load_project_context(&state.db, &project_id, conv_id)
+            .await
+            .history(),
         None => vec![],
     };
     let attachments = body.attachments.as_deref().unwrap_or(&[]);

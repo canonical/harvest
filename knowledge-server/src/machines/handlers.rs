@@ -1,6 +1,6 @@
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{rejection::WebSocketUpgradeRejection, Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
     http::{header, HeaderMap, StatusCode},
@@ -951,10 +951,14 @@ pub async fn agent_console_open_handler(
     Query(q): Query<ConsoleQuery>,
     headers: HeaderMap,
     uri: axum::http::Uri,
-    ws: WebSocketUpgrade,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Result<axum::response::Response, ApiError> {
     let db = db_or_err(&state)?;
     require_project_access(db, &user.sub, &user.role, &project_id).await?;
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(rejection) => return Ok(rejection.into_response()),
+    };
 
     if !state.registry.is_local(&agent_id) {
         if !crate::cluster::peer::is_forwarded(&headers) {
@@ -1017,10 +1021,14 @@ pub async fn agent_console_claim_handler(
     State(state): State<Arc<MachineState>>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
-    ws: WebSocketUpgrade,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> impl IntoResponse {
     let Some(agent_id) = authenticate_agent(&state.registry, &headers).await else {
         return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(rejection) => return rejection.into_response(),
     };
 
     let ws = match forward_claim_to_owner(

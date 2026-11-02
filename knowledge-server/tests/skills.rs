@@ -239,6 +239,8 @@ async fn seed_skill_raw(
     id
 }
 
+const DEFAULT_SKILLS: usize = 6;
+
 async fn count_skills(db: &Db) -> usize {
     let rows = db
         .query("SELECT count(*) AS n FROM skills", json!({}))
@@ -787,12 +789,12 @@ async fn skill_store_load_content_unknown_name_returns_none() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn seed_defaults_if_needed_seeds_five_skills_once() {
+async fn seed_defaults_if_needed_seeds_the_default_skills_once() {
     db!(c, db);
     knowledge_server::skills::seed_defaults_if_needed(&db)
         .await
         .unwrap();
-    assert_eq!(count_skills(&db).await, 5);
+    assert_eq!(count_skills(&db).await, DEFAULT_SKILLS);
 
     let rows = db
         .query(
@@ -802,7 +804,14 @@ async fn seed_defaults_if_needed_seeds_five_skills_once() {
         .await
         .unwrap();
     let names: Vec<&str> = rows.iter().filter_map(|r| r["name"].as_str()).collect();
-    for expected in ["juju", "lxd", "ceph", "canonical-k8s", "landscape"] {
+    for expected in [
+        "juju",
+        "lxd",
+        "ceph",
+        "canonical-k8s",
+        "landscape",
+        "openstack",
+    ] {
         assert!(
             names.contains(&expected),
             "missing seeded skill '{expected}': {names:?}"
@@ -820,7 +829,7 @@ async fn seed_defaults_if_needed_is_idempotent_second_call_no_duplicates() {
     knowledge_server::skills::seed_defaults_if_needed(&db)
         .await
         .unwrap();
-    assert_eq!(count_skills(&db).await, 5);
+    assert_eq!(count_skills(&db).await, DEFAULT_SKILLS);
 }
 
 #[tokio::test]
@@ -830,7 +839,7 @@ async fn seed_defaults_if_needed_does_not_reseed_after_deletion() {
     knowledge_server::skills::seed_defaults_if_needed(&db)
         .await
         .unwrap();
-    assert_eq!(count_skills(&db).await, 5);
+    assert_eq!(count_skills(&db).await, DEFAULT_SKILLS);
 
     db.execute("DELETE FROM skills", json!({})).await.unwrap();
     assert_eq!(count_skills(&db).await, 0);

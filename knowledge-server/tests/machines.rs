@@ -4,7 +4,6 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use http_body_util::BodyExt as _;
 use serde_json::{json, Value};
 use tower::ServiceExt as _;
 
@@ -12,23 +11,6 @@ use knowledge_server::machines::{
     handlers::{generate_install_script, machines_router, MachineState},
     MachineRegistry,
 };
-
-async fn body_bytes(resp: axum::response::Response) -> Vec<u8> {
-    resp.into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes()
-        .to_vec()
-}
-
-async fn body_text(resp: axum::response::Response) -> String {
-    String::from_utf8_lossy(&body_bytes(resp).await).into_owned()
-}
-
-async fn body_json(resp: axum::response::Response) -> Value {
-    serde_json::from_slice(&body_bytes(resp).await).unwrap()
-}
 
 fn make_state(registry: Arc<MachineRegistry>) -> Arc<MachineState> {
     Arc::new(MachineState {
@@ -1465,8 +1447,6 @@ mod db_tests {
     #[tokio::test]
     #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
     async fn port_forward_proxy_forwards_request_with_trailing_slash() {
-        use futures_util::{SinkExt as _, StreamExt as _};
-
         let test_db = TestDb::new().await;
         let db = Arc::new(test_db.db.clone());
 
