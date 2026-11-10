@@ -26,6 +26,9 @@ use harvest_search::SearchEngine;
 use serde::de::DeserializeOwned;
 
 use crate::config::SearchConfig;
+use crate::llm::types::ProviderSelection;
+use crate::llm::LlmProvider;
+use crate::search::llm_adapter::ProviderModel;
 use crate::search::record::Recorder;
 use crate::search::SearchService;
 
@@ -127,22 +130,65 @@ pub fn tiered(config: &SearchConfig, parts: &Parts, tier_one_only: bool) -> Tier
     TieredEngine::new(Arc::clone(&parts.registry), tiers, Gate::new(checks))
 }
 
+pub struct ModelEngines {
+    registry: Arc<IndexRegistry>,
+    reranker: Arc<dyn Reranker>,
+    gate: CalibratedScore,
+    db: Arc<Db>,
+    selection: Option<ProviderSelection>,
+}
+
+impl ModelEngines {
+    pub fn engine(
+        &self,
+        config: &SearchConfig,
+        llm: &Arc<dyn LlmProvider>,
+    ) -> Arc<dyn SearchEngine> {
+        let parts = Parts {
+            registry: Arc::clone(&self.registry),
+            reranker: Arc::clone(&self.reranker),
+            gate: self.gate.clone(),
+            model: Some(ProviderModel::new(Arc::clone(llm), self.selection.clone())),
+        };
+        with_fallback(config, &parts, Arc::clone(&self.db))
+    }
+}
+
+fn with_fallback(config: &SearchConfig, parts: &Parts, db: Arc<Db>) -> Arc<dyn SearchEngine> {
+    Arc::new(WithFallback::new(
+        tiered(config, parts, false),
+        PostgresEngine::new(db),
+    ))
+}
+
+pub fn fast_model_selection(config: &SearchConfig) -> Option<ProviderSelection> {
+    config.fast_model.as_ref().map(|m| ProviderSelection {
+        provider_id: m.provider_id.clone(),
+        model: m.model.clone(),
+        cache_breakpoint_index: None,
+    })
+}
+
 pub fn build(
     config: &SearchConfig,
     db: Arc<Db>,
-    model: Option<Arc<dyn LanguageModel>>,
+    llm: Option<Arc<dyn LlmProvider>>,
     recorder: Recorder,
 ) -> Result<Arc<SearchService>> {
-    build_with_embeddings(config, db, model, recorder, None)
+    build_with_embeddings(config, db, llm, recorder, None)
 }
 
 pub fn build_with_embeddings(
     config: &SearchConfig,
     db: Arc<Db>,
-    model: Option<Arc<dyn LanguageModel>>,
+    llm: Option<Arc<dyn LlmProvider>>,
     recorder: Recorder,
     stored: Option<Arc<dyn crate::agent::semantic::Embedder>>,
 ) -> Result<Arc<SearchService>> {
+    let selection = fast_model_selection(config);
+    let model: Option<Arc<dyn LanguageModel>> = llm.as_ref().map(|llm| {
+        ProviderModel::new(Arc::clone(llm), selection.clone()) as Arc<dyn LanguageModel>
+    });
     let parts = match stored {
         Some(embedder) => parts_with_embedder(
             config,
@@ -152,15 +198,20 @@ pub fn build_with_embeddings(
         )?,
         None => parts(config, PgCorpus::new(Arc::clone(&db)), model)?,
     };
-    let engine: Arc<dyn SearchEngine> = Arc::new(WithFallback::new(
-        tiered(config, &parts, false),
-        PostgresEngine::new(db),
-    ));
+    let engine = with_fallback(config, &parts, Arc::clone(&db));
+    let models = ModelEngines {
+        registry: Arc::clone(&parts.registry),
+        reranker: Arc::clone(&parts.reranker),
+        gate: parts.gate.clone(),
+        db,
+        selection,
+    };
     Ok(Arc::new(SearchService {
         engine,
         registry: parts.registry,
         recorder,
         config: config.clone(),
+        models,
     }))
 }
 
