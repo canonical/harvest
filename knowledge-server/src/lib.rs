@@ -17,6 +17,7 @@ pub mod lxd;
 pub mod machines;
 pub mod metrics;
 pub mod projects;
+pub mod search;
 pub mod server;
 pub mod skills;
 pub mod turns;

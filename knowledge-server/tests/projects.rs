@@ -133,6 +133,7 @@ fn projects_app_with_llm(db: Arc<Db>, llm: Arc<dyn knowledge_server::llm::LlmPro
         compaction_keep_last: 6,
         thresholds: None,
         semantic: None,
+        search: None,
     });
     let state = Arc::new(ProjectState::new(
         db,

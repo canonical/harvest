@@ -178,6 +178,34 @@ fn spawn_fence_guard(node: Arc<ClusterNode>, live: Arc<ProjectLive>, evicted: Sh
     });
 }
 
+fn build_search(
+    config: &crate::config::SearchConfig,
+    db: &Arc<Db>,
+    llm: &Arc<dyn crate::llm::LlmProvider>,
+    node_id: &str,
+) -> Result<Option<Arc<crate::search::SearchService>>> {
+    if config.engine == crate::config::SearchMode::Loop {
+        return Ok(None);
+    }
+    let selection = config
+        .fast_model
+        .as_ref()
+        .map(|m| crate::llm::types::ProviderSelection {
+            provider_id: m.provider_id.clone(),
+            model: m.model.clone(),
+            cache_breakpoint_index: None,
+        });
+    let model = crate::search::llm_adapter::ProviderModel::new(Arc::clone(llm), selection);
+    let service = crate::search::wiring::build(
+        config,
+        Arc::clone(db),
+        Some(model),
+        crate::search::record::Recorder::new(Arc::clone(db), node_id),
+    )?;
+    tracing::info!(mode = ?config.engine, "tiered code search enabled");
+    Ok(Some(service))
+}
+
 fn spawn_reaper(
     leases: Arc<dyn Leases>,
     db: Arc<Db>,
@@ -381,8 +409,16 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     }
 
     graph_tools::set_run_sql_available(graph_tools::probe_run_sql(&db).await);
-    let global_tools =
-        graph_tools::all_tools_with_semantic(Arc::clone(&db), semantic_handle.clone());
+    let search = build_search(&config.search, &db, &llm_provider, node.node_id())?;
+    if let Some(service) = &search {
+        crate::search::index_sync::spawn(
+            Arc::clone(service),
+            Arc::clone(&db),
+            Arc::clone(&bus),
+            shutdown.clone(),
+        );
+    }
+    let global_tools = crate::api::code_tools(&db, semantic_handle.clone(), search.as_ref());
     let thresholds = crate::api::Thresholds::from_system_one(config.system_one.as_ref());
 
     let agent = Arc::new(
@@ -445,6 +481,7 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         compaction_keep_last,
         thresholds: Some(thresholds),
         semantic: semantic_handle.clone(),
+        search: search.clone(),
     });
 
     let pricing = Arc::new(crate::cost::PricingTable::from_configs(&config.llm));
