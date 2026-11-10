@@ -257,6 +257,7 @@ impl SearchEngine for PostgresEngine {
             degraded: None,
             generation: None,
             trace,
+            answer: None,
         })
     }
 }

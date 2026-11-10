@@ -326,6 +326,7 @@ impl SearchEngine for Canned {
             degraded: None,
             generation: None,
             trace: Default::default(),
+            answer: None,
         })
     }
 }

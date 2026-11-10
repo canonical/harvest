@@ -9,6 +9,8 @@ use crate::question::Question;
 use crate::retrieve::{Candidate, Terms};
 use crate::trace::Trace;
 
+const POOL: usize = 200;
+
 pub struct SearchContext {
     pub query: Query,
     pub question: Question,
@@ -71,6 +73,12 @@ impl SearchContext {
     }
 
     pub fn into_result(mut self, started: Instant) -> SearchResult {
+        self.trace.pool = self
+            .candidates
+            .iter()
+            .take(POOL)
+            .map(|c| self.index.unit(c.unit).key())
+            .collect();
         self.trace.total_ms = started.elapsed().as_secs_f64() * 1000.0;
         SearchResult {
             evidence: self.evidence,
@@ -79,6 +87,7 @@ impl SearchContext {
             degraded: self.degraded,
             generation: Some(self.index.generation.clone()),
             trace: self.trace,
+            answer: None,
         }
     }
 }

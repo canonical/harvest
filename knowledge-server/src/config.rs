@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Deserialize, Clone, Default)]
 pub struct SystemOneThresholds {
@@ -185,6 +185,91 @@ pub struct Config {
     pub semantic: SemanticConfig,
     #[serde(default)]
     pub cluster: ClusterConfig,
+    #[serde(default)]
+    pub search: SearchConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    #[default]
+    Loop,
+    Tiered,
+    Shadow,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct FastModelConfig {
+    pub provider_id: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+fn default_search_deadline_ms() -> u64 {
+    7_000
+}
+fn default_search_token_budget() -> usize {
+    8_000
+}
+fn default_search_tier3_turns() -> usize {
+    6
+}
+fn default_search_refresh_secs() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchConfig {
+    #[serde(default)]
+    pub engine: SearchMode,
+    #[serde(default = "default_search_deadline_ms")]
+    pub deadline_ms: u64,
+    #[serde(default = "default_search_token_budget")]
+    pub token_budget: usize,
+    #[serde(default)]
+    pub cache_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub fast_model: Option<FastModelConfig>,
+    #[serde(default = "default_search_tier3_turns")]
+    pub tier3_turns: usize,
+    #[serde(default)]
+    pub judge: bool,
+    #[serde(default)]
+    pub reranker: Option<PathBuf>,
+    #[serde(default)]
+    pub gate: Option<PathBuf>,
+    #[serde(default)]
+    pub warm: Vec<String>,
+    #[serde(default = "default_search_refresh_secs")]
+    pub refresh_secs: u64,
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            engine: SearchMode::default(),
+            deadline_ms: default_search_deadline_ms(),
+            token_budget: default_search_token_budget(),
+            cache_dir: None,
+            fast_model: None,
+            tier3_turns: default_search_tier3_turns(),
+            judge: false,
+            reranker: None,
+            gate: None,
+            warm: Vec::new(),
+            refresh_secs: default_search_refresh_secs(),
+        }
+    }
+}
+
+impl SearchConfig {
+    pub fn warm_scopes(&self) -> Vec<(String, String)> {
+        self.warm
+            .iter()
+            .filter_map(|s| s.rsplit_once('@'))
+            .map(|(repo, version)| (repo.to_string(), version.to_string()))
+            .collect()
+    }
 }
 
 fn default_heartbeat_interval_ms() -> u64 {

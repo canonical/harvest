@@ -7,6 +7,7 @@ use std::time::Duration;
 pub const LATENCY_MS: &[u64] = &[
     5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000, 60_000, 120_000,
 ];
+pub const PERCENT: &[u64] = &[10, 25, 50, 75, 90, 95, 99, 100];
 pub const SIZES: &[u64] = &[
     10, 50, 100, 500, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 200_000,
 ];
@@ -235,6 +236,28 @@ pub static MESH_DROPPED: CounterVec = CounterVec::new("harvest_mesh_batches_drop
 pub static MESH_RESYNCS: CounterVec = CounterVec::new("harvest_mesh_resyncs_total");
 pub static MESH_LINKS: GaugeVec = GaugeVec::new("harvest_mesh_links");
 
+pub static SEARCH_STAGE: HistogramVec =
+    HistogramVec::new("harvest_search_stage_milliseconds", LATENCY_MS);
+pub static SEARCH_E2E: HistogramVec = HistogramVec::new("harvest_search_milliseconds", LATENCY_MS);
+pub static SEARCH_TIER: CounterVec = CounterVec::new("harvest_search_tier_total");
+pub static SEARCH_DEGRADED: CounterVec = CounterVec::new("harvest_search_degraded_total");
+pub static SEARCH_LLM_CALLS: CounterVec = CounterVec::new("harvest_search_llm_calls_total");
+pub static SEARCH_GATE: CounterVec = CounterVec::new("harvest_gate_decision_total");
+pub static SEARCH_SHADOW_RECALL: HistogramVec =
+    HistogramVec::new("harvest_search_shadow_recall_percent", PERCENT);
+pub static SEARCH_INDEX_LOAD: HistogramVec =
+    HistogramVec::new("harvest_search_index_load_milliseconds", LATENCY_MS);
+pub static SEARCH_INDEX_STALENESS: HistogramVec =
+    HistogramVec::new("harvest_search_index_staleness_milliseconds", LATENCY_MS);
+pub static SEARCH_INDEX_LOADED: GaugeVec = GaugeVec::new("harvest_search_index_loaded");
+pub static LEASES: CounterVec = CounterVec::new("harvest_lease_acquire_total");
+pub static LEASES_HELD: GaugeVec = GaugeVec::new("harvest_lease_held");
+pub static FENCED_WRITES_REJECTED: CounterVec =
+    CounterVec::new("harvest_fenced_write_rejected_total");
+pub static WORK_QUEUE_DEPTH: GaugeVec = GaugeVec::new("harvest_workqueue_depth");
+pub static WORK_QUEUE_REAPED: CounterVec = CounterVec::new("harvest_workqueue_reaped_total");
+pub static WORK_ITEMS: CounterVec = CounterVec::new("harvest_workqueue_items_total");
+
 pub static TURN_DURATION: LazyLock<Histogram> = LazyLock::new(|| Histogram::new(LATENCY_MS));
 
 pub fn render(out: &mut String) {
@@ -248,6 +271,22 @@ pub fn render(out: &mut String) {
     MESH_DROPPED.render(out);
     MESH_RESYNCS.render(out);
     MESH_LINKS.render(out);
+    SEARCH_STAGE.render(out);
+    SEARCH_E2E.render(out);
+    SEARCH_TIER.render(out);
+    SEARCH_DEGRADED.render(out);
+    SEARCH_LLM_CALLS.render(out);
+    SEARCH_GATE.render(out);
+    SEARCH_SHADOW_RECALL.render(out);
+    SEARCH_INDEX_LOAD.render(out);
+    SEARCH_INDEX_STALENESS.render(out);
+    SEARCH_INDEX_LOADED.render(out);
+    LEASES.render(out);
+    LEASES_HELD.render(out);
+    FENCED_WRITES_REJECTED.render(out);
+    WORK_QUEUE_DEPTH.render(out);
+    WORK_QUEUE_REAPED.render(out);
+    WORK_ITEMS.render(out);
     let _ = writeln!(out, "# TYPE harvest_turn_duration_milliseconds histogram");
     TURN_DURATION.render(out, "harvest_turn_duration_milliseconds", "");
 }

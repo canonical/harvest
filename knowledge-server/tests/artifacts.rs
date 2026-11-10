@@ -85,6 +85,7 @@ fn artifacts_app(db: Arc<Db>) -> Router {
         compaction_keep_last: 6,
         thresholds: None,
         semantic: None,
+        search: None,
     });
     let project_state = Arc::new(ProjectState::new(
         Arc::clone(&db),

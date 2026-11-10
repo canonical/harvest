@@ -208,12 +208,29 @@ pub struct ProjectAgentBuilder {
     pub compaction_keep_last: usize,
     pub thresholds: Option<Thresholds>,
     pub semantic: Option<Arc<graph_tools::SemanticHandle>>,
+    pub search: Option<Arc<crate::search::SearchService>>,
+}
+
+pub fn code_tools(
+    db: &Arc<Db>,
+    semantic: Option<Arc<graph_tools::SemanticHandle>>,
+    search: Option<&Arc<crate::search::SearchService>>,
+) -> Vec<Box<dyn tool::Tool>> {
+    match search {
+        Some(service) if service.mode() == crate::config::SearchMode::Tiered => {
+            crate::search::code_tool::tiered_tools(Arc::clone(db), Arc::clone(service))
+        }
+        _ => graph_tools::all_tools_with_semantic(Arc::clone(db), semantic),
+    }
 }
 
 impl ProjectAgentBuilder {
+    fn code_tools(&self) -> Vec<Box<dyn tool::Tool>> {
+        code_tools(&self.db, self.semantic.clone(), self.search.as_ref())
+    }
+
     fn base_tools(&self, project_id: String, conversation_id: String) -> Vec<Box<dyn tool::Tool>> {
-        let mut tools =
-            graph_tools::all_tools_with_semantic(Arc::clone(&self.db), self.semantic.clone());
+        let mut tools = self.code_tools();
         tools.push(Box::new(machine_tools::ListAgentsTool {
             registry: Arc::clone(&self.registry),
             project_id: project_id.clone(),
@@ -450,8 +467,7 @@ impl ProjectAgentBuilder {
         ctx: &deployments::DeploymentContext,
         llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        let mut tools =
-            graph_tools::all_tools_with_semantic(Arc::clone(&self.db), self.semantic.clone());
+        let mut tools = self.code_tools();
         tools.push(Box::new(skill_tools::ListSkillsTool {
             store: Arc::clone(&self.skills),
             project_id: project_id.clone(),

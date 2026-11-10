@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::EvidenceKey;
 use crate::gate::signals::Signals;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -26,6 +27,8 @@ pub struct Trace {
     pub gate: Vec<GateRecord>,
     pub signals: Option<Signals>,
     pub total_ms: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pool: Vec<EvidenceKey>,
 }
 
 impl Trace {

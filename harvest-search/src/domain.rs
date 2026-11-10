@@ -79,6 +79,7 @@ pub enum Source {
     Step,
     Fallback,
     Cache,
+    Agent,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -137,6 +138,7 @@ impl Gap {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TierId {
+    Loop,
     Fallback,
     Rounds,
     Plan,
@@ -146,6 +148,7 @@ pub enum TierId {
 impl TierId {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Loop => "loop",
             Self::Fallback => "fallback",
             Self::Rounds => "tier1",
             Self::Plan => "tier2",
@@ -180,6 +183,8 @@ pub struct SearchResult {
     pub degraded: Option<Degraded>,
     pub generation: Option<String>,
     pub trace: Trace,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

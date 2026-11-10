@@ -158,6 +158,11 @@ impl TurnLaunch {
         let registry = Arc::clone(&state.agent_builder.registry);
         let collocate_registry = Arc::clone(&state.collocate_registry);
         let pricing = Arc::clone(&state.pricing);
+        let shadow = state
+            .agent_builder
+            .search
+            .clone()
+            .filter(|s| s.mode() == crate::config::SearchMode::Shadow);
         let conv_id = self.conv_id.clone();
         let span = tracing::info_span!(
             "turn",
@@ -190,6 +195,16 @@ impl TurnLaunch {
                     })
                 };
                 let _worker = CancelOnDrop(worker.abort_handle());
+                let agent_rx = match shadow {
+                    Some(service) => crate::search::shadow::tap(
+                        agent_rx,
+                        service,
+                        self.query.clone(),
+                        self.turn_id.clone(),
+                        self.conv_id.clone(),
+                    ),
+                    None => agent_rx,
+                };
                 drive_turn(
                     live,
                     Arc::clone(&db),
