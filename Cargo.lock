@@ -1753,6 +1753,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "harvest-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "harvest-db",
+ "harvest-search",
+ "knowledge-harvester",
+ "knowledge-server",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "harvest-search"
 version = "0.1.0"
 dependencies = [
