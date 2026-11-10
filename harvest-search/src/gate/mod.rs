@@ -1,5 +1,6 @@
 pub mod completeness;
 pub mod dangling;
+pub mod family;
 pub mod judge;
 pub mod named;
 pub mod score;

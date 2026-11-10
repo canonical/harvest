@@ -97,7 +97,11 @@ impl SearchService {
         Ok(out)
     }
 
-    pub async fn resolve_scope(db: &harvest_db::Db, question: &str) -> Option<Scope> {
+    pub async fn resolve_scope(
+        db: &harvest_db::Db,
+        question: &str,
+        earlier: &str,
+    ) -> Option<Scope> {
         let rows = db
             .query(INGESTED_SQL, serde_json::json!({}))
             .await
@@ -112,7 +116,7 @@ impl SearchService {
                 ))
             })
             .collect();
-        pick_scope(&versions, question)
+        pick_scope(&versions, question).or_else(|| pick_named_scope(&versions, earlier))
     }
 }
 
@@ -165,6 +169,20 @@ fn mentioned(text: &str, word: &str) -> bool {
             |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '-'));
         boundary(before) && boundary(after)
     })
+}
+
+pub fn pick_named_scope(versions: &[(String, String)], text: &str) -> Option<Scope> {
+    let lower = text.to_lowercase();
+    let mut named: Vec<&str> = Vec::new();
+    for (repo, _) in versions {
+        if mentioned(&lower, repo) && !named.contains(&repo.as_str()) {
+            named.push(repo);
+        }
+    }
+    match named.as_slice() {
+        [_] => pick_scope(versions, text),
+        _ => None,
+    }
 }
 
 pub fn pick_scope(versions: &[(String, String)], question: &str) -> Option<Scope> {
@@ -230,5 +248,13 @@ mod tests {
             Some(Scope::new("harvest", "main"))
         );
         assert_eq!(pick_scope(&[], "anything"), None);
+        assert_eq!(
+            pick_named_scope(&versions(), "What are the Cinder drivers available?"),
+            Some(Scope::new("cinder", "29.0.0"))
+        );
+        assert_eq!(
+            pick_named_scope(&versions(), "How are volumes attached?"),
+            None
+        );
     }
 }

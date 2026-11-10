@@ -232,7 +232,32 @@ impl Tool for ReadSourcesTool {
             json!({ "repo": repo, "version": version, "files": targets.files, "names": targets.names }),
         ).await?;
 
-        if rows.is_empty() {
+        let files_with_symbols: std::collections::HashSet<&str> =
+            rows.iter().filter_map(|r| r["file"].as_str()).collect();
+        let other_files: Vec<&String> = targets
+            .files
+            .iter()
+            .filter(|f| !files_with_symbols.contains(f.as_str()))
+            .collect();
+        let units = if other_files.is_empty() {
+            Vec::new()
+        } else {
+            self.0
+                .query(
+                    "SELECT u.path AS file, u.name, u.kind, u.start_line, u.end_line, u.text AS source
+                     FROM code_units u
+                     JOIN versions v ON v.id = u.version_id
+                     JOIN repositories r ON r.id = v.repository_id
+                     WHERE r.name = $repo AND v.tag = $version AND u.path = ANY($files)
+                       AND u.kind <> 'module'
+                     ORDER BY u.path, u.start_line",
+                    json!({ "repo": repo, "version": version, "files": other_files }),
+                )
+                .await
+                .unwrap_or_default()
+        };
+
+        if rows.is_empty() && units.is_empty() {
             let mut missing = Vec::new();
             for f in &targets.files {
                 missing.push(format!("file {f}"));
@@ -240,15 +265,16 @@ impl Tool for ReadSourcesTool {
             for n in &targets.names {
                 missing.push(format!("symbol {n}"));
             }
-            return Ok(format!(
-                "No symbols found for {} in {repo}:{version}. Use search_symbols to find the exact file path or name.",
+            anyhow::bail!(
+                "nothing is indexed for {} in {repo}:{version}; check the exact path or name",
                 missing.join(", ")
-            ));
+            );
         }
 
         let limit = clamp_limit(&params).min(READ_SOURCES_MAX_SYMBOLS);
         let results: Vec<Value> = rows
             .iter()
+            .chain(units.iter())
             .take(limit)
             .map(|row| {
                 json!({

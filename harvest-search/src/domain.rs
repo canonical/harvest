@@ -195,6 +195,8 @@ pub enum SearchError {
     UnknownScope(Scope),
     #[error("language model failed: {0}")]
     Model(String),
+    #[error("the search ran out of time")]
+    Deadline,
     #[error("invalid plan: {0}")]
     Plan(String),
     #[error(transparent)]

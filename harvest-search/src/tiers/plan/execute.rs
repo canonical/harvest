@@ -65,6 +65,51 @@ pub fn capability_value(source: &str, name: &str) -> Option<String> {
     None
 }
 
+pub fn subclass_table(
+    index: &IndexSnapshot,
+    root: UnitId,
+    source: Source,
+) -> (Vec<UnitId>, Evidence) {
+    let mut units: Vec<UnitId> = Vec::new();
+    for sub in index
+        .graph
+        .subclasses(root, crate::index::graph::Depth::Transitive)
+    {
+        let unit = index.unit(sub);
+        if !unit.is_test() && !unit.is_vendored() && !unit.is_generated() && !units.contains(&sub) {
+            units.push(sub);
+        }
+    }
+    units.sort_by(|a, b| {
+        let (a, b) = (index.unit(*a), index.unit(*b));
+        (&a.file, a.start_line).cmp(&(&b.file, b.start_line))
+    });
+    let lines = units
+        .iter()
+        .map(|u| {
+            let unit = index.unit(*u);
+            format!(
+                "{} ({}:{}) extends {}",
+                unit.qualified_name,
+                unit.file,
+                unit.start_line,
+                unit.bases.join(", ")
+            )
+        })
+        .collect();
+    let covers = units.iter().map(|u| index.unit(*u).key()).collect();
+    let root_name = index.unit(root).qualified_name.clone();
+    (
+        units.clone(),
+        table(
+            format!("all {} subclasses of {root_name}", units.len()),
+            lines,
+            covers,
+            source,
+        ),
+    )
+}
+
 fn table(name: String, lines: Vec<String>, covers: Vec<EvidenceKey>, source: Source) -> Evidence {
     Evidence {
         key: EvidenceKey::Symbol {
@@ -219,6 +264,16 @@ impl<'a> Executor<'a> {
                 }
                 covers.sort();
                 covers.dedup();
+                if !lines.iter().any(|l| !l.ends_with("is not defined")) {
+                    return Ok(StepOutput {
+                        summary: format!(
+                            "{name} is not defined on any of these {} classes or their ancestors",
+                            classes.len()
+                        ),
+                        units: classes,
+                        ..StepOutput::default()
+                    });
+                }
                 StepOutput {
                     summary: format!("{name} resolved for {} classes", classes.len()),
                     table: Some(table(

@@ -49,8 +49,9 @@ impl Tier for Steps {
     async fn run(&self, ctx: &mut SearchContext) -> Result<(), SearchError> {
         let mut history: Vec<String> = Vec::new();
         let mut outputs: Vec<StepOutput> = Vec::new();
+        let mut step_cost = MODEL_STEP_COST;
         for turn in 0..self.max_turns {
-            if !ctx.deadline.leaves_room_for(MODEL_STEP_COST) {
+            if !ctx.deadline.leaves_room_for(step_cost) {
                 ctx.mark_truncated();
                 break;
             }
@@ -66,7 +67,14 @@ impl Tier for Steps {
                 .complete_json(SYSTEM, &prompt, ctx.deadline)
                 .await;
             ctx.trace.record("tier3.step_llm", started.elapsed());
-            let reply = reply?;
+            step_cost = step_cost.max(started.elapsed().mul_f32(1.2));
+            let reply = match reply {
+                Err(SearchError::Deadline) if !outputs.is_empty() => {
+                    ctx.mark_truncated();
+                    break;
+                }
+                other => other?,
+            };
             let steps = parse_steps(&reply, STEPS_PER_TURN).unwrap_or_default();
             let started = Instant::now();
             let executed = Executor::new(&ctx.index, Source::Step).run(&steps, &outputs);
