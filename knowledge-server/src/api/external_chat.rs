@@ -311,11 +311,8 @@ async fn answer_chat(
     } else {
         Arc::new(
             Agent::new(
-                user_llm,
-                crate::agent::graph_tools::all_tools_with_semantic(
-                    Arc::clone(db),
-                    state.qs.semantic.clone(),
-                ),
+                Arc::clone(&user_llm),
+                state.qs.code_tools(db, &user_llm),
                 state.qs.max_iterations,
             )
             .with_compaction(

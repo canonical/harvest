@@ -188,19 +188,10 @@ fn build_search(
     if config.engine == crate::config::SearchMode::Loop {
         return Ok(None);
     }
-    let selection = config
-        .fast_model
-        .as_ref()
-        .map(|m| crate::llm::types::ProviderSelection {
-            provider_id: m.provider_id.clone(),
-            model: m.model.clone(),
-            cache_breakpoint_index: None,
-        });
-    let model = crate::search::llm_adapter::ProviderModel::new(Arc::clone(llm), selection);
     let service = crate::search::wiring::build_with_embeddings(
         config,
         Arc::clone(db),
-        Some(model),
+        Some(Arc::clone(llm)),
         crate::search::record::Recorder::new(Arc::clone(db), node_id),
         stored_embeddings,
     )?;
@@ -464,7 +455,7 @@ pub async fn start(config: Config) -> Result<RunningServer> {
             shutdown.clone(),
         );
     }
-    let global_tools = crate::api::code_tools(&db, semantic_handle.clone(), search.as_ref());
+    let global_tools = crate::api::code_tools(&db, semantic_handle.clone(), search.as_ref(), None);
     let thresholds = crate::api::Thresholds::from_system_one(config.system_one.as_ref());
 
     let agent = Arc::new(

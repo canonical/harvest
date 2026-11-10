@@ -103,7 +103,19 @@ pub struct QueryState {
     pub compaction_keep_last: usize,
     pub pricing: Arc<crate::cost::PricingTable>,
     pub semantic: Option<Arc<graph_tools::SemanticHandle>>,
+    pub search: Option<Arc<crate::search::SearchService>>,
     pub admission: Arc<crate::turns::admission::TurnAdmission>,
+}
+
+impl QueryState {
+    pub fn code_tools(&self, db: &Arc<Db>, llm: &Arc<dyn LlmProvider>) -> Vec<Box<dyn tool::Tool>> {
+        code_tools(
+            db,
+            self.semantic.clone(),
+            self.search.as_ref(),
+            Some(Arc::clone(llm)),
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -215,22 +227,33 @@ pub fn code_tools(
     db: &Arc<Db>,
     semantic: Option<Arc<graph_tools::SemanticHandle>>,
     search: Option<&Arc<crate::search::SearchService>>,
+    llm: Option<Arc<dyn LlmProvider>>,
 ) -> Vec<Box<dyn tool::Tool>> {
     match search {
         Some(service) if service.mode() == crate::config::SearchMode::Tiered => {
-            crate::search::code_tool::tiered_tools(Arc::clone(db), Arc::clone(service))
+            crate::search::code_tool::tiered_tools(Arc::clone(db), Arc::clone(service), llm)
         }
         _ => graph_tools::all_tools_with_semantic(Arc::clone(db), semantic),
     }
 }
 
 impl ProjectAgentBuilder {
-    fn code_tools(&self) -> Vec<Box<dyn tool::Tool>> {
-        code_tools(&self.db, self.semantic.clone(), self.search.as_ref())
+    fn code_tools(&self, llm: &Arc<dyn LlmProvider>) -> Vec<Box<dyn tool::Tool>> {
+        code_tools(
+            &self.db,
+            self.semantic.clone(),
+            self.search.as_ref(),
+            Some(Arc::clone(llm)),
+        )
     }
 
-    fn base_tools(&self, project_id: String, conversation_id: String) -> Vec<Box<dyn tool::Tool>> {
-        let mut tools = self.code_tools();
+    fn base_tools(
+        &self,
+        project_id: String,
+        conversation_id: String,
+        llm: &Arc<dyn LlmProvider>,
+    ) -> Vec<Box<dyn tool::Tool>> {
+        let mut tools = self.code_tools(llm);
         tools.push(Box::new(machine_tools::ListAgentsTool {
             registry: Arc::clone(&self.registry),
             project_id: project_id.clone(),
@@ -380,7 +403,7 @@ impl ProjectAgentBuilder {
         llm: Arc<dyn LlmProvider>,
         system_one: Option<Arc<crate::llm::system_one::SystemOneClient>>,
     ) -> Arc<Agent> {
-        let tools = self.base_tools(project_id, conversation_id);
+        let tools = self.base_tools(project_id, conversation_id, &llm);
         let agent = Agent::new(llm, tools, self.max_iterations)
             .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
             .with_system_one(system_one)
@@ -407,7 +430,7 @@ impl ProjectAgentBuilder {
         ctx: &deployments::DeploymentContext,
         llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        let mut tools = self.base_tools(project_id.clone(), String::new());
+        let mut tools = self.base_tools(project_id.clone(), String::new(), &llm);
         tools.push(Box::new(deployment_tools::LinkDeploymentArtifactTool {
             db: Arc::clone(&self.db),
             project_id: project_id.clone(),
@@ -467,7 +490,7 @@ impl ProjectAgentBuilder {
         ctx: &deployments::DeploymentContext,
         llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        let mut tools = self.code_tools();
+        let mut tools = self.code_tools(&llm);
         tools.push(Box::new(skill_tools::ListSkillsTool {
             store: Arc::clone(&self.skills),
             project_id: project_id.clone(),
@@ -575,6 +598,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         compaction_keep_last: state.agent_builder.compaction_keep_last,
         pricing: Arc::clone(&state.pricing),
         semantic: state.semantic.clone(),
+        search: state.agent_builder.search.clone(),
         admission: Arc::clone(&state.admission),
     });
     let agent_router = Router::new()

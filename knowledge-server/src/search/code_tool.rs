@@ -7,16 +7,18 @@ use serde_json::{json, Value};
 
 use crate::agent::tool::Tool;
 use crate::llm::types::ToolDefinition;
+use crate::llm::LlmProvider;
 use crate::search::record::TraceContext;
 use crate::search::SearchService;
 
 pub struct SearchCodeTool {
     service: Arc<SearchService>,
+    llm: Option<Arc<dyn LlmProvider>>,
 }
 
 impl SearchCodeTool {
-    pub fn new(service: Arc<SearchService>) -> Self {
-        Self { service }
+    pub fn new(service: Arc<SearchService>, llm: Option<Arc<dyn LlmProvider>>) -> Self {
+        Self { service, llm }
     }
 }
 
@@ -127,20 +129,24 @@ impl Tool for SearchCodeTool {
         }
         let result = self
             .service
-            .search(&query, TraceContext::engine("tiered"))
+            .search(self.llm.as_ref(), &query, TraceContext::engine("tiered"))
             .await?;
         Ok(render(&query, &result))
     }
 }
 
-pub fn tiered_tools(db: Arc<harvest_db::Db>, service: Arc<SearchService>) -> Vec<Box<dyn Tool>> {
+pub fn tiered_tools(
+    db: Arc<harvest_db::Db>,
+    service: Arc<SearchService>,
+    llm: Option<Arc<dyn LlmProvider>>,
+) -> Vec<Box<dyn Tool>> {
     use crate::agent::graph_tools::{
         run_sql_available, CompareSymbolAcrossVersionsTool, ListRepositoriesTool, ReadSourcesTool,
         RunSqlTool,
     };
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(ListRepositoriesTool(Arc::clone(&db))),
-        Box::new(SearchCodeTool::new(service)),
+        Box::new(SearchCodeTool::new(service, llm)),
         Box::new(ReadSourcesTool(Arc::clone(&db))),
         Box::new(CompareSymbolAcrossVersionsTool(Arc::clone(&db))),
     ];

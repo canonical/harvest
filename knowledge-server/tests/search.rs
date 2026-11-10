@@ -1,18 +1,83 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Result;
+use async_trait::async_trait;
 use serde_json::json;
 
 use harvest_db::test_support::TestDb;
-use harvest_search::llm::ScriptedModel;
 use harvest_search::Scope;
 use knowledge_harvester::graph::model::{CallRef, ClassNode, FunctionNode, ParsedFile};
 use knowledge_harvester::graph::writer::GraphWriter;
 use knowledge_server::agent::tool::Tool;
 use knowledge_server::config::{SearchConfig, SearchMode};
+use knowledge_server::llm::types::{LlmResponse, Message, ModelInfo, ToolDefinition, Usage};
+use knowledge_server::llm::LlmProvider;
 use knowledge_server::search::code_tool::SearchCodeTool;
 use knowledge_server::search::record::Recorder;
 use knowledge_server::search::wiring;
+
+struct CountingLlm {
+    calls: AtomicUsize,
+    reply: Option<&'static str>,
+}
+
+impl CountingLlm {
+    fn answering(reply: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            reply: Some(reply),
+        })
+    }
+
+    fn failing() -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            reply: None,
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LlmProvider for CountingLlm {
+    fn id(&self) -> &str {
+        "counting"
+    }
+    fn kind(&self) -> &str {
+        "mock"
+    }
+    fn default_model(&self) -> &str {
+        "mock-model"
+    }
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        Ok(vec![])
+    }
+    async fn chat_with(
+        &self,
+        _model: Option<&str>,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+    ) -> Result<LlmResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match self.reply {
+            Some(text) => Ok(LlmResponse::Message {
+                text: text.into(),
+                usage: Usage::default(),
+            }),
+            None => Err(anyhow::anyhow!("no key configured")),
+        }
+    }
+}
+
+async fn warm(service: &knowledge_server::search::SearchService) {
+    let scope = Scope::new("cinder", "v1");
+    let _ = service.registry.ensure(&scope).await;
+}
 
 fn class(name: &str, file: &str, source: &str, bases: &[&str]) -> ClassNode {
     ClassNode {
@@ -125,11 +190,11 @@ async fn search_code_falls_back_while_cold_then_answers_from_the_index_and_recor
     let service = wiring::build(
         &config,
         Arc::clone(&db),
-        Some(Arc::new(ScriptedModel::failing())),
+        Some(CountingLlm::failing() as Arc<dyn LlmProvider>),
         Recorder::new(Arc::clone(&db), "node-a"),
     )
     .unwrap();
-    let tool = SearchCodeTool::new(Arc::clone(&service));
+    let tool = SearchCodeTool::new(Arc::clone(&service), None);
     let params = json!({
         "query": "What does attach_volume call?",
         "repo": "cinder",
@@ -187,6 +252,53 @@ async fn search_code_rejects_missing_scope() {
         Recorder::metrics_only(),
     )
     .unwrap();
-    let tool = SearchCodeTool::new(service);
+    let tool = SearchCodeTool::new(service, None);
     assert!(tool.execute(json!({"query": "x"})).await.is_err());
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn search_code_calls_the_model_of_the_asking_user_not_the_server() {
+    let test_db = TestDb::new().await;
+    seed(&test_db.db).await;
+    let db = Arc::new(test_db.db.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let gate = dir.path().join("gate.json");
+    std::fs::write(
+        &gate,
+        json!({"weights": [], "bias": 0.0, "accept": 2.0, "reject": 1.5}).to_string(),
+    )
+    .unwrap();
+    let config = SearchConfig {
+        engine: SearchMode::Tiered,
+        gate: Some(gate),
+        ..SearchConfig::default()
+    };
+    let server = CountingLlm::failing();
+    let service = wiring::build(
+        &config,
+        Arc::clone(&db),
+        Some(Arc::clone(&server) as Arc<dyn LlmProvider>),
+        Recorder::metrics_only(),
+    )
+    .unwrap();
+    warm(&service).await;
+    let user = CountingLlm::answering(r#"{"sufficient": false, "steps": [], "done": true}"#);
+    let tool = SearchCodeTool::new(
+        Arc::clone(&service),
+        Some(Arc::clone(&user) as Arc<dyn LlmProvider>),
+    );
+    let answer = tool
+        .execute(json!({
+            "query": "Which drivers support multiattach and what enforces it?",
+            "repo": "cinder",
+            "version": "v1",
+        }))
+        .await
+        .unwrap();
+    assert!(
+        user.calls() > 0,
+        "the user's model was never called: {answer}"
+    );
+    assert_eq!(server.calls(), 0, "the server's model was called: {answer}");
 }

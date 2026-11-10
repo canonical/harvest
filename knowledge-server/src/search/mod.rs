@@ -15,6 +15,7 @@ use harvest_search::{
 };
 
 use crate::config::{SearchConfig, SearchMode};
+use crate::llm::LlmProvider;
 use record::{Recorder, TraceContext};
 
 pub struct SearchService {
@@ -22,6 +23,7 @@ pub struct SearchService {
     pub registry: Arc<IndexRegistry>,
     pub recorder: Recorder,
     pub config: SearchConfig,
+    pub models: wiring::ModelEngines,
 }
 
 impl SearchService {
@@ -39,12 +41,20 @@ impl SearchService {
         query
     }
 
+    pub fn engine_for(&self, llm: Option<&Arc<dyn LlmProvider>>) -> Arc<dyn SearchEngine> {
+        match llm {
+            Some(llm) => self.models.engine(&self.config, llm),
+            None => Arc::clone(&self.engine),
+        }
+    }
+
     pub async fn search(
         &self,
+        llm: Option<&Arc<dyn LlmProvider>>,
         query: &Query,
         context: TraceContext,
     ) -> Result<SearchResult, SearchError> {
-        let result = self.engine.search(query, self.deadline()).await;
+        let result = self.engine_for(llm).search(query, self.deadline()).await;
         match &result {
             Ok(result) => self.recorder.record(query, result, context),
             Err(e) => tracing::warn!(error = %e, scope = ?query.scope, "code search failed"),
