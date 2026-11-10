@@ -66,8 +66,8 @@ pub struct IndexSnapshot {
 }
 
 impl IndexSnapshot {
-    pub async fn build(corpus: Corpus, embedder: &dyn Embedder) -> Result<Self> {
-        let vectors = match corpus.vectors {
+    pub async fn build(mut corpus: Corpus, embedder: &dyn Embedder) -> Result<Self> {
+        let vectors = match corpus.vectors.take() {
             Some(stored)
                 if stored.model == embedder.model()
                     && stored.vectors.len() == corpus.units.len() =>
@@ -79,10 +79,17 @@ impl IndexSnapshot {
                 for batch in corpus.units.chunks(EMBED_BATCH) {
                     let texts: Vec<String> = batch.iter().map(embedding_text).collect();
                     all.extend(embedder.embed(&texts).await?.into_iter().map(Some));
+                    tokio::task::yield_now().await;
                 }
                 VectorIndex::from_vectors(embedder.model(), all)
             }
         };
+        tokio::task::spawn_blocking(move || Self::assemble(corpus, vectors))
+            .await
+            .map_err(|e| anyhow::anyhow!("building the index failed: {e}"))
+    }
+
+    fn assemble(corpus: Corpus, vectors: VectorIndex) -> Self {
         let mut names: HashMap<String, Vec<UnitId>> = HashMap::new();
         for unit in &corpus.units {
             let mut keys = vec![
@@ -102,7 +109,7 @@ impl IndexSnapshot {
                 }
             }
         }
-        Ok(Self {
+        Self {
             cache: CacheIndex::build(&corpus.cached),
             graph: CodeGraph::build(corpus.units.len(), &corpus.edges),
             bm25: Bm25Index::build(&corpus.units),
@@ -113,7 +120,7 @@ impl IndexSnapshot {
             edges: corpus.edges,
             vectors,
             names,
-        })
+        }
     }
 
     pub fn unit(&self, id: UnitId) -> &Unit {
@@ -359,13 +366,13 @@ impl IndexRegistry {
                 return Ok(corpus);
             }
         }
-        let corpus = self.source.load(scope).await?;
+        let corpus = Arc::new(self.source.load(scope).await?);
         if let Some(cache) = &self.cache {
-            if let Err(e) = cache.write(&corpus).await {
+            if let Err(e) = cache.write(Arc::clone(&corpus)).await {
                 tracing::warn!(error = %e, ?scope, "could not write the index cache");
             }
         }
-        Ok(corpus)
+        Ok(Arc::try_unwrap(corpus).unwrap_or_else(|shared| (*shared).clone()))
     }
 }
 

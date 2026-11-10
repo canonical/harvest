@@ -133,6 +133,7 @@ pub fn tiered(config: &SearchConfig, parts: &Parts, tier_one_only: bool) -> Tier
     let mut checks: Vec<Box<dyn SufficiencyCheck>> = vec![
         Box::new(harvest_search::gate::named::NamedSymbols),
         Box::new(ListCompleteness::default()),
+        Box::new(harvest_search::gate::family::FamilyProperty),
         Box::new(DanglingReferences),
         Box::new(harvest_search::calibration::ScopedScore::new(
             parts.gate.clone(),

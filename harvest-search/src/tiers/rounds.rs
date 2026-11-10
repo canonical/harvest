@@ -57,6 +57,70 @@ impl Rounds {
     }
 }
 
+const FAMILY_SCAN: usize = 30;
+const MIN_FAMILY: usize = 3;
+
+pub fn enumerate_family(ctx: &mut SearchContext) {
+    use crate::index::corpus::UnitKind;
+    use crate::question::QuestionKind;
+    if ctx.question.kind != QuestionKind::Hierarchy || !ctx.question.wants_list {
+        return;
+    }
+    if ctx
+        .fixed
+        .iter()
+        .any(|e| e.label.contains(" subclasses of "))
+    {
+        return;
+    }
+    let index = std::sync::Arc::clone(&ctx.index);
+    let mut roots: Vec<u32> = ctx
+        .named
+        .iter()
+        .copied()
+        .filter(|u| index.unit(*u).kind() == UnitKind::Class)
+        .collect();
+    if roots.is_empty() {
+        for candidate in ctx.candidates.iter().take(FAMILY_SCAN) {
+            let unit = index.unit(candidate.unit);
+            if unit.kind() != UnitKind::Class || unit.is_test() || unit.is_vendored() {
+                continue;
+            }
+            for root in std::iter::once(candidate.unit).chain(index.graph.ancestors(candidate.unit))
+            {
+                if !roots.contains(&root) {
+                    roots.push(root);
+                }
+            }
+        }
+    }
+    let best = roots
+        .into_iter()
+        .map(|root| {
+            let family = index
+                .graph
+                .subclasses(root, crate::index::graph::Depth::Transitive);
+            let related = family
+                .iter()
+                .filter(|u| {
+                    let unit = index.unit(**u);
+                    !unit.is_test() && ctx.question.relatedness(&unit.qualified_name) >= 1
+                })
+                .count();
+            (root, related, family.len())
+        })
+        .filter(|(root, related, size)| {
+            *related >= MIN_FAMILY || (*size >= MIN_FAMILY && ctx.named.contains(root))
+        })
+        .max_by_key(|(root, related, size)| (*related, *size, std::cmp::Reverse(*root)));
+    let Some((root, _, _)) = best else {
+        return;
+    };
+    let (_, table) =
+        crate::tiers::plan::execute::subclass_table(&index, root, crate::domain::Source::Graph);
+    ctx.fixed.insert(0, table);
+}
+
 fn top_units(candidates: &[Candidate], k: usize) -> Vec<u32> {
     candidates.iter().take(k).map(|c| c.unit).collect()
 }
@@ -73,6 +137,7 @@ impl Tier for Rounds {
 
     async fn run(&self, ctx: &mut SearchContext) -> Result<(), SearchError> {
         self.gather(ctx).await;
+        enumerate_family(ctx);
         rerank_and_pack(ctx, self.reranker.as_ref()).await
     }
 }
@@ -136,5 +201,74 @@ impl Rounds {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{Query, Scope};
+    use crate::index::corpus::{Corpus, Relation, Unit, UnitKind};
+    use crate::index::vectors::HashingEmbedder;
+    use crate::index::IndexSnapshot;
+    use crate::Deadline;
+
+    fn class(name: &str, file: &str) -> Unit {
+        Unit {
+            name: name.into(),
+            qualified_name: name.into(),
+            kind: Some(UnitKind::Class),
+            file: file.into(),
+            start_line: 1,
+            end_line: 10,
+            ..Unit::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn list_questions_about_a_family_get_the_whole_family() {
+        let mut corpus = Corpus::new(Scope::new("r", "v"), "g");
+        let base = corpus.push_unit(class("BaseVD", "volume/driver.py"));
+        let mut drivers = Vec::new();
+        for i in 0..20 {
+            let d = corpus.push_unit(class(
+                &format!("Vendor{i}Driver"),
+                &format!("volume/drivers/v{i}.py"),
+            ));
+            corpus.link(d, base, Relation::Inherits);
+            drivers.push(d);
+        }
+        let mut fake = class("FakeDriver", "tests/fake.py");
+        fake.test = true;
+        let fake = corpus.push_unit(fake);
+        corpus.link(fake, base, Relation::Inherits);
+        let index = Arc::new(
+            IndexSnapshot::build(corpus, &HashingEmbedder::default())
+                .await
+                .unwrap(),
+        );
+        let query = Query::new(
+            "What are the volume drivers available?",
+            Scope::new("r", "v"),
+        );
+        let mut ctx = SearchContext::new(&query, index, Deadline::after(Duration::from_secs(5)));
+        ctx.candidates = drivers[..3]
+            .iter()
+            .map(|u| Candidate {
+                unit: *u,
+                score: 1.0,
+                ..Candidate::default()
+            })
+            .collect();
+        enumerate_family(&mut ctx);
+        assert_eq!(ctx.fixed.len(), 1);
+        let table = &ctx.fixed[0];
+        assert!(
+            table.label.contains("all 20 subclasses of BaseVD"),
+            "{}",
+            table.label
+        );
+        assert_eq!(table.covers.len(), 20);
+        assert!(!table.text.contains("FakeDriver"));
     }
 }

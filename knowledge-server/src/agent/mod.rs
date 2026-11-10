@@ -285,7 +285,42 @@ pub struct ToolResumeResult {
     pub is_error: bool,
 }
 
-const PREFETCH_HEADER: &str = "Code search results for this question (already run; start from them and do not repeat this search):";
+const PREFETCH_HEADER: &str = "[Harvest ran a code search for this question automatically before your turn. The results below come from the search engine, not from the user; the user has not seen them. Start from them and do not repeat this search.]";
+
+const EARLIER_CONTEXT_CHARS: usize = 2_000;
+
+fn message_text(message: &Message) -> String {
+    match &message.content {
+        MessageContent::Text(text) => text.clone(),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+fn earlier_conversation_text(messages: &[Message]) -> String {
+    let mut text = String::new();
+    let last_user = messages
+        .iter()
+        .rposition(|m| matches!(m.role, crate::llm::types::Role::User))
+        .unwrap_or(messages.len());
+    for message in messages[..last_user].iter().rev() {
+        if matches!(message.role, crate::llm::types::Role::System) {
+            continue;
+        }
+        let part = message_text(message);
+        if text.len() + part.len() > EARLIER_CONTEXT_CHARS {
+            break;
+        }
+        text = format!("{part}\n{text}");
+    }
+    text
+}
 
 const READ_BUDGET_SPENT: &str = "error: the follow-up reads for this question are used up. Answer now from the evidence you already have, and say what is still missing.";
 
@@ -297,15 +332,19 @@ fn append_to_last_user_message(messages: &mut [Message], text: &str) {
     else {
         return;
     };
+    let addition = ContentPart::Text {
+        text: text.to_string(),
+        thought_signature: None,
+    };
     match &mut last.content {
         MessageContent::Text(existing) => {
-            existing.push_str("\n\n");
-            existing.push_str(text);
+            let original = ContentPart::Text {
+                text: std::mem::take(existing),
+                thought_signature: None,
+            };
+            last.content = MessageContent::Parts(vec![original, addition]);
         }
-        MessageContent::Parts(parts) => parts.push(ContentPart::Text {
-            text: text.to_string(),
-            thought_signature: None,
-        }),
+        MessageContent::Parts(parts) => parts.push(addition),
     }
 }
 
@@ -1202,7 +1241,8 @@ impl Agent {
         let mut prefetched = false;
         if depth == 0 && iterations == 0 {
             if let Some(tool) = tool_map.get("search_code") {
-                if let Some((input, result)) = tool.prefetch(&goal).await {
+                let earlier = earlier_conversation_text(&messages);
+                if let Some((input, result)) = tool.prefetch(&goal, &earlier).await {
                     let _ = event_sender
                         .send(AgentEvent::ToolCall {
                             name: "search_code".into(),
@@ -2344,14 +2384,30 @@ impl Agent {
             };
             allowed.push(ok);
         }
-        join_all(calls.iter().zip(allowed).map(|(call, ok)| async move {
+        let counted: Vec<bool> = calls
+            .iter()
+            .zip(&allowed)
+            .map(|(call, ok)| {
+                *ok && budget.is_some()
+                    && tool_map
+                        .get(call.name.as_str())
+                        .is_some_and(|t| t.reads_code())
+            })
+            .collect();
+        let results = join_all(calls.iter().zip(allowed).map(|(call, ok)| async move {
             if ok {
                 self.execute_tool_call(call, tool_map).await
             } else {
                 READ_BUDGET_SPENT.to_string()
             }
         }))
-        .await
+        .await;
+        for (result, counted) in results.iter().zip(counted) {
+            if counted && result.starts_with("error:") {
+                *used = used.saturating_sub(1);
+            }
+        }
+        results
     }
 
     async fn execute_tool_call(
@@ -6785,7 +6841,11 @@ mod tests {
         fn read_budget(&self) -> Option<usize> {
             self.budget
         }
-        async fn prefetch(&self, _question: &str) -> Option<(serde_json::Value, String)> {
+        async fn prefetch(
+            &self,
+            _question: &str,
+            _earlier: &str,
+        ) -> Option<(serde_json::Value, String)> {
             self.prefetch
                 .map(|text| (serde_json::json!({ "query": "q" }), text.to_string()))
         }
@@ -6826,6 +6886,47 @@ mod tests {
             }
         }
         assert!(saw_call, "the prefetched search is shown as a tool call");
+    }
+
+    struct FailingRead(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl Tool for FailingRead {
+        fn definition(&self) -> crate::llm::types::ToolDefinition {
+            crate::llm::types::ToolDefinition {
+                name: "read_sources".into(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            }
+        }
+        async fn execute(&self, _params: serde_json::Value) -> Result<String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            anyhow::bail!("nothing is indexed for that path")
+        }
+        fn reads_code(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_code_reads_do_not_use_up_the_budget() {
+        let llm = RecordingLlm::new(vec![
+            tool_call("read_sources"),
+            tool_call("read_sources"),
+            tool_call("read_sources"),
+            tool_call("search_code"),
+            text("done"),
+        ]);
+        let (tool, executed) = research_tool(Some(0), None);
+        let failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let agent = Agent::new(
+            llm.clone(),
+            vec![tool, Box::new(FailingRead(Arc::clone(&failed)))],
+            10,
+        );
+        agent.query("q", &[], &[], None).await.unwrap();
+        assert_eq!(failed.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(executed.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -22,6 +22,8 @@ pub struct Question {
     pub about_tests: bool,
     #[serde(default)]
     pub broad: bool,
+    #[serde(default)]
+    pub asks_property: bool,
     pub identifiers: Vec<String>,
     pub words: Vec<String>,
 }
@@ -97,6 +99,10 @@ const BREADTH_CUES: &[&str] = &[
     "where are they used",
 ];
 
+const PROPERTY_CUES: &[&str] = &[
+    "support", "whether", "enable", "allow", "capab", "can ", "able to",
+];
+
 const TEST_CUES: &[&str] = &[
     " test", "tests", "testing", " spec", "fixture", "mock", "assert", "coverage",
 ];
@@ -124,7 +130,9 @@ impl Question {
         };
         let about_tests = mentions(&lower, TEST_CUES);
         let broad = wants_list || mentions(&lower, BREADTH_CUES);
+        let asks_property = mentions(&lower, PROPERTY_CUES);
         Self {
+            asks_property,
             broad,
             kind,
             wants_list,

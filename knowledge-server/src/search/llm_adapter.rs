@@ -33,7 +33,7 @@ impl LanguageModel for ProviderModel {
             .chat_routed(self.selection.as_ref(), &messages, &[]);
         let (response, _, _) = tokio::time::timeout(deadline.remaining(), call)
             .await
-            .map_err(|_| SearchError::Model("the model did not answer before the deadline".into()))?
+            .map_err(|_| SearchError::Deadline)?
             .map_err(|e| SearchError::Model(e.to_string()))?;
         match response {
             LlmResponse::Message { text, .. } => parse_json_object(&text),
@@ -69,7 +69,7 @@ mod tests {
         let reply = model
             .complete_json("s", "p", Deadline::after(Duration::from_millis(20)))
             .await;
-        assert!(matches!(reply, Err(SearchError::Model(_))));
+        assert!(matches!(reply, Err(SearchError::Deadline)));
     }
 
     #[tokio::test]

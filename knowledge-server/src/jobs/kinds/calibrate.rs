@@ -96,15 +96,23 @@ impl Job for CalibrateJob {
         };
         fence.check()?;
         let embedder = Arc::clone(self.service.registry.embedder());
+        let watched = fence.clone();
         let calibrator = Calibrator::new(move |reranker| {
             crate::search::wiring::rounds_with(reranker, Arc::clone(&embedder))
-        });
+        })
+        .with_stop(Arc::new(move || watched.check().is_err()));
         let base = self.service.calibration_base.reranker.clone();
-        let Some((calibration, report)) = calibrator.calibrate(index, base).await else {
+        let runtime = tokio::runtime::Handle::current();
+        let outcome = tokio::task::spawn_blocking(move || {
+            runtime.block_on(async move { calibrator.calibrate(index, base).await })
+        })
+        .await?;
+        fence.check()?;
+        let Some((calibration, report)) = outcome else {
             tracing::info!(
                 repo,
                 version,
-                "too few synthetic questions to calibrate search; keeping defaults"
+                "no calibration produced (too few questions or out of time); keeping defaults"
             );
             return Ok(());
         };

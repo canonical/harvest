@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
@@ -64,14 +65,16 @@ impl DiskCache {
         read_file(&newest?.1).await
     }
 
-    pub async fn write(&self, corpus: &Corpus) -> Result<()> {
+    pub async fn write(&self, corpus: Arc<Corpus>) -> Result<()> {
         let dir = self.dir(&corpus.scope);
         tokio::fs::create_dir_all(&dir)
             .await
             .with_context(|| format!("creating {}", dir.display()))?;
         let target = self.file(&corpus.scope, &corpus.generation);
         let temporary = target.with_extension("json.tmp");
-        let bytes = serde_json::to_vec(corpus)?;
+        let bytes = tokio::task::spawn_blocking(move || serde_json::to_vec(corpus.as_ref()))
+            .await
+            .map_err(|e| anyhow::anyhow!("serializing the index cache failed: {e}"))??;
         tokio::fs::write(&temporary, bytes).await?;
         tokio::fs::rename(&temporary, &target).await?;
         let mut entries = tokio::fs::read_dir(&dir).await?;
@@ -86,7 +89,10 @@ impl DiskCache {
 
 async fn read_file(path: &Path) -> Option<Corpus> {
     let bytes = tokio::fs::read(path).await.ok()?;
-    match serde_json::from_slice(&bytes) {
+    let parsed = tokio::task::spawn_blocking(move || serde_json::from_slice::<Corpus>(&bytes))
+        .await
+        .ok()?;
+    match parsed {
         Ok(corpus) => Some(corpus),
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "discarding a corrupt index cache file");
@@ -115,8 +121,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = DiskCache::new(dir.path());
         let scope = Scope::new("org/repo", "v1.0");
-        cache.write(&corpus("g1")).await.unwrap();
-        cache.write(&corpus("g2")).await.unwrap();
+        cache.write(Arc::new(corpus("g1"))).await.unwrap();
+        cache.write(Arc::new(corpus("g2"))).await.unwrap();
         assert!(cache.read(&scope, "g1").await.is_none());
         assert_eq!(cache.read(&scope, "g2").await.unwrap().units.len(), 1);
         assert_eq!(cache.latest(&scope).await.unwrap().generation, "g2");
@@ -127,7 +133,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = DiskCache::new(dir.path());
         let scope = Scope::new("r", "v");
-        cache.write(&corpus("g")).await.unwrap();
+        cache.write(Arc::new(corpus("g"))).await.unwrap();
         let path = cache.file(&Scope::new("org/repo", "v1.0"), "g");
         tokio::fs::write(&path, b"{not json").await.unwrap();
         assert!(cache

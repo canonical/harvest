@@ -57,6 +57,14 @@ impl SearchEngine for TieredEngine {
                     ctx.degraded = Some(Degraded::ModelUnavailable);
                     break;
                 }
+                Err(SearchError::Deadline) => {
+                    tracing::info!(
+                        tier = tier.id().as_str(),
+                        "tier stopped at the deadline; answering with the evidence so far"
+                    );
+                    ctx.mark_truncated();
+                    break;
+                }
                 Err(SearchError::Plan(message)) => {
                     ctx.notes.push(format!("plan rejected: {message}"));
                     continue;

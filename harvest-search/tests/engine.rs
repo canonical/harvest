@@ -158,6 +158,7 @@ async fn registry() -> Arc<IndexRegistry> {
 fn gate() -> Gate {
     Gate::new(vec![
         Box::new(ListCompleteness::default()),
+        Box::new(harvest_search::gate::family::FamilyProperty),
         Box::new(DanglingReferences),
         Box::new(CalibratedScore {
             accept: 0.5,
@@ -247,7 +248,8 @@ async fn an_incomplete_list_escalates_to_a_plan_that_covers_every_driver() {
     assert_eq!(result.tier_reached, TierId::Plan, "{:?}", result.trace.gate);
     assert_eq!(result.trace.llm_calls, 1);
     assert!(
-        model.prompts()[0].contains("only"),
+        model.prompts()[0].contains("all 40 subclasses of VolumeDriver")
+            && model.prompts()[0].contains("property asked about"),
         "the plan prompt names the gap: {}",
         model.prompts()[0]
     );

@@ -547,6 +547,7 @@ impl ProjectLive {
                     query: text("query"),
                     attachments: row["attachments"].as_array().map_or(&[], Vec::as_slice),
                     partial_answer: String::new(),
+                    chain: Vec::new(),
                 })
                 .await;
             }
@@ -597,6 +598,7 @@ impl ProjectLive {
                     query: &turn.state.query,
                     attachments: &turn.state.attachments,
                     partial_answer: partial_answer(&turn.state),
+                    chain: crate::projects::interruption::chain_of(&turn.state),
                 })
                 .await;
             }

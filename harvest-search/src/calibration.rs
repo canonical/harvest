@@ -382,7 +382,12 @@ where
 {
     rounds: F,
     per_kind: usize,
+    stop: Arc<dyn Fn() -> bool + Send + Sync>,
+    budget: Duration,
 }
+
+const LARGE_INDEX: usize = 20_000;
+const LARGE_INDEX_PER_KIND: usize = 30;
 
 impl<F> Calibrator<F>
 where
@@ -392,7 +397,24 @@ where
         Self {
             rounds,
             per_kind: 60,
+            stop: Arc::new(|| false),
+            budget: Duration::from_secs(180),
         }
+    }
+
+    pub fn with_stop(mut self, stop: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.stop = stop;
+        self
+    }
+
+    pub fn with_budget(mut self, budget: Duration) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    async fn checkpoint(&self, started: std::time::Instant) -> bool {
+        tokio::task::yield_now().await;
+        !(self.stop)() && started.elapsed() < self.budget
     }
 
     pub fn with_per_kind(mut self, per_kind: usize) -> Self {
@@ -413,11 +435,15 @@ where
         index: &Arc<IndexSnapshot>,
         reranker: Arc<dyn Reranker>,
         examples: &[&Example],
-    ) -> (f64, Vec<(Signals, f64)>) {
+        started: std::time::Instant,
+    ) -> Option<(f64, Vec<(Signals, f64)>)> {
         let rounds = (self.rounds)(Arc::clone(&reranker));
         let mut total = 0.0;
         let mut outcomes = Vec::new();
         for example in examples {
+            if !self.checkpoint(started).await {
+                return None;
+            }
             let mut ctx = self.context(index, example).await;
             rounds.gather(&mut ctx).await;
             if rerank_and_pack(&mut ctx, reranker.as_ref()).await.is_err() {
@@ -432,7 +458,7 @@ where
             total += recall;
             outcomes.push((Signals::compute(&ctx), recall));
         }
-        (total / examples.len().max(1) as f64, outcomes)
+        Some((total / examples.len().max(1) as f64, outcomes))
     }
 
     pub async fn calibrate(
@@ -440,7 +466,13 @@ where
         index: Arc<IndexSnapshot>,
         base: LinearReranker,
     ) -> Option<(Calibration, Report)> {
-        let examples = synthesize(&index, self.per_kind);
+        let started = std::time::Instant::now();
+        let per_kind = if index.units.len() > LARGE_INDEX {
+            self.per_kind.min(LARGE_INDEX_PER_KIND)
+        } else {
+            self.per_kind
+        };
+        let examples = synthesize(&index, per_kind);
         if examples.len() < MIN_EXAMPLES {
             return None;
         }
@@ -451,6 +483,9 @@ where
         let mut rows = Vec::new();
         let mut labels = Vec::new();
         for example in &train {
+            if !self.checkpoint(started).await {
+                return None;
+            }
             let mut ctx = self.context(&index, example).await;
             gather.gather(&mut ctx).await;
             let wanted: HashSet<UnitId> = example
@@ -469,16 +504,18 @@ where
             return None;
         }
         let trained = train_reranker(&rows, &labels);
-        let (base_recall, _) = self.recall(&index, Arc::new(base.clone()), &holdout).await;
+        let (base_recall, _) = self
+            .recall(&index, Arc::new(base.clone()), &holdout, started)
+            .await?;
         let (trained_recall, _) = self
-            .recall(&index, Arc::new(trained.clone()), &holdout)
-            .await;
+            .recall(&index, Arc::new(trained.clone()), &holdout, started)
+            .await?;
         let keep = trained_recall + MAX_REGRESSION >= base_recall;
         let reranker = if keep { trained } else { base };
 
         let (_, outcomes) = self
-            .recall(&index, Arc::new(reranker.clone()), &train)
-            .await;
+            .recall(&index, Arc::new(reranker.clone()), &train, started)
+            .await?;
         let mut gate_rows = Vec::new();
         let mut sufficient = Vec::new();
         for (signals, recall) in outcomes {
@@ -586,5 +623,37 @@ mod tests {
         let d = defaults();
         assert!(!d.reranker.weights.is_empty());
         assert!(d.gate.accept > d.gate.reject);
+    }
+
+    #[tokio::test]
+    async fn a_stopped_calibration_gives_up_without_a_result() {
+        let mut corpus = Corpus::new(Scope::new("r", "v"), "g");
+        for i in 0..40 {
+            corpus.push_unit(unit(
+                &format!("handle_item_{i}"),
+                None,
+                UnitKind::Function,
+                "Handle one queued work item for the batch.",
+            ));
+        }
+        let index = Arc::new(
+            IndexSnapshot::build(corpus, &HashingEmbedder::default())
+                .await
+                .unwrap(),
+        );
+        let embedder: Arc<dyn crate::index::vectors::Embedder> =
+            Arc::new(HashingEmbedder::default());
+        let calibrator = Calibrator::new(move |reranker| {
+            Rounds::new(
+                vec![Box::new(crate::retrieve::Bm25Retriever)],
+                reranker,
+                Arc::clone(&embedder),
+            )
+        })
+        .with_stop(Arc::new(|| true));
+        assert!(calibrator
+            .calibrate(index, LinearReranker::default())
+            .await
+            .is_none());
     }
 }

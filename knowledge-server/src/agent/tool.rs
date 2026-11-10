@@ -22,7 +22,7 @@ pub trait Tool: Send + Sync {
     fn read_budget(&self) -> Option<usize> {
         None
     }
-    async fn prefetch(&self, _question: &str) -> Option<(Value, String)> {
+    async fn prefetch(&self, _question: &str, _earlier: &str) -> Option<(Value, String)> {
         None
     }
 }

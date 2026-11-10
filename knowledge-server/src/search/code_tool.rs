@@ -212,11 +212,25 @@ impl Tool for SearchCodeTool {
         Some(self.service.config.max_followups)
     }
 
-    async fn prefetch(&self, question: &str) -> Option<(Value, String)> {
+    async fn prefetch(&self, question: &str, earlier: &str) -> Option<(Value, String)> {
         if !self.service.config.prefetch || question.trim().is_empty() {
             return None;
         }
-        let scope = SearchService::resolve_scope(self.db.as_ref()?, question).await?;
+        let scope = SearchService::resolve_scope(self.db.as_ref()?, question, earlier).await?;
+        if self.service.registry.get(&scope).is_none() {
+            let registry = Arc::clone(&self.service.registry);
+            let warming = scope.clone();
+            tokio::spawn(async move {
+                if let Err(e) = registry.ensure(&warming).await {
+                    tracing::warn!(error = %e, scope = ?warming, "warming the index failed");
+                }
+            });
+            tracing::info!(
+                ?scope,
+                "index not loaded yet; skipping the first code search"
+            );
+            return None;
+        }
         match self.search(question, &scope, None).await {
             Ok(result) => Some((
                 json!({ "query": question, "repo": scope.repo, "version": scope.version }),
