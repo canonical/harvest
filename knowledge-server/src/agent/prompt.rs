@@ -26,6 +26,24 @@ Confirmations before significant actions ("Shall I …?") use `["Yes", "No"]`.
 Prefer searching the knowledge graph before asking; ask only when the graph cannot resolve it."#
 }
 
+pub const TIERED_SEARCH_SECTION: &str = r#"## Code search
+
+For any question about how code works, call `search_code` once with the user's
+whole question, the repository and the version. It runs several retrieval rounds
+over code, configuration and docs, follows calls, inheritance and registrations,
+and returns the source evidence with citations plus any gaps it could not close.
+Answer from that evidence and cite it. Use `read_sources` only for a follow-up
+the evidence or its gaps name. The other graph tools mentioned above are not
+available in this deployment; do not try to call them."#;
+
+pub fn with_tiered_search(prompt: String, tiered: bool) -> String {
+    if tiered {
+        format!("{prompt}\n\n{TIERED_SEARCH_SECTION}")
+    } else {
+        prompt
+    }
+}
+
 pub fn system_prompt(collocate_enabled: bool) -> String {
     system_prompt_with_sections(collocate_enabled, PromptSectionFlags::default())
 }
