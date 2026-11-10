@@ -11,7 +11,7 @@ SELECT id, file, name, impl_type, label, coalesce(start_line, 0) AS start_line,
        coalesce(end_line, 0) AS end_line, coalesce(docstring, '') AS docstring
 FROM code_symbols
 WHERE repo = $repo AND version = $version
-  AND file !~* '(^|/)(tests?|testing)(/|_)|_test\.|test_'
+  AND origin = 'source' AND NOT is_test
 ORDER BY md5(id::text)
 LIMIT $limit
 "#;
@@ -19,8 +19,9 @@ LIMIT $limit
 const FAMILIES_SQL: &str = r#"
 SELECT e.dst_id AS id
 FROM code_edges e
+JOIN code_symbols s ON s.id = e.src_id
 WHERE e.repo = $repo AND e.version = $version AND e.relation IN ('INHERITS', 'IMPLEMENTS')
-  AND e.src_file !~* '(^|/)(tests?|testing)(/|_)|_test\.|test_'
+  AND s.origin = 'source' AND NOT s.is_test
 GROUP BY e.dst_id
 HAVING count(*) >= 3
 ORDER BY md5(e.dst_id::text)
@@ -37,13 +38,17 @@ WITH RECURSIVE family(id) AS (
 SELECT s.id, s.file, s.name, s.impl_type, s.label, coalesce(s.start_line, 0) AS start_line,
        coalesce(s.end_line, 0) AS end_line, '' AS docstring
 FROM family JOIN code_symbols s ON s.id = family.id
-WHERE s.file !~* '(^|/)(tests?|testing)(/|_)|_test\.|test_'
+WHERE s.origin = 'source' AND NOT s.is_test
 "#;
 
 const CALL_TARGETS_SQL: &str = r#"
 SELECT e.dst_id AS id, count(*) AS n
 FROM code_edges e
+JOIN code_symbols caller ON caller.id = e.src_id
+JOIN code_symbols target ON target.id = e.dst_id
 WHERE e.repo = $repo AND e.version = $version AND e.relation = 'CALLS'
+  AND caller.origin = 'source' AND NOT caller.is_test
+  AND target.origin = 'source' AND NOT target.is_test
 GROUP BY e.dst_id
 HAVING count(*) BETWEEN 2 AND 15
 ORDER BY md5(e.dst_id::text)
@@ -57,6 +62,7 @@ FROM symbol_edges e
 JOIN code_symbols s ON s.id = CASE WHEN $direction = 'in' THEN e.src_id ELSE e.dst_id END
 WHERE e.relation = 'CALLS'
   AND CASE WHEN $direction = 'in' THEN e.dst_id ELSE e.src_id END = $id
+  AND s.origin = 'source' AND NOT s.is_test
 "#;
 
 const NAME_COUNTS_SQL: &str = r#"
