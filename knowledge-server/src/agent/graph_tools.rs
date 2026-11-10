@@ -284,9 +284,14 @@ WITH signals AS (
       AND ($decorator = '' OR EXISTS (
             SELECT 1 FROM unnest(cs.decorators) d
             WHERE d = $decorator OR right(d, length($decorator) + 1) = '.' || $decorator))
+), cap_candidates AS (
+    SELECT s.id
+    FROM symbols s
+    WHERE s.label = 'Class'
+      AND lower(s.source) LIKE '%' || replace(replace(replace(lower($query), '\', '\\'), '%', '\%'), '_', '\_') || '%'
 ), matched AS (
     SELECT s.*,
-           lower(s.label) = 'class'
+           s.id IN (SELECT id FROM cap_candidates)
            AND s.source ~* ('(^|[^A-Za-z0-9_])' || s.q_literal || '([^A-Za-z0-9_]|$)') AS cap_match
     FROM signals s
 )
@@ -357,6 +362,8 @@ impl SearchSymbolsTool {
     }
 }
 
+pub const SEMANTIC_CANDIDATES: i64 = 200;
+
 pub const HYBRID_SEARCH_SQL: &str = r#"
 WITH lexical AS (
     SELECT cs.*,
@@ -377,9 +384,14 @@ WITH lexical AS (
       AND ($decorator = '' OR EXISTS (
             SELECT 1 FROM unnest(cs.decorators) d
             WHERE d = $decorator OR right(d, length($decorator) + 1) = '.' || $decorator))
+), cap_candidates AS (
+    SELECT s.id
+    FROM symbols s
+    WHERE s.label = 'Class'
+      AND lower(s.source) LIKE '%' || replace(replace(replace(lower($query), '\', '\\'), '%', '\%'), '_', '\_') || '%'
 ), lexical_matched AS (
     SELECT l.*,
-           lower(l.label) = 'class'
+           l.id IN (SELECT id FROM cap_candidates)
            AND l.source ~* ('(^|[^A-Za-z0-9_])' || l.q_literal || '([^A-Za-z0-9_]|$)') AS cap_match
     FROM lexical l
 ), lexical_scored AS (
@@ -401,10 +413,14 @@ WITH lexical AS (
     SELECT s.id,
            (1 - (s.embedding <=> $qvec::vector))::float8 AS semantic_score
     FROM symbols s
+    JOIN versions v     ON v.id = s.version_id
+    JOIN repositories r ON r.id = v.repository_id
     WHERE s.embedding IS NOT NULL
       AND s.embedding_model = $qmodel
-      AND ($repo = '' OR s.repo = $repo)
-      AND ($version = '' OR s.version = $version)
+      AND ($repo = '' OR r.name = $repo)
+      AND ($version = '' OR v.tag = $version)
+    ORDER BY s.embedding <=> $qvec::vector
+    LIMIT $semantic_k
 )
 SELECT ls.repo, ls.version, ls.file, ls.name, ls.start_line, lower(ls.label) AS kind,
        ls.signature, ls.source, ls.docstring, coalesce(ls.decorators, '{}') AS decorators,
@@ -537,6 +553,7 @@ impl Tool for SearchSymbolsTool {
                 params["qmodel"] = json!(self.1.as_ref().unwrap().model);
                 params["lexical"] = json!(self.1.as_ref().unwrap().lexical_weight);
                 params["semantic"] = json!(self.1.as_ref().unwrap().semantic_weight);
+                params["semantic_k"] = json!(SEMANTIC_CANDIDATES);
                 Some(HYBRID_SEARCH_SQL)
             }
             None => None,
@@ -2707,6 +2724,14 @@ mod search_tests {
             "the capability score must read the CTE column"
         );
         assert!(HYBRID_SEARCH_SQL.contains("1 - (s.embedding <=> $qvec::vector)"));
+    }
+
+    #[test]
+    fn hybrid_sql_scopes_vectors_through_versions_and_limits_them_for_the_index() {
+        assert!(!HYBRID_SEARCH_SQL.contains("OR s.repo"));
+        assert!(!HYBRID_SEARCH_SQL.contains("OR s.version"));
+        assert!(HYBRID_SEARCH_SQL
+            .contains("ORDER BY s.embedding <=> $qvec::vector\n    LIMIT $semantic_k"));
     }
 
     #[test]
