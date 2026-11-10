@@ -17,9 +17,10 @@ use crate::agent::{graph_tools, Agent};
 use crate::api::{AppState, GraphCache, ProjectAgentBuilder};
 use crate::auth::{api_keys::ApiKeyStore, user_keys::UserKeyStore};
 use crate::cluster::bus::ClusterBus;
+use crate::cluster::lease::{self, Leases};
 use crate::cluster::node::{ClusterNode, NodeStanding};
 use crate::cluster::peer::{require_secret, ClusterSecrets, PeerClient};
-use crate::cluster::{singleton, Shutdown};
+use crate::cluster::Shutdown;
 use crate::config::Config;
 use crate::crypto::Crypto;
 use crate::machines::directory::AgentDirectory;
@@ -178,6 +179,7 @@ fn spawn_fence_guard(node: Arc<ClusterNode>, live: Arc<ProjectLive>, evicted: Sh
 }
 
 fn spawn_reaper(
+    leases: Arc<dyn Leases>,
     db: Arc<Db>,
     live: Arc<ProjectLive>,
     directory: Arc<AgentDirectory>,
@@ -189,7 +191,7 @@ fn spawn_reaper(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            let result = singleton::run_exclusive(&db, "reaper", || async {
+            let result = lease::run_exclusive(leases.as_ref(), "reaper", || async {
                 reap(&db, &live, &directory).await;
                 if let Ok(alive) = live.node().live_node_ids().await {
                     collocate.reap_dead_nodes(&alive).await;
@@ -290,6 +292,7 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     let node = Arc::clone(&cluster.node);
     let bus = Arc::clone(&cluster.bus);
     let quorium = cluster.quorium.clone();
+    let leases = lease::for_node(&node, quorium.as_ref());
     let peers = match (cluster_config.effective_shared_secret(), internal_addr) {
         (Some(secret), Some(_)) => Some(PeerClient::secured(
             node.node_id(),
@@ -347,24 +350,28 @@ pub async fn start(config: Config) -> Result<RunningServer> {
             if let Some(embedder) = handle.embedder.clone() {
                 let db = Arc::clone(&db);
                 let semantic_cfg = config.semantic.clone();
+                let leases = Arc::clone(&leases);
                 tokio::spawn(async move {
-                    let ran = singleton::run_exclusive(&db, "semantic-backfill", || async {
-                        match crate::agent::semantic::run_backfill_if_configured(
-                            db.as_ref(),
-                            embedder.as_ref(),
-                            &semantic_cfg,
-                        )
-                        .await
-                        {
-                            Ok(stats) => tracing::info!(
-                                scanned = stats.scanned,
-                                embedded = stats.embedded,
-                                "semantic backfill finished"
-                            ),
-                            Err(err) => tracing::warn!(error = %err, "semantic backfill failed"),
-                        }
-                    })
-                    .await;
+                    let ran =
+                        lease::run_exclusive(leases.as_ref(), "semantic-backfill", || async {
+                            match crate::agent::semantic::run_backfill_if_configured(
+                                db.as_ref(),
+                                embedder.as_ref(),
+                                &semantic_cfg,
+                            )
+                            .await
+                            {
+                                Ok(stats) => tracing::info!(
+                                    scanned = stats.scanned,
+                                    embedded = stats.embedded,
+                                    "semantic backfill finished"
+                                ),
+                                Err(err) => {
+                                    tracing::warn!(error = %err, "semantic backfill failed")
+                                }
+                            }
+                        })
+                        .await;
                     if matches!(ran, Ok(false)) {
                         tracing::info!("semantic backfill already running on another node");
                     }
@@ -487,6 +494,7 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     });
     spawn_graph_cache_invalidation(Arc::clone(&bus), Arc::clone(&cache));
     spawn_reaper(
+        Arc::clone(&leases),
         Arc::clone(&db),
         Arc::clone(&live),
         Arc::clone(&directory),
