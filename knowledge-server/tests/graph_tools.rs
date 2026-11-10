@@ -35,6 +35,8 @@ fn function(
         source: source.into(),
         impl_type: None,
         docstring: None,
+        is_test: false,
+        statement_lines: Vec::new(),
         calls,
     }
 }
@@ -76,6 +78,7 @@ async fn seed_graph(writer: &GraphWriter) {
             embeds: vec![],
             uses: vec![],
             docstring: None,
+            is_test: false,
             decorators: vec![],
         }],
         imports: vec![ImportNode {
@@ -626,6 +629,8 @@ async fn search_symbols_matches_docstring_prose() {
                     source: "def provision():\n    return 1".into(),
                     impl_type: None,
                     docstring: Some("Provisions a block volume over iSCSI.".into()),
+                    is_test: false,
+                    statement_lines: Vec::new(),
                     calls: vec![],
                 }],
                 classes: vec![],
@@ -691,6 +696,7 @@ async fn search_symbols_matches_capability_constant_inside_a_class() {
                     embeds: vec![],
                     uses: vec![],
                     docstring: None,
+                    is_test: false,
                     decorators: vec![],
                 }],
                 imports: vec![],
@@ -760,6 +766,7 @@ async fn search_symbols_ranks_capability_above_path_match() {
                         embeds: vec![],
                         uses: vec![],
                         docstring: None,
+                        is_test: false,
                         decorators: vec![],
                     }],
                     imports: vec![],
@@ -783,6 +790,7 @@ async fn search_symbols_ranks_capability_above_path_match() {
                         embeds: vec![],
                         uses: vec![],
                         docstring: None,
+                        is_test: false,
                         decorators: vec![],
                     }],
                     imports: vec![],
@@ -843,6 +851,8 @@ async fn search_symbols_returns_bounded_previews_not_full_source() {
                     source: format!("fn huge() {{ {long} }}"),
                     impl_type: None,
                     docstring: None,
+                    is_test: false,
+                    statement_lines: Vec::new(),
                     calls: vec![],
                 }],
                 classes: vec![],
@@ -1264,6 +1274,8 @@ fn py_decorated_class(
         embeds: vec![],
         uses: vec![],
         docstring: None,
+        is_test: false,
+        is_test: false,
         decorators: decorators.iter().map(|d| d.to_string()).collect(),
     }
 }

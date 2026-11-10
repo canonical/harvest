@@ -31,6 +31,8 @@ fn make_file(repo: &str, version: &str, path: &str) -> ParsedFile {
                 source: "fn alpha() {\n    beta();\n}".to_string(),
                 impl_type: None,
                 docstring: None,
+                is_test: false,
+                statement_lines: Vec::new(),
                 calls: vec![],
             },
             FunctionNode {
@@ -45,6 +47,8 @@ fn make_file(repo: &str, version: &str, path: &str) -> ParsedFile {
                 source: "fn beta() {}".to_string(),
                 impl_type: None,
                 docstring: None,
+                is_test: false,
+                statement_lines: Vec::new(),
                 calls: vec![],
             },
         ],
@@ -62,6 +66,7 @@ fn make_file(repo: &str, version: &str, path: &str) -> ParsedFile {
             embeds: vec![],
             uses: vec![],
             docstring: None,
+            is_test: false,
             decorators: vec![],
         }],
         imports: vec![ImportNode {
@@ -481,4 +486,32 @@ class VolumeBusy(Exception):
         has_unit("DOCUMENTS", "Drivers", "VolumeDriver"),
         "{unit_edges:?}"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn file_origin_and_test_symbols_are_stored() {
+    setup!(writer, container);
+    writer.upsert_version("r", "v1", 0, false).await.unwrap();
+    let mut source = make_file("r", "v1", "src/lib.rs");
+    source.functions[0].is_test = true;
+    let mut vendored = make_file("r", "v1", "vendor/dep/lib.rs");
+    vendored.origin = knowledge_harvester::origin::Origin::Vendored;
+    writer
+        .write_version("r", "v1", &[source, vendored])
+        .await
+        .unwrap();
+    let rows = container
+        .db
+        .query(
+            "SELECT file AS path, origin, bool_or(is_test) AS any_test FROM code_symbols GROUP BY file, origin ORDER BY file",
+            json!({}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows[0]["path"], "src/lib.rs");
+    assert_eq!(rows[0]["origin"], "source");
+    assert_eq!(rows[0]["any_test"], true);
+    assert_eq!(rows[1]["origin"], "vendored");
+    assert_eq!(rows[1]["any_test"], false);
 }

@@ -1,4 +1,5 @@
 use std::path::{Component, Path, PathBuf};
+use streaming_iterator::StreamingIterator;
 
 use tree_sitter::{Node, Query, QueryCursor};
 
@@ -22,9 +23,11 @@ impl Dialect {
 
     fn language(self) -> tree_sitter::Language {
         match self {
-            Self::JavaScript => tree_sitter_javascript::language(),
-            Self::TypeScript => tree_sitter_typescript::language_typescript(),
-            Self::Tsx => tree_sitter_typescript::language_tsx(),
+            Self::JavaScript => tree_sitter::Language::from(tree_sitter_javascript::LANGUAGE),
+            Self::TypeScript => {
+                tree_sitter::Language::from(tree_sitter_typescript::LANGUAGE_TYPESCRIPT)
+            }
+            Self::Tsx => tree_sitter::Language::from(tree_sitter_typescript::LANGUAGE_TSX),
         }
     }
 
@@ -112,7 +115,8 @@ fn enclosing_class(source: &str, node: Node) -> Option<String> {
 fn calls_in(source: &str, node: Node, query: &Query) -> Vec<CallRef> {
     let mut cursor = QueryCursor::new();
     let mut calls = Vec::new();
-    for m in cursor.matches(query, node, source.as_bytes()) {
+    let mut matches_17 = cursor.matches(query, node, source.as_bytes());
+    while let Some(m) = matches_17.next() {
         for capture in m.captures {
             calls.push(CallRef {
                 callee: text(source, capture.node).to_string(),
@@ -267,6 +271,8 @@ pub fn parse(source: &str, path: &Path, repo: &str, version: &str, dialect: Dial
                     source: body.into(),
                     impl_type,
                     docstring: doc_comment(source, node),
+                    is_test: super::is_test_node(source, node, text(source, name)),
+                    statement_lines: super::statement_lines(node),
                     calls: calls_in(source, node, &calls),
                 });
             }
@@ -297,6 +303,8 @@ pub fn parse(source: &str, path: &Path, repo: &str, version: &str, dialect: Dial
                     source: body.into(),
                     impl_type: None,
                     docstring: doc_comment(source, declaration),
+                    is_test: super::is_test_node(source, declaration, text(source, name)),
+                    statement_lines: super::statement_lines(value),
                     calls: calls_in(source, value, &calls),
                 });
             }
@@ -337,6 +345,7 @@ pub fn parse(source: &str, path: &Path, repo: &str, version: &str, dialect: Dial
                     embeds: vec![],
                     uses: vec![],
                     docstring: doc_comment(source, node),
+                    is_test: super::is_test_node(source, node, text(source, name)),
                     decorators: decorators(source, node),
                 });
             }

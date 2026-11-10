@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use streaming_iterator::StreamingIterator;
 
 use super::LanguageParser;
 use crate::graph::model::{CallRef, ClassNode, FunctionNode, ImportNode, ParsedFile};
@@ -17,7 +18,7 @@ impl LanguageParser for RustParser {
     fn parse(&self, source: &str, path: &Path, repo: &str, version: &str) -> ParsedFile {
         let mut ts_parser = tree_sitter::Parser::new();
         ts_parser
-            .set_language(&tree_sitter_rust::language())
+            .set_language(&tree_sitter::Language::from(tree_sitter_rust::LANGUAGE))
             .unwrap();
 
         let tree = match ts_parser.parse(source, None) {
@@ -26,7 +27,7 @@ impl LanguageParser for RustParser {
         };
 
         let file_path = path.to_string_lossy().into_owned();
-        let lang = tree_sitter_rust::language();
+        let lang = tree_sitter::Language::from(tree_sitter_rust::LANGUAGE);
         let mut out = ParsedFile {
             path: file_path.clone(),
             language: "rust".into(),
@@ -42,7 +43,8 @@ impl LanguageParser for RustParser {
                 let type_idx  = q.capture_index_for_name("impl_type").unwrap();
                 let fn_in_idx = q.capture_index_for_name("fn_in_impl").unwrap();
                 let mut cursor = tree_sitter::QueryCursor::new();
-                for m in cursor.matches(&q, tree.root_node(), source.as_bytes()) {
+                let mut matches_1 = cursor.matches(&q, tree.root_node(), source.as_bytes());
+                while let Some(m) = matches_1.next() {
                     let tn  = m.captures.iter().find(|c| c.index == type_idx);
                     let fn_n = m.captures.iter().find(|c| c.index == fn_in_idx);
                     if let (Some(t), Some(f)) = (tn, fn_n) {
@@ -63,7 +65,8 @@ impl LanguageParser for RustParser {
                 let trait_idx  = q.capture_index_for_name("trait").unwrap();
                 let struct_idx = q.capture_index_for_name("struct_type").unwrap();
                 let mut cursor = tree_sitter::QueryCursor::new();
-                for m in cursor.matches(&q, tree.root_node(), source.as_bytes()) {
+                let mut matches_2 = cursor.matches(&q, tree.root_node(), source.as_bytes());
+                while let Some(m) = matches_2.next() {
                     let trait_cap  = m.captures.iter().find(|c| c.index == trait_idx);
                     let struct_cap = m.captures.iter().find(|c| c.index == struct_idx);
                     if let (Some(tr), Some(st)) = (trait_cap, struct_cap) {
@@ -95,7 +98,8 @@ impl LanguageParser for RustParser {
         let fn_idx = fn_q.capture_index_for_name("fn").unwrap();
         let name_idx = fn_q.capture_index_for_name("name").unwrap();
         let mut cursor = tree_sitter::QueryCursor::new();
-        for m in cursor.matches(&fn_q, tree.root_node(), source.as_bytes()) {
+        let mut matches_3 = cursor.matches(&fn_q, tree.root_node(), source.as_bytes());
+        while let Some(m) = matches_3.next() {
             let fn_node = m
                 .captures
                 .iter()
@@ -120,7 +124,8 @@ impl LanguageParser for RustParser {
 
                 let mut calls = Vec::new();
                 let mut call_cur = tree_sitter::QueryCursor::new();
-                for cm in call_cur.matches(&call_q, fn_n, source.as_bytes()) {
+                let mut matches_4 = call_cur.matches(&call_q, fn_n, source.as_bytes());
+                while let Some(cm) = matches_4.next() {
                     if let Some(cap) = cm.captures.iter().find(|c| c.index == callee_idx) {
                         calls.push(CallRef {
                             callee: source[cap.node.byte_range()].to_string(),
@@ -141,6 +146,8 @@ impl LanguageParser for RustParser {
                     source: src_text.into(),
                     impl_type,
                     docstring: leading_doc_comment(source, fn_n),
+                    is_test: super::is_test_node(source, fn_n, name),
+                    statement_lines: super::statement_lines(fn_n),
                     calls,
                 });
             }
@@ -158,7 +165,8 @@ impl LanguageParser for RustParser {
                 let node_idx = tq.capture_index_for_name("node").unwrap();
                 let name_idx = tq.capture_index_for_name("name").unwrap();
                 let mut cursor = tree_sitter::QueryCursor::new();
-                for m in cursor.matches(&tq, tree.root_node(), source.as_bytes()) {
+                let mut matches_5 = cursor.matches(&tq, tree.root_node(), source.as_bytes());
+                while let Some(m) = matches_5.next() {
                     let type_node = m
                         .captures
                         .iter()
@@ -194,6 +202,7 @@ impl LanguageParser for RustParser {
                             embeds: vec![],
                             uses,
                             docstring: leading_doc_comment(source, tn),
+                            is_test: super::is_test_node(source, tn, name),
                             decorators: Vec::new(),
                         });
                     }
@@ -218,7 +227,7 @@ impl LanguageParser for PythonParser {
     fn parse(&self, source: &str, path: &Path, repo: &str, version: &str) -> ParsedFile {
         let mut ts_parser = tree_sitter::Parser::new();
         ts_parser
-            .set_language(&tree_sitter_python::language())
+            .set_language(&tree_sitter::Language::from(tree_sitter_python::LANGUAGE))
             .unwrap();
 
         let tree = match ts_parser.parse(source, None) {
@@ -227,7 +236,7 @@ impl LanguageParser for PythonParser {
         };
 
         let file_path = path.to_string_lossy().into_owned();
-        let lang = tree_sitter_python::language();
+        let lang = tree_sitter::Language::from(tree_sitter_python::LANGUAGE);
         let mut out = ParsedFile {
             path: file_path.clone(),
             language: "python".into(),
@@ -249,7 +258,8 @@ impl LanguageParser for PythonParser {
         let name_idx = fn_q.capture_index_for_name("name").unwrap();
         {
             let mut cursor = tree_sitter::QueryCursor::new();
-            for m in cursor.matches(&fn_q, tree.root_node(), source.as_bytes()) {
+            let mut matches_6 = cursor.matches(&fn_q, tree.root_node(), source.as_bytes());
+            while let Some(m) = matches_6.next() {
                 let fn_node = m
                     .captures
                     .iter()
@@ -274,7 +284,8 @@ impl LanguageParser for PythonParser {
 
                     let mut calls = Vec::new();
                     let mut call_cursor = tree_sitter::QueryCursor::new();
-                    for cm in call_cursor.matches(&call_q, fn_n, source.as_bytes()) {
+                    let mut matches_7 = call_cursor.matches(&call_q, fn_n, source.as_bytes());
+                    while let Some(cm) = matches_7.next() {
                         if let Some(cap) = cm.captures.iter().find(|c| c.index == callee_idx) {
                             let callee = source[cap.node.byte_range()].to_string();
                             let line = cap.node.start_position().row as u32 + 1;
@@ -294,6 +305,8 @@ impl LanguageParser for PythonParser {
                         source: src_text.into(),
                         impl_type: owner.clone(),
                         docstring: python_docstring(source, fn_n),
+                        is_test: super::is_test_node(source, fn_n, name),
+                        statement_lines: super::statement_lines(fn_n),
                         calls,
                     });
                     python_references(source, fn_n, name, owner, start_line, &mut out.references);
@@ -308,7 +321,8 @@ impl LanguageParser for PythonParser {
         let cnm_idx = cls_q.capture_index_for_name("name").unwrap();
         {
             let mut cursor = tree_sitter::QueryCursor::new();
-            for m in cursor.matches(&cls_q, tree.root_node(), source.as_bytes()) {
+            let mut matches_8 = cursor.matches(&cls_q, tree.root_node(), source.as_bytes());
+            while let Some(m) = matches_8.next() {
                 let cls_node = m
                     .captures
                     .iter()
@@ -338,6 +352,7 @@ impl LanguageParser for PythonParser {
                         embeds: vec![],
                         uses: vec![],
                         docstring: python_docstring(source, cls_n),
+                        is_test: super::is_test_node(source, cls_n, name),
                         decorators: python_decorators(source, cls_n),
                     });
                 }
@@ -353,7 +368,8 @@ impl LanguageParser for PythonParser {
         {
             let mut bases_map: HashMap<String, Vec<String>> = HashMap::new();
             let mut cursor = tree_sitter::QueryCursor::new();
-            for m in cursor.matches(&inherit_q, tree.root_node(), source.as_bytes()) {
+            let mut matches_9 = cursor.matches(&inherit_q, tree.root_node(), source.as_bytes());
+            while let Some(m) = matches_9.next() {
                 let cn = m.captures.iter().find(|c| c.index == iclass_idx);
                 let bn = m.captures.iter().find(|c| c.index == ibase_idx);
                 if let (Some(cn), Some(bn)) = (cn, bn) {
@@ -381,7 +397,8 @@ impl LanguageParser for PythonParser {
         let imp_idx = imp_q.capture_index_for_name("import").unwrap();
         {
             let mut cursor = tree_sitter::QueryCursor::new();
-            for m in cursor.matches(&imp_q, tree.root_node(), source.as_bytes()) {
+            let mut matches_10 = cursor.matches(&imp_q, tree.root_node(), source.as_bytes());
+            while let Some(m) = matches_10.next() {
                 if let Some(cap) = m.captures.iter().find(|c| c.index == imp_idx) {
                     let line = cap.node.start_position().row as u32 + 1;
                     let target = python_import_target(source, cap.node);
@@ -446,7 +463,9 @@ impl LanguageParser for GoParser {
 
     fn parse(&self, source: &str, path: &Path, repo: &str, version: &str) -> ParsedFile {
         let mut ts_parser = tree_sitter::Parser::new();
-        ts_parser.set_language(&tree_sitter_go::language()).unwrap();
+        ts_parser
+            .set_language(&tree_sitter::Language::from(tree_sitter_go::LANGUAGE))
+            .unwrap();
 
         let tree = match ts_parser.parse(source, None) {
             Some(t) => t,
@@ -454,7 +473,7 @@ impl LanguageParser for GoParser {
         };
 
         let file_path = path.to_string_lossy().into_owned();
-        let lang = tree_sitter_go::language();
+        let lang = tree_sitter::Language::from(tree_sitter_go::LANGUAGE);
         let mut out = ParsedFile {
             path: file_path.clone(),
             language: "go".into(),
@@ -475,7 +494,8 @@ impl LanguageParser for GoParser {
         let m_idx = method_q.capture_index_for_name("m").unwrap();
         {
             let mut cursor = tree_sitter::QueryCursor::new();
-            for mat in cursor.matches(&method_q, tree.root_node(), source.as_bytes()) {
+            let mut matches_11 = cursor.matches(&method_q, tree.root_node(), source.as_bytes());
+            while let Some(mat) = matches_11.next() {
                 let mn = mat
                     .captures
                     .iter()
@@ -499,7 +519,8 @@ impl LanguageParser for GoParser {
         let name_idx = fn_q.capture_index_for_name("name").unwrap();
         {
             let mut cursor = tree_sitter::QueryCursor::new();
-            for m in cursor.matches(&fn_q, tree.root_node(), source.as_bytes()) {
+            let mut matches_12 = cursor.matches(&fn_q, tree.root_node(), source.as_bytes());
+            while let Some(m) = matches_12.next() {
                 let fn_node = m
                     .captures
                     .iter()
@@ -524,7 +545,8 @@ impl LanguageParser for GoParser {
 
                     let mut calls = Vec::new();
                     let mut call_cur = tree_sitter::QueryCursor::new();
-                    for cm in call_cur.matches(&call_q, fn_n, source.as_bytes()) {
+                    let mut matches_13 = call_cur.matches(&call_q, fn_n, source.as_bytes());
+                    while let Some(cm) = matches_13.next() {
                         if let Some(cap) = cm.captures.iter().find(|c| c.index == callee_idx) {
                             calls.push(CallRef {
                                 callee: source[cap.node.byte_range()].to_string(),
@@ -545,6 +567,8 @@ impl LanguageParser for GoParser {
                         source: src_text.into(),
                         impl_type,
                         docstring: leading_doc_comment(source, fn_n),
+                        is_test: super::is_test_node(source, fn_n, name),
+                        statement_lines: super::statement_lines(fn_n),
                         calls,
                     });
                 }
@@ -560,7 +584,8 @@ impl LanguageParser for GoParser {
         let tnm_idx = type_q.capture_index_for_name("name").unwrap();
         {
             let mut cursor = tree_sitter::QueryCursor::new();
-            for m in cursor.matches(&type_q, tree.root_node(), source.as_bytes()) {
+            let mut matches_14 = cursor.matches(&type_q, tree.root_node(), source.as_bytes());
+            while let Some(m) = matches_14.next() {
                 let ts_node = m
                     .captures
                     .iter()
@@ -606,6 +631,7 @@ impl LanguageParser for GoParser {
                         embeds,
                         uses: vec![],
                         docstring: leading_doc_comment(source, ts_n),
+                        is_test: super::is_test_node(source, ts_n, name),
                         decorators: Vec::new(),
                     });
                 }
@@ -620,7 +646,8 @@ impl LanguageParser for GoParser {
         let path_idx = imp_q.capture_index_for_name("path").unwrap();
         {
             let mut cursor = tree_sitter::QueryCursor::new();
-            for m in cursor.matches(&imp_q, tree.root_node(), source.as_bytes()) {
+            let mut matches_15 = cursor.matches(&imp_q, tree.root_node(), source.as_bytes());
+            while let Some(m) = matches_15.next() {
                 if let Some(cap) = m.captures.iter().find(|c| c.index == path_idx) {
                     let line = cap.node.start_position().row as u32 + 1;
                     let raw = &source[cap.node.byte_range()];
@@ -639,50 +666,6 @@ impl LanguageParser for GoParser {
         }
 
         out
-    }
-}
-
-pub struct CParser;
-
-impl LanguageParser for CParser {
-    fn language_name(&self) -> &str {
-        "c"
-    }
-    fn extensions(&self) -> &[&'static str] {
-        &["c", "h"]
-    }
-
-    fn parse(&self, _source: &str, path: &Path, _repo: &str, _version: &str) -> ParsedFile {
-        let mut ts_parser = tree_sitter::Parser::new();
-        ts_parser.set_language(&tree_sitter_c::language()).unwrap();
-        ParsedFile {
-            path: path.to_string_lossy().into_owned(),
-            language: "c".into(),
-            ..Default::default()
-        }
-    }
-}
-
-pub struct CppParser;
-
-impl LanguageParser for CppParser {
-    fn language_name(&self) -> &str {
-        "cpp"
-    }
-    fn extensions(&self) -> &[&'static str] {
-        &["cpp", "cc", "cxx", "hpp"]
-    }
-
-    fn parse(&self, _source: &str, path: &Path, _repo: &str, _version: &str) -> ParsedFile {
-        let mut ts_parser = tree_sitter::Parser::new();
-        ts_parser
-            .set_language(&tree_sitter_cpp::language())
-            .unwrap();
-        ParsedFile {
-            path: path.to_string_lossy().into_owned(),
-            language: "cpp".into(),
-            ..Default::default()
-        }
     }
 }
 
@@ -898,7 +881,7 @@ fn python_decorators(source: &str, node: tree_sitter::Node) -> Vec<String> {
         return Vec::new();
     };
     let mut decorators = Vec::new();
-    for i in 0..parent.named_child_count() {
+    for i in 0..parent.named_child_count() as u32 {
         let Some(decorator) = parent.named_child(i).filter(|c| c.kind() == "decorator") else {
             continue;
         };
@@ -927,7 +910,7 @@ fn python_import_target(source: &str, node: tree_sitter::Node) -> String {
             .map(|n| source[n.byte_range()].trim().to_string())
             .unwrap_or_default(),
         "import_statement" => {
-            for i in 0..node.named_child_count() {
+            for i in 0..node.named_child_count() as u32 {
                 let child = node.named_child(i).unwrap();
                 match child.kind() {
                     "dotted_name" => return source[child.byte_range()].trim().to_string(),
@@ -1073,7 +1056,8 @@ fn rust_extract_field_uses(
     let mut seen = std::collections::HashSet::new();
     seen.insert(type_name.to_string());
     let mut cursor = tree_sitter::QueryCursor::new();
-    for m in cursor.matches(field_q, type_item, source.as_bytes()) {
+    let mut matches_16 = cursor.matches(field_q, type_item, source.as_bytes());
+    while let Some(m) = matches_16.next() {
         if let Some(cap) = m.captures.iter().find(|c| c.index == ft_idx) {
             let mut types = Vec::new();
             rust_collect_type_names(source, cap.node, &mut types);
@@ -1783,14 +1767,28 @@ mod tests {
     }
 
     #[test]
-    fn c_stub_returns_empty() {
-        let pf = CParser.parse("void foo() {}", Path::new("a.c"), "r", "v1");
-        assert!(pf.functions.is_empty() && pf.language == "c");
+    fn rust_tests_inside_cfg_test_modules_and_with_test_attributes_are_marked() {
+        let src = "fn load() -> u32 {\n    let a = 1;\n    a + 1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    fn helper() {}\n    #[test]\n    fn loads() { helper(); }\n}\n\n#[tokio::test]\nasync fn async_case() {}\n";
+        let pf = RustParser.parse(src, Path::new("src/lib.rs"), "r", "v");
+        let test = |n: &str| pf.functions.iter().find(|f| f.name == n).unwrap().is_test;
+        assert!(!test("load"));
+        assert!(test("helper"));
+        assert!(test("loads"));
+        assert!(test("async_case"));
+        let load = pf.functions.iter().find(|f| f.name == "load").unwrap();
+        assert_eq!(load.statement_lines, vec![2, 3]);
     }
 
     #[test]
-    fn cpp_stub_returns_empty() {
-        let pf = CppParser.parse("void foo() {}", Path::new("a.cpp"), "r", "v1");
-        assert!(pf.functions.is_empty() && pf.language == "cpp");
+    fn python_test_functions_and_test_case_methods_are_marked() {
+        let src = "class VolumeTests(unittest.TestCase):\n    def test_attach(self):\n        pass\n\n    def setUp(self):\n        pass\n\ndef attach():\n    x = 1\n    return x\n";
+        let pf = PythonParser.parse(src, Path::new("cinder/volume.py"), "r", "v");
+        let test = |n: &str| pf.functions.iter().find(|f| f.name == n).unwrap().is_test;
+        assert!(test("test_attach"));
+        assert!(test("setUp"));
+        assert!(!test("attach"));
+        assert!(pf.classes[0].is_test);
+        let attach = pf.functions.iter().find(|f| f.name == "attach").unwrap();
+        assert_eq!(attach.statement_lines, vec![9, 10]);
     }
 }
