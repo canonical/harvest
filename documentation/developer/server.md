@@ -387,6 +387,12 @@ Deployment-scoped agents use specialised system prompts (see `prompt.rs`) that f
 
 ---
 
+## Tiered Code Search
+
+`[search] engine = "shadow" | "tiered"` replaces the agent loop's graph exploration with the
+tiered engine and the `search_code` tool. Architecture, configuration, metrics and the
+`harvest-eval` workflow are described in [search.md](search.md).
+
 ## Graph Query Tools
 
 These graph tools are exposed to the LLM (defined in `agent/graph_tools.rs`). Each runs one or more PostgreSQL queries against the `code_*` views. The full tool set also includes machine, skill, infra, terraform, artifact, secret, and interaction tools — see the [README "Agent tools"](../../README.md#agent-tools) table for the complete list and `agent/*_tools.rs` for the implementations.

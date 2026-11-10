@@ -23,3 +23,15 @@ max_iterations = 20
 # api_key   = "gsk_..."
 # model     = "llama-3.3-70b-versatile"
 # max_iterations = 20
+
+# Tiered code search (see documentation/developer/search.md)
+# [search]
+# engine       = "shadow"     # loop | shadow | tiered
+# deadline_ms  = 7000
+# token_budget = 8000
+# cache_dir    = "/var/lib/harvest/search-cache"
+# judge        = false
+# enrich       = false
+# [search.fast_model]
+# provider_id  = "anthropic"
+# model        = "claude-haiku-5-5"

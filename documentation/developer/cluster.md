@@ -119,6 +119,18 @@ phases tracked in the cluster secret: every unit first accepts the new secret, t
 stops accepting the old one. Each phase advances once every unit reports (by digest) that it runs
 the previous one.
 
+## Leases and background work
+
+Exclusive jobs (the reaper, the semantic backfill, background enrichment) run under leases from
+`cluster::lease::for_node`. On quorium a lease belongs to the holder's session: when the leader
+expires or withdraws a member, every lease it held is released, and each grant carries a
+fencing token that only grows. The postgres backend keeps the same contract with
+`cluster_leases`, reclaiming a lease once its holder is no longer live. Work items live in
+`work_queue`; writes from a job commit through `Fence::commit`, which refuses a token older than
+the newest one recorded in `fencing_tokens`, so a node that resumes after a pause cannot
+overwrite newer results. Lease commands are only proposed once every quorium member advertises
+the `leases` feature. See [search.md](search.md) for the search side.
+
 ## Operations
 
 ### Rolling restart
