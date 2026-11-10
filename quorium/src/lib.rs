@@ -9,6 +9,6 @@ pub mod types;
 pub mod voters;
 
 pub use node::{Health, KeepAlive, Quorium, QuoriumConfig, ServerInfo, Status};
-pub use state::{Command, MemberRecord, Response};
+pub use state::{Command, Lease, MemberRecord, Response, FEATURES, FEATURE_LEASES};
 pub use token::JoinToken;
 pub use voters::Tuning;

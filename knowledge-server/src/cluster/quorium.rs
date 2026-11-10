@@ -35,6 +35,10 @@ impl QuoriumMembership {
             version: announcement.version.clone(),
             draining: announcement.draining,
             joined_at_ms: quorium::node::now_ms(),
+            features: quorium::state::FEATURES
+                .iter()
+                .map(|f| f.to_string())
+                .collect(),
         };
         match self.quorium.write(Command::Register { member }).await? {
             Response::Evicted => Err(MembershipError::Evicted),
@@ -48,6 +52,7 @@ impl QuoriumMembership {
                 && m.internal_url == announcement.internal_url
                 && m.version == announcement.version
                 && m.draining == announcement.draining
+                && quorium::state::FEATURES.iter().all(|f| m.supports(f))
         })
     }
 }

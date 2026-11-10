@@ -163,6 +163,10 @@ fn member(node_id: &str) -> MemberRecord {
         version: "fuzz".into(),
         draining: false,
         joined_at_ms: 0,
+        features: quorium::state::FEATURES
+            .iter()
+            .map(|f| f.to_string())
+            .collect(),
     }
 }
 
@@ -306,5 +310,78 @@ async fn random_partitions_keep_the_cluster_safe_and_convergent() {
         .unwrap_or(2);
     for seed in 1..=seeds {
         run_seed(seed).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_isolated_lease_holder_loses_its_lease_to_the_majority_with_a_higher_token() {
+    let network = Arc::new(Network::default());
+    let servers = cluster(&network).await;
+    let mut keepers = Vec::new();
+    for (index, server) in servers.iter().enumerate() {
+        let node_id = format!("member-{index}");
+        servers[0]
+            .quorium
+            .write(Command::Register {
+                member: member(&node_id),
+            })
+            .await
+            .unwrap();
+        keepers.push(tokio::spawn(keep_alive(
+            Arc::clone(&server.quorium),
+            node_id,
+        )));
+    }
+    let first = servers[0]
+        .quorium
+        .try_acquire_lease("job:index", "member-0")
+        .await
+        .unwrap()
+        .expect("a free lease is granted");
+    assert_eq!(
+        servers[1]
+            .quorium
+            .try_acquire_lease("job:index", "member-1")
+            .await
+            .unwrap(),
+        None
+    );
+
+    network.isolate(0);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let second = loop {
+        if let Ok(Some(token)) = servers[1]
+            .quorium
+            .try_acquire_lease("job:index", "member-1")
+            .await
+        {
+            break token;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the majority never took the lease over"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(
+        second > first,
+        "fencing tokens must increase: {first} then {second}"
+    );
+    let holder = servers[2]
+        .quorium
+        .lease_linearizable("job:index")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(holder.holder, "member-1");
+    assert_eq!(holder.token, second);
+
+    network.heal();
+    for keeper in keepers {
+        keeper.abort();
+    }
+    for server in servers {
+        server.serving.abort();
+        server.quorium.shutdown().await;
     }
 }
