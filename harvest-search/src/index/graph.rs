@@ -212,11 +212,11 @@ impl CodeGraph {
                     .map(|(_, r)| weight_of(*r, Direction::Out))
                     .chain(inn.iter().map(|(_, r)| weight_of(*r, Direction::In)))
                     .sum();
-                let mut spread = |target: UnitId,
-                                  share: f32,
-                                  next: &mut [f32],
-                                  touched: &mut [bool],
-                                  reached: &mut Vec<UnitId>| {
+                let spread = |target: UnitId,
+                              share: f32,
+                              next: &mut [f32],
+                              touched: &mut [bool],
+                              reached: &mut Vec<UnitId>| {
                     let t = target as usize;
                     next[t] += share;
                     if !touched[t] {
