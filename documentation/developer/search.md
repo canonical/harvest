@@ -10,7 +10,7 @@ the question is. The answering model calls one tool, `search_code`, and answers 
 |---|---|
 | `harvest-search` | Indexes, retrieval, tiers, the sufficiency gate and the Postgres fallback. No LLM provider, HTTP or cluster code: it talks to the outside through `CorpusSource` (rows in) and `LanguageModel` (fast-model calls out). |
 | `knowledge-server` | `search/` wires the engine from `[search]`, exposes `search_code`, records traces and metrics, keeps indexes fresh and runs shadow mode. `jobs/` runs fenced background work such as enrichment. `cluster/lease.rs` provides leases on both cluster backends. |
-| `knowledge-harvester` | Parses code (Rust, Python, Go, TypeScript, JavaScript), extracts non-code units, resolves typed edges and writes them to Postgres. |
+| `knowledge-harvester` | Parses code in 44 languages, classifies each file as source, test, vendored or generated, extracts non-code units, resolves typed edges and writes them to Postgres. |
 | `harvest-eval` | Builds gold sets, runs any engine over them and reports quality and latency, compares reports against gates, calibrates the gate and trains the reranker. |
 
 Every engine implements `SearchEngine::search(&Query, Deadline) -> SearchResult`, so the legacy
@@ -21,12 +21,16 @@ loop (`LegacyLoopEngine`), the tiered engine and the SQL fallback are measured t
 1. **Tier 1** (no model, about 100–200 ms on a 35k-symbol version) runs up to three rounds:
    BM25, dense and exact-name retrieval fused by weighted reciprocal rank, personalized PageRank
    over the typed graph with edge weights chosen by question kind, then new terms from the top
-   hits. It stops when the top ten stop changing, reranks with `LinearReranker` and packs the
-   best evidence into the token budget. A class replaces its own methods when both rank.
-2. **The gate** runs checks cheapest first and stops at the first that decides: list and caller
-   completeness against the graph, dangling references from the top evidence, a calibrated
-   logistic score over retrieval signals, and optionally a small-model judge
-   (`search.judge = true`). Anything still undecided escalates.
+   hits. Symbols the question names, in any language's syntax (`Fence::commit`, `a.b.C`,
+   `obj->run`, `Class#method`), are matched by name parts and pinned. It stops when the top ten
+   stop changing, then reranks and packs at most twelve pieces into the token budget: whole
+   functions with the class they belong to and the one-line signatures of what they call, and
+   large classes as a skeleton of member signatures. Pieces from the same file sit together.
+2. **The gate** runs checks cheapest first and stops at the first that decides: symbols named in
+   the question that are missing from the evidence, list and caller completeness against the
+   graph, dangling references from the top evidence, a calibrated logistic score over retrieval
+   signals, and optionally a small-model judge (`search.judge = true`). Anything still undecided
+   escalates.
 3. **Tier 2** asks the fast model once for a plan in a small typed step language
    (`search`, `subclasses_of`, `capability`, `method`, `callers`, `callees`, `reads_config`,
    `read`) and executes it against the in-memory index in milliseconds. Capability and subclass
@@ -41,18 +45,42 @@ index builds in the background.
 
 ## Index
 
-The harvester (parser version 3) stores, per version:
+The harvester (parser version 4) stores, per version:
 
-* symbols with their owning class (`impl_type`), so same-named methods of different classes no
-  longer overwrite each other;
+* symbols with their owning class (`impl_type`) and whether they are test code, so same-named
+  methods of different classes no longer overwrite each other;
+* the origin of every file: `source`, `test`, `vendored` or `generated`, decided from
+  `.gitattributes` (`linguist-vendored`, `linguist-generated` and their negations), generated
+  markers (`@generated`, `DO NOT EDIT`, minified text), GitHub Linguist's vendored path
+  conventions, git history (files only ever changed by dependency-sync commits) and test path
+  conventions;
 * typed edges: `CALLS`, `INHERITS`, `IMPLEMENTS`, `USES`, `EMBEDS`, `OVERRIDES`, `INSTANTIATES`,
   `RAISES`, `REGISTERS` and `TESTS` between symbols, resolved by an import- and class-aware
   resolver (own class and ancestors, then same file, then imported modules, then a unique name,
   and a polymorphic call resolves to the base method);
 * `code_units`: module skeletons with recent commit subjects, config sections and oslo option
-  declarations, documentation sections, and statement-boundary chunks of long functions;
+  declarations, documentation sections, chunks of long functions split at the statements of
+  their syntax tree, and line windows of source files no parser understands;
 * `unit_edges`: `READS_CONFIG` (function to option), `DOCUMENTS` (doc section to symbol),
   `REGISTERS` (entry points to classes) and `CO_CHANGES` (files changed together in git).
+
+### Languages
+
+Rust, Python, Go, TypeScript and JavaScript have dedicated parsers. Every other language goes
+through one generic parser (`parser/generic.rs`): it uses the grammar's `tags.scm` query where
+the crate ships one, and a structural pass over the syntax tree that recognises definitions,
+calls, base types, imports, annotations and leading doc comments from node and field names. It
+covers C, C++, Java, C#, Ruby, PHP, Kotlin, Scala, Swift, Lua, Bash, Elixir, Haskell, OCaml,
+Julia, Elm, Dart, R, Zig, Objective-C, Erlang, Solidity, Fortran, Groovy, Perl, D, Gleam, F#,
+Racket, Protocol Buffers, Verilog, Pascal, Nix, PowerShell, CUDA, GLSL, Scheme, Ada and MATLAB
+(`.m` files are told apart from Objective-C by content). Adding a language means adding a
+grammar crate and one line to `generic::specs()`. Test code is recognised in the parser from
+names, attributes or decorators (`#[test]`, `@Test`, `[Fact]`, `pytest` markers) and enclosing
+test scopes such as `#[cfg(test)] mod` or `*Tests` classes. A file whose language has no
+grammar, or whose parser finds no definitions, is indexed as line windows.
+
+Search never looks at file paths or syntax: it reads the language-neutral fields the harvester
+writes (kind, owner, name parts, test flag, origin).
 
 Versions ingested by an older parser are re-ingested automatically. Each node builds its
 in-memory index (BM25, vectors, CSR graph, cache) from Postgres and caches the corpus on local
@@ -80,6 +108,9 @@ reranker = "/etc/harvest/reranker.json"   # from harvest-eval train-reranker
 gate = "/etc/harvest/gate.json"           # from harvest-eval calibrate-gate
 warm = ["cinder@29.0.0"]     # loaded at start, besides recently searched versions
 refresh_secs = 30
+max_followups = 3            # code reads allowed after the first search, per question
+prefetch = true              # run the first search before the model's first call
+calibrate = true             # calibrate search per repository in the background
 
 [search.fast_model]
 provider_id = "anthropic"
@@ -89,10 +120,29 @@ model = "claude-haiku-5-5"
 * `loop` keeps today's agent loop and tools.
 * `shadow` keeps the loop for users, runs the tiered engine on the same question after each turn
   and records how much of the loop's cited evidence it found (`shadow_recall`).
-* `tiered` gives the agent `search_code`, `read_sources`, `compare_symbol_across_versions`,
-  `list_repositories` and `run_sql`, and adds a short prompt section telling it to search once.
+* `tiered` gives the agent `search_code`, `read_sources`, `compare_symbol_across_versions` and
+  `list_repositories` with a prompt of its own. When the question names an ingested repository,
+  or only one is ingested, the server runs the first search before the model's first call and
+  hands the evidence over with the question. After that the agent may make
+  `search.max_followups` code reads (`search_code` with `focus` on named symbols or files,
+  `read_sources`, version comparisons) before it must answer; further reads are refused with a
+  message telling it to answer from what it has.
 
 Roll out as `shadow`, compare `harvest_search_shadow_recall_percent`, then switch to `tiered`.
+
+## Calibration
+
+The reranker weights and the gate thresholds come from, in order: a calibration stored for the
+version in `search_calibrations`, the files named by `search.reranker` and `search.gate`, and the
+defaults built into `harvest-search/defaults/calibration.json`, which are trained across several
+open-source repositories in different languages.
+
+With `search.calibrate = true`, a fenced background job (`jobs/kinds/calibrate.rs`) calibrates
+each ingested version once its content changes. It generates questions from the index itself —
+symbol lookups, docstring descriptions, subclass lists, callers and call flows — trains the
+reranker on 70% of them, keeps the trained weights only if they do at least as well as the
+current ones on the other 30%, calibrates the gate, and stores the result. The new calibration
+changes the index generation, so every node picks it up on its next refresh.
 
 ## High availability
 
