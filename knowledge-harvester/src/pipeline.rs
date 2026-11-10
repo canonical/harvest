@@ -74,7 +74,11 @@ impl Pipeline {
     pub async fn run(&self, force: bool) -> Result<()> {
         for repo in &self.repositories {
             if let Err(e) = self.process_repo(repo, force).await {
-                tracing::error!(repo = repo.name, error = %e, "repository failed");
+                tracing::error!(
+                    repo = repo.name,
+                    error = format!("{e:#}"),
+                    "repository failed"
+                );
             }
         }
         Ok(())

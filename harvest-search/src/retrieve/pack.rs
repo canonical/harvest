@@ -11,6 +11,38 @@ const MAX_UNIT_CHARS: usize = 8_000;
 const MIN_USEFUL_CHARS: usize = 200;
 const MIN_RELATIVE_SCORE: f32 = 0.2;
 pub const MAX_ITEMS: usize = 12;
+pub const MAX_BROAD_ITEMS: usize = 32;
+const BROAD_UNIT_CHARS: usize = 1_500;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    Focused,
+    Broad,
+}
+
+impl Shape {
+    pub fn of(question: &crate::question::Question) -> Self {
+        if question.broad {
+            Self::Broad
+        } else {
+            Self::Focused
+        }
+    }
+
+    fn items(self) -> usize {
+        match self {
+            Self::Focused => MAX_ITEMS,
+            Self::Broad => MAX_BROAD_ITEMS,
+        }
+    }
+
+    fn unit_chars(self) -> usize {
+        match self {
+            Self::Focused => MAX_UNIT_CHARS,
+            Self::Broad => BROAD_UNIT_CHARS,
+        }
+    }
+}
 const SKELETON_MEMBERS: usize = 40;
 const CALLEE_SIGNATURES: usize = 6;
 const SIGNATURE_CHARS: usize = 160;
@@ -197,6 +229,17 @@ pub fn pack(
     fixed: Vec<Evidence>,
     budget: TokenBudget,
 ) -> Vec<Evidence> {
+    pack_shaped(index, candidates, fixed, budget, Shape::Focused)
+}
+
+pub fn pack_shaped(
+    index: &IndexSnapshot,
+    candidates: &[Candidate],
+    fixed: Vec<Evidence>,
+    budget: TokenBudget,
+    shape: Shape,
+) -> Vec<Evidence> {
+    let max_unit = shape.unit_chars();
     let mut remaining = budget.0 * CHARS_PER_TOKEN;
     for evidence in &fixed {
         remaining = remaining.saturating_sub(evidence.text.len());
@@ -209,7 +252,7 @@ pub fn pack(
     let mut chosen: Vec<Packed> = Vec::new();
     let mut packed_units: HashSet<UnitId> = HashSet::new();
     for (rank, candidate) in candidates.iter().enumerate() {
-        if chosen.len() >= MAX_ITEMS || (remaining < MIN_USEFUL_CHARS && !chosen.is_empty()) {
+        if chosen.len() >= shape.items() || (remaining < MIN_USEFUL_CHARS && !chosen.is_empty()) {
             break;
         }
         if !candidate.pinned && top > 0.0 && candidate.score < top * MIN_RELATIVE_SCORE {
@@ -233,8 +276,8 @@ pub fn pack(
         }
         let holds_chosen = chosen.iter().any(|p| unit.contains(p.unit));
         let body_len = unit.body.len();
-        let as_skeleton = unit.kind() == UnitKind::Class
-            && (holds_chosen || body_len > MAX_UNIT_CHARS.min(remaining));
+        let as_skeleton =
+            unit.kind() == UnitKind::Class && (holds_chosen || body_len > max_unit.min(remaining));
         let text = if as_skeleton {
             skeleton(index, unit)
         } else {
@@ -242,7 +285,7 @@ pub fn pack(
                 index,
                 unit,
                 &packed_units,
-                MAX_UNIT_CHARS.min(remaining.max(MIN_USEFUL_CHARS)),
+                max_unit.min(remaining.max(MIN_USEFUL_CHARS)),
             )
         };
         if text.len() > remaining && !chosen.is_empty() && !candidate.pinned {
@@ -412,5 +455,36 @@ mod tests {
     fn clipping_respects_character_boundaries() {
         assert_eq!(clip("héllo", 2), "h\n…");
         assert_eq!(estimate_tokens("abcdefgh"), 2);
+    }
+
+    #[tokio::test]
+    async fn broad_questions_get_more_shorter_items() {
+        let mut corpus = Corpus::new(Scope::new("r", "v"), "g");
+        for i in 0..40u32 {
+            corpus.push_unit(unit(
+                &format!("caller{i}"),
+                &format!("{i}.py"),
+                (1, 50),
+                3_000,
+                UnitKind::Function,
+            ));
+        }
+        let index = IndexSnapshot::build(corpus, &HashingEmbedder::default())
+            .await
+            .unwrap();
+        let ids: Vec<u32> = (0..40).collect();
+        let broad = pack_shaped(
+            &index,
+            &candidates(&ids),
+            Vec::new(),
+            TokenBudget(16_000),
+            Shape::Broad,
+        );
+        assert!(broad.len() > MAX_ITEMS, "{}", broad.len());
+        assert!(broad.iter().all(|e| e.text.len() <= BROAD_UNIT_CHARS + 100));
+        let question = crate::question::Question::analyze("What calls attach_volume?");
+        assert_eq!(Shape::of(&question), Shape::Broad);
+        let question = crate::question::Question::analyze("How does attach_volume work?");
+        assert_eq!(Shape::of(&question), Shape::Focused);
     }
 }
