@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use harvest_db::test_support::TestDb;
-use knowledge_server::cluster::{bus::ClusterBus, node::ClusterNode, singleton};
+use knowledge_server::cluster::{bus::ClusterBus, lease, node::ClusterNode};
 use knowledge_server::config::ClusterConfig;
 use serde_json::{json, Value};
 
@@ -189,26 +189,39 @@ async fn bus_tells_subscribers_to_resync_after_losing_its_listener_and_keeps_del
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn singleton_jobs_run_on_one_node_at_a_time() {
+async fn exclusive_jobs_run_on_one_node_at_a_time() {
     let t = TestDb::new().await;
     let db = Arc::new(t.db.clone());
+    let node_a = ClusterNode::new(Arc::clone(&db), &fast_config("a"));
+    let node_b = ClusterNode::new(Arc::clone(&db), &fast_config("b"));
+    node_a.heartbeat().await.unwrap();
+    node_b.heartbeat().await.unwrap();
+    let on_a = lease::for_node(&node_a, None);
+    let on_b = lease::for_node(&node_b, None);
     let runs = Arc::new(AtomicUsize::new(0));
-    let job = |db: Arc<harvest_db::Db>, runs: Arc<AtomicUsize>| async move {
-        singleton::run_exclusive(&db, "test-job", || async {
+    let job = |leases: Arc<dyn lease::Leases>, runs: Arc<AtomicUsize>| async move {
+        lease::run_exclusive(leases.as_ref(), "test-job", || async {
             runs.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(400)).await;
         })
         .await
         .unwrap()
     };
-    let (first, second) = tokio::join!(job(Arc::clone(&db), Arc::clone(&runs)), async {
+    let (first, second) = tokio::join!(job(Arc::clone(&on_a), Arc::clone(&runs)), async {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        job(Arc::clone(&db), Arc::clone(&runs)).await
+        job(Arc::clone(&on_b), Arc::clone(&runs)).await
     });
     assert!(first);
     assert!(!second);
     assert_eq!(runs.load(Ordering::SeqCst), 1);
-    assert!(job(Arc::clone(&db), Arc::clone(&runs)).await);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !job(Arc::clone(&on_b), Arc::clone(&runs)).await {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the lease was never released"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert_eq!(runs.load(Ordering::SeqCst), 2);
 }
 

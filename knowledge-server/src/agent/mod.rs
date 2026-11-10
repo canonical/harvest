@@ -6238,8 +6238,8 @@ mod tests {
         );
         let resp = agent.query("what is t1?", &[], &[], None).await.unwrap();
         assert_eq!(resp.tool_calls_made, 3);
-        assert_eq!(routing.hits(), 1);
-        assert_eq!(filtering.hits(), 0);
+        assert_eq!(routing.calls(), 1);
+        assert_eq!(filtering.calls(), 0);
     }
 
     #[tokio::test]

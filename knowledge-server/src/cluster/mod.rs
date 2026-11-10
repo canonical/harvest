@@ -2,6 +2,7 @@ pub mod admin;
 pub mod bus;
 #[cfg(test)]
 mod conformance;
+pub mod lease;
 pub mod membership;
 pub mod mesh;
 pub mod node;
@@ -10,7 +11,6 @@ pub mod peer;
 pub mod postgres;
 pub mod quorium;
 pub mod runtime;
-pub mod singleton;
 pub mod tls;
 
 use std::future::Future;
