@@ -58,6 +58,25 @@ impl Rounds {
 }
 
 const FAMILY_SCAN: usize = 30;
+const PROPERTY_WORDS: &[&str] = &[
+    "support",
+    "supports",
+    "enabl",
+    "enable",
+    "allow",
+    "allows",
+    "capabl",
+    "capability",
+    "whether",
+    "has",
+    "have",
+    "can",
+    "able",
+    "use",
+    "uses",
+    "flag",
+    "set",
+];
 const MIN_FAMILY: usize = 3;
 
 pub fn enumerate_family(ctx: &mut SearchContext) {
@@ -74,6 +93,22 @@ pub fn enumerate_family(ctx: &mut SearchContext) {
         return;
     }
     let index = std::sync::Arc::clone(&ctx.index);
+    let repo_words: std::collections::HashSet<String> =
+        crate::index::tokenizer::tokens(&ctx.query.scope.repo)
+            .into_iter()
+            .map(|t| crate::index::tokenizer::stem(&t))
+            .collect();
+    let topic: std::collections::HashSet<String> = ctx
+        .question
+        .vocabulary()
+        .into_iter()
+        .filter(|w| !repo_words.contains(w))
+        .collect();
+    let related = |name: &str| {
+        crate::index::tokenizer::tokens(name)
+            .into_iter()
+            .any(|t| topic.contains(&crate::index::tokenizer::stem(&t)))
+    };
     let mut roots: Vec<u32> = ctx
         .named
         .iter()
@@ -81,6 +116,29 @@ pub fn enumerate_family(ctx: &mut SearchContext) {
         .filter(|u| index.unit(*u).kind() == UnitKind::Class)
         .collect();
     if roots.is_empty() {
+        for unit in index.units.iter() {
+            if unit.kind() == UnitKind::Class
+                && !unit.is_test()
+                && !unit.is_vendored()
+                && !unit.is_generated()
+                && related(&unit.name)
+                && index
+                    .graph
+                    .neighbors(
+                        unit.id,
+                        crate::index::graph::Direction::In,
+                        &[crate::index::corpus::Relation::Inherits],
+                    )
+                    .nth(MIN_FAMILY - 1)
+                    .is_some()
+            {
+                for root in std::iter::once(unit.id).chain(index.graph.ancestors(unit.id)) {
+                    if !roots.contains(&root) {
+                        roots.push(root);
+                    }
+                }
+            }
+        }
         for candidate in ctx.candidates.iter().take(FAMILY_SCAN) {
             let unit = index.unit(candidate.unit);
             if unit.kind() != UnitKind::Class || unit.is_test() || unit.is_vendored() {
@@ -104,7 +162,7 @@ pub fn enumerate_family(ctx: &mut SearchContext) {
                 .iter()
                 .filter(|u| {
                     let unit = index.unit(**u);
-                    !unit.is_test() && ctx.question.relatedness(&unit.qualified_name) >= 1
+                    !unit.is_test() && related(&unit.name)
                 })
                 .count();
             (root, related, family.len())
@@ -116,9 +174,39 @@ pub fn enumerate_family(ctx: &mut SearchContext) {
     let Some((root, _, _)) = best else {
         return;
     };
-    let (_, table) =
+    let (members, table) =
         crate::tiers::plan::execute::subclass_table(&index, root, crate::domain::Source::Graph);
     ctx.fixed.insert(0, table);
+    if !ctx.question.asks_property {
+        return;
+    }
+    let mut attributes: Vec<(usize, String)> = Vec::new();
+    for owner in std::iter::once(root).chain(index.graph.ancestors(root)) {
+        for name in crate::tiers::plan::execute::class_attributes(&index.unit(owner).body) {
+            let shared = crate::index::tokenizer::tokens(&name)
+                .into_iter()
+                .filter(|t| {
+                    let stem = crate::index::tokenizer::stem(t);
+                    t.len() > 2 && topic.contains(&stem) && !PROPERTY_WORDS.contains(&stem.as_str())
+                })
+                .count();
+            if shared > 0 && !attributes.iter().any(|(_, n)| *n == name) {
+                attributes.push((shared, name));
+            }
+        }
+    }
+    attributes.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    for (_, name) in attributes.into_iter().take(2) {
+        if let Some(table) = crate::tiers::plan::execute::capability_table(
+            &index,
+            &members,
+            &name,
+            crate::domain::Source::Graph,
+        ) {
+            ctx.fixed.insert(1, table);
+            break;
+        }
+    }
 }
 
 fn top_units(candidates: &[Candidate], k: usize) -> Vec<u32> {

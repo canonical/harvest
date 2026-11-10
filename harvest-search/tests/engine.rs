@@ -185,6 +185,15 @@ fn engine(registry: Arc<IndexRegistry>, model: Arc<dyn LanguageModel>) -> Tiered
     TieredEngine::new(registry, tiers, gate())
 }
 
+fn escalation_query() -> Query {
+    let mut query = Query::new(
+        "Which volume drivers support encrypted replication?",
+        scope(),
+    );
+    query.budget = harvest_search::TokenBudget(3_000);
+    query
+}
+
 fn list_query() -> Query {
     let mut query = Query::new("Which volume drivers support multiattach?", scope());
     query.budget = harvest_search::TokenBudget(3_000);
@@ -244,11 +253,14 @@ async fn an_incomplete_list_escalates_to_a_plan_that_covers_every_driver() {
         {"op": "capability", "of": 0, "name": "supports_multiattach"}
     ]})]));
     let engine = engine(registry().await, model.clone());
-    let result = engine.search(&list_query(), deadline()).await.unwrap();
+    let result = engine
+        .search(&escalation_query(), deadline())
+        .await
+        .unwrap();
     assert_eq!(result.tier_reached, TierId::Plan, "{:?}", result.trace.gate);
     assert_eq!(result.trace.llm_calls, 1);
     assert!(
-        model.prompts()[0].contains("all 40 subclasses of VolumeDriver")
+        model.prompts()[0].contains("subclasses of VolumeDriver")
             && model.prompts()[0].contains("property asked about"),
         "the plan prompt names the gap: {}",
         model.prompts()[0]
@@ -269,7 +281,10 @@ async fn an_incomplete_list_escalates_to_a_plan_that_covers_every_driver() {
 #[tokio::test]
 async fn a_failing_model_degrades_to_tier_one_evidence() {
     let engine = engine(registry().await, Arc::new(ScriptedModel::failing()));
-    let result = engine.search(&list_query(), deadline()).await.unwrap();
+    let result = engine
+        .search(&escalation_query(), deadline())
+        .await
+        .unwrap();
     assert_eq!(result.degraded, Some(Degraded::ModelUnavailable));
     assert_eq!(result.tier_reached, TierId::Plan);
     assert!(!result.evidence.is_empty());
@@ -281,7 +296,10 @@ async fn an_exhausted_deadline_stops_escalation() {
     let model = Arc::new(ScriptedModel::new(vec![json!({"steps": []})]));
     let engine = engine(registry().await, model.clone());
     let result = engine
-        .search(&list_query(), Deadline::after(Duration::from_millis(1)))
+        .search(
+            &escalation_query(),
+            Deadline::after(Duration::from_millis(1)),
+        )
         .await
         .unwrap();
     assert_eq!(result.tier_reached, TierId::Rounds);
@@ -297,7 +315,10 @@ async fn tier_three_takes_steps_until_done() {
         json!({"steps": [{"op": "capability", "of": 1, "name": "supports_multiattach"}], "done": true}),
     ]));
     let engine = engine(registry().await, model.clone());
-    let result = engine.search(&list_query(), deadline()).await.unwrap();
+    let result = engine
+        .search(&escalation_query(), deadline())
+        .await
+        .unwrap();
     assert_eq!(
         result.tier_reached,
         TierId::Steps,
@@ -359,4 +380,27 @@ async fn a_cold_index_falls_back_and_says_so() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("the cold index was never warmed");
+}
+
+#[tokio::test]
+async fn tier_one_resolves_a_property_across_a_family_without_the_model() {
+    let model = Arc::new(ScriptedModel::failing());
+    let engine = engine(registry().await, model.clone());
+    let result = engine.search(&list_query(), deadline()).await.unwrap();
+    assert_eq!(
+        result.tier_reached,
+        TierId::Rounds,
+        "{:?}",
+        result.trace.gate
+    );
+    assert!(model.prompts().is_empty());
+    let matrix = result
+        .evidence
+        .iter()
+        .find(|e| e.label == "capability supports_multiattach")
+        .expect("tier 1 resolves the capability");
+    assert!(matrix.text.contains("LVMVolumeDriver"));
+    for driver in drivers() {
+        assert!(has_symbol(&result, &driver), "{driver} missing");
+    }
 }

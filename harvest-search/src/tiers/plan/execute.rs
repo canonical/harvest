@@ -110,6 +110,81 @@ pub fn subclass_table(
     )
 }
 
+fn locate(index: &IndexSnapshot, unit: UnitId) -> String {
+    let u = index.unit(unit);
+    format!("{} ({}:{})", u.qualified_name, u.file, u.start_line)
+}
+
+pub fn capability_table(
+    index: &IndexSnapshot,
+    classes: &[UnitId],
+    name: &str,
+    source: Source,
+) -> Option<Evidence> {
+    let mut lines = Vec::new();
+    let mut covers = Vec::new();
+    let mut defined = false;
+    for class in classes {
+        let chain: Vec<UnitId> = std::iter::once(*class)
+            .chain(index.graph.ancestors(*class))
+            .collect();
+        let found = chain
+            .iter()
+            .find_map(|c| capability_value(&index.unit(*c).body, name).map(|v| (*c, v)));
+        covers.push(index.unit(*class).key());
+        lines.push(match found {
+            Some((owner, value)) if owner == *class => {
+                defined = true;
+                format!("{}: {name} = {value}", locate(index, *class))
+            }
+            Some((owner, value)) => {
+                defined = true;
+                covers.push(index.unit(owner).key());
+                format!(
+                    "{}: {name} = {value} (inherited from {})",
+                    locate(index, *class),
+                    index.unit(owner).qualified_name
+                )
+            }
+            None => format!("{}: {name} is not defined", locate(index, *class)),
+        });
+    }
+    if !defined {
+        return None;
+    }
+    covers.sort();
+    covers.dedup();
+    Some(table(format!("capability {name}"), lines, covers, source))
+}
+
+pub fn class_attributes(source: &str) -> Vec<String> {
+    let mut body_indent: Option<usize> = None;
+    let mut names = Vec::new();
+    for line in source.lines().skip(1) {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        if indent != *body_indent.get_or_insert(indent) {
+            continue;
+        }
+        let name: String = trimmed
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() || name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        if capability_value(&format!("class X:\n    {trimmed}"), &name).is_some()
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    names
+}
+
 fn table(name: String, lines: Vec<String>, covers: Vec<EvidenceKey>, source: Source) -> Evidence {
     Evidence {
         key: EvidenceKey::Symbol {
@@ -237,53 +312,21 @@ impl<'a> Executor<'a> {
             }
             Step::Capability { of, name } => {
                 let classes = self.classes(&self.resolve(of, outputs)?);
-                let mut lines = Vec::new();
-                let mut covers = Vec::new();
-                for class in &classes {
-                    let chain: Vec<UnitId> = std::iter::once(*class)
-                        .chain(index.graph.ancestors(*class))
-                        .collect();
-                    let found = chain.iter().find_map(|c| {
-                        capability_value(&index.unit(*c).body, name).map(|v| (*c, v))
-                    });
-                    covers.push(index.unit(*class).key());
-                    lines.push(match found {
-                        Some((owner, value)) if owner == *class => {
-                            format!("{}: {name} = {value}", self.location(*class))
-                        }
-                        Some((owner, value)) => {
-                            covers.push(index.unit(owner).key());
-                            format!(
-                                "{}: {name} = {value} (inherited from {})",
-                                self.location(*class),
-                                index.unit(owner).qualified_name
-                            )
-                        }
-                        None => format!("{}: {name} is not defined", self.location(*class)),
-                    });
-                }
-                covers.sort();
-                covers.dedup();
-                if !lines.iter().any(|l| !l.ends_with("is not defined")) {
-                    return Ok(StepOutput {
+                match capability_table(index, &classes, name, self.source) {
+                    Some(table) => StepOutput {
+                        summary: format!("{name} resolved for {} classes", classes.len()),
+                        table: Some(table),
+                        units: classes,
+                        ..StepOutput::default()
+                    },
+                    None => StepOutput {
                         summary: format!(
                             "{name} is not defined on any of these {} classes or their ancestors",
                             classes.len()
                         ),
                         units: classes,
                         ..StepOutput::default()
-                    });
-                }
-                StepOutput {
-                    summary: format!("{name} resolved for {} classes", classes.len()),
-                    table: Some(table(
-                        format!("capability {name}"),
-                        lines,
-                        covers,
-                        self.source,
-                    )),
-                    units: classes,
-                    ..StepOutput::default()
+                    },
                 }
             }
             Step::Method { of, name } => {
