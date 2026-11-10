@@ -46,6 +46,7 @@ hex          = "0.4"
 
 # Database
 harvest-db   = { path = "../harvest-db" }
+harvest-search = { path = "../harvest-search" }
 quorium      = { path = "../quorium" }
 
 # Code ingestion (harvester library)
