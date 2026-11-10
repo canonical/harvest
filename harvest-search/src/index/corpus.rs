@@ -45,6 +45,10 @@ impl UnitKind {
     pub fn is_symbol(self) -> bool {
         matches!(self, Self::Function | Self::Method | Self::Class)
     }
+
+    pub fn is_documentation(self) -> bool {
+        self == Self::Doc
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -102,6 +102,30 @@ pub fn definition() -> ToolDefinition {
     }
 }
 
+pub const CODE_HEADING: &str = "## Code (authoritative: base the answer on this)";
+pub const DOCUMENTATION_HEADING: &str = "## Documentation (not verified: it shows where to look in the code and may be outdated or describe plans)";
+
+fn push_item(out: &mut String, number: &str, evidence: &Evidence, scope: &Scope) {
+    let file = evidence.key.file();
+    if file.is_empty() {
+        out.push_str(&format!(
+            "\n[{number}] {}\n{}\n",
+            evidence.label, evidence.text
+        ));
+    } else {
+        out.push_str(&format!(
+            "\n[{number}] {} [{}:{}:{}:{}-{}]\n{}\n",
+            evidence.label,
+            scope.repo,
+            scope.version,
+            file,
+            evidence.start_line,
+            evidence.end_line,
+            evidence.text
+        ));
+    }
+}
+
 pub fn render(query: &Query, result: &SearchResult) -> String {
     let scope = &query.scope;
     let mut out = format!(
@@ -126,31 +150,22 @@ pub fn render(query: &Query, result: &SearchResult) -> String {
         }
         None => {}
     }
+    out.push_str(&format!("\n{CODE_HEADING}\n"));
     for (i, evidence) in result.evidence.iter().enumerate() {
-        let file = evidence.key.file();
-        if file.is_empty() {
-            out.push_str(&format!(
-                "\n[{}] {}\n{}\n",
-                i + 1,
-                evidence.label,
-                evidence.text
-            ));
-        } else {
-            out.push_str(&format!(
-                "\n[{}] {} [{}:{}:{}:{}-{}]\n{}\n",
-                i + 1,
-                evidence.label,
-                scope.repo,
-                scope.version,
-                file,
-                evidence.start_line,
-                evidence.end_line,
-                evidence.text
-            ));
-        }
+        push_item(&mut out, &(i + 1).to_string(), evidence, scope);
     }
     if result.evidence.is_empty() {
-        out.push_str("\nNo matching code was found.\n");
+        out.push_str(if result.documentation.is_empty() {
+            "\nNo matching code was found.\n"
+        } else {
+            "\nNo matching code was found; only documentation matched. Say so in the answer.\n"
+        });
+    }
+    if !result.documentation.is_empty() {
+        out.push_str(&format!("\n{DOCUMENTATION_HEADING}\n"));
+        for (i, evidence) in result.documentation.iter().enumerate() {
+            push_item(&mut out, &format!("D{}", i + 1), evidence, scope);
+        }
     }
     if !result.gaps.is_empty() {
         out.push_str("\nGaps the search could not close:\n");
@@ -254,17 +269,7 @@ pub fn render_focus(scope: &Scope, focus: &[String], evidence: &[Evidence]) -> S
         scope.version
     );
     for (i, item) in evidence.iter().enumerate() {
-        out.push_str(&format!(
-            "\n[{}] {} [{}:{}:{}:{}-{}]\n{}\n",
-            i + 1,
-            item.label,
-            scope.repo,
-            scope.version,
-            item.key.file(),
-            item.start_line,
-            item.end_line,
-            item.text
-        ));
+        push_item(&mut out, &(i + 1).to_string(), item, scope);
     }
     if evidence.is_empty() {
         out.push_str("\nNone of these names or paths are in the index for this version.\n");
@@ -297,6 +302,7 @@ mod tests {
     fn rendering_shows_citations_notes_and_gaps() {
         let query = Query::new("how?", Scope::new("cinder", "v1"));
         let result = SearchResult {
+            documentation: Vec::new(),
             evidence: vec![Evidence {
                 key: EvidenceKey::Symbol {
                     file: "a.py".into(),
@@ -325,5 +331,46 @@ mod tests {
         assert!(text.contains("tier2"));
         assert!(text.contains("time budget"));
         assert!(text.contains("- who calls f"));
+    }
+
+    #[test]
+    fn code_and_documentation_render_as_separate_sections() {
+        let query = Query::new("How is it installed?", Scope::new("amafu", "main"));
+        let item = |file: &str, label: &str| Evidence {
+            key: EvidenceKey::Symbol {
+                file: file.into(),
+                name: label.into(),
+            },
+            unit: None,
+            label: label.into(),
+            start_line: 1,
+            end_line: 9,
+            text: "body".into(),
+            score: 1.0,
+            found_by: Source::Lexical,
+            covers: Vec::new(),
+        };
+        let result = SearchResult {
+            evidence: vec![item("crates/installer/src/maas.rs", "class MaasClient")],
+            documentation: vec![item("README.md", "doc Install with MAAS (planned)")],
+            gaps: Vec::new(),
+            tier_reached: TierId::Rounds,
+            degraded: None,
+            generation: None,
+            trace: Default::default(),
+            answer: None,
+        };
+        let text = render(&query, &result);
+        let code = text.find(CODE_HEADING).unwrap();
+        let docs = text.find(DOCUMENTATION_HEADING).unwrap();
+        assert!(code < text.find("class MaasClient").unwrap());
+        assert!(docs > text.find("class MaasClient").unwrap());
+        assert!(text.contains("[D1] doc Install with MAAS (planned) [amafu:main:README.md:1-9]"));
+
+        let only_docs = SearchResult {
+            evidence: Vec::new(),
+            ..result
+        };
+        assert!(render(&query, &only_docs).contains("only documentation matched"));
     }
 }

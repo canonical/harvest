@@ -345,6 +345,7 @@ impl SearchEngine for Canned {
         _deadline: Deadline,
     ) -> Result<SearchResult, SearchError> {
         Ok(SearchResult {
+            documentation: Vec::new(),
             evidence: Vec::new(),
             gaps: Vec::new(),
             tier_reached: TierId::Fallback,

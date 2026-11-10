@@ -70,6 +70,7 @@ impl SearchEngine for LegacyLoopEngine {
         trace.record("loop", started.elapsed());
         trace.total_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(SearchResult {
+            documentation: Vec::new(),
             evidence,
             gaps: Vec::new(),
             tier_reached: TierId::Loop,

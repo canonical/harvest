@@ -5300,6 +5300,8 @@ mod tests {
         assert!(!prompt.contains("find_subclasses"));
         assert!(!prompt.contains("get_evidence_pack"));
         assert!(!prompt.contains("Knowledge Graph Schema"));
+        assert!(prompt.contains("The Code part is authoritative"));
+        assert!(prompt.contains("Do not state anything from documentation as fact"));
     }
 
     #[tokio::test]

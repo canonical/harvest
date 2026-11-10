@@ -19,6 +19,8 @@ pub struct SearchContext {
     pub deadline: Deadline,
     pub candidates: Vec<Candidate>,
     pub evidence: Vec<Evidence>,
+    pub documentation: Vec<Evidence>,
+    pub signposts: Vec<Candidate>,
     pub fixed: Vec<Evidence>,
     pub gaps: Vec<Gap>,
     pub trace: Trace,
@@ -42,6 +44,8 @@ impl SearchContext {
             deadline,
             candidates: Vec::new(),
             evidence: Vec::new(),
+            documentation: Vec::new(),
+            signposts: Vec::new(),
             fixed: Vec::new(),
             gaps: Vec::new(),
             trace: Trace::default(),
@@ -86,6 +90,7 @@ impl SearchContext {
         self.trace.total_ms = started.elapsed().as_secs_f64() * 1000.0;
         SearchResult {
             evidence: self.evidence,
+            documentation: self.documentation,
             gaps: self.gaps,
             tier_reached: self.tier,
             degraded: self.degraded,

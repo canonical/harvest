@@ -189,6 +189,77 @@ fn full(index: &IndexSnapshot, unit: &Unit, packed: &HashSet<UnitId>, max_chars:
     text
 }
 
+pub const DOCUMENTATION_SHARE: f32 = 0.15;
+pub const MAX_DOCUMENTATION_ITEMS: usize = 3;
+const DOCUMENTATION_EXCERPT_CHARS: usize = 600;
+const POINTERS_SHOWN: usize = 5;
+
+fn pointers(index: &IndexSnapshot, doc: UnitId) -> Vec<String> {
+    index
+        .graph
+        .neighbors(doc, Direction::Out, &[Relation::Documents])
+        .map(|target| index.unit(target))
+        .filter(|target| !target.kind().is_documentation())
+        .take(POINTERS_SHOWN)
+        .map(|target| {
+            format!(
+                "{} ({}:{})",
+                target.qualified_name, target.file, target.start_line
+            )
+        })
+        .collect()
+}
+
+fn documentation_text(index: &IndexSnapshot, unit: &Unit, max_chars: usize) -> String {
+    let mut text = header(unit);
+    text.push_str(&clip(
+        unit.body.trim(),
+        max_chars.min(DOCUMENTATION_EXCERPT_CHARS),
+    ));
+    let pointed = pointers(index, unit.id);
+    if !pointed.is_empty() {
+        text.push_str("\npoints to code: ");
+        text.push_str(&pointed.join(", "));
+    }
+    text
+}
+
+pub fn documentation_budget(budget: TokenBudget) -> TokenBudget {
+    TokenBudget((budget.0 as f32 * DOCUMENTATION_SHARE) as usize)
+}
+
+pub fn code_budget(budget: TokenBudget, has_documentation: bool) -> TokenBudget {
+    if has_documentation {
+        TokenBudget(budget.0 - documentation_budget(budget).0)
+    } else {
+        budget
+    }
+}
+
+pub fn pack_documentation(
+    index: &IndexSnapshot,
+    candidates: &[Candidate],
+    budget: TokenBudget,
+) -> Vec<Evidence> {
+    let mut remaining = budget.0 * CHARS_PER_TOKEN;
+    let mut packed = Vec::new();
+    for candidate in candidates.iter().take(MAX_DOCUMENTATION_ITEMS) {
+        if remaining < MIN_USEFUL_CHARS {
+            break;
+        }
+        let unit = index.unit(candidate.unit);
+        let text = documentation_text(index, unit, remaining);
+        remaining = remaining.saturating_sub(text.len());
+        let found_by = candidate
+            .sources
+            .first()
+            .copied()
+            .unwrap_or(Source::Lexical);
+        packed.push(evidence_for(unit, text, candidate.rrf, found_by));
+    }
+    packed
+}
+
 pub fn render_whole(index: &IndexSnapshot, unit: UnitId, max_chars: usize) -> String {
     let unit = index.unit(unit);
     if unit.kind() == UnitKind::Class && unit.body.len() > max_chars {

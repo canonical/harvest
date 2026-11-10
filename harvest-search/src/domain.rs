@@ -80,6 +80,7 @@ pub enum Source {
     Fallback,
     Cache,
     Agent,
+    Signpost,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -178,6 +179,8 @@ impl Degraded {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchResult {
     pub evidence: Vec<Evidence>,
+    #[serde(default)]
+    pub documentation: Vec<Evidence>,
     pub gaps: Vec<Gap>,
     pub tier_reached: TierId,
     pub degraded: Option<Degraded>,
