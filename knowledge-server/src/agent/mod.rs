@@ -406,20 +406,31 @@ impl Agent {
         self
     }
 
+    fn uses_tiered_search(&self) -> bool {
+        self.tools
+            .iter()
+            .any(|t| t.definition().name == "search_code")
+    }
+
     fn effective_system_prompt(&self) -> String {
         let collocate_enabled = self
             .tools
             .iter()
             .any(|t| t.definition().name.starts_with("collocate_"));
-        self.system_prompt_override
-            .clone()
-            .unwrap_or_else(|| prompt::system_prompt(collocate_enabled))
+        match &self.system_prompt_override {
+            Some(prompt) => prompt.clone(),
+            None => prompt::with_tiered_search(
+                prompt::system_prompt(collocate_enabled),
+                self.uses_tiered_search(),
+            ),
+        }
     }
 
     async fn effective_system_prompt_for_query(&self, user_query: &str) -> String {
         if self.system_prompt_override.is_some() {
             return self.effective_system_prompt();
         }
+        let tiered = self.uses_tiered_search();
         let collocate_enabled = self
             .tools
             .iter()
@@ -429,14 +440,17 @@ impl Agent {
                 .select_prompt_sections(user_query, collocate_enabled)
                 .await
             {
-                Ok(flags) => prompt::system_prompt_with_sections(collocate_enabled, flags),
+                Ok(flags) => prompt::with_tiered_search(
+                    prompt::system_prompt_with_sections(collocate_enabled, flags),
+                    tiered,
+                ),
                 Err(e) => {
                     tracing::warn!(error = %e, "system-one prompt section selection failed — using full prompt");
-                    prompt::system_prompt(collocate_enabled)
+                    prompt::with_tiered_search(prompt::system_prompt(collocate_enabled), tiered)
                 }
             }
         } else {
-            prompt::system_prompt(collocate_enabled)
+            prompt::with_tiered_search(prompt::system_prompt(collocate_enabled), tiered)
         }
     }
 
@@ -5119,6 +5133,21 @@ mod tests {
             llm.captured_system.lock().unwrap().as_deref(),
             Some("You are a deployment assistant.")
         );
+    }
+
+    #[test]
+    fn agents_with_search_code_get_the_tiered_search_section() {
+        let llm = MockLlm::new(vec![text("done")]);
+        let plain = Agent::new(
+            Arc::clone(&llm) as Arc<dyn LlmProvider>,
+            vec![MockTool::new("read_sources", "x")],
+            5,
+        );
+        assert!(!plain.effective_system_prompt().contains("## Code search"));
+        let tiered = Agent::new(llm, vec![MockTool::new("search_code", "x")], 5);
+        assert!(tiered
+            .effective_system_prompt()
+            .contains("call `search_code` once"));
     }
 
     #[tokio::test]
