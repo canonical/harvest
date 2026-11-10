@@ -62,8 +62,8 @@ pub fn parts(
     })
 }
 
-pub fn tiered(config: &SearchConfig, parts: &Parts, tier_one_only: bool) -> TieredEngine {
-    let mut tiers: Vec<Box<dyn Tier>> = vec![Box::new(Rounds::new(
+pub fn rounds(parts: &Parts) -> Rounds {
+    Rounds::new(
         vec![
             Box::new(Bm25Retriever),
             Box::new(DenseRetriever),
@@ -71,7 +71,11 @@ pub fn tiered(config: &SearchConfig, parts: &Parts, tier_one_only: bool) -> Tier
         ],
         Arc::clone(&parts.reranker),
         Arc::clone(parts.registry.embedder()),
-    ))];
+    )
+}
+
+pub fn tiered(config: &SearchConfig, parts: &Parts, tier_one_only: bool) -> TieredEngine {
+    let mut tiers: Vec<Box<dyn Tier>> = vec![Box::new(rounds(parts))];
     let mut checks: Vec<Box<dyn SufficiencyCheck>> = vec![
         Box::new(ListCompleteness::default()),
         Box::new(DanglingReferences),

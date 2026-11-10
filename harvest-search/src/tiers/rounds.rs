@@ -72,6 +72,13 @@ impl Tier for Rounds {
     }
 
     async fn run(&self, ctx: &mut SearchContext) -> Result<(), SearchError> {
+        self.gather(ctx).await;
+        rerank_and_pack(ctx, self.reranker.as_ref()).await
+    }
+}
+
+impl Rounds {
+    pub async fn gather(&self, ctx: &mut SearchContext) {
         let weights = ctx.question.edge_weights();
         let pinned: Vec<Candidate> = ctx
             .candidates
@@ -117,6 +124,5 @@ impl Tier for Rounds {
                 break;
             }
         }
-        rerank_and_pack(ctx, self.reranker.as_ref()).await
     }
 }

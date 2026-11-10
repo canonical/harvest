@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "harvest-db",
+    "harvest-eval",
     "harvest-search",
     "knowledge-harvester",
     "knowledge-server",
