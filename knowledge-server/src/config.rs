@@ -244,6 +244,16 @@ pub struct SearchConfig {
     pub refresh_secs: u64,
     #[serde(default)]
     pub enrich: bool,
+    #[serde(default = "default_search_max_followups")]
+    pub max_followups: usize,
+    #[serde(default = "default_true")]
+    pub prefetch: bool,
+    #[serde(default = "default_true")]
+    pub calibrate: bool,
+}
+
+fn default_search_max_followups() -> usize {
+    3
 }
 
 impl Default for SearchConfig {
@@ -260,6 +270,9 @@ impl Default for SearchConfig {
             gate: None,
             warm: Vec::new(),
             refresh_secs: default_search_refresh_secs(),
+            max_followups: default_search_max_followups(),
+            prefetch: true,
+            calibrate: true,
             enrich: false,
         }
     }

@@ -108,12 +108,18 @@ pub struct QueryState {
 }
 
 impl QueryState {
-    pub fn code_tools(&self, db: &Arc<Db>, llm: &Arc<dyn LlmProvider>) -> Vec<Box<dyn tool::Tool>> {
+    pub fn code_tools(
+        &self,
+        db: &Arc<Db>,
+        llm: &Arc<dyn LlmProvider>,
+        conversation_id: Option<&str>,
+    ) -> Vec<Box<dyn tool::Tool>> {
         code_tools(
             db,
             self.semantic.clone(),
             self.search.as_ref(),
-            Some(Arc::clone(llm)),
+            crate::search::code_tool::SearchToolContext::with_llm(Arc::clone(llm))
+                .in_conversation(conversation_id.unwrap_or_default()),
         )
     }
 }
@@ -227,23 +233,28 @@ pub fn code_tools(
     db: &Arc<Db>,
     semantic: Option<Arc<graph_tools::SemanticHandle>>,
     search: Option<&Arc<crate::search::SearchService>>,
-    llm: Option<Arc<dyn LlmProvider>>,
+    context: crate::search::code_tool::SearchToolContext,
 ) -> Vec<Box<dyn tool::Tool>> {
     match search {
         Some(service) if service.mode() == crate::config::SearchMode::Tiered => {
-            crate::search::code_tool::tiered_tools(Arc::clone(db), Arc::clone(service), llm)
+            crate::search::code_tool::tiered_tools(Arc::clone(db), Arc::clone(service), context)
         }
         _ => graph_tools::all_tools_with_semantic(Arc::clone(db), semantic),
     }
 }
 
 impl ProjectAgentBuilder {
-    fn code_tools(&self, llm: &Arc<dyn LlmProvider>) -> Vec<Box<dyn tool::Tool>> {
+    fn code_tools(
+        &self,
+        llm: &Arc<dyn LlmProvider>,
+        conversation_id: &str,
+    ) -> Vec<Box<dyn tool::Tool>> {
         code_tools(
             &self.db,
             self.semantic.clone(),
             self.search.as_ref(),
-            Some(Arc::clone(llm)),
+            crate::search::code_tool::SearchToolContext::with_llm(Arc::clone(llm))
+                .in_conversation(conversation_id),
         )
     }
 
@@ -253,7 +264,7 @@ impl ProjectAgentBuilder {
         conversation_id: String,
         llm: &Arc<dyn LlmProvider>,
     ) -> Vec<Box<dyn tool::Tool>> {
-        let mut tools = self.code_tools(llm);
+        let mut tools = self.code_tools(llm, &conversation_id);
         tools.push(Box::new(machine_tools::ListAgentsTool {
             registry: Arc::clone(&self.registry),
             project_id: project_id.clone(),
@@ -490,7 +501,7 @@ impl ProjectAgentBuilder {
         ctx: &deployments::DeploymentContext,
         llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        let mut tools = self.code_tools(&llm);
+        let mut tools = self.code_tools(&llm, "");
         tools.push(Box::new(skill_tools::ListSkillsTool {
             store: Arc::clone(&self.skills),
             project_id: project_id.clone(),

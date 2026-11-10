@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use harvest_search::{Degraded, Query, SearchResult};
+use harvest_db::Db;
+use harvest_search::{Degraded, Evidence, Query, Scope, SearchResult};
 use serde_json::{json, Value};
 
 use crate::agent::tool::Tool;
@@ -11,14 +12,64 @@ use crate::llm::LlmProvider;
 use crate::search::record::TraceContext;
 use crate::search::SearchService;
 
+#[derive(Clone, Default)]
+pub struct SearchToolContext {
+    pub llm: Option<Arc<dyn LlmProvider>>,
+    pub conversation_id: Option<String>,
+}
+
+impl SearchToolContext {
+    pub fn with_llm(llm: Arc<dyn LlmProvider>) -> Self {
+        Self {
+            llm: Some(llm),
+            conversation_id: None,
+        }
+    }
+
+    pub fn in_conversation(mut self, conversation_id: impl Into<String>) -> Self {
+        let id = conversation_id.into();
+        self.conversation_id = (!id.is_empty()).then_some(id);
+        self
+    }
+}
+
 pub struct SearchCodeTool {
     service: Arc<SearchService>,
-    llm: Option<Arc<dyn LlmProvider>>,
+    db: Option<Arc<Db>>,
+    context: SearchToolContext,
 }
 
 impl SearchCodeTool {
-    pub fn new(service: Arc<SearchService>, llm: Option<Arc<dyn LlmProvider>>) -> Self {
-        Self { service, llm }
+    pub fn new(service: Arc<SearchService>, context: SearchToolContext) -> Self {
+        Self {
+            service,
+            db: None,
+            context,
+        }
+    }
+
+    pub fn with_db(mut self, db: Arc<Db>) -> Self {
+        self.db = Some(db);
+        self
+    }
+
+    fn trace(&self) -> TraceContext {
+        TraceContext {
+            conversation_id: self.context.conversation_id.clone(),
+            ..TraceContext::engine("tiered")
+        }
+    }
+
+    async fn search(&self, question: &str, scope: &Scope, budget: Option<u64>) -> Result<String> {
+        let mut query = self.service.query(question, &scope.repo, &scope.version);
+        if let Some(budget) = budget {
+            query.budget = harvest_search::TokenBudget((budget as usize).clamp(1_000, 32_000));
+        }
+        let result = self
+            .service
+            .search(self.context.llm.as_ref(), &query, self.trace())
+            .await?;
+        Ok(render(&query, &result))
     }
 }
 
@@ -28,9 +79,10 @@ pub fn definition() -> ToolDefinition {
         description: "Find the code that answers a question about one repository version. \
                       Pass the user's whole question. The search runs several retrieval rounds \
                       over code, configuration and docs, follows calls, inheritance and \
-                      registrations, and returns the source evidence with citations, plus any \
-                      gaps it could not close. Call it once per question; use read_sources only \
-                      for follow-ups it names."
+                      registrations, and returns whole functions with their class and the \
+                      signatures they call, with citations, plus any gaps it could not close. \
+                      Call it once per question. For a follow-up the evidence or its gaps name, \
+                      pass `focus` with those symbol names or file paths instead of a new query."
             .into(),
         parameters: json!({
             "type": "object",
@@ -38,9 +90,14 @@ pub fn definition() -> ToolDefinition {
                 "query":   { "type": "string", "description": "The full question in natural language" },
                 "repo":    { "type": "string" },
                 "version": { "type": "string" },
+                "focus":   {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Symbol names (any language's syntax, e.g. Fence::commit or a.b.C) or file paths to read in full"
+                },
                 "budget_tokens": { "type": "integer", "description": "Evidence size, default 8000" }
             },
-            "required": ["query", "repo", "version"]
+            "required": ["repo", "version"]
         }),
     }
 }
@@ -120,40 +177,101 @@ impl Tool for SearchCodeTool {
             text(&params, "repo"),
             text(&params, "version"),
         );
-        if question.is_empty() || repo.is_empty() || version.is_empty() {
-            bail!("search_code needs a query, a repo and a version; use list_repositories to find them");
+        if repo.is_empty() || version.is_empty() {
+            bail!("search_code needs a repo and a version; use list_repositories to find them");
         }
-        let mut query = self.service.query(&question, &repo, &version);
-        if let Some(budget) = params["budget_tokens"].as_u64() {
-            query.budget = harvest_search::TokenBudget((budget as usize).clamp(1_000, 32_000));
+        let scope = Scope::new(&repo, &version);
+        let focus: Vec<String> = params["focus"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|i| i.as_str())
+                    .map(|i| i.trim().to_string())
+                    .filter(|i| !i.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !focus.is_empty() {
+            let budget = harvest_search::TokenBudget(self.service.config.token_budget);
+            let evidence = self.service.focus(&scope, &focus, budget).await?;
+            return Ok(render_focus(&scope, &focus, &evidence));
         }
-        let result = self
-            .service
-            .search(self.llm.as_ref(), &query, TraceContext::engine("tiered"))
-            .await?;
-        Ok(render(&query, &result))
+        if question.is_empty() {
+            bail!("search_code needs a query, or a focus list of symbols or files");
+        }
+        self.search(&question, &scope, params["budget_tokens"].as_u64())
+            .await
     }
+
+    fn reads_code(&self) -> bool {
+        true
+    }
+
+    fn read_budget(&self) -> Option<usize> {
+        Some(self.service.config.max_followups)
+    }
+
+    async fn prefetch(&self, question: &str) -> Option<(Value, String)> {
+        if !self.service.config.prefetch || question.trim().is_empty() {
+            return None;
+        }
+        let scope = SearchService::resolve_scope(self.db.as_ref()?, question).await?;
+        match self.search(question, &scope, None).await {
+            Ok(result) => Some((
+                json!({ "query": question, "repo": scope.repo, "version": scope.version }),
+                result,
+            )),
+            Err(e) => {
+                tracing::warn!(error = %e, "first code search failed; the agent will search itself");
+                None
+            }
+        }
+    }
+}
+
+pub fn render_focus(scope: &Scope, focus: &[String], evidence: &[Evidence]) -> String {
+    let mut out = format!(
+        "Focused reads of {} in {}@{}. Cite code as [{}:{}:<file>:<start>-<end>].\n",
+        focus.join(", "),
+        scope.repo,
+        scope.version,
+        scope.repo,
+        scope.version
+    );
+    for (i, item) in evidence.iter().enumerate() {
+        out.push_str(&format!(
+            "\n[{}] {} [{}:{}:{}:{}-{}]\n{}\n",
+            i + 1,
+            item.label,
+            scope.repo,
+            scope.version,
+            item.key.file(),
+            item.start_line,
+            item.end_line,
+            item.text
+        ));
+    }
+    if evidence.is_empty() {
+        out.push_str("\nNone of these names or paths are in the index for this version.\n");
+    }
+    out
 }
 
 pub fn tiered_tools(
     db: Arc<harvest_db::Db>,
     service: Arc<SearchService>,
-    llm: Option<Arc<dyn LlmProvider>>,
+    context: SearchToolContext,
 ) -> Vec<Box<dyn Tool>> {
     use crate::agent::graph_tools::{
-        run_sql_available, CompareSymbolAcrossVersionsTool, ListRepositoriesTool, ReadSourcesTool,
-        RunSqlTool,
+        CompareSymbolAcrossVersionsTool, ListRepositoriesTool, ReadSourcesTool,
     };
-    let mut tools: Vec<Box<dyn Tool>> = vec![
+    vec![
         Box::new(ListRepositoriesTool(Arc::clone(&db))),
-        Box::new(SearchCodeTool::new(service, llm)),
+        Box::new(SearchCodeTool::new(service, context).with_db(Arc::clone(&db))),
         Box::new(ReadSourcesTool(Arc::clone(&db))),
-        Box::new(CompareSymbolAcrossVersionsTool(Arc::clone(&db))),
-    ];
-    if run_sql_available() {
-        tools.push(Box::new(RunSqlTool(db)));
-    }
-    tools
+        Box::new(CompareSymbolAcrossVersionsTool(db)),
+    ]
 }
 
 #[cfg(test)]

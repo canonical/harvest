@@ -99,7 +99,7 @@ async fn answer_query(user: Claims, qs: Arc<QueryState>, req: QueryRequest) -> R
         Arc::new(
             Agent::new(
                 Arc::clone(&user_llm),
-                qs.code_tools(&db, &user_llm),
+                qs.code_tools(&db, &user_llm, req.conversation_id.as_deref()),
                 qs.max_iterations,
             )
             .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
@@ -213,7 +213,7 @@ pub async fn handle_query_stream(
         Arc::new(
             Agent::new(
                 user_llm.clone(),
-                qs.code_tools(&db, &user_llm),
+                qs.code_tools(&db, &user_llm, req.conversation_id.as_deref()),
                 qs.max_iterations,
             )
             .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
