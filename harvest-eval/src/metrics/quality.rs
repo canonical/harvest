@@ -130,7 +130,7 @@ pub fn ndcg(gold: &GoldQuery, evidence: &[Evidence], k: usize) -> f64 {
         for (i, g) in gold.evidence.iter().enumerate() {
             if !credited[i] && found_in_evidence(g, std::slice::from_ref(e)) {
                 credited[i] = true;
-                gain += if g.essential { 2.0 } else { 1.0 };
+                gain = gain.max(if g.essential { 2.0 } else { 1.0 });
             }
         }
         dcg += gain / (rank as f64 + 2.0).log2();
@@ -283,5 +283,17 @@ mod tests {
             ),
             Some(1.0)
         );
+    }
+
+    #[test]
+    fn one_item_covering_several_gold_items_never_exceeds_one() {
+        let gold = query(vec![
+            GoldEvidence::symbol("a.py", "f", (10, 20), true),
+            GoldEvidence::symbol("a.py", "g", (30, 40), true),
+            GoldEvidence::symbol("a.py", "h", (50, 60), true),
+        ]);
+        let class = vec![symbol("a.py", "Holder", (1, 100))];
+        let score = ndcg(&gold, &class, 10);
+        assert!(score <= 1.0 && score > 0.0, "{score}");
     }
 }

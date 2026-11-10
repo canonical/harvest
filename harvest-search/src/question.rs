@@ -20,6 +20,8 @@ pub struct Question {
     pub wants_list: bool,
     #[serde(default)]
     pub about_tests: bool,
+    #[serde(default)]
+    pub broad: bool,
     pub identifiers: Vec<String>,
     pub words: Vec<String>,
 }
@@ -83,6 +85,18 @@ const FLOW_CUES: &[&str] = &[
     "when ",
 ];
 
+const BREADTH_CUES: &[&str] = &[
+    "what calls",
+    "who calls",
+    "callers",
+    "called from",
+    "called by",
+    "usages",
+    "uses of",
+    "where is it used",
+    "where are they used",
+];
+
 const TEST_CUES: &[&str] = &[
     " test", "tests", "testing", " spec", "fixture", "mock", "assert", "coverage",
 ];
@@ -109,7 +123,9 @@ impl Question {
             QuestionKind::Lookup
         };
         let about_tests = mentions(&lower, TEST_CUES);
+        let broad = wants_list || mentions(&lower, BREADTH_CUES);
         Self {
+            broad,
             kind,
             wants_list,
             about_tests,

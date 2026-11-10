@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use crate::context::SearchContext;
 use crate::domain::{SearchError, TierId};
-use crate::retrieve::pack::pack;
+use crate::retrieve::pack::{pack_shaped, Shape};
 use crate::retrieve::rerank::Reranker;
 
 #[async_trait]
@@ -30,11 +30,12 @@ pub async fn rerank_and_pack(
     ctx.trace
         .record(format!("{}.rerank", ctx.tier.as_str()), started.elapsed());
     let started = Instant::now();
-    ctx.evidence = pack(
+    ctx.evidence = pack_shaped(
         &ctx.index,
         &ctx.candidates,
         ctx.fixed.clone(),
         ctx.query.budget,
+        Shape::of(&ctx.question),
     );
     ctx.trace
         .record(format!("{}.pack", ctx.tier.as_str()), started.elapsed());
