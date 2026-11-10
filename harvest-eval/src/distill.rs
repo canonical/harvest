@@ -133,6 +133,7 @@ mod tests {
             reference_answer: None,
         };
         let result = SearchResult {
+            documentation: Vec::new(),
             evidence: vec![Evidence {
                 key: EvidenceKey::Symbol {
                     file: String::new(),

@@ -3,6 +3,7 @@ pub mod extract;
 pub mod fuse;
 pub mod pack;
 pub mod rerank;
+pub mod signposts;
 
 use serde::{Deserialize, Serialize};
 

@@ -28,7 +28,7 @@ pub const FEATURE_NAMES: [&str; FEATURES] = [
     "off_topic_test",
     "pinned",
     "is_symbol",
-    "doc_for_code",
+    "signposted",
     "vendored",
     "generated",
     "named",
@@ -97,7 +97,6 @@ pub fn features(
 ) -> [f32; FEATURES] {
     let unit = index.unit(candidate.unit);
     let vocabulary: HashSet<String> = question.vocabulary().into_iter().collect();
-    let code_question = question.kind != QuestionKind::Config;
     [
         candidate.rrf * 60.0,
         if max_lexical > 0.0 {
@@ -114,7 +113,9 @@ pub fn features(
         f32::from(u8::from(unit.is_test() && !question.about_tests)),
         f32::from(u8::from(candidate.pinned)),
         f32::from(u8::from(unit.kind().is_symbol())),
-        f32::from(u8::from(code_question && unit.kind() == UnitKind::Doc)),
+        f32::from(u8::from(crate::retrieve::signposts::is_signposted(
+            candidate,
+        ))),
         f32::from(u8::from(unit.is_vendored())),
         f32::from(u8::from(unit.is_generated())),
         f32::from(u8::from(named.named.contains(&candidate.unit))),
@@ -172,7 +173,7 @@ impl Default for LinearReranker {
     fn default() -> Self {
         Self {
             weights: vec![
-                1.0, 0.8, 0.6, 1.2, 0.8, 1.0, 0.3, 0.3, -1.5, 3.0, 0.3, -0.6, -2.5, -2.5, 2.5, 0.6,
+                1.0, 0.8, 0.6, 1.2, 0.8, 1.0, 0.3, 0.3, -1.5, 3.0, 0.3, 0.5, -2.5, -2.5, 2.5, 0.6,
             ],
             bias: 0.0,
         }

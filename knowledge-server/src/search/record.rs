@@ -102,6 +102,13 @@ impl Recorder {
                 })
             })
             .collect();
+        let documentation: Vec<_> = result
+            .documentation
+            .iter()
+            .map(|e| json!({ "key": e.key, "label": e.label, "score": e.score }))
+            .collect();
+        let mut trace = serde_json::to_value(&result.trace).unwrap_or_else(|_| json!({}));
+        trace["documentation"] = json!(documentation);
         let params = json!({
             "turn_id": context.turn_id,
             "conversation_id": context.conversation_id,
@@ -118,7 +125,7 @@ impl Recorder {
             "shadow_recall": context.shadow_recall,
             "evidence": evidence,
             "gaps": result.gaps,
-            "trace": result.trace,
+            "trace": trace,
         });
         tokio::spawn(async move {
             if let Err(e) = db.execute(INSERT_SQL, params).await {

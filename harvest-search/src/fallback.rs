@@ -251,6 +251,7 @@ impl SearchEngine for PostgresEngine {
         trace.record("fallback.search", started.elapsed());
         trace.total_ms = started.elapsed().as_secs_f64() * 1000.0;
         Ok(SearchResult {
+            documentation: Vec::new(),
             evidence: found,
             gaps: Vec::new(),
             tier_reached: TierId::Fallback,

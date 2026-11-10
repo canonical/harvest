@@ -3,6 +3,7 @@ pub mod corpus;
 pub mod disk_cache;
 pub mod graph;
 pub mod pg;
+pub mod signposts;
 pub mod tokenizer;
 pub mod vectors;
 
@@ -89,7 +90,7 @@ impl IndexSnapshot {
             .map_err(|e| anyhow::anyhow!("building the index failed: {e}"))
     }
 
-    fn assemble(corpus: Corpus, vectors: VectorIndex) -> Self {
+    fn assemble(mut corpus: Corpus, vectors: VectorIndex) -> Self {
         let mut names: HashMap<String, Vec<UnitId>> = HashMap::new();
         for unit in &corpus.units {
             let mut keys = vec![
@@ -109,6 +110,12 @@ impl IndexSnapshot {
                 }
             }
         }
+        let signposts = signposts::links(
+            &signposts::Names::new(&names, &corpus.units),
+            &corpus.units,
+            &corpus.edges,
+        );
+        corpus.edges.extend(signposts);
         Self {
             cache: CacheIndex::build(&corpus.cached),
             graph: CodeGraph::build(corpus.units.len(), &corpus.edges),
@@ -128,13 +135,7 @@ impl IndexSnapshot {
     }
 
     pub fn find_by_name(&self, name: &str) -> &[UnitId] {
-        let parts = tokenizer::name_parts(name);
-        for start in 0..parts.len() {
-            if let Some(found) = self.names.get(&parts[start..].join(".")) {
-                return found;
-            }
-        }
-        &[]
+        signposts::lookup(&self.names, name)
     }
 
     pub fn named_in(&self, question: &crate::question::Question) -> Vec<UnitId> {

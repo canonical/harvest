@@ -110,6 +110,8 @@ const TEST_PATTERNS: &[&str] = &[
     r"Tests?\.(java|kt|scala|cs|swift|groovy|php|dart|m)$",
     r"(^|/)src/test/",
     r"(^|/)testdata/",
+    r"(^|/)test[-_]?(rig|rigs|harness|harnesses|support|utils|helpers|lab|labs)/",
+    r"(^|/)(e2e|integration[-_]tests?|functional[-_]tests?)/",
     r"(^|/)fixtures/",
     r"(^|/)conftest\.py$",
 ];
@@ -345,6 +347,11 @@ mod tests {
             Origin::Test
         );
         assert_eq!(c.classify("spec/models/user_spec.rb", ""), Origin::Test);
+        assert_eq!(
+            c.classify("test-rig/lxd-lab/src/maas_lab.rs", ""),
+            Origin::Test
+        );
+        assert_eq!(c.classify("e2e/flows/login.ts", ""), Origin::Test);
         assert_eq!(c.classify("vendor/github.com/x/y.go", ""), Origin::Vendored);
         assert_eq!(
             c.classify("web/node_modules/react/index.js", ""),
