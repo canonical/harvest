@@ -4,7 +4,7 @@ use crate::context::SearchContext;
 use crate::gate::{completeness, dangling};
 use crate::index::tokenizer::tokens;
 
-pub const SIGNALS: usize = 7;
+pub const SIGNALS: usize = 9;
 
 pub const SIGNAL_NAMES: [&str; SIGNALS] = [
     "top_stable",
@@ -14,7 +14,11 @@ pub const SIGNAL_NAMES: [&str; SIGNALS] = [
     "evidence",
     "dangling",
     "list_coverage",
+    "top_probability",
+    "relevant_unpacked",
 ];
+
+const RELEVANT: f32 = 0.5;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Signals {
@@ -25,6 +29,10 @@ pub struct Signals {
     pub evidence: usize,
     pub dangling: usize,
     pub list_coverage: Option<f32>,
+    #[serde(default)]
+    pub top_probability: f32,
+    #[serde(default)]
+    pub relevant_unpacked: f32,
 }
 
 impl Signals {
@@ -61,7 +69,29 @@ impl Signals {
                 .count();
             found as f32 / ctx.question.identifiers.len() as f32
         };
+        let packed = ctx.evidence_units();
+        let relevant: Vec<_> = ctx
+            .candidates
+            .iter()
+            .filter(|c| c.score >= RELEVANT && c.score <= 1.0)
+            .collect();
+        let relevant_unpacked = if relevant.is_empty() {
+            0.0
+        } else {
+            relevant
+                .iter()
+                .filter(|c| !packed.contains(&c.unit) && !ctx.has_unit(c.unit))
+                .count() as f32
+                / relevant.len() as f32
+        };
         Self {
+            top_probability: ctx
+                .candidates
+                .iter()
+                .filter(|c| !c.pinned)
+                .map(|c| c.score.clamp(0.0, 1.0))
+                .fold(0.0, f32::max),
+            relevant_unpacked,
             top_stable: ctx.stable,
             score_gap,
             agreement,
@@ -81,6 +111,8 @@ impl Signals {
             (self.evidence as f32 / 10.0).min(1.0),
             (self.dangling as f32 / 4.0).min(1.0),
             self.list_coverage.unwrap_or(1.0),
+            self.top_probability,
+            self.relevant_unpacked,
         ]
     }
 }

@@ -69,6 +69,7 @@ pub fn pack(
     let mut remaining = budget.0 * CHARS_PER_TOKEN;
     let mut packed: Vec<Evidence> = Vec::new();
     let mut units: Vec<&Unit> = Vec::new();
+    let fixed_count = fixed.len();
     for evidence in fixed {
         remaining = remaining.saturating_sub(evidence.text.len());
         packed.push(evidence);
@@ -86,8 +87,26 @@ pub fn pack(
             continue;
         }
         let unit = index.unit(candidate.unit);
-        if units.iter().any(|u| overlaps(u, unit)) {
-            continue;
+        let overlapping: Vec<usize> = units
+            .iter()
+            .enumerate()
+            .filter(|(_, u)| overlaps(u, unit))
+            .map(|(i, _)| i)
+            .collect();
+        if !overlapping.is_empty() {
+            let contains_all = overlapping.iter().all(|i| unit.contains(units[*i]));
+            let refund: usize = overlapping
+                .iter()
+                .map(|i| packed[fixed_count + *i].text.len())
+                .sum();
+            if !contains_all || render(unit, MAX_UNIT_CHARS).len() > remaining + refund {
+                continue;
+            }
+            for i in overlapping.into_iter().rev() {
+                units.remove(i);
+                packed.remove(fixed_count + i);
+            }
+            remaining += refund;
         }
         let text = render(unit, MAX_UNIT_CHARS.min(remaining.max(MIN_USEFUL_CHARS)));
         remaining = remaining.saturating_sub(text.len());
@@ -140,6 +159,20 @@ mod tests {
         let packed = pack(&index, &candidates, Vec::new(), TokenBudget(1_000));
         let labels: Vec<u32> = packed.iter().filter_map(|e| e.unit).collect();
         assert_eq!(labels, vec![0, 2, 3]);
+        let members_first: Vec<Candidate> = [1, 0]
+            .into_iter()
+            .map(|unit| Candidate {
+                unit,
+                score: 1.0,
+                ..Candidate::default()
+            })
+            .collect();
+        let replaced = pack(&index, &members_first, Vec::new(), TokenBudget(1_000));
+        assert_eq!(
+            replaced.iter().filter_map(|e| e.unit).collect::<Vec<_>>(),
+            vec![0],
+            "the class replaces its method"
+        );
         let total: usize = packed.iter().map(|e| e.text.len()).sum();
         assert!(total <= 1_000 * CHARS_PER_TOKEN + MIN_USEFUL_CHARS);
         assert!(packed[2].text.ends_with('…'));
