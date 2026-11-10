@@ -49,6 +49,8 @@ impl CacheIndex {
 }
 
 pub const MAX_NAMED_MATCHES: usize = 5;
+const MAX_NAMED_WORD_MATCHES: usize = 2;
+const MIN_NAMED_WORD: usize = 4;
 
 pub struct IndexSnapshot {
     pub scope: Scope,
@@ -126,6 +128,53 @@ impl IndexSnapshot {
             }
         }
         &[]
+    }
+
+    pub fn named_in(&self, question: &crate::question::Question) -> Vec<UnitId> {
+        let mut named = self.named_units(&question.identifiers);
+        let covered: HashSet<String> = question
+            .identifiers
+            .iter()
+            .flat_map(|i| {
+                let parts = tokenizer::name_parts(i);
+                let pieces: Vec<String> = parts
+                    .iter()
+                    .flat_map(|p| tokenizer::split_identifier(p))
+                    .collect();
+                parts.into_iter().chain(pieces)
+            })
+            .collect();
+        for word in &question.words {
+            if word.chars().count() < MIN_NAMED_WORD
+                || tokenizer::is_stopword(word)
+                || covered.contains(word)
+            {
+                continue;
+            }
+            let Some(found) = self.names.get(word) else {
+                continue;
+            };
+            let exact: Vec<UnitId> = found
+                .iter()
+                .copied()
+                .filter(|u| {
+                    let unit = self.unit(*u);
+                    tokenizer::name_key(&unit.name) == *word
+                        && unit.kind().is_symbol()
+                        && !unit.is_vendored()
+                        && !unit.is_generated()
+                        && !unit.is_test()
+                })
+                .collect();
+            if (1..=MAX_NAMED_WORD_MATCHES).contains(&exact.len()) {
+                for unit in exact {
+                    if !named.contains(&unit) {
+                        named.push(unit);
+                    }
+                }
+            }
+        }
+        named
     }
 
     pub fn named_units(&self, identifiers: &[String]) -> Vec<UnitId> {

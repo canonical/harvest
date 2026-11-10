@@ -53,10 +53,7 @@ const NEAR_RELATIONS: [Relation; 8] = [
 
 impl Named {
     pub fn of(question: &Question, index: &IndexSnapshot) -> Self {
-        let named: HashSet<UnitId> = index
-            .named_units(&question.identifiers)
-            .into_iter()
-            .collect();
+        let named: HashSet<UnitId> = index.named_in(question).into_iter().collect();
         let mut near = HashSet::new();
         for unit in &named {
             for direction in [Direction::Out, Direction::In] {

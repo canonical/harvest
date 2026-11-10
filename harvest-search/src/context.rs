@@ -32,7 +32,7 @@ pub struct SearchContext {
 impl SearchContext {
     pub fn new(query: &Query, index: Arc<IndexSnapshot>, deadline: Deadline) -> Self {
         let question = Question::analyze(&query.text);
-        let named = index.named_units(&question.identifiers);
+        let named = index.named_in(&question);
         Self {
             named,
             question,
