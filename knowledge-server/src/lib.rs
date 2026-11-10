@@ -12,6 +12,7 @@ pub mod cost;
 pub mod crypto;
 pub mod deployments;
 pub mod ingestion;
+pub mod jobs;
 pub mod llm;
 pub mod lxd;
 pub mod machines;

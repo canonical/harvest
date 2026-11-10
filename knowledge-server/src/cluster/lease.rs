@@ -37,6 +37,16 @@ pub struct Lease {
 }
 
 impl Lease {
+    pub fn fixed(key: &str, token: u64) -> Self {
+        let (_, lost) = watch::channel(false);
+        Self {
+            key: key.to_string(),
+            token,
+            lost,
+            release: Mutex::new(None),
+        }
+    }
+
     pub fn key(&self) -> &str {
         &self.key
     }

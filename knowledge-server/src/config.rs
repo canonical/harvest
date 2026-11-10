@@ -242,6 +242,8 @@ pub struct SearchConfig {
     pub warm: Vec<String>,
     #[serde(default = "default_search_refresh_secs")]
     pub refresh_secs: u64,
+    #[serde(default)]
+    pub enrich: bool,
 }
 
 impl Default for SearchConfig {
@@ -258,6 +260,7 @@ impl Default for SearchConfig {
             gate: None,
             warm: Vec::new(),
             refresh_secs: default_search_refresh_secs(),
+            enrich: false,
         }
     }
 }

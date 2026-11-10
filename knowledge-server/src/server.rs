@@ -206,6 +206,44 @@ fn build_search(
     Ok(Some(service))
 }
 
+fn spawn_enrichment(
+    config: &Config,
+    db: &Arc<Db>,
+    llm: &Arc<dyn crate::llm::LlmProvider>,
+    node: &Arc<crate::cluster::node::ClusterNode>,
+    leases: &Arc<dyn Leases>,
+    admission: &Arc<crate::turns::admission::TurnAdmission>,
+    shutdown: Shutdown,
+) {
+    let selection =
+        config
+            .search
+            .fast_model
+            .as_ref()
+            .map(|m| crate::llm::types::ProviderSelection {
+                provider_id: m.provider_id.clone(),
+                model: m.model.clone(),
+                cache_breakpoint_index: None,
+            });
+    let model_name = selection
+        .as_ref()
+        .map(|s| format!("{}:{}", s.provider_id, s.model.clone().unwrap_or_default()))
+        .unwrap_or_else(|| llm.default_model().to_string());
+    let model = crate::search::llm_adapter::ProviderModel::new(Arc::clone(llm), selection);
+    let job = crate::jobs::kinds::enrich::EnrichJob::new(Arc::clone(db), model, model_name);
+    let busy_admission = Arc::clone(admission);
+    let busy_limit = (config.agent.max_active_turns / 2).max(1);
+    crate::jobs::JobRunner::new(
+        crate::jobs::queue::WorkQueue::new(Arc::clone(db)),
+        Arc::clone(leases),
+        Arc::clone(node),
+        vec![Arc::new(job)],
+        Arc::new(move || busy_admission.active() >= busy_limit),
+    )
+    .spawn(shutdown);
+    tracing::info!("background enrichment enabled");
+}
+
 fn spawn_reaper(
     leases: Arc<dyn Leases>,
     db: Arc<Db>,
@@ -495,6 +533,21 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     );
 
     let collocate_reaper = Arc::clone(&collocate_registry);
+    let admission = crate::turns::admission::TurnAdmission::new(
+        config.agent.max_active_turns,
+        config.agent.max_active_turns_per_user,
+    );
+    if config.search.enrich && search.is_some() {
+        spawn_enrichment(
+            &config,
+            &db,
+            &llm_provider,
+            &node,
+            &leases,
+            &admission,
+            shutdown.clone(),
+        );
+    }
     let state = AppState {
         agent,
         db: Arc::clone(&db),
@@ -515,10 +568,7 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         pricing,
         semantic: semantic_handle,
         live: Arc::clone(&live),
-        admission: crate::turns::admission::TurnAdmission::new(
-            config.agent.max_active_turns,
-            config.agent.max_active_turns_per_user,
-        ),
+        admission: Arc::clone(&admission),
     };
 
     let cache: Arc<GraphCache> = Arc::new(RwLock::new(HashMap::new()));
