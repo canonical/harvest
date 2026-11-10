@@ -71,6 +71,7 @@ fn make_file(repo: &str, version: &str, path: &str) -> ParsedFile {
             target: "std::collections::HashMap".to_string(),
             line: 1,
         }],
+        ..ParsedFile::default()
     }
 }
 
@@ -337,4 +338,147 @@ async fn reingesting_keeps_the_old_data_visible_until_the_new_data_is_written() 
         .await
         .unwrap();
     assert_eq!(rows[0]["ingested"], json!(true));
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn python_sources_produce_units_and_typed_edges() {
+    use knowledge_harvester::parser::LanguageParser;
+    use std::path::Path;
+
+    setup!(writer, test_db);
+    let driver = r#"from oslo_config import cfg
+
+volume_opts = [cfg.IntOpt('retry_limit', default=3)]
+
+
+class VolumeDriver(object):
+    def initialize_connection(self, volume):
+        raise NotImplementedError()
+
+
+class LVMVolumeDriver(VolumeDriver):
+    def initialize_connection(self, volume):
+        if CONF.retry_limit > 3:
+            raise exception.VolumeBusy()
+        return {}
+
+
+class VolumeBusy(Exception):
+    pass
+"#;
+    let parser = knowledge_harvester::parser::language::PythonParser;
+    let mut parsed = parser.parse(driver, Path::new("cinder/volume/driver.py"), "r", "v1");
+    knowledge_harvester::units::add_code_units(&mut parsed);
+    let docs = ParsedFile {
+        path: "doc/drivers.md".into(),
+        language: "text".into(),
+        units: knowledge_harvester::units::file_units(
+            Path::new("doc/drivers.md"),
+            "# Drivers\nSubclass `VolumeDriver` and set `retry_limit`.\n",
+        ),
+        ..ParsedFile::default()
+    };
+    writer.upsert_repository("r", "u").await.unwrap();
+    writer
+        .write_version("r", "v1", &[parsed, docs])
+        .await
+        .unwrap();
+
+    let db = &test_db.db;
+    let methods = db
+        .query(
+            "SELECT impl_type FROM symbols WHERE name = 'initialize_connection' ORDER BY impl_type",
+            json!({}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        methods.len(),
+        2,
+        "same-named methods of different classes are both stored"
+    );
+    assert_eq!(methods[0]["impl_type"], "LVMVolumeDriver");
+
+    let edges = db
+        .query(
+            "SELECT relation, src_name, dst_name FROM code_edges ORDER BY relation, src_name",
+            json!({}),
+        )
+        .await
+        .unwrap();
+    let has = |relation: &str, src: &str, dst: &str| {
+        edges
+            .iter()
+            .any(|e| e["relation"] == relation && e["src_name"] == src && e["dst_name"] == dst)
+    };
+    assert!(
+        has("INHERITS", "LVMVolumeDriver", "VolumeDriver"),
+        "{edges:?}"
+    );
+    assert!(
+        has(
+            "OVERRIDES",
+            "initialize_connection",
+            "initialize_connection"
+        ),
+        "{edges:?}"
+    );
+    assert!(
+        has("RAISES", "initialize_connection", "VolumeBusy"),
+        "{edges:?}"
+    );
+
+    let units = db
+        .query(
+            "SELECT kind, name FROM code_units ORDER BY kind, name",
+            json!({}),
+        )
+        .await
+        .unwrap();
+    let kinds: Vec<String> = units
+        .iter()
+        .map(|u| {
+            format!(
+                "{}:{}",
+                u["kind"].as_str().unwrap(),
+                u["name"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert!(
+        kinds.contains(&"config:retry_limit".to_string()),
+        "{kinds:?}"
+    );
+    assert!(kinds.contains(&"doc:Drivers".to_string()), "{kinds:?}");
+    assert!(
+        kinds.contains(&"module:cinder/volume/driver.py".to_string()),
+        "{kinds:?}"
+    );
+
+    let unit_edges = db
+        .query(
+            "SELECT e.relation, coalesce(u.name, s.name) AS src, coalesce(du.name, ds.name) AS dst
+             FROM unit_edges e
+             LEFT JOIN code_units u ON u.id = e.src_unit_id
+             LEFT JOIN symbols s ON s.id = e.src_symbol_id
+             LEFT JOIN code_units du ON du.id = e.dst_unit_id
+             LEFT JOIN symbols ds ON ds.id = e.dst_symbol_id",
+            json!({}),
+        )
+        .await
+        .unwrap();
+    let has_unit = |relation: &str, src: &str, dst: &str| {
+        unit_edges
+            .iter()
+            .any(|e| e["relation"] == relation && e["src"] == src && e["dst"] == dst)
+    };
+    assert!(
+        has_unit("READS_CONFIG", "initialize_connection", "retry_limit"),
+        "{unit_edges:?}"
+    );
+    assert!(
+        has_unit("DOCUMENTS", "Drivers", "VolumeDriver"),
+        "{unit_edges:?}"
+    );
 }

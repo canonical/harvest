@@ -54,10 +54,11 @@ ORDER BY u.id
 "#;
 
 const UNIT_EDGES_SQL: &str = r#"
-SELECT e.src_unit_id, e.dst_symbol_id, e.dst_unit_id, e.relation
+SELECT e.src_unit_id, e.src_symbol_id, e.dst_symbol_id, e.dst_unit_id, e.relation
 FROM unit_edges e
-JOIN code_units u ON u.id = e.src_unit_id
-WHERE u.version_id = $vid
+LEFT JOIN code_units u ON u.id = e.src_unit_id
+LEFT JOIN symbols s ON s.id = e.src_symbol_id
+WHERE coalesce(u.version_id, s.version_id) = $vid
 "#;
 
 const ENRICHMENTS_SQL: &str = r#"
@@ -328,7 +329,14 @@ impl CorpusSource for PgCorpus {
                 .await
             {
                 for edge in self.db.query(UNIT_EDGES_SQL, json!({ "vid": vid })).await? {
-                    let src = edge["src_unit_id"].as_i64().and_then(|id| by_unit.get(&id));
+                    let src = edge["src_unit_id"]
+                        .as_i64()
+                        .and_then(|id| by_unit.get(&id))
+                        .or_else(|| {
+                            edge["src_symbol_id"]
+                                .as_i64()
+                                .and_then(|id| by_symbol.get(&id))
+                        });
                     let dst = edge["dst_symbol_id"]
                         .as_i64()
                         .and_then(|id| by_symbol.get(&id))

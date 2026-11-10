@@ -104,3 +104,49 @@ async fn the_postgres_engine_answers_from_sql_when_no_index_is_loaded() {
             name: "VolumeDriver.initialize_connection".into()
         }));
 }
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn pg_corpus_loads_units_and_their_edges() {
+    let test_db = TestDb::new().await;
+    seed(&test_db.db).await;
+    test_db
+        .db
+        .batch_execute(
+            r#"
+            INSERT INTO code_units (id, version_id, file_id, kind, name, path, start_line, end_line, text, content_hash)
+            VALUES (100, 1, 1, 'config', 'retry_limit', 'cinder/volume/driver.py', 2, 2, 'cfg.IntOpt(''retry_limit'')', 'h'),
+                   (101, 1, 1, 'doc', 'Drivers', 'doc/drivers.md', 1, 3, 'Subclass VolumeDriver', 'h');
+            INSERT INTO unit_edges (src_symbol_id, dst_unit_id, relation) VALUES (11, 100, 'READS_CONFIG');
+            INSERT INTO unit_edges (src_unit_id, dst_symbol_id, relation) VALUES (101, 10, 'DOCUMENTS');
+            "#,
+        )
+        .await
+        .unwrap();
+    let corpus = PgCorpus::new(Arc::new(test_db.db.clone()))
+        .load(&Scope::new("cinder", "v1"))
+        .await
+        .unwrap();
+    let id_of = |name: &str| corpus.units.iter().find(|u| u.name == name).unwrap().id;
+    assert_eq!(corpus.units.len(), 5);
+    assert_eq!(
+        corpus.units[id_of("retry_limit") as usize].kind(),
+        UnitKind::Config
+    );
+    let has = |src: u32, dst: u32, relation: Relation| {
+        corpus
+            .edges
+            .iter()
+            .any(|e| e.src == src && e.dst == dst && e.relation == relation)
+    };
+    assert!(has(
+        id_of("initialize_connection"),
+        id_of("retry_limit"),
+        Relation::ReadsConfig
+    ));
+    assert!(has(
+        id_of("Drivers"),
+        id_of("VolumeDriver"),
+        Relation::Documents
+    ));
+}

@@ -265,7 +265,8 @@ impl LanguageParser for PythonParser {
                     let start_line = fn_n.start_position().row as u32 + 1;
                     let end_line = fn_n.end_position().row as u32 + 1;
                     let src_text = &source[fn_n.byte_range()];
-                    let kind = if python_has_class_ancestor(fn_n) {
+                    let owner = python_enclosing_class(source, fn_n);
+                    let kind = if owner.is_some() || python_has_class_ancestor(fn_n) {
                         "method"
                     } else {
                         "function"
@@ -291,10 +292,11 @@ impl LanguageParser for PythonParser {
                         start_line,
                         end_line,
                         source: src_text.into(),
-                        impl_type: None,
+                        impl_type: owner.clone(),
                         docstring: python_docstring(source, fn_n),
                         calls,
                     });
+                    python_references(source, fn_n, name, owner, start_line, &mut out.references);
                 }
             }
         }
@@ -368,6 +370,9 @@ impl LanguageParser for PythonParser {
             }
         }
 
+        out.units
+            .extend(python_option_declarations(source, tree.root_node()));
+
         let imp_q = tree_sitter::Query::new(
             &lang,
             "[(import_statement) (import_from_statement)] @import",
@@ -404,19 +409,12 @@ impl LanguageParser for TypeScriptParser {
         "typescript"
     }
     fn extensions(&self) -> &[&'static str] {
-        &["ts", "tsx"]
+        &["ts", "tsx", "mts", "cts"]
     }
 
-    fn parse(&self, _source: &str, path: &Path, _repo: &str, _version: &str) -> ParsedFile {
-        let mut ts_parser = tree_sitter::Parser::new();
-        ts_parser
-            .set_language(&tree_sitter_typescript::language_typescript())
-            .unwrap();
-        ParsedFile {
-            path: path.to_string_lossy().into_owned(),
-            language: "typescript".into(),
-            ..Default::default()
-        }
+    fn parse(&self, source: &str, path: &Path, repo: &str, version: &str) -> ParsedFile {
+        let dialect = super::ecmascript::Dialect::for_path(path, true);
+        super::ecmascript::parse(source, path, repo, version, dialect)
     }
 }
 
@@ -427,19 +425,12 @@ impl LanguageParser for JavaScriptParser {
         "javascript"
     }
     fn extensions(&self) -> &[&'static str] {
-        &["js", "jsx", "mjs"]
+        &["js", "jsx", "mjs", "cjs"]
     }
 
-    fn parse(&self, _source: &str, path: &Path, _repo: &str, _version: &str) -> ParsedFile {
-        let mut ts_parser = tree_sitter::Parser::new();
-        ts_parser
-            .set_language(&tree_sitter_javascript::language())
-            .unwrap();
-        ParsedFile {
-            path: path.to_string_lossy().into_owned(),
-            language: "javascript".into(),
-            ..Default::default()
-        }
+    fn parse(&self, source: &str, path: &Path, repo: &str, version: &str) -> ParsedFile {
+        let dialect = super::ecmascript::Dialect::for_path(path, false);
+        super::ecmascript::parse(source, path, repo, version, dialect)
     }
 }
 
@@ -693,6 +684,146 @@ impl LanguageParser for CppParser {
             ..Default::default()
         }
     }
+}
+
+fn python_enclosing_class(source: &str, function: tree_sitter::Node) -> Option<String> {
+    let mut current = function.parent();
+    while let Some(node) = current {
+        match node.kind() {
+            "class_definition" => {
+                return node
+                    .child_by_field_name("name")
+                    .map(|n| source[n.byte_range()].to_string())
+            }
+            "function_definition" => return None,
+            _ => current = node.parent(),
+        }
+    }
+    None
+}
+
+static CONFIG_READ: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?:^|\.)(?:CONF|conf|configuration)\.(?:[a-z_][a-z0-9_]*\.)?([a-z_][a-z0-9_]*)$",
+    )
+    .unwrap()
+});
+
+fn python_references(
+    source: &str,
+    function: tree_sitter::Node,
+    name: &str,
+    owner: Option<String>,
+    start_line: u32,
+    out: &mut Vec<crate::units::ReferenceNode>,
+) {
+    let from = crate::units::Owner {
+        name: name.to_string(),
+        impl_type: owner,
+        start_line,
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![function];
+    while let Some(node) = stack.pop() {
+        let mut walk = node.walk();
+        for child in node.named_children(&mut walk) {
+            if child.kind() != "function_definition" && child.kind() != "class_definition" {
+                stack.push(child);
+            }
+        }
+        let line = node.start_position().row as u32 + 1;
+        match node.kind() {
+            "raise_statement" => {
+                let Some(raised) = node.named_child(0) else {
+                    continue;
+                };
+                let target = if raised.kind() == "call" {
+                    raised.child_by_field_name("function")
+                } else {
+                    Some(raised)
+                };
+                if let Some(target) =
+                    target.filter(|t| matches!(t.kind(), "identifier" | "attribute"))
+                {
+                    let text = &source[target.byte_range()];
+                    let last = text.rsplit('.').next().unwrap_or(text).to_string();
+                    if seen.insert(("RAISES", last.clone())) {
+                        out.push(crate::units::ReferenceNode {
+                            from: from.clone(),
+                            target: last,
+                            relation: "RAISES".into(),
+                            line,
+                        });
+                    }
+                }
+            }
+            "attribute" => {
+                let text = &source[node.byte_range()];
+                if node.parent().is_some_and(|p| p.kind() == "attribute") {
+                    continue;
+                }
+                if let Some(key) = CONFIG_READ.captures(text).and_then(|c| c.get(1)) {
+                    let key = key.as_str().to_string();
+                    if seen.insert(("READS_CONFIG", key.clone())) {
+                        out.push(crate::units::ReferenceNode {
+                            from: from.clone(),
+                            target: key,
+                            relation: "READS_CONFIG".into(),
+                            line,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn python_option_declarations(
+    source: &str,
+    root: tree_sitter::Node,
+) -> Vec<crate::units::UnitNode> {
+    let mut units = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let mut walk = node.walk();
+        for child in node.named_children(&mut walk) {
+            stack.push(child);
+        }
+        if node.kind() != "call" {
+            continue;
+        }
+        let Some(function) = node.child_by_field_name("function") else {
+            continue;
+        };
+        let callee = &source[function.byte_range()];
+        if !callee.ends_with("Opt") || !callee.contains('.') {
+            continue;
+        }
+        let Some(first) = node
+            .child_by_field_name("arguments")
+            .and_then(|a| a.named_child(0))
+            .filter(|a| a.kind() == "string")
+        else {
+            continue;
+        };
+        let key = source[first.byte_range()].trim_matches(|c| c == '\'' || c == '"');
+        if key.is_empty() || key.contains(' ') {
+            continue;
+        }
+        units.push(crate::units::UnitNode {
+            kind: "config".into(),
+            name: key.to_string(),
+            start_line: node.start_position().row as u32 + 1,
+            end_line: node.end_position().row as u32 + 1,
+            text: source[node.byte_range()].to_string(),
+            owner: None,
+            mentions: Vec::new(),
+            registers: Vec::new(),
+        });
+    }
+    units.sort_by_key(|u| u.start_line);
+    units
 }
 
 fn python_has_class_ancestor(mut node: tree_sitter::Node) -> bool {
@@ -1597,15 +1728,58 @@ mod tests {
     }
 
     #[test]
-    fn typescript_stub_returns_empty() {
+    fn typescript_and_javascript_functions_are_parsed() {
         let pf = TypeScriptParser.parse("function foo() {}", Path::new("a.ts"), "r", "v1");
-        assert!(pf.functions.is_empty() && pf.language == "typescript");
+        assert!(pf.functions[0].name == "foo" && pf.language == "typescript");
+        let pf = JavaScriptParser.parse("function foo() {}", Path::new("a.js"), "r", "v1");
+        assert!(pf.functions[0].name == "foo" && pf.language == "javascript");
     }
 
     #[test]
-    fn javascript_stub_returns_empty() {
-        let pf = JavaScriptParser.parse("function foo() {}", Path::new("a.js"), "r", "v1");
-        assert!(pf.functions.is_empty() && pf.language == "javascript");
+    fn python_methods_know_their_class_and_record_raises_and_config_reads() {
+        let source = "from oslo_config import cfg\nopts = [cfg.IntOpt('retry_limit', default=3, help='Retries.')]\n\nclass Manager(Base):\n    def attach(self):\n        n = CONF.retry_limit + self.configuration.backend.max_over\n        def inner():\n            pass\n        raise exception.VolumeBusy(volume_id=1)\n\nclass Other:\n    def attach(self):\n        raise ValueError\n";
+        let pf = parse_python(source);
+        let attaches: Vec<_> = pf.functions.iter().filter(|f| f.name == "attach").collect();
+        assert_eq!(attaches.len(), 2);
+        assert_eq!(attaches[0].impl_type.as_deref(), Some("Manager"));
+        assert_eq!(attaches[1].impl_type.as_deref(), Some("Other"));
+        let inner = pf.functions.iter().find(|f| f.name == "inner").unwrap();
+        assert!(inner.impl_type.is_none());
+        let refs: Vec<(String, String, Option<String>)> = pf
+            .references
+            .iter()
+            .map(|r| {
+                (
+                    r.relation.clone(),
+                    r.target.clone(),
+                    r.from.impl_type.clone(),
+                )
+            })
+            .collect();
+        assert!(
+            refs.contains(&("RAISES".into(), "VolumeBusy".into(), Some("Manager".into()))),
+            "{refs:?}"
+        );
+        assert!(
+            refs.contains(&(
+                "READS_CONFIG".into(),
+                "retry_limit".into(),
+                Some("Manager".into())
+            )),
+            "{refs:?}"
+        );
+        assert!(
+            refs.contains(&(
+                "READS_CONFIG".into(),
+                "max_over".into(),
+                Some("Manager".into())
+            )),
+            "{refs:?}"
+        );
+        assert!(refs.contains(&("RAISES".into(), "ValueError".into(), Some("Other".into()))));
+        let option = pf.units.iter().find(|u| u.kind == "config").unwrap();
+        assert_eq!(option.name, "retry_limit");
+        assert_eq!(option.start_line, 2);
     }
 
     #[test]
