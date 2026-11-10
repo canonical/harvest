@@ -81,13 +81,13 @@ describe('ChatMessage — activity line', () => {
   it('shows one line for the current step and hides the steps', () => {
     const w = mount(ChatMessage, { props: { msg: working } });
     expect(w.find('.activity-line__line').text()).toBe("I'm reading the driver support matrix.");
-    expect(w.find('.activity-line__toggle').text()).toContain('2 steps');
+    expect(w.find('.activity-line__steps').text()).toContain('2 steps');
     expect(w.find('.tc-chain').isVisible()).toBe(false);
   });
 
   it('opens and closes the steps from the line', async () => {
     const w = mount(ChatMessage, { props: { msg: working }, attachTo: document.body });
-    const toggle = w.find('.activity-line__toggle');
+    const toggle = w.find('.activity-line__row');
     await toggle.trigger('click');
     expect(toggle.attributes('aria-expanded')).toBe('true');
     expect(w.find('.tc-chain').isVisible()).toBe(true);
@@ -95,6 +95,13 @@ describe('ChatMessage — activity line', () => {
     await toggle.trigger('click');
     expect(w.find('.tc-chain').isVisible()).toBe(false);
     w.unmount();
+  });
+
+  it('shows the live timer on the activity line instead of the meta row', () => {
+    const msg = { ...working, startedAt: Date.now() - 12000 };
+    const w = mount(ChatMessage, { props: { msg } });
+    expect(w.find('.activity-line__elapsed').text()).toMatch(/1[12]s/);
+    expect(w.find('.duration-badge').exists()).toBe(false);
   });
 
   it('keeps the intent badge and phase label out of the line while loading', () => {
@@ -123,7 +130,7 @@ describe('ChatMessage — activity line', () => {
     const line = w.find('.activity-line');
     expect(line.classes()).toContain('activity-line--done');
     expect(line.text()).toContain('2 steps');
-    expect(w.find('.activity-line__toggle').text()).toContain('Show steps');
+    expect(w.find('.activity-line__steps').text()).toContain('Show steps');
   });
 
   it('shows no line on a finished answer without steps', () => {

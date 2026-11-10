@@ -26,24 +26,35 @@ describe('ActivityLine', () => {
 
   it('counts steps while working and offers to show them when settled', async () => {
     const w = mount(ActivityLine, { props: { activity: working('Thinking'), steps: 1 } });
-    expect(w.find('.activity-line__toggle').text()).toBe('1 step');
+    expect(w.find('.activity-line__steps').text()).toBe('1 step');
     await w.setProps({ activity: { state: 'done', text: 'Worked for 3s · 1 step' }, expanded: true });
-    expect(w.find('.activity-line__toggle').text()).toBe('Hide steps');
+    expect(w.find('.activity-line__steps').text()).toBe('Hide steps');
   });
 
-  it('hides the toggle when there are no steps', () => {
+  it('is not a button and shows no step label when there are no steps', async () => {
     const w = mount(ActivityLine, { props: { activity: working('Thinking'), steps: 0 } });
-    expect(w.find('.activity-line__toggle').exists()).toBe(false);
+    expect(w.find('.activity-line__steps').exists()).toBe(false);
+    expect(w.find('button').exists()).toBe(false);
+    await w.find('.activity-line__row').trigger('click');
+    expect(w.emitted('toggle')).toBeUndefined();
   });
 
-  it('emits toggle and reflects the expanded state', async () => {
+  it('makes the whole line one button that toggles the steps', async () => {
     const w = mount(ActivityLine, { props: { activity: working('Thinking'), steps: 2, expanded: false } });
-    const toggle = w.find('.activity-line__toggle');
-    expect(toggle.attributes('aria-expanded')).toBe('false');
-    await toggle.trigger('click');
+    const row = w.find('button.activity-line__row');
+    expect(row.exists()).toBe(true);
+    expect(row.find('.activity-line__text').exists()).toBe(true);
+    expect(row.find('.activity-line__steps').exists()).toBe(true);
+    expect(row.attributes('aria-expanded')).toBe('false');
+    await w.find('.activity-line__line').trigger('click');
     expect(w.emitted('toggle')).toHaveLength(1);
     await w.setProps({ expanded: true });
-    expect(toggle.attributes('aria-expanded')).toBe('true');
+    expect(row.attributes('aria-expanded')).toBe('true');
+  });
+
+  it('shows the elapsed time on the same line', () => {
+    const w = mount(ActivityLine, { props: { activity: working('Thinking'), steps: 1, elapsed: '12s' } });
+    expect(w.find('.activity-line__row .activity-line__elapsed').text()).toBe('12s');
   });
 
   it('slides to a new line only when the activity changes, not while a sentence grows', async () => {
