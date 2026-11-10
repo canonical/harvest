@@ -59,9 +59,82 @@ describe('ChatMessage — user', () => {
 });
 
 describe('ChatMessage — assistant loading', () => {
-  it('shows loading indicator when loading and no chain', () => {
+  it('shows the activity line saying the agent is thinking before anything arrives', () => {
     const w = mount(ChatMessage, { props: { msg: assistantLoading } });
-    expect(w.find('.loading-dots').exists()).toBe(true);
+    const line = w.find('.activity-line');
+    expect(line.exists()).toBe(true);
+    expect(line.classes()).toContain('activity-line--working');
+    expect(line.text()).toContain('Thinking');
+  });
+});
+
+describe('ChatMessage — activity line', () => {
+  const working = {
+    role: 'assistant', status: 'loading', pendingAnswer: '', phase: 'Reading source', intent: 'research',
+    chain: [
+      { type: 'thinking', text: "I'm reading the driver support matrix.", streaming: false },
+      { type: 'tool_call', id: 7, name: 'read_sources', input: { files: ['doc/support-matrix.ini'] }, status: 'running', preview: null },
+    ],
+    tool_calls: [], answer: null, sources: [], tool_calls_made: 0,
+  };
+
+  it('shows one line for the current step and hides the steps', () => {
+    const w = mount(ChatMessage, { props: { msg: working } });
+    expect(w.find('.activity-line__line').text()).toBe("I'm reading the driver support matrix.");
+    expect(w.find('.activity-line__toggle').text()).toContain('2 steps');
+    expect(w.find('.tc-chain').isVisible()).toBe(false);
+  });
+
+  it('opens and closes the steps from the line', async () => {
+    const w = mount(ChatMessage, { props: { msg: working }, attachTo: document.body });
+    const toggle = w.find('.activity-line__toggle');
+    await toggle.trigger('click');
+    expect(toggle.attributes('aria-expanded')).toBe('true');
+    expect(w.find('.tc-chain').isVisible()).toBe(true);
+    expect(w.find('.tc-step').isVisible()).toBe(true);
+    await toggle.trigger('click');
+    expect(w.find('.tc-chain').isVisible()).toBe(false);
+    w.unmount();
+  });
+
+  it('keeps the intent badge and phase label out of the line while loading', () => {
+    const w = mount(ChatMessage, { props: { msg: working } });
+    expect(w.find('.intent-badge').exists()).toBe(false);
+    expect(w.find('.phase-label').exists()).toBe(false);
+  });
+
+  it('keeps a short intent sentence out of the answer area', () => {
+    const msg = { ...working, chain: [], pendingAnswer: "I'm locating the volume drivers." };
+    const w = mount(ChatMessage, { props: { msg } });
+    expect(w.find('.message__answer--streaming').exists()).toBe(false);
+    expect(w.find('.activity-line__line').text()).toBe("I'm locating the volume drivers.");
+  });
+
+  it('streams a long answer in the answer area and says it is writing', () => {
+    const msg = { ...working, chain: [], pendingAnswer: 'Cinder ships these drivers:\n- LVM\n- Ceph' };
+    const w = mount(ChatMessage, { props: { msg } });
+    expect(w.find('.message__answer--streaming').exists()).toBe(true);
+    expect(w.find('.activity-line__line').text()).toBe('Writing the answer');
+  });
+
+  it('summarises a finished turn and keeps its steps one click away', () => {
+    const msg = { ...assistantWithThinking, durationMs: 11000 };
+    const w = mount(ChatMessage, { props: { msg } });
+    const line = w.find('.activity-line');
+    expect(line.classes()).toContain('activity-line--done');
+    expect(line.text()).toContain('2 steps');
+    expect(w.find('.activity-line__toggle').text()).toContain('Show steps');
+  });
+
+  it('shows no line on a finished answer without steps', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantDone } });
+    expect(w.find('.activity-line').exists()).toBe(false);
+  });
+
+  it('marks an interrupted turn as stopped', () => {
+    const msg = { ...assistantWithThinking, status: 'error', error: 'interrupted' };
+    const w = mount(ChatMessage, { props: { msg } });
+    expect(w.find('.activity-line').classes()).toContain('activity-line--stopped');
   });
 });
 
@@ -317,12 +390,12 @@ describe('ChatMessage — status bar (intent + phase)', () => {
     answer: 'Done', sources: [], tool_calls_made: 1,
   };
 
-  it('renders intent badge and phase label in a single status-bar row', () => {
+  it('shows only the activity line in the status bar while loading', () => {
     const w = mount(ChatMessage, { props: { msg: loadingWithIntent } });
     const bar = w.find('.message__status-bar');
     expect(bar.exists()).toBe(true);
-    expect(bar.find('.intent-badge').exists()).toBe(true);
-    expect(bar.find('.phase-label').exists()).toBe(true);
+    expect(bar.find('.activity-line').exists()).toBe(true);
+    expect(bar.find('.intent-badge').exists()).toBe(false);
   });
 
   it('status bar is sticky while loading', () => {
@@ -497,6 +570,22 @@ describe('ChatMessage — confirm_action chain entries', () => {
     expect(w.text()).toContain('Working…');
   });
 
+  it('keeps a pending confirmation visible while the other steps stay collapsed', () => {
+    const msg = {
+      ...assistantWithConfirmPending,
+      status: 'loading',
+      chain: [
+        { type: 'tool_call', name: 'list_agents', input: {}, status: 'done', preview: '[]' },
+        confirmChainItem(),
+      ],
+    };
+    const w = mount(ChatMessage, { props: { msg, isLast: true }, attachTo: document.body });
+    expect(w.find('.message__confirm').isVisible()).toBe(true);
+    expect(w.find('.tc-step').isVisible()).toBe(false);
+    expect(w.find('.activity-line').classes()).toContain('activity-line--waiting');
+    w.unmount();
+  });
+
   it('does not render confirm block when chain has no confirm_action entries', () => {
     const w = mount(ChatMessage, { props: { msg: assistantDone, isLast: true } });
     expect(w.find('.message__confirm').exists()).toBe(false);
@@ -512,7 +601,7 @@ describe('ChatMessage — confirm_action chain entries', () => {
       ],
     };
     const w = mount(ChatMessage, { props: { msg, isLast: true } });
-    const kinds = [...w.find('.tc-chain__viewport').element.children].map(el =>
+    const kinds = [...w.find('.tc-chain__list').element.children].map(el =>
       el.classList.contains('tc-step') ? 'tool_call' : 'confirm_action'
     );
     expect(kinds).toEqual(['tool_call', 'confirm_action', 'tool_call']);
