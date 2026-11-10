@@ -59,6 +59,13 @@ WHERE e.relation = 'CALLS'
   AND CASE WHEN $direction = 'in' THEN e.dst_id ELSE e.src_id END = $id
 "#;
 
+const NAME_COUNTS_SQL: &str = r#"
+SELECT coalesce(impl_type || '.', '') || name AS qualified, count(*) AS n
+FROM code_symbols
+WHERE repo = $repo AND version = $version
+GROUP BY 1
+"#;
+
 const SYMBOL_SQL: &str = r#"
 SELECT id, file, name, impl_type, label, coalesce(start_line, 0) AS start_line,
        coalesce(end_line, 0) AS end_line, coalesce(docstring, '') AS docstring
@@ -157,6 +164,20 @@ impl<'a> Synthesizer<'a> {
         self.db.query(sql, params).await
     }
 
+    async fn name_counts(&self) -> Result<HashMap<String, i64>> {
+        Ok(self
+            .rows(NAME_COUNTS_SQL, json!({}))
+            .await?
+            .iter()
+            .map(|r| {
+                (
+                    r["qualified"].as_str().unwrap_or_default().to_string(),
+                    r["n"].as_i64().unwrap_or(0),
+                )
+            })
+            .collect())
+    }
+
     async fn by_id(&self, id: i64) -> Result<Option<Symbol>> {
         Ok(self
             .rows(SYMBOL_SQL, json!({ "id": id }))
@@ -168,10 +189,12 @@ impl<'a> Synthesizer<'a> {
     pub async fn generate(&self, per_kind: usize) -> Result<Vec<GoldQuery>> {
         let mut queries = Vec::new();
         let sample = self
-            .rows(SYMBOLS_SQL, json!({ "limit": (per_kind * 4) as i64 }))
+            .rows(SYMBOLS_SQL, json!({ "limit": (per_kind * 12) as i64 }))
             .await?;
+        let counts = self.name_counts().await?;
+        let unambiguous = |s: &Symbol| counts.get(&s.qualified).copied().unwrap_or(0) == 1;
         let symbols: Vec<Symbol> = sample.iter().map(symbol).collect();
-        for s in symbols.iter().take(per_kind) {
+        for s in symbols.iter().filter(|s| unambiguous(s)).take(per_kind) {
             let what = if s.is_class { "class" } else { "function" };
             queries.push(self.query(
                 "lookup",
@@ -221,12 +244,18 @@ impl<'a> Synthesizer<'a> {
             ));
         }
         for row in self
-            .rows(CALL_TARGETS_SQL, json!({ "limit": per_kind as i64 }))
+            .rows(CALL_TARGETS_SQL, json!({ "limit": (per_kind * 6) as i64 }))
             .await?
         {
+            if queries.iter().filter(|q| q.kind == "callers").count() >= per_kind {
+                break;
+            }
             let Some(target) = self.by_id(row["id"].as_i64().unwrap_or(0)).await? else {
                 continue;
             };
+            if !unambiguous(&target) {
+                continue;
+            }
             let callers: Vec<Symbol> = self
                 .db
                 .query(NEIGHBORS_SQL, json!({ "direction": "in", "id": target.id }))

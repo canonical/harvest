@@ -164,47 +164,121 @@ impl CodeGraph {
         iterations: usize,
     ) -> Vec<(UnitId, f32)> {
         let total: f32 = seeds.iter().map(|(_, s)| s.max(0.0)).sum();
-        if total <= 0.0 {
+        if total <= 0.0 || self.nodes == 0 {
             return Vec::new();
         }
-        let teleport: HashMap<UnitId, f32> = seeds
+        let table: Vec<(f32, f32)> = Relation::ALL
             .iter()
-            .map(|(n, s)| (*n, s.max(0.0) / total))
+            .map(|r| {
+                (
+                    weights.weight(*r, Direction::Out),
+                    weights.weight(*r, Direction::In),
+                )
+            })
             .collect();
-        let mut rank = teleport.clone();
+        let weight_of = |relation: Relation, direction: Direction| {
+            let (out, inn) = table[relation as usize];
+            match direction {
+                Direction::Out => out,
+                Direction::In => inn,
+            }
+        };
+        let mut teleport = vec![0f32; self.nodes];
+        let mut rank = vec![0f32; self.nodes];
+        let mut active: Vec<UnitId> = Vec::new();
+        for (node, score) in seeds {
+            if (*node as usize) < self.nodes && *score > 0.0 {
+                if teleport[*node as usize] == 0.0 {
+                    active.push(*node);
+                }
+                teleport[*node as usize] += score / total;
+            }
+        }
+        rank.clone_from(&teleport);
+        let mut next = vec![0f32; self.nodes];
+        let mut touched = vec![false; self.nodes];
         for _ in 0..iterations {
-            let mut next: HashMap<UnitId, f32> =
-                teleport.iter().map(|(n, t)| (*n, restart * t)).collect();
-            for (&node, &mass) in &rank {
-                let outgoing: Vec<(UnitId, f32)> = self
-                    .out
-                    .of(node)
-                    .iter()
-                    .map(|(n, r)| (*n, weights.weight(*r, Direction::Out)))
-                    .chain(
-                        self.inn
-                            .of(node)
-                            .iter()
-                            .map(|(n, r)| (*n, weights.weight(*r, Direction::In))),
-                    )
-                    .filter(|(_, w)| *w > 0.0)
-                    .collect();
-                let sum: f32 = outgoing.iter().map(|(_, w)| w).sum();
-                if sum <= 0.0 {
-                    *next.entry(node).or_default() += (1.0 - restart) * mass;
+            let mut reached: Vec<UnitId> = Vec::with_capacity(active.len() * 2);
+            for &node in &active {
+                let i = node as usize;
+                let mass = rank[i];
+                if mass < PRUNE {
                     continue;
                 }
-                for (neighbor, w) in outgoing {
-                    *next.entry(neighbor).or_default() += (1.0 - restart) * mass * w / sum;
+                let out = self.out.of(node);
+                let inn = self.inn.of(node);
+                let sum: f32 = out
+                    .iter()
+                    .map(|(_, r)| weight_of(*r, Direction::Out))
+                    .chain(inn.iter().map(|(_, r)| weight_of(*r, Direction::In)))
+                    .sum();
+                let mut spread = |target: UnitId,
+                                  share: f32,
+                                  next: &mut [f32],
+                                  touched: &mut [bool],
+                                  reached: &mut Vec<UnitId>| {
+                    let t = target as usize;
+                    next[t] += share;
+                    if !touched[t] {
+                        touched[t] = true;
+                        reached.push(target);
+                    }
+                };
+                if sum <= 0.0 {
+                    spread(
+                        node,
+                        (1.0 - restart) * mass,
+                        &mut next,
+                        &mut touched,
+                        &mut reached,
+                    );
+                    continue;
+                }
+                let scale = (1.0 - restart) * mass / sum;
+                for (target, relation) in out {
+                    let w = weight_of(*relation, Direction::Out);
+                    if w > 0.0 {
+                        spread(*target, scale * w, &mut next, &mut touched, &mut reached);
+                    }
+                }
+                for (target, relation) in inn {
+                    let w = weight_of(*relation, Direction::In);
+                    if w > 0.0 {
+                        spread(*target, scale * w, &mut next, &mut touched, &mut reached);
+                    }
                 }
             }
-            rank = next;
+            for &node in &active {
+                rank[node as usize] = 0.0;
+            }
+            for (node, t) in teleport.iter().enumerate() {
+                if *t > 0.0 {
+                    next[node] += restart * t;
+                    if !touched[node] {
+                        touched[node] = true;
+                        reached.push(node as UnitId);
+                    }
+                }
+            }
+            for &node in &reached {
+                let i = node as usize;
+                rank[i] = next[i];
+                next[i] = 0.0;
+                touched[i] = false;
+            }
+            active = reached;
         }
-        let mut ranked: Vec<(UnitId, f32)> = rank.into_iter().collect();
+        let mut ranked: Vec<(UnitId, f32)> = active
+            .into_iter()
+            .map(|n| (n, rank[n as usize]))
+            .filter(|(_, s)| *s > 0.0)
+            .collect();
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         ranked
     }
 }
+
+const PRUNE: f32 = 1e-6;
 
 #[cfg(test)]
 mod tests {
