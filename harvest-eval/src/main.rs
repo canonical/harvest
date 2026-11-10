@@ -19,7 +19,7 @@ use harvest_eval::gold::{self, Split};
 use harvest_eval::judge::{Answerer, Judge};
 use harvest_eval::report::{compare, summarize, Gates, Report};
 use harvest_eval::run::{run, Run};
-use harvest_eval::{calibrate, extract, synth};
+use harvest_eval::{calibrate, distill, extract, synth};
 
 #[derive(Parser)]
 #[command(
@@ -105,6 +105,24 @@ enum Command {
         judge: bool,
         #[arg(long)]
         references: Option<PathBuf>,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    Distill {
+        #[command(flatten)]
+        connection: Connection,
+        #[arg(long)]
+        gold: PathBuf,
+        #[arg(long, value_enum, default_value = "all")]
+        split: Split,
+        #[arg(long, value_enum, default_value = "legacy")]
+        engine: EngineKind,
+        #[arg(long, default_value_t = 600_000)]
+        budget_ms: u64,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        cache: bool,
         #[arg(long)]
         out: PathBuf,
     },
@@ -280,6 +298,51 @@ fn print_summary(report: &Report) {
     }
 }
 
+async fn warm(parts: &wiring::Parts, queries: &[gold::GoldQuery]) -> Result<BTreeMap<String, f64>> {
+    let scopes: BTreeSet<Scope> = queries
+        .iter()
+        .map(|q| Scope::new(&q.repo, &q.version))
+        .collect();
+    let mut index_load_ms = BTreeMap::new();
+    for scope in scopes {
+        let started = Instant::now();
+        parts.registry.ensure(&scope).await?;
+        index_load_ms.insert(
+            format!("{}@{}", scope.repo, scope.version),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(index_load_ms)
+}
+
+async fn build_engine(
+    context: &Env,
+    engine: EngineKind,
+    config: &SearchConfig,
+    parts: &wiring::Parts,
+) -> Result<Box<dyn SearchEngine>> {
+    Ok(match engine {
+        EngineKind::Fallback => Box::new(PostgresEngine::new(Arc::clone(&context.db))),
+        EngineKind::Tier1 => Box::new(wiring::tiered(config, parts, true)),
+        EngineKind::Tiered => Box::new(wiring::tiered(config, parts, false)),
+        EngineKind::Legacy => {
+            let cfg = context
+                .config
+                .as_ref()
+                .context("the legacy engine needs --config")?;
+            knowledge_server::agent::graph_tools::set_run_sql_available(
+                knowledge_server::agent::graph_tools::probe_run_sql(&context.db).await,
+            );
+            let agent = knowledge_server::agent::Agent::new(
+                knowledge_server::llm::from_config(&cfg.llm),
+                knowledge_server::agent::graph_tools::all_tools(Arc::clone(&context.db)),
+                cfg.agent.max_iterations,
+            );
+            Box::new(LegacyLoopEngine::new(Arc::new(agent)))
+        }
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber_init();
@@ -347,42 +410,13 @@ async fn main() -> Result<()> {
                 _ => None,
             };
             let parts = wiring::parts(&config, PgCorpus::new(Arc::clone(&context.db)), fast_model)?;
-            let mut index_load_ms = BTreeMap::new();
-            if matches!(engine, EngineKind::Tier1 | EngineKind::Tiered) {
-                let scopes: BTreeSet<Scope> = queries
-                    .iter()
-                    .map(|q| Scope::new(&q.repo, &q.version))
-                    .collect();
-                for scope in scopes {
-                    let started = Instant::now();
-                    parts.registry.ensure(&scope).await?;
-                    index_load_ms.insert(
-                        format!("{}@{}", scope.repo, scope.version),
-                        started.elapsed().as_secs_f64() * 1000.0,
-                    );
-                }
-            }
-            let tier1 = wiring::tiered(&config, &parts, true);
-            let engine_box: Box<dyn SearchEngine> = match engine {
-                EngineKind::Fallback => Box::new(PostgresEngine::new(Arc::clone(&context.db))),
-                EngineKind::Tier1 => Box::new(wiring::tiered(&config, &parts, true)),
-                EngineKind::Tiered => Box::new(wiring::tiered(&config, &parts, false)),
-                EngineKind::Legacy => {
-                    let cfg = context
-                        .config
-                        .as_ref()
-                        .context("the legacy engine needs --config")?;
-                    knowledge_server::agent::graph_tools::set_run_sql_available(
-                        knowledge_server::agent::graph_tools::probe_run_sql(&context.db).await,
-                    );
-                    let agent = knowledge_server::agent::Agent::new(
-                        knowledge_server::llm::from_config(&cfg.llm),
-                        knowledge_server::agent::graph_tools::all_tools(Arc::clone(&context.db)),
-                        cfg.agent.max_iterations,
-                    );
-                    Box::new(LegacyLoopEngine::new(Arc::new(agent)))
-                }
+            let index_load_ms = if matches!(engine, EngineKind::Tier1 | EngineKind::Tiered) {
+                warm(&parts, &queries).await?
+            } else {
+                BTreeMap::new()
             };
+            let tier1 = wiring::tiered(&config, &parts, true);
+            let engine_box = build_engine(&context, engine, &config, &parts).await?;
             let answerer = if answers || judge {
                 Some(Answerer::new(model(&context, false)?))
             } else {
@@ -429,6 +463,64 @@ async fn main() -> Result<()> {
             write_json(&out, &report)?;
             print_summary(&report);
             println!("report written to {}", out.display());
+        }
+        Command::Distill {
+            connection,
+            gold: gold_path,
+            split,
+            engine,
+            budget_ms,
+            limit,
+            cache,
+            out,
+        } => {
+            let context = connect(&connection).await?;
+            let mut queries: Vec<_> = gold::load(&gold_path)?
+                .into_iter()
+                .filter(|q| q.in_split(split))
+                .collect();
+            if let Some(limit) = limit {
+                queries.truncate(limit);
+            }
+            let config = search_config(&context);
+            let fast_model = match engine {
+                EngineKind::Tiered => Some(model(&context, true)?),
+                _ => None,
+            };
+            let parts = wiring::parts(&config, PgCorpus::new(Arc::clone(&context.db)), fast_model)?;
+            if matches!(engine, EngineKind::Tier1 | EngineKind::Tiered) {
+                warm(&parts, &queries).await?;
+            }
+            let engine_box = build_engine(&context, engine, &config, &parts).await?;
+            let mut distilled = Vec::new();
+            for query in &queries {
+                let result = engine_box
+                    .search(
+                        &harvest_eval::run::query_for(query, config.token_budget),
+                        harvest_search::Deadline::after(std::time::Duration::from_millis(
+                            budget_ms,
+                        )),
+                    )
+                    .await;
+                let Some(gold) = result
+                    .ok()
+                    .and_then(|r| distill::gold_from_result(query, &r, engine.name()))
+                else {
+                    continue;
+                };
+                if cache {
+                    distill::store_cache(&context.db, &gold).await?;
+                }
+                distilled.push(gold);
+            }
+            gold::save(&out, &distilled)?;
+            println!(
+                "distilled {} of {} questions into {}{}",
+                distilled.len(),
+                queries.len(),
+                out.display(),
+                if cache { " and the evidence cache" } else { "" }
+            );
         }
         Command::Compare { base, new, gates } => {
             let gates: Gates = match gates {
