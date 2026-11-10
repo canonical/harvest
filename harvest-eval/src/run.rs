@@ -9,6 +9,7 @@ use crate::metrics::quality::{ndcg, pool_recall, precision, recall};
 use crate::report::QueryRecord;
 
 const NDCG_AT: usize = 10;
+const TOP_LABELS: usize = 8;
 
 pub struct Run<'a> {
     pub engine: &'a dyn SearchEngine,
@@ -64,8 +65,19 @@ pub fn record_for(
         stages,
         llm_calls: result.trace.llm_calls,
         evidence: result.evidence.len(),
+        top: result
+            .evidence
+            .iter()
+            .take(TOP_LABELS)
+            .map(|e| e.label.clone())
+            .collect(),
         tier1_said_sufficient: tier1_said_sufficient(result),
-        tier1_recall: tier1.map(|t| recall(gold, &t.evidence).essential),
+        tier1_recall: tier1
+            .map(|t| recall(gold, &t.evidence).essential)
+            .or_else(|| {
+                (result.tier_reached == TierId::Rounds && !result.trace.gate.is_empty())
+                    .then_some(measured.essential)
+            }),
         signals: tier1
             .and_then(|t| t.trace.signals.clone())
             .or_else(|| result.trace.signals.clone()),

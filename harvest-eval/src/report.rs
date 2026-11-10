@@ -27,6 +27,8 @@ pub struct QueryRecord {
     pub llm_calls: u32,
     pub evidence: usize,
     #[serde(default)]
+    pub top: Vec<String>,
+    #[serde(default)]
     pub tier1_said_sufficient: Option<bool>,
     #[serde(default)]
     pub tier1_recall: Option<f64>,

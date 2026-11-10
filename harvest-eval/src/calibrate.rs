@@ -19,6 +19,7 @@ const EPOCHS: usize = 400;
 const LEARNING_RATE: f32 = 0.1;
 const L2: f32 = 0.001;
 const MISSED_TARGET: f64 = 5.0;
+const STRUCTURAL_COVERAGE: f32 = 0.9;
 
 pub fn logistic(rows: &[Vec<f32>], labels: &[bool], balance: bool) -> (Vec<f32>, f32) {
     let width = rows.first().map_or(0, Vec::len);
@@ -69,6 +70,13 @@ pub fn calibrate_gate(records: &[QueryRecord]) -> Option<CalibratedScore> {
         ) else {
             continue;
         };
+        let structurally_undecided = signals.dangling == 0
+            && signals
+                .list_coverage
+                .is_none_or(|c| c >= STRUCTURAL_COVERAGE);
+        if !structurally_undecided {
+            continue;
+        }
         rows.push(signals.features().to_vec());
         labels.push(recall >= INSUFFICIENT_BELOW);
     }
@@ -172,8 +180,10 @@ mod tests {
                     agreement: if good { 0.8 } else { 0.2 } + (i % 7) as f32 / 50.0,
                     identifier_coverage: 1.0,
                     evidence: 6,
-                    dangling: if good { 0 } else { 2 },
+                    dangling: 0,
                     list_coverage: None,
+                    top_probability: if good { 0.9 } else { 0.4 },
+                    relevant_unpacked: 0.0,
                 }),
                 ..QueryRecord::default()
             });

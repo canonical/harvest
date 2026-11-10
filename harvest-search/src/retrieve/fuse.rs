@@ -5,6 +5,15 @@ use crate::retrieve::{Candidate, Hit};
 
 const RRF_K: f32 = 60.0;
 
+fn weight(source: Source) -> f32 {
+    match source {
+        Source::Exact => 1.5,
+        Source::Lexical => 1.0,
+        Source::Dense => 0.5,
+        _ => 1.0,
+    }
+}
+
 pub fn fuse(lists: Vec<Vec<Hit>>) -> Vec<Candidate> {
     let mut merged: HashMap<UnitId, Candidate> = HashMap::new();
     for list in lists {
@@ -13,7 +22,7 @@ pub fn fuse(lists: Vec<Vec<Hit>>) -> Vec<Candidate> {
                 unit: hit.unit,
                 ..Candidate::default()
             });
-            candidate.rrf += 1.0 / (RRF_K + rank as f32 + 1.0);
+            candidate.rrf += weight(hit.source) / (RRF_K + rank as f32 + 1.0);
             match hit.source {
                 Source::Lexical => candidate.lexical = candidate.lexical.max(hit.score),
                 Source::Dense => candidate.dense = candidate.dense.max(hit.score),

@@ -5,8 +5,9 @@ use async_trait::async_trait;
 use crate::context::SearchContext;
 use crate::domain::{Gap, UnitId};
 use crate::gate::{SufficiencyCheck, Verdict};
-use crate::index::corpus::UnitKind;
+use crate::index::corpus::{Relation, UnitKind};
 use crate::index::graph::Depth;
+use crate::index::graph::Direction;
 use crate::index::tokenizer::tokens;
 
 const MIN_FAMILY: usize = 2;
@@ -79,7 +80,48 @@ fn root_class(ctx: &SearchContext) -> Option<UnitId> {
         .map(|(_, u)| u)
 }
 
+const CALLER_CUES: &[&str] = &[
+    "calls ",
+    "callers",
+    "called by",
+    "who uses",
+    "used by",
+    "invokes",
+];
+
+fn named_unit(ctx: &SearchContext) -> Option<UnitId> {
+    ctx.question.identifiers.iter().find_map(|identifier| {
+        let found = ctx.index.find_by_name(identifier);
+        (found.len() == 1).then(|| found[0])
+    })
+}
+
+pub fn caller_coverage(ctx: &SearchContext) -> Option<Coverage> {
+    let lower = ctx.query.text.to_lowercase();
+    if !CALLER_CUES.iter().any(|cue| lower.contains(cue)) {
+        return None;
+    }
+    let target = named_unit(ctx)?;
+    let callers: Vec<UnitId> = ctx
+        .index
+        .graph
+        .neighbors(target, Direction::In, &[Relation::Calls])
+        .collect();
+    if callers.is_empty() {
+        return None;
+    }
+    let found = callers.iter().filter(|u| ctx.has_unit(**u)).count();
+    Some(Coverage {
+        root: format!("callers of {}", ctx.index.unit(target).qualified_name),
+        found,
+        total: callers.len(),
+    })
+}
+
 pub fn coverage(ctx: &SearchContext) -> Option<Coverage> {
+    if let Some(callers) = caller_coverage(ctx) {
+        return Some(callers);
+    }
     if !ctx.question.wants_list {
         return None;
     }
@@ -112,8 +154,13 @@ impl SufficiencyCheck for ListCompleteness {
     async fn check(&self, ctx: &SearchContext) -> Verdict {
         match coverage(ctx) {
             Some(c) if c.ratio() < self.threshold => {
+                let of = if c.root.starts_with("callers of ") {
+                    c.root.clone()
+                } else {
+                    format!("subclasses of {}", c.root)
+                };
                 Verdict::Insufficient(vec![Gap::IncompleteList {
-                    of: format!("subclasses of {}", c.root),
+                    of,
                     found: c.found,
                     total: c.total,
                 }])

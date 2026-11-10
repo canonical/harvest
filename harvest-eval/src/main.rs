@@ -56,6 +56,10 @@ struct Connection {
     config: Option<PathBuf>,
     #[arg(long, env = "HARVEST_DATABASE_URL")]
     database_url: Option<String>,
+    #[arg(long)]
+    reranker: Option<PathBuf>,
+    #[arg(long)]
+    gate: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -134,6 +138,8 @@ enum Command {
 struct Env {
     config: Option<Config>,
     db: Arc<Db>,
+    reranker: Option<PathBuf>,
+    gate: Option<PathBuf>,
 }
 
 async fn connect(connection: &Connection) -> Result<Env> {
@@ -150,15 +156,24 @@ async fn connect(connection: &Connection) -> Result<Env> {
     Ok(Env {
         config,
         db: Arc::new(Db::connect(&url).await?),
+        reranker: connection.reranker.clone(),
+        gate: connection.gate.clone(),
     })
 }
 
 fn search_config(context: &Env) -> SearchConfig {
-    context
+    let mut config = context
         .config
         .as_ref()
         .map(|c| c.search.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(path) = &context.reranker {
+        config.reranker = Some(path.clone());
+    }
+    if let Some(path) = &context.gate {
+        config.gate = Some(path.clone());
+    }
+    config
 }
 
 fn model(context: &Env, fast: bool) -> Result<Arc<dyn LanguageModel>> {

@@ -23,7 +23,16 @@ pub fn extract(index: &IndexSnapshot, candidates: &[Candidate], top: usize) -> V
             names.push(name.to_string());
         }
     };
-    for candidate in candidates.iter().take(top) {
+    let mut trusted: Vec<&Candidate> = candidates
+        .iter()
+        .take(top * 2)
+        .filter(|c| c.exact || c.sources.len() >= 2 || c.pinned)
+        .take(top)
+        .collect();
+    if trusted.is_empty() {
+        trusted = candidates.iter().take(top.min(2)).collect();
+    }
+    for candidate in trusted {
         let unit = index.unit(candidate.unit);
         push(&unit.qualified_name, &mut names);
         for base in &unit.bases {

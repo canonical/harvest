@@ -149,7 +149,7 @@ impl Reranker for LinearReranker {
     ) -> Result<Vec<Candidate>> {
         let matrix = feature_matrix(question, index, &candidates);
         for (candidate, features) in candidates.iter_mut().zip(matrix) {
-            candidate.score = self.score(&features);
+            candidate.score = crate::gate::score::sigmoid(self.score(&features));
         }
         sort_candidates(&mut candidates);
         Ok(candidates)

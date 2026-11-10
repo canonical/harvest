@@ -17,7 +17,7 @@ pub struct CalibratedScore {
 impl Default for CalibratedScore {
     fn default() -> Self {
         Self {
-            weights: vec![0.8, 1.0, 1.0, 1.5, 0.5, -1.5, 1.0],
+            weights: vec![0.8, 1.0, 1.0, 1.5, 0.5, -1.5, 1.0, 0.0, 0.0],
             bias: -1.5,
             accept: 0.75,
             reject: 0.2,
@@ -84,6 +84,8 @@ mod tests {
             evidence: 8,
             dangling: 0,
             list_coverage: None,
+            top_probability: 0.0,
+            relevant_unpacked: 0.0,
         };
         let weak = Signals {
             evidence: 1,
