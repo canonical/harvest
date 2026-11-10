@@ -1,0 +1,45 @@
+[database]
+url = "postgres://harvest:harvest@127.0.0.1:5432/harvest_bench"
+
+[storage]
+clone_root = "/tmp/harvest-bench"
+
+[[repositories]]
+name = "cinder"
+url  = "https://opendev.org/openstack/cinder.git"
+refs = ["29.0.0"]
+
+[[repositories]]
+name = "gson"
+url  = "https://github.com/google/gson.git"
+refs = ["gson-parent-2.11.0"]
+
+[[repositories]]
+name = "jq"
+url  = "https://github.com/jqlang/jq.git"
+refs = ["jq-1.7.1"]
+
+[[repositories]]
+name = "rack"
+url  = "https://github.com/rack/rack.git"
+refs = ["v3.1.8"]
+
+[[repositories]]
+name = "newtonsoft-json"
+url  = "https://github.com/JamesNK/Newtonsoft.Json.git"
+refs = ["13.0.3"]
+
+[[repositories]]
+name = "cobra"
+url  = "https://github.com/spf13/cobra.git"
+refs = ["v1.8.1"]
+
+[[repositories]]
+name = "slim"
+url  = "https://github.com/slimphp/Slim.git"
+refs = ["4.14.0"]
+
+[[repositories]]
+name = "harvest"
+url  = "https://github.com/canonical/harvest"
+refs = ["feature/improve-search-engine-with-caching-and-indexing"]
