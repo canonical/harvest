@@ -85,11 +85,19 @@ pub fn parts_with_embedder(
     embedder: Arc<dyn Embedder>,
 ) -> Result<Parts> {
     let cache = config.cache_dir.as_ref().map(DiskCache::new);
-    let reranker: LinearReranker = load_json(config.reranker.as_deref(), "reranker")?;
+    let defaults = harvest_search::calibration::defaults();
+    let reranker: LinearReranker = match config.reranker.as_deref() {
+        Some(path) => load_json(Some(path), "reranker")?,
+        None => defaults.reranker,
+    };
+    let gate: CalibratedScore = match config.gate.as_deref() {
+        Some(path) => load_json(Some(path), "gate calibration")?,
+        None => defaults.gate,
+    };
     Ok(Parts {
         registry: IndexRegistry::new(source, embedder, cache),
-        reranker: Arc::new(reranker),
-        gate: load_json(config.gate.as_deref(), "gate calibration")?,
+        reranker: harvest_search::calibration::ScopedReranker::new(Arc::new(reranker)),
+        gate,
         model,
     })
 }
@@ -110,9 +118,12 @@ pub fn rounds(parts: &Parts) -> Rounds {
 pub fn tiered(config: &SearchConfig, parts: &Parts, tier_one_only: bool) -> TieredEngine {
     let mut tiers: Vec<Box<dyn Tier>> = vec![Box::new(rounds(parts))];
     let mut checks: Vec<Box<dyn SufficiencyCheck>> = vec![
+        Box::new(harvest_search::gate::named::NamedSymbols),
         Box::new(ListCompleteness::default()),
         Box::new(DanglingReferences),
-        Box::new(parts.gate.clone()),
+        Box::new(harvest_search::calibration::ScopedScore::new(
+            parts.gate.clone(),
+        )),
     ];
     if let (Some(model), false) = (&parts.model, tier_one_only) {
         tiers.push(Box::new(Plan::new(

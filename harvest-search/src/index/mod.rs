@@ -48,9 +48,12 @@ impl CacheIndex {
     }
 }
 
+pub const MAX_NAMED_MATCHES: usize = 5;
+
 pub struct IndexSnapshot {
     pub scope: Scope,
     pub generation: String,
+    pub calibration: Option<crate::calibration::Calibration>,
     pub units: Vec<Unit>,
     pub edges: Vec<Edge>,
     pub graph: CodeGraph,
@@ -80,10 +83,21 @@ impl IndexSnapshot {
         };
         let mut names: HashMap<String, Vec<UnitId>> = HashMap::new();
         for unit in &corpus.units {
-            let mut keys = vec![unit.name.to_lowercase(), unit.qualified_name.to_lowercase()];
+            let mut keys = vec![
+                tokenizer::name_key(&unit.name),
+                tokenizer::name_key(&unit.qualified_name),
+            ];
+            if let Some(last) = tokenizer::name_parts(&unit.name).pop() {
+                keys.push(last);
+            }
+            keys.retain(|k| !k.is_empty());
+            keys.sort();
             keys.dedup();
             for key in keys {
-                names.entry(key).or_default().push(unit.id);
+                let ids = names.entry(key).or_default();
+                if !ids.contains(&unit.id) {
+                    ids.push(unit.id);
+                }
             }
         }
         Ok(Self {
@@ -92,6 +106,7 @@ impl IndexSnapshot {
             bm25: Bm25Index::build(&corpus.units),
             scope: corpus.scope,
             generation: corpus.generation,
+            calibration: corpus.calibration,
             units: corpus.units,
             edges: corpus.edges,
             vectors,
@@ -104,14 +119,48 @@ impl IndexSnapshot {
     }
 
     pub fn find_by_name(&self, name: &str) -> &[UnitId] {
-        let key = name.trim().trim_end_matches("()").to_lowercase();
-        if let Some(found) = self.names.get(&key) {
-            return found;
+        let parts = tokenizer::name_parts(name);
+        for start in 0..parts.len() {
+            if let Some(found) = self.names.get(&parts[start..].join(".")) {
+                return found;
+            }
         }
-        match key.rsplit_once('.') {
-            Some((_, last)) => self.names.get(last).map_or(&[], Vec::as_slice),
-            None => &[],
+        &[]
+    }
+
+    pub fn named_units(&self, identifiers: &[String]) -> Vec<UnitId> {
+        let mut named = Vec::new();
+        for identifier in identifiers {
+            let candidates: Vec<UnitId> = self
+                .find_by_name(identifier)
+                .iter()
+                .copied()
+                .filter(|u| {
+                    let unit = self.unit(*u);
+                    !unit.is_vendored() && !unit.is_generated()
+                })
+                .collect();
+            let preferred: Vec<UnitId> = {
+                let source: Vec<UnitId> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|u| !self.unit(*u).is_test())
+                    .collect();
+                if source.is_empty() {
+                    candidates
+                } else {
+                    source
+                }
+            };
+            if (1..=MAX_NAMED_MATCHES).contains(&preferred.len()) {
+                for unit in preferred {
+                    if !named.contains(&unit) {
+                        named.push(unit);
+                    }
+                }
+            }
         }
+        named
     }
 }
 

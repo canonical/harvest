@@ -107,6 +107,19 @@ pub fn split_identifier(identifier: &str) -> Vec<String> {
     pieces.into_iter().map(|p| p.to_lowercase()).collect()
 }
 
+pub fn name_parts(name: &str) -> Vec<String> {
+    name.trim()
+        .trim_end_matches("()")
+        .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+        .filter(|p| !p.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+pub fn name_key(name: &str) -> String {
+    name_parts(name).join(".")
+}
+
 pub fn looks_like_identifier(word: &str) -> bool {
     let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
     if trimmed.len() < 3 || !trimmed.starts_with(|c: char| c.is_alphabetic() || c == '_') {
@@ -116,6 +129,9 @@ pub fn looks_like_identifier(word: &str) -> bool {
     let has_lower = trimmed.chars().any(char::is_lowercase);
     trimmed.contains('_')
         || word.contains('.') && !word.ends_with('.')
+        || word.contains("::")
+        || word.contains("->")
+        || word.contains('#') && !word.starts_with('#')
         || (inner_upper && has_lower)
         || word.contains("()")
 }

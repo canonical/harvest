@@ -26,12 +26,16 @@ pub struct SearchContext {
     pub stable: bool,
     pub degraded: Option<Degraded>,
     pub notes: Vec<String>,
+    pub named: Vec<UnitId>,
 }
 
 impl SearchContext {
     pub fn new(query: &Query, index: Arc<IndexSnapshot>, deadline: Deadline) -> Self {
+        let question = Question::analyze(&query.text);
+        let named = index.named_units(&question.identifiers);
         Self {
-            question: Question::analyze(&query.text),
+            named,
+            question,
             terms: Terms::from_question(&query.text),
             query: query.clone(),
             index,

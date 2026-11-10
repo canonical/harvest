@@ -1,5 +1,9 @@
 use std::collections::HashSet;
 
+use crate::domain::UnitId;
+use crate::index::corpus::Relation;
+use crate::index::graph::Direction;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -10,7 +14,7 @@ use crate::index::IndexSnapshot;
 use crate::question::{Question, QuestionKind};
 use crate::retrieve::{sort_candidates, Candidate};
 
-pub const FEATURES: usize = 12;
+pub const FEATURES: usize = 16;
 
 pub const FEATURE_NAMES: [&str; FEATURES] = [
     "rrf",
@@ -21,11 +25,47 @@ pub const FEATURE_NAMES: [&str; FEATURES] = [
     "name_overlap",
     "path_overlap",
     "kind_prior",
-    "is_test",
+    "off_topic_test",
     "pinned",
     "is_symbol",
-    "is_doc_like",
+    "doc_for_code",
+    "vendored",
+    "generated",
+    "named",
+    "near_named",
 ];
+
+pub struct Named {
+    named: HashSet<UnitId>,
+    near: HashSet<UnitId>,
+}
+
+const NEAR_RELATIONS: [Relation; 8] = [
+    Relation::Calls,
+    Relation::Contains,
+    Relation::Inherits,
+    Relation::Implements,
+    Relation::Overrides,
+    Relation::Uses,
+    Relation::Instantiates,
+    Relation::ReadsConfig,
+];
+
+impl Named {
+    pub fn of(question: &Question, index: &IndexSnapshot) -> Self {
+        let named: HashSet<UnitId> = index
+            .named_units(&question.identifiers)
+            .into_iter()
+            .collect();
+        let mut near = HashSet::new();
+        for unit in &named {
+            for direction in [Direction::Out, Direction::In] {
+                near.extend(index.graph.neighbors(*unit, direction, &NEAR_RELATIONS));
+            }
+        }
+        Self { named, near }
+    }
+}
 
 fn overlap(vocabulary: &HashSet<String>, text: &str) -> f32 {
     if vocabulary.is_empty() {
@@ -56,9 +96,11 @@ pub fn features(
     index: &IndexSnapshot,
     candidate: &Candidate,
     max_lexical: f32,
+    named: &Named,
 ) -> [f32; FEATURES] {
     let unit = index.unit(candidate.unit);
     let vocabulary: HashSet<String> = question.vocabulary().into_iter().collect();
+    let code_question = question.kind != QuestionKind::Config;
     [
         candidate.rrf * 60.0,
         if max_lexical > 0.0 {
@@ -72,13 +114,16 @@ pub fn features(
         overlap(&vocabulary, &unit.qualified_name),
         overlap(&vocabulary, &unit.file),
         kind_prior(question.kind, unit.kind()),
-        f32::from(u8::from(unit.is_test())),
+        f32::from(u8::from(unit.is_test() && !question.about_tests)),
         f32::from(u8::from(candidate.pinned)),
         f32::from(u8::from(unit.kind().is_symbol())),
-        f32::from(u8::from(matches!(
-            unit.kind(),
-            UnitKind::Doc | UnitKind::Config | UnitKind::Module
-        ))),
+        f32::from(u8::from(code_question && unit.kind() == UnitKind::Doc)),
+        f32::from(u8::from(unit.is_vendored())),
+        f32::from(u8::from(unit.is_generated())),
+        f32::from(u8::from(named.named.contains(&candidate.unit))),
+        f32::from(u8::from(
+            !named.named.contains(&candidate.unit) && named.near.contains(&candidate.unit),
+        )),
     ]
 }
 
@@ -88,9 +133,10 @@ pub fn feature_matrix(
     candidates: &[Candidate],
 ) -> Vec<[f32; FEATURES]> {
     let max_lexical = candidates.iter().map(|c| c.lexical).fold(0.0, f32::max);
+    let named = Named::of(question, index);
     candidates
         .iter()
-        .map(|c| features(question, index, c, max_lexical))
+        .map(|c| features(question, index, c, max_lexical, &named))
         .collect()
 }
 
@@ -128,7 +174,9 @@ pub struct LinearReranker {
 impl Default for LinearReranker {
     fn default() -> Self {
         Self {
-            weights: vec![1.0, 0.8, 0.6, 1.2, 0.8, 1.0, 0.3, 0.3, -0.8, 3.0, 0.3, -0.2],
+            weights: vec![
+                1.0, 0.8, 0.6, 1.2, 0.8, 1.0, 0.3, 0.3, -1.5, 3.0, 0.3, -0.6, -2.5, -2.5, 2.5, 0.6,
+            ],
             bias: 0.0,
         }
     }
@@ -176,6 +224,7 @@ mod tests {
         corpus.push_unit(Unit {
             name: "test_detach".into(),
             file: "tests/test_volume.py".into(),
+            origin: crate::index::corpus::Origin::Test,
             kind: Some(UnitKind::Function),
             ..Unit::default()
         });
