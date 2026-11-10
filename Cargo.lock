@@ -1753,6 +1753,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "harvest-search"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "harvest-db",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "harvest-tui"
 version = "0.1.0"
 dependencies = [
@@ -2388,6 +2404,7 @@ dependencies = [
  "futures",
  "futures-util",
  "harvest-db",
+ "harvest-search",
  "hex",
  "http",
  "http-body-util",
