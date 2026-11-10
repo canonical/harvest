@@ -38,6 +38,7 @@ harvest-db   = { path = "../harvest-db" }
 # File walking
 walkdir      = "2"
 ignore       = "0.4"   # respects .gitignore when walking
+regex        = "1"
 
 # Logging
 tracing            = "0.1"

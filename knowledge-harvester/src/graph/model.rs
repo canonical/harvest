@@ -80,4 +80,6 @@ pub struct ParsedFile {
     pub functions: Vec<FunctionNode>,
     pub classes: Vec<ClassNode>,
     pub imports: Vec<ImportNode>,
+    pub units: Vec<crate::units::UnitNode>,
+    pub references: Vec<crate::units::ReferenceNode>,
 }

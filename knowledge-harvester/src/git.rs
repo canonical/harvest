@@ -167,6 +167,86 @@ impl GitClient {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct History {
+    pub co_changes: Vec<(String, String, u32)>,
+    pub subjects: std::collections::HashMap<String, Vec<String>>,
+}
+
+const MAX_FILES_PER_COMMIT: usize = 20;
+const MIN_CO_CHANGES: u32 = 3;
+const PARTNERS_PER_FILE: usize = 10;
+const SUBJECTS_PER_FILE: usize = 5;
+
+impl GitClient {
+    pub fn history(&self, repo_path: &Path, refname: &str, max_commits: usize) -> Result<History> {
+        use std::collections::HashMap;
+        let repo = Repository::open(repo_path)?;
+        let commit = resolve_one(&repo, refname)?.peel_to_commit()?;
+        let mut walk = repo.revwalk()?;
+        walk.push(commit.id())?;
+        walk.set_sorting(git2::Sort::TIME)?;
+        let mut pairs: HashMap<(String, String), u32> = HashMap::new();
+        let mut subjects: HashMap<String, Vec<String>> = HashMap::new();
+        for oid in walk.take(max_commits) {
+            let commit = repo.find_commit(oid?)?;
+            if commit.parent_count() != 1 {
+                continue;
+            }
+            let diff = repo.diff_tree_to_tree(
+                Some(&commit.parent(0)?.tree()?),
+                Some(&commit.tree()?),
+                None,
+            )?;
+            let mut files: Vec<String> = diff
+                .deltas()
+                .filter_map(|d| {
+                    d.new_file()
+                        .path()
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                })
+                .collect();
+            files.sort();
+            files.dedup();
+            if files.is_empty() || files.len() > MAX_FILES_PER_COMMIT {
+                continue;
+            }
+            let subject = commit.summary().unwrap_or_default().to_string();
+            for file in &files {
+                let list = subjects.entry(file.clone()).or_default();
+                if list.len() < SUBJECTS_PER_FILE && !subject.is_empty() {
+                    list.push(subject.clone());
+                }
+            }
+            for (i, a) in files.iter().enumerate() {
+                for b in &files[i + 1..] {
+                    *pairs.entry((a.clone(), b.clone())).or_default() += 1;
+                }
+            }
+        }
+        let mut frequent: Vec<(String, String, u32)> = pairs
+            .into_iter()
+            .filter(|(_, n)| *n >= MIN_CO_CHANGES)
+            .map(|((a, b), n)| (a, b, n))
+            .collect();
+        frequent.sort_by(|x, y| y.2.cmp(&x.2).then_with(|| (&x.0, &x.1).cmp(&(&y.0, &y.1))));
+        let mut partners: HashMap<String, usize> = HashMap::new();
+        frequent.retain(|(a, b, _)| {
+            let keep = partners.get(a).copied().unwrap_or(0) < PARTNERS_PER_FILE
+                && partners.get(b).copied().unwrap_or(0) < PARTNERS_PER_FILE;
+            if keep {
+                *partners.entry(a.clone()).or_default() += 1;
+                *partners.entry(b.clone()).or_default() += 1;
+            }
+            keep
+        });
+        Ok(History {
+            co_changes: frequent,
+            subjects,
+        })
+    }
+}
+
 fn resolve_one<'r>(repo: &'r Repository, refname: &str) -> Result<git2::Object<'r>> {
     if let Ok(obj) = repo.revparse_single(refname) {
         return Ok(obj);

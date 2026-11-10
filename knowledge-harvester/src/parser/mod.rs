@@ -1,3 +1,4 @@
+pub mod ecmascript;
 pub mod language;
 
 use std::collections::HashMap;
@@ -6,7 +7,7 @@ use std::sync::Arc;
 
 use crate::graph::model::ParsedFile;
 
-pub const PARSER_VERSION: i32 = 2;
+pub const PARSER_VERSION: i32 = 3;
 
 pub trait LanguageParser: Send + Sync {
     fn language_name(&self) -> &str;

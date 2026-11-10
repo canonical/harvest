@@ -85,6 +85,7 @@ async fn seed_graph(writer: &GraphWriter) {
             target: "std::collections::HashMap".into(),
             line: 1,
         }],
+        ..ParsedFile::default()
     };
     let v2 = ParsedFile {
         path: "src/lib.rs".into(),
@@ -102,6 +103,7 @@ async fn seed_graph(writer: &GraphWriter) {
         ],
         classes: vec![],
         imports: vec![],
+        ..ParsedFile::default()
     };
 
     writer
@@ -628,6 +630,7 @@ async fn search_symbols_matches_docstring_prose() {
                 }],
                 classes: vec![],
                 imports: vec![],
+                ..ParsedFile::default()
             }],
         )
         .await
@@ -691,6 +694,7 @@ async fn search_symbols_matches_capability_constant_inside_a_class() {
                     decorators: vec![],
                 }],
                 imports: vec![],
+                ..ParsedFile::default()
             }],
         )
         .await
@@ -759,6 +763,7 @@ async fn search_symbols_ranks_capability_above_path_match() {
                         decorators: vec![],
                     }],
                     imports: vec![],
+                    ..ParsedFile::default()
                 },
                 ParsedFile {
                     path: "pkg/SUPPORTS_ACTIVE_ACTIVE_helper.py".into(),
@@ -781,6 +786,7 @@ async fn search_symbols_ranks_capability_above_path_match() {
                         decorators: vec![],
                     }],
                     imports: vec![],
+                    ..ParsedFile::default()
                 },
             ],
         )
@@ -841,6 +847,7 @@ async fn search_symbols_returns_bounded_previews_not_full_source() {
                 }],
                 classes: vec![],
                 imports: vec![],
+                ..ParsedFile::default()
             }],
         )
         .await
@@ -1274,6 +1281,7 @@ async fn seed_hierarchy(client: &Arc<harvest_db::Db>) {
         functions: vec![],
         classes,
         imports: vec![],
+        ..ParsedFile::default()
     };
     let registered = &["registry.driver"];
     writer

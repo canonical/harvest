@@ -11,6 +11,8 @@ use crate::git::GitClient;
 use crate::graph::writer::{GraphWriter, IngestionStatus};
 use crate::parser::{ParserRegistry, PARSER_VERSION};
 
+const HISTORY_COMMITS: usize = 2_000;
+
 pub struct Pipeline {
     repositories: Vec<RepoConfig>,
     git: GitClient,
@@ -200,11 +202,34 @@ impl Pipeline {
                     .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("");
-                if let Some(parser) = parsers.get(ext) {
-                    let relative = file_path.strip_prefix(&repo_root).unwrap_or(file_path);
-                    match std::fs::read_to_string(file_path) {
-                        Ok(source) => out.push(parser.parse(&source, relative, &repo_clone, &tag_clone)),
-                        Err(e) => tracing::warn!(path = %file_path.display(), error = %e, "skipping unreadable file"),
+                let relative = file_path.strip_prefix(&repo_root).unwrap_or(file_path);
+                let parser = parsers.get(ext);
+                if parser.is_none() && !crate::units::is_unit_file(relative) {
+                    continue;
+                }
+                let source = match std::fs::read_to_string(file_path) {
+                    Ok(source) => source,
+                    Err(e) => {
+                        tracing::debug!(path = %file_path.display(), error = %e, "skipping unreadable file");
+                        continue;
+                    }
+                };
+                match parser {
+                    Some(parser) => {
+                        let mut parsed = parser.parse(&source, relative, &repo_clone, &tag_clone);
+                        crate::units::add_code_units(&mut parsed);
+                        out.push(parsed);
+                    }
+                    None => {
+                        let units = crate::units::file_units(relative, &source);
+                        if !units.is_empty() {
+                            out.push(crate::graph::model::ParsedFile {
+                                path: relative.to_string_lossy().replace('\\', "/"),
+                                language: "text".into(),
+                                units,
+                                ..Default::default()
+                            });
+                        }
                     }
                 }
             }
@@ -218,8 +243,15 @@ impl Pipeline {
             parsed_count
         ));
 
+        let history = match self.git.history(repo_path, tag, HISTORY_COMMITS) {
+            Ok(history) => history,
+            Err(e) => {
+                tracing::warn!(repo, tag, error = %e, "could not read git history; skipping co-change edges");
+                crate::git::History::default()
+            }
+        };
         self.writer
-            .write_version(&repo_owned, &tag_owned, &parsed)
+            .write_version_with_history(&repo_owned, &tag_owned, &parsed, &history)
             .await?;
         self.emit(format!(
             "Ref '{}' ingested successfully ({} files).",
