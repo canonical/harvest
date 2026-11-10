@@ -183,6 +183,7 @@ fn build_search(
     db: &Arc<Db>,
     llm: &Arc<dyn crate::llm::LlmProvider>,
     node_id: &str,
+    stored_embeddings: Option<Arc<dyn crate::agent::semantic::Embedder>>,
 ) -> Result<Option<Arc<crate::search::SearchService>>> {
     if config.engine == crate::config::SearchMode::Loop {
         return Ok(None);
@@ -196,11 +197,12 @@ fn build_search(
             cache_breakpoint_index: None,
         });
     let model = crate::search::llm_adapter::ProviderModel::new(Arc::clone(llm), selection);
-    let service = crate::search::wiring::build(
+    let service = crate::search::wiring::build_with_embeddings(
         config,
         Arc::clone(db),
         Some(model),
         crate::search::record::Recorder::new(Arc::clone(db), node_id),
+        stored_embeddings,
     )?;
     tracing::info!(mode = ?config.engine, "tiered code search enabled");
     Ok(Some(service))
@@ -447,7 +449,13 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     }
 
     graph_tools::set_run_sql_available(graph_tools::probe_run_sql(&db).await);
-    let search = build_search(&config.search, &db, &llm_provider, node.node_id())?;
+    let search = build_search(
+        &config.search,
+        &db,
+        &llm_provider,
+        node.node_id(),
+        semantic_handle.as_ref().and_then(|h| h.embedder.clone()),
+    )?;
     if let Some(service) = &search {
         crate::search::index_sync::spawn(
             Arc::clone(service),

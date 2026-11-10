@@ -455,7 +455,7 @@ impl CorpusSource for PgCorpus {
                         vectors[*unit as usize] = Some(vector);
                     }
                 }
-                if vectors.iter().all(Option::is_some) {
+                if vectors.iter().any(Option::is_some) {
                     corpus.vectors = Some(StoredVectors {
                         model: model.clone(),
                         vectors,

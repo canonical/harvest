@@ -39,6 +39,27 @@ fn load_json<T: DeserializeOwned + Default>(path: Option<&Path>, what: &str) -> 
         .with_context(|| format!("parsing the {what} file {}", path.display()))
 }
 
+pub struct StoredEmbedder {
+    inner: Arc<dyn crate::agent::semantic::Embedder>,
+}
+
+impl StoredEmbedder {
+    pub fn new(inner: Arc<dyn crate::agent::semantic::Embedder>) -> Arc<Self> {
+        Arc::new(Self { inner })
+    }
+}
+
+#[async_trait::async_trait]
+impl Embedder for StoredEmbedder {
+    fn model(&self) -> &str {
+        self.inner.model()
+    }
+
+    async fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+        self.inner.embed(texts).await
+    }
+}
+
 pub struct Parts {
     pub registry: Arc<IndexRegistry>,
     pub reranker: Arc<dyn Reranker>,
@@ -51,7 +72,15 @@ pub fn parts(
     source: Arc<dyn CorpusSource>,
     model: Option<Arc<dyn LanguageModel>>,
 ) -> Result<Parts> {
-    let embedder: Arc<dyn Embedder> = Arc::new(HashingEmbedder::default());
+    parts_with_embedder(config, source, model, Arc::new(HashingEmbedder::default()))
+}
+
+pub fn parts_with_embedder(
+    config: &SearchConfig,
+    source: Arc<dyn CorpusSource>,
+    model: Option<Arc<dyn LanguageModel>>,
+    embedder: Arc<dyn Embedder>,
+) -> Result<Parts> {
     let cache = config.cache_dir.as_ref().map(DiskCache::new);
     let reranker: LinearReranker = load_json(config.reranker.as_deref(), "reranker")?;
     Ok(Parts {
@@ -104,7 +133,25 @@ pub fn build(
     model: Option<Arc<dyn LanguageModel>>,
     recorder: Recorder,
 ) -> Result<Arc<SearchService>> {
-    let parts = parts(config, PgCorpus::new(Arc::clone(&db)), model)?;
+    build_with_embeddings(config, db, model, recorder, None)
+}
+
+pub fn build_with_embeddings(
+    config: &SearchConfig,
+    db: Arc<Db>,
+    model: Option<Arc<dyn LanguageModel>>,
+    recorder: Recorder,
+    stored: Option<Arc<dyn crate::agent::semantic::Embedder>>,
+) -> Result<Arc<SearchService>> {
+    let parts = match stored {
+        Some(embedder) => parts_with_embedder(
+            config,
+            PgCorpus::with_stored_embeddings(Arc::clone(&db), embedder.model()),
+            model,
+            StoredEmbedder::new(embedder),
+        )?,
+        None => parts(config, PgCorpus::new(Arc::clone(&db)), model)?,
+    };
     let engine: Arc<dyn SearchEngine> = Arc::new(WithFallback::new(
         tiered(config, &parts, false),
         PostgresEngine::new(db),
