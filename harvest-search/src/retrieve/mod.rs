@@ -156,6 +156,60 @@ impl Retriever for ExactRetriever {
     }
 }
 
+pub struct CacheRetriever {
+    pub min_overlap: f32,
+}
+
+impl Default for CacheRetriever {
+    fn default() -> Self {
+        Self { min_overlap: 0.7 }
+    }
+}
+
+impl Retriever for CacheRetriever {
+    fn source(&self) -> Source {
+        Source::Cache
+    }
+
+    fn retrieve(&self, index: &IndexSnapshot, input: &RetrievalInput<'_>, k: usize) -> Vec<Hit> {
+        let Some(cache) = &index.cache else {
+            return Vec::new();
+        };
+        let asked: Vec<&String> = input
+            .terms
+            .weighted()
+            .iter()
+            .filter(|(_, w)| *w >= 1.0)
+            .map(|(t, _)| t)
+            .collect();
+        if asked.is_empty() {
+            return Vec::new();
+        }
+        let query: Vec<(String, f32)> = asked.iter().map(|t| ((*t).clone(), 1.0)).collect();
+        let Some((best, _)) = cache.bm25.search(&query, 1).into_iter().next() else {
+            return Vec::new();
+        };
+        let cached: std::collections::HashSet<String> =
+            query_tokens(&cache.questions[best as usize])
+                .into_iter()
+                .collect();
+        let overlap =
+            asked.iter().filter(|t| cached.contains(**t)).count() as f32 / asked.len() as f32;
+        if overlap < self.min_overlap {
+            return Vec::new();
+        }
+        cache.units[best as usize]
+            .iter()
+            .take(k)
+            .map(|unit| Hit {
+                unit: *unit,
+                score: overlap,
+                source: Source::Cache,
+            })
+            .collect()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Candidate {
     pub unit: UnitId,
@@ -225,6 +279,47 @@ mod tests {
             .iter()
             .any(|(t, w)| t == "volume" && (*w - 1.0).abs() < 1e-6));
         assert!(terms.embedding_text().ends_with("VolumeAttachment"));
+    }
+
+    #[tokio::test]
+    async fn cached_evidence_answers_close_paraphrases_only() {
+        use crate::domain::Scope;
+        use crate::index::corpus::{CachedEvidence, Corpus, Unit};
+        use crate::index::vectors::HashingEmbedder;
+        let mut corpus = Corpus::new(Scope::new("r", "v"), "g");
+        for name in ["a", "b", "c"] {
+            corpus.push_unit(Unit {
+                name: name.into(),
+                ..Unit::default()
+            });
+        }
+        corpus.cached.push(CachedEvidence {
+            question: "Which volume drivers support multiattach?".into(),
+            units: vec![1, 2],
+        });
+        let index = IndexSnapshot::build(corpus, &HashingEmbedder::default())
+            .await
+            .unwrap();
+        let retrieve = |text: &str| {
+            let terms = Terms::from_question(text);
+            CacheRetriever::default()
+                .retrieve(
+                    &index,
+                    &RetrievalInput {
+                        terms: &terms,
+                        vector: None,
+                    },
+                    10,
+                )
+                .iter()
+                .map(|h| h.unit)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            retrieve("which drivers support multiattach for volumes"),
+            vec![1, 2]
+        );
+        assert!(retrieve("which drivers support uploads").is_empty());
     }
 
     #[test]

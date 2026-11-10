@@ -17,7 +17,7 @@ use harvest_search::index::vectors::{Embedder, HashingEmbedder};
 use harvest_search::index::IndexRegistry;
 use harvest_search::llm::LanguageModel;
 use harvest_search::retrieve::rerank::{LinearReranker, Reranker};
-use harvest_search::retrieve::{Bm25Retriever, DenseRetriever, ExactRetriever};
+use harvest_search::retrieve::{Bm25Retriever, CacheRetriever, DenseRetriever, ExactRetriever};
 use harvest_search::tiers::plan::Plan;
 use harvest_search::tiers::rounds::Rounds;
 use harvest_search::tiers::steps::Steps;
@@ -68,6 +68,7 @@ pub fn rounds(parts: &Parts) -> Rounds {
             Box::new(Bm25Retriever),
             Box::new(DenseRetriever),
             Box::new(ExactRetriever),
+            Box::new(CacheRetriever::default()),
         ],
         Arc::clone(&parts.reranker),
         Arc::clone(parts.registry.embedder()),

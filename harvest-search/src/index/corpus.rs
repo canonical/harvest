@@ -199,6 +199,12 @@ pub struct StoredVectors {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CachedEvidence {
+    pub question: String,
+    pub units: Vec<UnitId>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Corpus {
     pub scope: Scope,
     pub generation: String,
@@ -206,6 +212,8 @@ pub struct Corpus {
     pub edges: Vec<Edge>,
     #[serde(default)]
     pub vectors: Option<StoredVectors>,
+    #[serde(default)]
+    pub cached: Vec<CachedEvidence>,
 }
 
 impl Corpus {

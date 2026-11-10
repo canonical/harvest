@@ -10,6 +10,7 @@ fn weight(source: Source) -> f32 {
         Source::Exact => 1.5,
         Source::Lexical => 1.0,
         Source::Dense => 0.5,
+        Source::Cache => 1.2,
         _ => 1.0,
     }
 }

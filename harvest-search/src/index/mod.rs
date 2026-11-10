@@ -20,6 +20,34 @@ use vectors::{embedding_text, Embedder, VectorIndex};
 
 const EMBED_BATCH: usize = 256;
 
+pub struct CacheIndex {
+    pub bm25: Bm25Index,
+    pub questions: Vec<String>,
+    pub units: Vec<Vec<UnitId>>,
+}
+
+impl CacheIndex {
+    fn build(cached: &[corpus::CachedEvidence]) -> Option<Self> {
+        if cached.is_empty() {
+            return None;
+        }
+        let pseudo: Vec<Unit> = cached
+            .iter()
+            .enumerate()
+            .map(|(i, c)| Unit {
+                id: i as UnitId,
+                docstring: c.question.clone(),
+                ..Unit::default()
+            })
+            .collect();
+        Some(Self {
+            bm25: Bm25Index::build(&pseudo),
+            questions: cached.iter().map(|c| c.question.clone()).collect(),
+            units: cached.iter().map(|c| c.units.clone()).collect(),
+        })
+    }
+}
+
 pub struct IndexSnapshot {
     pub scope: Scope,
     pub generation: String,
@@ -28,6 +56,7 @@ pub struct IndexSnapshot {
     pub graph: CodeGraph,
     pub bm25: Bm25Index,
     pub vectors: VectorIndex,
+    pub cache: Option<CacheIndex>,
     names: HashMap<String, Vec<UnitId>>,
 }
 
@@ -58,6 +87,7 @@ impl IndexSnapshot {
             }
         }
         Ok(Self {
+            cache: CacheIndex::build(&corpus.cached),
             graph: CodeGraph::build(corpus.units.len(), &corpus.edges),
             bm25: Bm25Index::build(&corpus.units),
             scope: corpus.scope,
