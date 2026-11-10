@@ -10,7 +10,7 @@ use crate::index::IndexSnapshot;
 use crate::question::{Question, QuestionKind};
 use crate::retrieve::{sort_candidates, Candidate};
 
-pub const FEATURES: usize = 10;
+pub const FEATURES: usize = 12;
 
 pub const FEATURE_NAMES: [&str; FEATURES] = [
     "rrf",
@@ -23,6 +23,8 @@ pub const FEATURE_NAMES: [&str; FEATURES] = [
     "kind_prior",
     "is_test",
     "pinned",
+    "is_symbol",
+    "is_doc_like",
 ];
 
 fn overlap(vocabulary: &HashSet<String>, text: &str) -> f32 {
@@ -72,6 +74,11 @@ pub fn features(
         kind_prior(question.kind, unit.kind()),
         f32::from(u8::from(unit.is_test())),
         f32::from(u8::from(candidate.pinned)),
+        f32::from(u8::from(unit.kind().is_symbol())),
+        f32::from(u8::from(matches!(
+            unit.kind(),
+            UnitKind::Doc | UnitKind::Config | UnitKind::Module
+        ))),
     ]
 }
 
@@ -121,7 +128,7 @@ pub struct LinearReranker {
 impl Default for LinearReranker {
     fn default() -> Self {
         Self {
-            weights: vec![1.0, 0.8, 0.6, 1.2, 0.8, 1.0, 0.3, 0.3, -0.8, 3.0],
+            weights: vec![1.0, 0.8, 0.6, 1.2, 0.8, 1.0, 0.3, 0.3, -0.8, 3.0, 0.3, -0.2],
             bias: 0.0,
         }
     }
