@@ -185,10 +185,10 @@ fn content_hash(text: &str) -> String {
 async fn write_file(tx: &Tx, version_id: i64, file: &ParsedFile, history: &History) -> Result<()> {
     let rows = tx
         .query(
-            "INSERT INTO files (version_id, path, language) VALUES ($vid, $path, $lang)
-         ON CONFLICT (version_id, path) DO UPDATE SET language = EXCLUDED.language
+            "INSERT INTO files (version_id, path, language, origin) VALUES ($vid, $path, $lang, $origin)
+         ON CONFLICT (version_id, path) DO UPDATE SET language = EXCLUDED.language, origin = EXCLUDED.origin
          RETURNING id",
-            json!({ "vid": version_id, "path": file.path, "lang": file.language }),
+            json!({ "vid": version_id, "path": file.path, "lang": file.language, "origin": file.origin.as_str() }),
         )
         .await?;
     let file_id = rows
@@ -210,6 +210,7 @@ async fn write_file(tx: &Tx, version_id: i64, file: &ParsedFile, history: &Histo
                         "source":     f.source,
                         "impl_type":  f.impl_type,
                         "docstring":  f.docstring,
+                        "is_test":    f.is_test,
                     })
                 })
                 .collect(),
@@ -217,16 +218,16 @@ async fn write_file(tx: &Tx, version_id: i64, file: &ParsedFile, history: &Histo
         );
         tx.execute(
             "INSERT INTO symbols (file_id, version_id, label, name, kind, signature,
-                                  start_line, end_line, source, impl_type, docstring)
+                                  start_line, end_line, source, impl_type, docstring, is_test)
              SELECT $file_id, $vid, 'Function', f->>'name', f->>'kind', f->>'signature',
                     (f->>'start_line')::int, (f->>'end_line')::int, f->>'source', f->>'impl_type',
-                    f->>'docstring'
+                    f->>'docstring', coalesce((f->>'is_test')::boolean, false)
              FROM jsonb_array_elements($fns::jsonb) AS f
              ON CONFLICT (file_id, label, coalesce(impl_type, ''), name) DO UPDATE SET
                  kind = EXCLUDED.kind, signature = EXCLUDED.signature,
                  start_line = EXCLUDED.start_line, end_line = EXCLUDED.end_line,
                  source = EXCLUDED.source, impl_type = EXCLUDED.impl_type,
-                 docstring = EXCLUDED.docstring",
+                 docstring = EXCLUDED.docstring, is_test = EXCLUDED.is_test",
             json!({ "file_id": file_id, "vid": version_id, "fns": fns }),
         )
         .await?;
@@ -249,6 +250,7 @@ async fn write_file(tx: &Tx, version_id: i64, file: &ParsedFile, history: &Histo
                         "uses":       c.uses,
                         "docstring":  c.docstring,
                         "decorators": c.decorators,
+                        "is_test":    c.is_test,
                     })
                 })
                 .collect(),
@@ -256,7 +258,7 @@ async fn write_file(tx: &Tx, version_id: i64, file: &ParsedFile, history: &Histo
         );
         tx.execute(
             "INSERT INTO symbols (file_id, version_id, label, name, kind, start_line, end_line,
-                                  source, bases, traits, embeds, uses, docstring, decorators)
+                                  source, bases, traits, embeds, uses, docstring, decorators, is_test)
              SELECT $file_id, $vid, 'Class', c->>'name', c->>'kind',
                     (c->>'start_line')::int, (c->>'end_line')::int, c->>'source',
                     ARRAY(SELECT jsonb_array_elements_text(c->'bases')),
@@ -264,14 +266,16 @@ async fn write_file(tx: &Tx, version_id: i64, file: &ParsedFile, history: &Histo
                     ARRAY(SELECT jsonb_array_elements_text(c->'embeds')),
                     ARRAY(SELECT jsonb_array_elements_text(c->'uses')),
                     c->>'docstring',
-                    ARRAY(SELECT jsonb_array_elements_text(coalesce(c->'decorators', '[]'::jsonb)))
+                    ARRAY(SELECT jsonb_array_elements_text(coalesce(c->'decorators', '[]'::jsonb))),
+                    coalesce((c->>'is_test')::boolean, false)
              FROM jsonb_array_elements($classes::jsonb) AS c
              ON CONFLICT (file_id, label, coalesce(impl_type, ''), name) DO UPDATE SET
                  kind = EXCLUDED.kind, start_line = EXCLUDED.start_line,
                  end_line = EXCLUDED.end_line, source = EXCLUDED.source,
                  bases = EXCLUDED.bases, traits = EXCLUDED.traits,
                  embeds = EXCLUDED.embeds, uses = EXCLUDED.uses,
-                 docstring = EXCLUDED.docstring, decorators = EXCLUDED.decorators",
+                 docstring = EXCLUDED.docstring, decorators = EXCLUDED.decorators,
+                 is_test = EXCLUDED.is_test",
             json!({ "file_id": file_id, "vid": version_id, "classes": classes }),
         )
         .await?;

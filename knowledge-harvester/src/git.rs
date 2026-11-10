@@ -171,6 +171,8 @@ impl GitClient {
 pub struct History {
     pub co_changes: Vec<(String, String, u32)>,
     pub subjects: std::collections::HashMap<String, Vec<String>>,
+    pub files: std::collections::HashMap<String, crate::origin::FileHistory>,
+    pub total_commits: usize,
 }
 
 const MAX_FILES_PER_COMMIT: usize = 20;
@@ -188,6 +190,8 @@ impl GitClient {
         walk.set_sorting(git2::Sort::TIME)?;
         let mut pairs: HashMap<(String, String), u32> = HashMap::new();
         let mut subjects: HashMap<String, Vec<String>> = HashMap::new();
+        let mut file_stats: HashMap<String, crate::origin::FileHistory> = HashMap::new();
+        let mut total_commits = 0usize;
         for oid in walk.take(max_commits) {
             let commit = repo.find_commit(oid?)?;
             if commit.parent_count() != 1 {
@@ -208,10 +212,19 @@ impl GitClient {
                 .collect();
             files.sort();
             files.dedup();
+            total_commits += 1;
+            let subject = commit.summary().unwrap_or_default().to_string();
+            let sync = crate::origin::is_sync_subject(&subject);
+            for file in &files {
+                let stats = file_stats.entry(file.clone()).or_default();
+                stats.commits += 1;
+                if sync {
+                    stats.sync_commits += 1;
+                }
+            }
             if files.is_empty() || files.len() > MAX_FILES_PER_COMMIT {
                 continue;
             }
-            let subject = commit.summary().unwrap_or_default().to_string();
             for file in &files {
                 let list = subjects.entry(file.clone()).or_default();
                 if list.len() < SUBJECTS_PER_FILE && !subject.is_empty() {
@@ -243,6 +256,8 @@ impl GitClient {
         Ok(History {
             co_changes: frequent,
             subjects,
+            files: file_stats,
+            total_commits,
         })
     }
 }

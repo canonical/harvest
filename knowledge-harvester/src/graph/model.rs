@@ -29,7 +29,7 @@ pub struct CallRef {
     pub line: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FunctionNode {
     pub repo: String,
     pub version: String,
@@ -43,9 +43,13 @@ pub struct FunctionNode {
     pub impl_type: Option<String>,
     pub docstring: Option<String>,
     pub calls: Vec<CallRef>,
+    #[serde(default)]
+    pub is_test: bool,
+    #[serde(default)]
+    pub statement_lines: Vec<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClassNode {
     pub repo: String,
     pub version: String,
@@ -62,6 +66,8 @@ pub struct ClassNode {
     pub docstring: Option<String>,
     #[serde(default)]
     pub decorators: Vec<String>,
+    #[serde(default)]
+    pub is_test: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +83,7 @@ pub struct ImportNode {
 pub struct ParsedFile {
     pub path: String,
     pub language: String,
+    pub origin: crate::origin::Origin,
     pub functions: Vec<FunctionNode>,
     pub classes: Vec<ClassNode>,
     pub imports: Vec<ImportNode>,

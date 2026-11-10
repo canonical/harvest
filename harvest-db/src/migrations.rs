@@ -34,6 +34,10 @@ const MIGRATIONS: &[(i32, &str)] = &[
         17,
         include_str!("../migrations/0017_work_queue_enrichment_cache.sql"),
     ),
+    (
+        18,
+        include_str!("../migrations/0018_origin_and_calibration.sql"),
+    ),
 ];
 
 pub fn fingerprint() -> u64 {

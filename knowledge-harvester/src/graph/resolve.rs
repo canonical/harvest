@@ -50,18 +50,7 @@ pub struct ResolvedEdge {
 }
 
 pub fn is_test_path(path: &str) -> bool {
-    let p = path.to_ascii_lowercase();
-    p.starts_with("tests/")
-        || p.starts_with("test/")
-        || p.contains("/tests/")
-        || p.contains("/test/")
-        || p.contains("/testing/")
-        || p.rsplit('/').next().is_some_and(|f| {
-            f.starts_with("test_")
-                || f.contains("_test.")
-                || f.contains(".test.")
-                || f.contains(".spec.")
-        })
+    crate::origin::is_test_path(path)
 }
 
 fn last_segment(name: &str) -> &str {

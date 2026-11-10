@@ -188,12 +188,32 @@ impl Pipeline {
         let files = self.git.walk_source_files(repo_path)?;
         self.emit(format!("Found {} source files to parse.", files.len()));
 
+        let history = match self.git.history(repo_path, tag, HISTORY_COMMITS) {
+            Ok(history) => history,
+            Err(e) => {
+                tracing::warn!(repo, tag, error = %e, "could not read git history; skipping co-change edges");
+                crate::git::History::default()
+            }
+        };
+        let attribute_files: Vec<std::path::PathBuf> = files
+            .iter()
+            .filter(|f| f.file_name().is_some_and(|n| n == ".gitattributes"))
+            .cloned()
+            .collect();
+        let classifier = Arc::new(crate::origin::Classifier::load(
+            repo_path,
+            &attribute_files,
+            &history.files,
+            history.total_commits,
+        ));
+
         let parsers = Arc::clone(&self.parsers);
         let repo_owned = repo.to_owned();
         let tag_owned = tag.to_owned();
         let repo_clone = repo_owned.clone();
         let tag_clone = tag_owned.clone();
         let repo_root = repo_path.to_path_buf();
+        let classifier_for_parse = Arc::clone(&classifier);
 
         let parsed = tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
@@ -204,9 +224,6 @@ impl Pipeline {
                     .unwrap_or("");
                 let relative = file_path.strip_prefix(&repo_root).unwrap_or(file_path);
                 let parser = parsers.get(ext);
-                if parser.is_none() && !crate::units::is_unit_file(relative) {
-                    continue;
-                }
                 let source = match std::fs::read_to_string(file_path) {
                     Ok(source) => source,
                     Err(e) => {
@@ -214,23 +231,46 @@ impl Pipeline {
                         continue;
                     }
                 };
-                match parser {
+                let path = relative.to_string_lossy().replace('\\', "/");
+                let origin = classifier_for_parse.classify(&path, &source);
+                let parsed = match parser {
                     Some(parser) => {
                         let mut parsed = parser.parse(&source, relative, &repo_clone, &tag_clone);
-                        crate::units::add_code_units(&mut parsed);
-                        out.push(parsed);
-                    }
-                    None => {
-                        let units = crate::units::file_units(relative, &source);
-                        if !units.is_empty() {
-                            out.push(crate::graph::model::ParsedFile {
-                                path: relative.to_string_lossy().replace('\\', "/"),
-                                language: "text".into(),
-                                units,
-                                ..Default::default()
-                            });
+                        if parsed.functions.is_empty() && parsed.classes.is_empty() {
+                            parsed.units = crate::units::window_units(relative, &source);
+                        } else {
+                            crate::units::add_code_units(&mut parsed);
                         }
+                        Some(parsed)
                     }
+                    None if crate::units::is_unit_file(relative) => {
+                        let units = crate::units::file_units(relative, &source);
+                        (!units.is_empty()).then(|| crate::graph::model::ParsedFile {
+                            path: path.clone(),
+                            language: "text".into(),
+                            units,
+                            ..Default::default()
+                        })
+                    }
+                    None if crate::units::is_source_like(relative, &source)
+                        && matches!(origin, crate::origin::Origin::Source | crate::origin::Origin::Test) =>
+                    {
+                        Some(crate::graph::model::ParsedFile {
+                            path: path.clone(),
+                            language: ext.to_ascii_lowercase(),
+                            units: crate::units::window_units(relative, &source),
+                            ..Default::default()
+                        })
+                    }
+                    None => None,
+                };
+                if let Some(mut parsed) = parsed {
+                    parsed.origin = origin;
+                    if origin == crate::origin::Origin::Test {
+                        parsed.functions.iter_mut().for_each(|f| f.is_test = true);
+                        parsed.classes.iter_mut().for_each(|c| c.is_test = true);
+                    }
+                    out.push(parsed);
                 }
             }
             out
@@ -243,13 +283,6 @@ impl Pipeline {
             parsed_count
         ));
 
-        let history = match self.git.history(repo_path, tag, HISTORY_COMMITS) {
-            Ok(history) => history,
-            Err(e) => {
-                tracing::warn!(repo, tag, error = %e, "could not read git history; skipping co-change edges");
-                crate::git::History::default()
-            }
-        };
         self.writer
             .write_version_with_history(&repo_owned, &tag_owned, &parsed, &history)
             .await?;

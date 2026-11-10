@@ -94,6 +94,7 @@ fn class(name: &str, file: &str, source: &str, bases: &[&str]) -> ClassNode {
         embeds: vec![],
         uses: vec![],
         docstring: None,
+        is_test: false,
         decorators: vec![],
     }
 }
@@ -111,6 +112,8 @@ fn function(name: &str, file: &str, source: &str, calls: &[&str]) -> FunctionNod
         source: source.into(),
         impl_type: None,
         docstring: None,
+        is_test: false,
+        statement_lines: Vec::new(),
         calls: calls
             .iter()
             .map(|c| CallRef {

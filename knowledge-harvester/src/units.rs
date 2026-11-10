@@ -265,12 +265,38 @@ fn chunk_boundaries(lines: &[&str]) -> Vec<usize> {
     boundaries
 }
 
+fn statement_boundaries(function: &FunctionNode, total: usize) -> Option<Vec<usize>> {
+    let starts: Vec<usize> = function
+        .statement_lines
+        .iter()
+        .filter(|l| **l > function.start_line)
+        .map(|l| (*l - function.start_line) as usize)
+        .filter(|l| *l < total)
+        .collect();
+    if starts.len() < 2 {
+        return None;
+    }
+    let mut boundaries = vec![1];
+    let mut last = 1;
+    for start in starts {
+        if start - last >= CHUNK_LINES {
+            boundaries.push(start);
+            last = start;
+        }
+    }
+    if boundaries.len() > 1 && total - last < CHUNK_LINES / 2 {
+        boundaries.pop();
+    }
+    Some(boundaries)
+}
+
 pub fn chunks(function: &FunctionNode) -> Vec<UnitNode> {
     let lines: Vec<&str> = function.source.lines().collect();
     if lines.len() < CHUNK_THRESHOLD_LINES {
         return Vec::new();
     }
-    let boundaries = chunk_boundaries(&lines);
+    let boundaries =
+        statement_boundaries(function, lines.len()).unwrap_or_else(|| chunk_boundaries(&lines));
     let qualified = match &function.impl_type {
         Some(owner) => format!("{owner}.{}", function.name),
         None => function.name.clone(),
@@ -300,6 +326,97 @@ pub fn chunks(function: &FunctionNode) -> Vec<UnitNode> {
             }
         })
         .collect()
+}
+
+const NOT_SOURCE_EXTENSIONS: &[&str] = &[
+    "txt",
+    "csv",
+    "tsv",
+    "log",
+    "lock",
+    "sum",
+    "map",
+    "svg",
+    "pem",
+    "crt",
+    "key",
+    "pub",
+    "asc",
+    "patch",
+    "diff",
+    "po",
+    "pot",
+    "mo",
+    "ipynb",
+    "snap",
+    "out",
+    "err",
+    "bak",
+    "orig",
+    "rej",
+    "license",
+    "gitignore",
+    "gitattributes",
+    "gitmodules",
+    "dockerignore",
+    "editorconfig",
+    "env",
+];
+const MAX_WINDOW_FILE_BYTES: usize = 512 * 1024;
+const WINDOW_LINES: usize = 60;
+const MAX_AVERAGE_LINE: usize = 240;
+
+pub fn is_source_like(path: &Path, source: &str) -> bool {
+    let Some(extension) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    let extension = extension.to_ascii_lowercase();
+    if NOT_SOURCE_EXTENSIONS.contains(&extension.as_str()) || is_unit_file(path) {
+        return false;
+    }
+    let lines = source.lines().count();
+    lines >= 3
+        && source.len() <= MAX_WINDOW_FILE_BYTES
+        && !source.contains('\0')
+        && source.len() / lines.max(1) <= MAX_AVERAGE_LINE
+}
+
+fn window_end(lines: &[&str], start: usize) -> usize {
+    let target = (start + WINDOW_LINES).min(lines.len());
+    if target == lines.len() {
+        return target;
+    }
+    let lower = start + WINDOW_LINES * 2 / 3;
+    (lower..target)
+        .rev()
+        .find(|i| lines[*i].trim().is_empty())
+        .map(|i| i + 1)
+        .unwrap_or(target)
+}
+
+pub fn window_units(path: &Path, source: &str) -> Vec<UnitNode> {
+    let lines: Vec<&str> = source.lines().collect();
+    let name = path.to_string_lossy().replace('\\', "/");
+    let mut units = Vec::new();
+    let mut start = 0;
+    while start < lines.len() {
+        let end = window_end(&lines, start);
+        let text = lines[start..end].join("\n");
+        if !text.trim().is_empty() {
+            units.push(UnitNode {
+                kind: "chunk".into(),
+                name: format!("{name} (lines {}-{})", start + 1, end),
+                start_line: start as u32 + 1,
+                end_line: end as u32,
+                text,
+                owner: None,
+                mentions: Vec::new(),
+                registers: Vec::new(),
+            });
+        }
+        start = end;
+    }
+    units
 }
 
 pub fn add_code_units(parsed: &mut ParsedFile) {
@@ -369,6 +486,8 @@ mod tests {
             source,
             impl_type: Some("Manager".into()),
             docstring: None,
+            is_test: false,
+            statement_lines: Vec::new(),
             calls: vec![],
         }
     }
@@ -408,6 +527,7 @@ mod tests {
                 embeds: vec![],
                 uses: vec![],
                 docstring: Some("Manages things.".into()),
+                is_test: false,
                 decorators: vec![],
             }],
             ..ParsedFile::default()
@@ -419,5 +539,45 @@ mod tests {
             .text
             .contains("class Manager(Base) Manages things."));
         assert!(skeleton.text.contains("    def run(self):"));
+    }
+
+    #[test]
+    fn long_functions_split_at_syntax_tree_statements() {
+        let mut function = function("load", 200);
+        function.statement_lines = (12..200).step_by(30).map(|l| l as u32).collect();
+        let parts = chunks(&function);
+        assert!(parts.len() >= 2);
+        assert!(
+            parts
+                .iter()
+                .skip(1)
+                .all(|p| function.statement_lines.contains(&p.start_line)),
+            "{:?}",
+            parts.iter().map(|p| p.start_line).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn unknown_source_files_become_line_windows() {
+        let source: String = (0..150)
+            .map(|i| {
+                if i % 25 == 0 {
+                    String::new()
+                } else {
+                    format!("line {i}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(is_source_like(Path::new("src/a.weird"), &source));
+        assert!(!is_source_like(Path::new("data/a.csv"), &source));
+        assert!(!is_source_like(Path::new("README.md"), &source));
+        let windows = window_units(Path::new("src/a.weird"), &source);
+        assert!(windows.len() >= 3);
+        assert_eq!(windows[0].start_line, 1);
+        assert!(windows
+            .windows(2)
+            .all(|w| w[1].start_line == w[0].end_line + 1));
+        assert_eq!(windows.last().unwrap().end_line, 150);
     }
 }
