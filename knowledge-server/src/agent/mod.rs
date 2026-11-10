@@ -1084,6 +1084,63 @@ impl Agent {
         }
     }
 
+    async fn tools_for_turn(
+        &self,
+        goal: &str,
+        tool_defs: &[ToolDefinition],
+    ) -> Vec<ToolDefinition> {
+        let Some(so) = &self.system_one else {
+            return tool_defs.to_vec();
+        };
+        let all_tool_names: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
+        match so.select_tools(goal, &all_tool_names).await {
+            Ok(selected) => tool_defs
+                .iter()
+                .filter(|t| selected.contains(&t.name) || t.name == "ask_user")
+                .cloned()
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "system-one tool selection failed — using full tool set");
+                tool_defs.to_vec()
+            }
+        }
+    }
+
+    async fn route_turn(&self, goal: &str, messages: &[Message]) -> Option<ProviderSelection> {
+        let so = self.system_one.as_ref()?;
+        let history_summary: String = messages
+            .iter()
+            .take(messages.len().saturating_sub(1))
+            .filter(|m| {
+                matches!(
+                    m.role,
+                    crate::llm::types::Role::User | crate::llm::types::Role::Assistant
+                )
+            })
+            .map(|m| match &m.content {
+                MessageContent::Text(t) => t.clone(),
+                MessageContent::Parts(_) => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        match so.route_model_enhanced(goal, &history_summary).await {
+            Ok((tier, confidence, _needs_deep)) if confidence >= self.fast_path_threshold => {
+                self.resolve_tier_selection(&tier)
+            }
+            Ok((_, low_conf, _)) => {
+                tracing::debug!(
+                    confidence = low_conf,
+                    "system-one model routing low confidence — using default"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "system-one model routing failed — using default provider");
+                None
+            }
+        }
+    }
+
     async fn run_loop(
         &self,
         mut messages: Vec<Message>,
@@ -1106,6 +1163,11 @@ impl Agent {
         let protected_prefix_len = messages.len();
         let goal = latest_user_text(&messages);
         let mut scored_tool_results: HashSet<u64> = HashSet::new();
+        let tools_for_turn = self.tools_for_turn(&goal, tool_defs).await;
+        let routed_selection = match selection {
+            Some(_) => None,
+            None => self.route_turn(&goal, &messages).await,
+        };
         loop {
             if event_sender.is_closed() {
                 tracing::info!(iterations, "turn abandoned: stopping the agent loop");
@@ -1181,59 +1243,9 @@ impl Agent {
                 sel.cache_breakpoint_index = Some(protected_prefix_len);
             }
 
-            let history_summary: String = messages
-                .iter()
-                .take(messages.len().saturating_sub(1))
-                .filter(|m| {
-                    matches!(
-                        m.role,
-                        crate::llm::types::Role::User | crate::llm::types::Role::Assistant
-                    )
-                })
-                .map(|m| match &m.content {
-                    MessageContent::Text(t) => t.clone(),
-                    MessageContent::Parts(_) => String::new(),
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            let tools_snapshot = if let Some(so) = &self.system_one {
-                let all_tool_names: Vec<String> =
-                    tool_defs.iter().map(|t| t.name.clone()).collect();
-                match so.select_tools(&goal, &all_tool_names).await {
-                    Ok(selected) => tool_defs
-                        .iter()
-                        .filter(|t| selected.contains(&t.name) || t.name == "ask_user")
-                        .cloned()
-                        .collect(),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "system-one tool selection failed — using full tool set");
-                        tool_defs.to_vec()
-                    }
-                }
-            } else {
-                tool_defs.to_vec()
-            };
-
-            if let Some(so) = &self.system_one {
-                if selection_owned.is_none() {
-                    match so.route_model_enhanced(&goal, &history_summary).await {
-                        Ok((tier, confidence, _needs_deep))
-                            if confidence >= self.fast_path_threshold =>
-                        {
-                            selection_owned = self.resolve_tier_selection(&tier);
-                        }
-                        Ok((_, low_conf, _)) => {
-                            tracing::debug!(
-                                confidence = low_conf,
-                                "system-one model routing low confidence — using default"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "system-one model routing failed — using default provider");
-                        }
-                    }
-                }
+            let tools_snapshot = tools_for_turn.clone();
+            if selection_owned.is_none() {
+                selection_owned = routed_selection.clone();
             }
 
             let permit = self.llm_concurrency.clone().acquire_owned().await;
@@ -1514,32 +1526,43 @@ impl Agent {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    let call_infos: Vec<(String, String)> = tool_calls
+                    let (side_effecting, read_only): (Vec<ToolCall>, Vec<ToolCall>) =
+                        tool_calls.into_iter().partition(|c| {
+                            tool_map
+                                .get(&c.name)
+                                .is_some_and(|t| t.requires_confirmation())
+                        });
+                    let call_infos: Vec<(String, String)> = side_effecting
                         .iter()
                         .map(|c| (c.name.clone(), c.input.to_string()))
                         .collect();
-                    match so.filter_tool_calls(&call_infos, &history_text).await {
-                        Ok(keep) => {
-                            let filtered: Vec<ToolCall> = tool_calls
-                                .into_iter()
-                                .zip(keep.iter())
-                                .filter(|(_, k)| **k)
-                                .map(|(c, _)| c)
-                                .collect();
-                            if filtered.len() < call_infos.len() {
-                                tracing::info!(
-                                    total = call_infos.len(),
-                                    kept = filtered.len(),
-                                    "system-one filtered unnecessary tool calls"
-                                );
+                    let kept = if call_infos.is_empty() {
+                        side_effecting
+                    } else {
+                        match so.filter_tool_calls(&call_infos, &history_text).await {
+                            Ok(keep) => {
+                                let filtered: Vec<ToolCall> = side_effecting
+                                    .into_iter()
+                                    .zip(keep.iter())
+                                    .filter(|(_, k)| **k)
+                                    .map(|(c, _)| c)
+                                    .collect();
+                                if filtered.len() < call_infos.len() {
+                                    tracing::info!(
+                                        total = call_infos.len(),
+                                        kept = filtered.len(),
+                                        "system-one filtered unnecessary tool calls"
+                                    );
+                                }
+                                filtered
                             }
-                            filtered
+                            Err(e) => {
+                                tracing::warn!(error = %e, "system-one tool call filtering failed — executing all");
+                                side_effecting
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "system-one tool call filtering failed — executing all");
-                            tool_calls
-                        }
-                    }
+                    };
+                    read_only.into_iter().chain(kept).collect()
                 }
             } else {
                 tool_calls
@@ -6167,6 +6190,56 @@ mod tests {
         Agent::new(llm, tools, max)
             .with_system_one(Some(so))
             .with_thresholds(0.7, 0.85, 0.4, 0.95, 2, 0.8, 5, 0.7)
+    }
+
+    #[tokio::test]
+    async fn system_one_routes_once_per_turn_and_skips_filtering_read_only_calls() {
+        let server = httpmock::prelude::MockServer::start();
+        let routing = server.mock(|when, then| {
+            when.method("POST").path("/").body_includes("model_tier");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": { "model_tier": { "type": "choice", "choice": "large", "confidence": 0.1 } },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let filtering = server.mock(|when, then| {
+            when.method("POST").path("/").body_includes("_necessary");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {},
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {},
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let so = mock_system_one_client(&server.base_url());
+        let llm = MockLlm::new(vec![
+            tool_call("t1"),
+            tool_call("t2"),
+            tool_call("t3"),
+            text("final answer"),
+        ]);
+        let agent = agent_with_system_one(
+            llm,
+            vec![
+                MockTool::new("t1", "r1"),
+                MockTool::new("t2", "r2"),
+                MockTool::new("t3", "r3"),
+            ],
+            10,
+            so,
+        );
+        let resp = agent.query("what is t1?", &[], &[], None).await.unwrap();
+        assert_eq!(resp.tool_calls_made, 3);
+        assert_eq!(routing.hits(), 1);
+        assert_eq!(filtering.hits(), 0);
     }
 
     #[tokio::test]
