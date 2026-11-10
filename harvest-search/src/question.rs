@@ -49,6 +49,10 @@ const HIERARCHY_CUES: &[&str] = &[
     "backends",
     "plugins",
     "providers",
+    "driver",
+    "backend",
+    "plugin",
+    "provider",
     "base class",
     "concrete",
 ];

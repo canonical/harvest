@@ -26,6 +26,12 @@ loop (`LegacyLoopEngine`), the tiered engine and the SQL fallback are measured t
    stop changing, then reranks and packs at most twelve pieces into the token budget: whole
    functions with the class they belong to and the one-line signatures of what they call, and
    large classes as a skeleton of member signatures. Pieces from the same file sit together.
+   List and caller questions get up to 32 shorter pieces instead. A list question about a family
+   of classes ("which drivers…") gets the complete family: the base class with the most members
+   related to the question, found among the top hits and among classes named after a word of
+   the question, is expanded into a table of every non-test subclass. When the question also asks
+   about a property ("…support active-active"), a class-level attribute of that base class whose
+   name matches the question is resolved for every member, including inherited values.
 2. **The gate** runs checks cheapest first and stops at the first that decides: symbols named in
    the question that are missing from the evidence, list and caller completeness against the
    graph, dangling references from the top evidence, a calibrated logistic score over retrieval
@@ -38,7 +44,9 @@ loop (`LegacyLoopEngine`), the tiered engine and the SQL fallback are measured t
 4. **Tier 3** uses the same steps one move at a time, up to `search.tier3_turns` model calls,
    with the executed history in each prompt.
 
-The deadline (`search.deadline_ms`) is checked before every escalation. A failing model ends
+The deadline (`search.deadline_ms`) is checked before every escalation and, in Tier 3, before
+every model call, using the duration of the previous call. Running out of time keeps the
+evidence gathered so far (`degraded = deadline_truncated`). A failing model ends
 the search with the evidence gathered so far (`degraded = model_unavailable`); a version whose
 index is not loaded yet is answered by the SQL fallback (`degraded = index_cold`) while the
 index builds in the background.
@@ -142,7 +150,10 @@ each ingested version once its content changes. It generates questions from the 
 symbol lookups, docstring descriptions, subclass lists, callers and call flows — trains the
 reranker on 70% of them, keeps the trained weights only if they do at least as well as the
 current ones on the other 30%, calibrates the gate, and stores the result. The new calibration
-changes the index generation, so every node picks it up on its next refresh.
+changes the index generation, so every node picks it up on its next refresh. Calibration runs on
+a blocking thread so it cannot delay cluster heartbeats, stops as soon as its lease is lost, uses
+fewer questions on versions above 20,000 units and gives up after three minutes. Index builds and
+the on-disk cache are also built off the async threads.
 
 ## High availability
 
