@@ -47,6 +47,27 @@ impl UnitKind {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Origin {
+    #[default]
+    Source,
+    Test,
+    Vendored,
+    Generated,
+}
+
+impl Origin {
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "test" => Self::Test,
+            "vendored" => Self::Vendored,
+            "generated" => Self::Generated,
+            _ => Self::Source,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Unit {
     pub id: UnitId,
@@ -66,6 +87,10 @@ pub struct Unit {
     pub language: String,
     #[serde(default)]
     pub summary: String,
+    #[serde(default)]
+    pub origin: Origin,
+    #[serde(default)]
+    pub test: bool,
 }
 
 impl Unit {
@@ -106,15 +131,15 @@ impl Unit {
     }
 
     pub fn is_test(&self) -> bool {
-        let file = self.file.to_ascii_lowercase();
-        file.contains("/tests/")
-            || file.starts_with("tests/")
-            || file.contains("/test/")
-            || file.contains("_test.")
-            || file.contains("/test_")
-            || file.starts_with("test_")
-            || file.contains(".spec.")
-            || file.contains(".test.")
+        self.test || self.origin == Origin::Test
+    }
+
+    pub fn is_vendored(&self) -> bool {
+        self.origin == Origin::Vendored
+    }
+
+    pub fn is_generated(&self) -> bool {
+        self.origin == Origin::Generated
     }
 }
 
@@ -214,6 +239,8 @@ pub struct Corpus {
     pub vectors: Option<StoredVectors>,
     #[serde(default)]
     pub cached: Vec<CachedEvidence>,
+    #[serde(default)]
+    pub calibration: Option<crate::calibration::Calibration>,
 }
 
 impl Corpus {

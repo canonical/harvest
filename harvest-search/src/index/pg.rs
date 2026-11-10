@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use crate::domain::{Scope, UnitId};
 use crate::index::corpus::{Corpus, CorpusSource, Relation, StoredVectors, Unit, UnitKind};
 
-pub const INDEX_SCHEMA: u32 = 1;
+pub const INDEX_SCHEMA: u32 = 2;
 
 const VERSION_SQL: &str = r#"
 SELECT v.id, v.parser_version,
@@ -43,7 +43,8 @@ SELECT s.id, s.label, s.name, coalesce(s.kind, '') AS kind, coalesce(s.signature
        coalesce(s.start_line, 0) AS start_line, coalesce(s.end_line, 0) AS end_line,
        coalesce(s.source, '') AS source, s.impl_type, coalesce(s.bases, '{}') AS bases,
        coalesce(s.traits, '{}') AS traits, coalesce(s.docstring, '') AS docstring,
-       coalesce(s.decorators, '{}') AS decorators, f.path, coalesce(f.language, '') AS language
+       coalesce(s.decorators, '{}') AS decorators, f.path, coalesce(f.language, '') AS language,
+       f.origin, s.is_test
 FROM symbols s
 JOIN files f ON f.id = s.file_id
 WHERE s.version_id = $vid
@@ -59,8 +60,9 @@ WHERE s.version_id = $vid
 
 const UNITS_SQL: &str = r#"
 SELECT u.id, u.kind, u.name, u.path, coalesce(u.language, '') AS language,
-       u.start_line, u.end_line, u.text, u.symbol_id
+       u.start_line, u.end_line, u.text, u.symbol_id, f.origin
 FROM code_units u
+JOIN files f ON f.id = u.file_id
 WHERE u.version_id = $vid AND (u.symbol_id IS NULL OR u.kind = 'chunk')
 ORDER BY u.id
 "#;
@@ -85,6 +87,11 @@ SELECT s.id, s.embedding::text AS embedding
 FROM symbols s
 WHERE s.version_id = $vid AND s.embedding IS NOT NULL AND s.embedding_model = $model
 "#;
+
+const CALIBRATION_COUNT_SQL: &str = "SELECT count(*) AS n, coalesce(max(extract(epoch FROM created_at))::bigint, 0) AS m FROM search_calibrations WHERE version_id = $vid";
+
+const CALIBRATION_SQL: &str =
+    "SELECT reranker, gate FROM search_calibrations WHERE version_id = $vid";
 
 const HAS_TABLE_SQL: &str = "SELECT to_regclass($name) IS NOT NULL AS present";
 
@@ -126,6 +133,7 @@ impl PgCorpus {
             ("code_units", UNIT_COUNT_SQL, "units"),
             ("symbol_enrichments", ENRICHMENT_COUNT_SQL, "enrichments"),
             ("evidence_cache", CACHE_COUNT_SQL, "cache"),
+            ("search_calibrations", CALIBRATION_COUNT_SQL, "calibration"),
         ] {
             let mut fingerprint = String::from("0");
             if self.present(HAS_TABLE_SQL, json!({ "name": table })).await {
@@ -154,7 +162,7 @@ impl PgCorpus {
 
 fn generation(row: &Value) -> String {
     format!(
-        "s{INDEX_SCHEMA}-v{}-p{}-n{}-m{}-e{}-u{}-x{}-c{}",
+        "s{INDEX_SCHEMA}-v{}-p{}-n{}-m{}-e{}-u{}-x{}-c{}-k{}",
         row["id"].as_i64().unwrap_or(0),
         row["parser_version"].as_i64().unwrap_or(0),
         row["symbols"].as_i64().unwrap_or(0),
@@ -163,6 +171,7 @@ fn generation(row: &Value) -> String {
         row["units"].as_str().unwrap_or("0"),
         row["enrichments"].as_str().unwrap_or("0"),
         row["cache"].as_str().unwrap_or("0"),
+        row["calibration"].as_str().unwrap_or("0"),
     )
 }
 
@@ -223,6 +232,8 @@ pub fn symbol_unit(row: &Value) -> Unit {
         bases,
         language: text(&row["language"]),
         summary: String::new(),
+        origin: super::corpus::Origin::parse(row["origin"].as_str().unwrap_or("source")),
+        test: row["is_test"].as_bool().unwrap_or(false),
     }
 }
 
@@ -317,6 +328,32 @@ impl CorpusSource for PgCorpus {
             .ok_or_else(|| anyhow::anyhow!("unknown version {scope:?}"))?;
         let vid = row["id"].as_i64().unwrap_or(0);
         let mut corpus = Corpus::new(scope.clone(), generation(&row));
+        if self
+            .present(HAS_TABLE_SQL, json!({ "name": "search_calibrations" }))
+            .await
+        {
+            if let Some(stored) = self
+                .db
+                .query(CALIBRATION_SQL, json!({ "vid": vid }))
+                .await?
+                .into_iter()
+                .next()
+            {
+                match (
+                    serde_json::from_value(stored["reranker"].clone()),
+                    serde_json::from_value(stored["gate"].clone()),
+                ) {
+                    (Ok(reranker), Ok(gate)) => {
+                        corpus.calibration =
+                            Some(crate::calibration::Calibration { reranker, gate });
+                    }
+                    _ => tracing::warn!(
+                        ?scope,
+                        "stored search calibration does not parse; using defaults"
+                    ),
+                }
+            }
+        }
         let mut by_symbol: HashMap<i64, UnitId> = HashMap::new();
         for symbol in self.db.query(SYMBOLS_SQL, json!({ "vid": vid })).await? {
             let unit = symbol_unit(&symbol);
@@ -379,10 +416,14 @@ impl CorpusSource for PgCorpus {
                     start_line: line(&row["start_line"]),
                     end_line: line(&row["end_line"]),
                     language: text(&row["language"]),
+                    origin: super::corpus::Origin::parse(
+                        row["origin"].as_str().unwrap_or("source"),
+                    ),
                     ..Unit::default()
                 });
                 if let Some(owner) = parent_symbol.and_then(|s| by_symbol.get(&s)) {
                     corpus.link(*owner, id, Relation::Contains);
+                    corpus.units[id as usize].test = corpus.units[*owner as usize].test;
                 }
                 by_unit.insert(row["id"].as_i64().unwrap_or(0), id);
             }

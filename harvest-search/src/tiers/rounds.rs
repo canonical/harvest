@@ -80,12 +80,24 @@ impl Tier for Rounds {
 impl Rounds {
     pub async fn gather(&self, ctx: &mut SearchContext) {
         let weights = ctx.question.edge_weights();
-        let pinned: Vec<Candidate> = ctx
+        let mut pinned: Vec<Candidate> = ctx
             .candidates
             .iter()
             .filter(|c| c.pinned)
             .cloned()
             .collect();
+        for unit in &ctx.named {
+            if !pinned.iter().any(|c| c.unit == *unit) {
+                pinned.push(Candidate {
+                    unit: *unit,
+                    score: 1.0,
+                    exact: true,
+                    pinned: true,
+                    sources: vec![crate::domain::Source::Exact],
+                    ..Candidate::default()
+                });
+            }
+        }
         let mut previous: Vec<u32> = Vec::new();
         for round in 0..self.max_rounds {
             let started = Instant::now();

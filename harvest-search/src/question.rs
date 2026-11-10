@@ -18,6 +18,8 @@ pub enum QuestionKind {
 pub struct Question {
     pub kind: QuestionKind,
     pub wants_list: bool,
+    #[serde(default)]
+    pub about_tests: bool,
     pub identifiers: Vec<String>,
     pub words: Vec<String>,
 }
@@ -81,6 +83,10 @@ const FLOW_CUES: &[&str] = &[
     "when ",
 ];
 
+const TEST_CUES: &[&str] = &[
+    " test", "tests", "testing", " spec", "fixture", "mock", "assert", "coverage",
+];
+
 fn mentions(text: &str, cues: &[&str]) -> bool {
     cues.iter().any(|cue| text.contains(cue))
 }
@@ -102,9 +108,11 @@ impl Question {
         } else {
             QuestionKind::Lookup
         };
+        let about_tests = mentions(&lower, TEST_CUES);
         Self {
             kind,
             wants_list,
+            about_tests,
             identifiers: identifiers(text),
             words: query_tokens(text),
         }
@@ -112,10 +120,12 @@ impl Question {
 
     pub fn vocabulary(&self) -> Vec<String> {
         let mut vocabulary = Vec::new();
-        let pieces = self
-            .identifiers
-            .iter()
-            .flat_map(|i| i.split('.').flat_map(split_identifier).collect::<Vec<_>>());
+        let pieces = self.identifiers.iter().flat_map(|i| {
+            crate::index::tokenizer::name_parts(i)
+                .iter()
+                .flat_map(|p| split_identifier(p))
+                .collect::<Vec<_>>()
+        });
         for word in self.words.iter().cloned().chain(pieces) {
             for form in [stem(&word), word] {
                 if form.len() >= 3 && !vocabulary.contains(&form) {
@@ -127,11 +137,13 @@ impl Question {
     }
 
     pub fn relatedness(&self, name: &str) -> usize {
+        let target = crate::index::tokenizer::name_key(name);
         if self.identifiers.iter().any(|i| {
-            i.eq_ignore_ascii_case(name)
-                || i.rsplit('.')
-                    .next()
-                    .is_some_and(|l| l.eq_ignore_ascii_case(name))
+            let key = crate::index::tokenizer::name_key(i);
+            key == target
+                || crate::index::tokenizer::name_parts(i)
+                    .last()
+                    .is_some_and(|l| *l == target)
         }) {
             return usize::MAX;
         }

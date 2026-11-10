@@ -3,60 +3,18 @@ use std::time::Duration;
 
 use anyhow::Result;
 use harvest_search::context::SearchContext;
-use harvest_search::gate::score::{sigmoid, CalibratedScore};
+use harvest_search::gate::score::CalibratedScore;
 use harvest_search::index::IndexRegistry;
-use harvest_search::retrieve::rerank::{feature_matrix, LinearReranker};
+use harvest_search::retrieve::rerank::feature_matrix;
 use harvest_search::tiers::rounds::Rounds;
 use harvest_search::{Deadline, EvidenceKey};
 
 use crate::gold::GoldQuery;
 use crate::metrics::quality::matches_key;
-use crate::metrics::stats::percentile;
 use crate::report::{QueryRecord, INSUFFICIENT_BELOW};
 use crate::run::query_for;
 
-const EPOCHS: usize = 400;
-const LEARNING_RATE: f32 = 0.1;
-const L2: f32 = 0.001;
-const MISSED_TARGET: f64 = 5.0;
-const STRUCTURAL_COVERAGE: f32 = 0.9;
-
-pub fn logistic(rows: &[Vec<f32>], labels: &[bool], balance: bool) -> (Vec<f32>, f32) {
-    let width = rows.first().map_or(0, Vec::len);
-    let mut weights = vec![0f32; width];
-    let mut bias = 0f32;
-    if rows.is_empty() {
-        return (weights, bias);
-    }
-    let positives = labels.iter().filter(|l| **l).count().max(1) as f32;
-    let negatives = labels.iter().filter(|l| !**l).count().max(1) as f32;
-    let (pos_weight, neg_weight) = if balance {
-        let total = positives + negatives;
-        (total / (2.0 * positives), total / (2.0 * negatives))
-    } else {
-        (1.0, 1.0)
-    };
-    let n = rows.len() as f32;
-    for _ in 0..EPOCHS {
-        let mut grad = vec![0f32; width];
-        let mut grad_bias = 0f32;
-        for (row, label) in rows.iter().zip(labels) {
-            let z = bias + row.iter().zip(&weights).map(|(x, w)| x * w).sum::<f32>();
-            let target = if *label { 1.0 } else { 0.0 };
-            let weight = if *label { pos_weight } else { neg_weight };
-            let error = (sigmoid(z) - target) * weight;
-            for (g, x) in grad.iter_mut().zip(row) {
-                *g += error * x;
-            }
-            grad_bias += error;
-        }
-        for (w, g) in weights.iter_mut().zip(&grad) {
-            *w -= LEARNING_RATE * (g / n + L2 * *w);
-        }
-        bias -= LEARNING_RATE * grad_bias / n;
-    }
-    (weights, bias)
-}
+pub use harvest_search::calibration::{logistic, train_reranker};
 
 pub fn calibrate_gate(records: &[QueryRecord]) -> Option<CalibratedScore> {
     let mut rows = Vec::new();
@@ -70,47 +28,13 @@ pub fn calibrate_gate(records: &[QueryRecord]) -> Option<CalibratedScore> {
         ) else {
             continue;
         };
-        let structurally_undecided = signals.dangling == 0
-            && signals
-                .list_coverage
-                .is_none_or(|c| c >= STRUCTURAL_COVERAGE);
-        if !structurally_undecided {
+        let Some(row) = harvest_search::calibration::gate_row(signals) else {
             continue;
-        }
-        rows.push(signals.features().to_vec());
+        };
+        rows.push(row);
         labels.push(recall >= INSUFFICIENT_BELOW);
     }
-    if !labels.iter().any(|l| *l) || !labels.iter().any(|l| !*l) {
-        return None;
-    }
-    let (weights, bias) = logistic(&rows, &labels, true);
-    let probability = |row: &Vec<f32>| {
-        f64::from(sigmoid(
-            bias + row.iter().zip(&weights).map(|(x, w)| x * w).sum::<f32>(),
-        ))
-    };
-    let insufficient: Vec<f64> = rows
-        .iter()
-        .zip(&labels)
-        .filter(|(_, l)| !**l)
-        .map(|(r, _)| probability(r))
-        .collect();
-    let sufficient: Vec<f64> = rows
-        .iter()
-        .zip(&labels)
-        .filter(|(_, l)| **l)
-        .map(|(r, _)| probability(r))
-        .collect();
-    let accept = (percentile(&insufficient, 100.0 - MISSED_TARGET) + 1e-4).min(0.999);
-    let reject = (percentile(&sufficient, MISSED_TARGET) - 1e-4)
-        .max(0.0)
-        .min(accept - 0.01);
-    Some(CalibratedScore {
-        weights,
-        bias,
-        accept: accept as f32,
-        reject: reject.max(0.0) as f32,
-    })
+    harvest_search::calibration::calibrate_gate(&rows, &labels)
 }
 
 pub async fn reranker_rows(
@@ -139,14 +63,10 @@ pub async fn reranker_rows(
     Ok((rows, labels))
 }
 
-pub fn train_reranker(rows: &[Vec<f32>], labels: &[bool]) -> LinearReranker {
-    let (weights, bias) = logistic(rows, labels, true);
-    LinearReranker { weights, bias }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use harvest_search::gate::score::sigmoid;
     use harvest_search::gate::signals::Signals;
 
     #[test]
