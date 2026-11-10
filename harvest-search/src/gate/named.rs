@@ -100,4 +100,40 @@ mod tests {
         let _: &Evidence = &ctx.evidence[0];
         assert_eq!(NamedSymbols.check(&ctx).await, Verdict::Undecided);
     }
+
+    #[tokio::test]
+    async fn plain_words_that_name_a_rare_symbol_count_as_named() {
+        let mut corpus = Corpus::new(Scope::new("r", "v"), "g");
+        let multadd = corpus.push_unit(Unit {
+            name: "multadd".into(),
+            qualified_name: "multadd".into(),
+            kind: Some(UnitKind::Function),
+            file: "src/jv_dtoa.c".into(),
+            ..Unit::default()
+        });
+        for file in ["a.c", "b.c", "c.c"] {
+            corpus.push_unit(Unit {
+                name: "parse".into(),
+                qualified_name: "parse".into(),
+                kind: Some(UnitKind::Function),
+                file: file.into(),
+                ..Unit::default()
+            });
+        }
+        let index = Arc::new(
+            IndexSnapshot::build(corpus, &HashingEmbedder::default())
+                .await
+                .unwrap(),
+        );
+        let query = Query::new(
+            "What happens when multadd is called during parse?",
+            Scope::new("r", "v"),
+        );
+        let ctx = SearchContext::new(
+            &query,
+            index,
+            Deadline::after(std::time::Duration::from_secs(5)),
+        );
+        assert_eq!(ctx.named, vec![multadd], "common names stay unpinned");
+    }
 }
