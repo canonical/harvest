@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use harvest_db::Db;
+use harvest_search::calibration::Calibration;
 use harvest_search::engine::{TieredEngine, WithFallback};
 use harvest_search::fallback::PostgresEngine;
 use harvest_search::gate::completeness::ListCompleteness;
@@ -85,6 +86,16 @@ pub fn parts_with_embedder(
     embedder: Arc<dyn Embedder>,
 ) -> Result<Parts> {
     let cache = config.cache_dir.as_ref().map(DiskCache::new);
+    let base = base_calibration(config)?;
+    Ok(Parts {
+        registry: IndexRegistry::new(source, embedder, cache),
+        reranker: harvest_search::calibration::ScopedReranker::new(Arc::new(base.reranker)),
+        gate: base.gate,
+        model,
+    })
+}
+
+pub fn base_calibration(config: &SearchConfig) -> Result<Calibration> {
     let defaults = harvest_search::calibration::defaults();
     let reranker: LinearReranker = match config.reranker.as_deref() {
         Some(path) => load_json(Some(path), "reranker")?,
@@ -94,15 +105,17 @@ pub fn parts_with_embedder(
         Some(path) => load_json(Some(path), "gate calibration")?,
         None => defaults.gate,
     };
-    Ok(Parts {
-        registry: IndexRegistry::new(source, embedder, cache),
-        reranker: harvest_search::calibration::ScopedReranker::new(Arc::new(reranker)),
-        gate,
-        model,
-    })
+    Ok(Calibration { reranker, gate })
 }
 
 pub fn rounds(parts: &Parts) -> Rounds {
+    rounds_with(
+        Arc::clone(&parts.reranker),
+        Arc::clone(parts.registry.embedder()),
+    )
+}
+
+pub fn rounds_with(reranker: Arc<dyn Reranker>, embedder: Arc<dyn Embedder>) -> Rounds {
     Rounds::new(
         vec![
             Box::new(Bm25Retriever),
@@ -110,8 +123,8 @@ pub fn rounds(parts: &Parts) -> Rounds {
             Box::new(ExactRetriever),
             Box::new(CacheRetriever::default()),
         ],
-        Arc::clone(&parts.reranker),
-        Arc::clone(parts.registry.embedder()),
+        reranker,
+        embedder,
     )
 }
 
@@ -223,6 +236,7 @@ pub fn build_with_embeddings(
         recorder,
         config: config.clone(),
         models,
+        calibration_base: base_calibration(config)?,
     }))
 }
 

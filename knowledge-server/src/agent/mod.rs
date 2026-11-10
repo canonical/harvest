@@ -285,6 +285,30 @@ pub struct ToolResumeResult {
     pub is_error: bool,
 }
 
+const PREFETCH_HEADER: &str = "Code search results for this question (already run; start from them and do not repeat this search):";
+
+const READ_BUDGET_SPENT: &str = "error: the follow-up reads for this question are used up. Answer now from the evidence you already have, and say what is still missing.";
+
+fn append_to_last_user_message(messages: &mut [Message], text: &str) {
+    let Some(last) = messages
+        .iter_mut()
+        .rev()
+        .find(|m| matches!(m.role, crate::llm::types::Role::User))
+    else {
+        return;
+    };
+    match &mut last.content {
+        MessageContent::Text(existing) => {
+            existing.push_str("\n\n");
+            existing.push_str(text);
+        }
+        MessageContent::Parts(parts) => parts.push(ContentPart::Text {
+            text: text.to_string(),
+            thought_signature: None,
+        }),
+    }
+}
+
 pub struct Agent {
     llm: Arc<dyn LlmProvider>,
     system_one: Option<Arc<SystemOneClient>>,
@@ -419,10 +443,11 @@ impl Agent {
             .any(|t| t.definition().name.starts_with("collocate_"));
         match &self.system_prompt_override {
             Some(prompt) => prompt.clone(),
-            None => prompt::with_tiered_search(
-                prompt::system_prompt(collocate_enabled),
-                self.uses_tiered_search(),
+            None if self.uses_tiered_search() => prompt::tiered_system_prompt(
+                collocate_enabled,
+                crate::llm::system_one::PromptSectionFlags::default(),
             ),
+            None => prompt::system_prompt(collocate_enabled),
         }
     }
 
@@ -440,17 +465,15 @@ impl Agent {
                 .select_prompt_sections(user_query, collocate_enabled)
                 .await
             {
-                Ok(flags) => prompt::with_tiered_search(
-                    prompt::system_prompt_with_sections(collocate_enabled, flags),
-                    tiered,
-                ),
+                Ok(flags) if tiered => prompt::tiered_system_prompt(collocate_enabled, flags),
+                Ok(flags) => prompt::system_prompt_with_sections(collocate_enabled, flags),
                 Err(e) => {
                     tracing::warn!(error = %e, "system-one prompt section selection failed — using full prompt");
-                    prompt::with_tiered_search(prompt::system_prompt(collocate_enabled), tiered)
+                    self.effective_system_prompt()
                 }
             }
         } else {
-            prompt::with_tiered_search(prompt::system_prompt(collocate_enabled), tiered)
+            self.effective_system_prompt()
         }
     }
 
@@ -1176,6 +1199,36 @@ impl Agent {
         let mut llm_call_count: usize = 0;
         let protected_prefix_len = messages.len();
         let goal = latest_user_text(&messages);
+        let mut prefetched = false;
+        if depth == 0 && iterations == 0 {
+            if let Some(tool) = tool_map.get("search_code") {
+                if let Some((input, result)) = tool.prefetch(&goal).await {
+                    let _ = event_sender
+                        .send(AgentEvent::ToolCall {
+                            name: "search_code".into(),
+                            input,
+                        })
+                        .await;
+                    let _ = event_sender
+                        .send(AgentEvent::ToolResult {
+                            name: "search_code".into(),
+                            preview: tool.preview(&result),
+                        })
+                        .await;
+                    append_to_last_user_message(
+                        &mut messages,
+                        &format!("{PREFETCH_HEADER}\n{}", cap_tool_result(result)),
+                    );
+                    prefetched = true;
+                }
+            }
+        }
+        let read_budget = tool_map
+            .values()
+            .filter_map(|t| t.read_budget())
+            .min()
+            .map(|b| b + usize::from(!prefetched));
+        let mut reads_used = 0usize;
         let mut scored_tool_results: HashSet<u64> = HashSet::new();
         let tools_for_turn = self.tools_for_turn(&goal, tool_defs).await;
         let routed_selection = match selection {
@@ -1664,12 +1717,14 @@ impl Agent {
                             llm_call_count,
                         );
                     }
-                    let results = join_all(
-                        automatic
-                            .iter()
-                            .map(|c| self.execute_tool_call(c, tool_map)),
-                    )
-                    .await;
+                    let results = self
+                        .execute_with_budget(
+                            automatic.iter().copied().collect(),
+                            tool_map,
+                            read_budget,
+                            &mut reads_used,
+                        )
+                        .await;
                     for (call, result) in automatic.iter().zip(results) {
                         let preview = tool_map
                             .get(call.name.as_str())
@@ -1765,12 +1820,14 @@ impl Agent {
                     llm_call_count,
                 );
             }
-            let results = join_all(
-                tool_calls
-                    .iter()
-                    .map(|c| self.execute_tool_call(c, tool_map)),
-            )
-            .await;
+            let results = self
+                .execute_with_budget(
+                    tool_calls.iter().collect(),
+                    tool_map,
+                    read_budget,
+                    &mut reads_used,
+                )
+                .await;
 
             for (call, result) in tool_calls.iter().zip(results) {
                 let preview = tool_map
@@ -2261,6 +2318,40 @@ impl Agent {
                 }
             }
         }
+    }
+
+    async fn execute_with_budget(
+        &self,
+        calls: Vec<&ToolCall>,
+        tool_map: &HashMap<String, &dyn Tool>,
+        budget: Option<usize>,
+        used: &mut usize,
+    ) -> Vec<String> {
+        let mut allowed = Vec::with_capacity(calls.len());
+        for call in &calls {
+            let reads = tool_map
+                .get(call.name.as_str())
+                .is_some_and(|t| t.reads_code());
+            let ok = match budget {
+                Some(limit) if reads => {
+                    let within = *used < limit;
+                    if within {
+                        *used += 1;
+                    }
+                    within
+                }
+                _ => true,
+            };
+            allowed.push(ok);
+        }
+        join_all(calls.iter().zip(allowed).map(|(call, ok)| async move {
+            if ok {
+                self.execute_tool_call(call, tool_map).await
+            } else {
+                READ_BUDGET_SPENT.to_string()
+            }
+        }))
+        .await
     }
 
     async fn execute_tool_call(
@@ -5143,11 +5234,16 @@ mod tests {
             vec![MockTool::new("read_sources", "x")],
             5,
         );
-        assert!(!plain.effective_system_prompt().contains("## Code search"));
-        let tiered = Agent::new(llm, vec![MockTool::new("search_code", "x")], 5);
-        assert!(tiered
+        assert!(!plain
             .effective_system_prompt()
-            .contains("call `search_code` once"));
+            .contains("## How to research"));
+        let tiered = Agent::new(llm, vec![MockTool::new("search_code", "x")], 5);
+        let prompt = tiered.effective_system_prompt();
+        assert!(prompt.contains("call `search_code` once"));
+        assert!(prompt.contains("## Citation Rules"));
+        assert!(!prompt.contains("find_subclasses"));
+        assert!(!prompt.contains("get_evidence_pack"));
+        assert!(!prompt.contains("Knowledge Graph Schema"));
     }
 
     #[tokio::test]
@@ -6659,6 +6755,96 @@ mod tests {
                 .iter()
                 .any(|r| r.contains("provide a complete answer")),
             "early synthesis must not fire before the capability gate is located"
+        );
+    }
+
+    struct ResearchTool {
+        name: &'static str,
+        budget: Option<usize>,
+        prefetch: Option<&'static str>,
+        executed: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for ResearchTool {
+        fn definition(&self) -> crate::llm::types::ToolDefinition {
+            crate::llm::types::ToolDefinition {
+                name: self.name.into(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            }
+        }
+        async fn execute(&self, _params: serde_json::Value) -> Result<String> {
+            self.executed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok("evidence".into())
+        }
+        fn reads_code(&self) -> bool {
+            true
+        }
+        fn read_budget(&self) -> Option<usize> {
+            self.budget
+        }
+        async fn prefetch(&self, _question: &str) -> Option<(serde_json::Value, String)> {
+            self.prefetch
+                .map(|text| (serde_json::json!({ "query": "q" }), text.to_string()))
+        }
+    }
+
+    fn research_tool(
+        budget: Option<usize>,
+        prefetch: Option<&'static str>,
+    ) -> (Box<ResearchTool>, Arc<std::sync::atomic::AtomicUsize>) {
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            Box::new(ResearchTool {
+                name: "search_code",
+                budget,
+                prefetch,
+                executed: Arc::clone(&executed),
+            }),
+            executed,
+        )
+    }
+
+    #[tokio::test]
+    async fn the_first_code_search_runs_before_the_model_and_rides_on_the_question() {
+        let llm = RecordingLlm::new(vec![text("answer")]);
+        let (tool, executed) = research_tool(Some(3), Some("EVIDENCE-FROM-PREFETCH"));
+        let agent = Agent::new(llm.clone(), vec![tool], 10);
+        let (tx, mut rx) = mpsc::channel(64);
+        agent
+            .query_streaming("How does Fence::commit work?", &[], &[], None, tx)
+            .await;
+        assert!(llm.requests()[0].contains("EVIDENCE-FROM-PREFETCH"));
+        assert!(llm.requests()[0].contains("How does Fence::commit work?"));
+        assert_eq!(executed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let mut saw_call = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, AgentEvent::ToolCall { ref name, .. } if name == "search_code") {
+                saw_call = true;
+            }
+        }
+        assert!(saw_call, "the prefetched search is shown as a tool call");
+    }
+
+    #[tokio::test]
+    async fn code_reads_beyond_the_follow_up_budget_are_refused() {
+        let llm = RecordingLlm::new(vec![
+            tool_call("search_code"),
+            tool_call("search_code"),
+            tool_call("search_code"),
+            tool_call("search_code"),
+            text("done"),
+        ]);
+        let (tool, executed) = research_tool(Some(1), None);
+        let agent = Agent::new(llm.clone(), vec![tool, MockTool::new("other", "fine")], 10);
+        let response = agent.query("q", &[], &[], None).await.unwrap();
+        assert_eq!(response.answer, "done");
+        assert_eq!(
+            executed.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one search plus one follow-up"
         );
     }
 

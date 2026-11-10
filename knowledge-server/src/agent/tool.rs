@@ -16,4 +16,13 @@ pub trait Tool: Send + Sync {
     fn requires_confirmation(&self) -> bool {
         false
     }
+    fn reads_code(&self) -> bool {
+        false
+    }
+    fn read_budget(&self) -> Option<usize> {
+        None
+    }
+    async fn prefetch(&self, _question: &str) -> Option<(Value, String)> {
+        None
+    }
 }

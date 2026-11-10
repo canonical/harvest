@@ -237,6 +237,29 @@ fn spawn_enrichment(
     tracing::info!("background enrichment enabled");
 }
 
+fn spawn_calibration(
+    db: &Arc<Db>,
+    service: &Arc<crate::search::SearchService>,
+    node: &Arc<crate::cluster::node::ClusterNode>,
+    leases: &Arc<dyn Leases>,
+    admission: &Arc<crate::turns::admission::TurnAdmission>,
+    config: &Config,
+    shutdown: Shutdown,
+) {
+    let job = crate::jobs::kinds::calibrate::CalibrateJob::new(Arc::clone(db), Arc::clone(service));
+    let busy_admission = Arc::clone(admission);
+    let busy_limit = (config.agent.max_active_turns / 2).max(1);
+    crate::jobs::JobRunner::new(
+        crate::jobs::queue::WorkQueue::new(Arc::clone(db)),
+        Arc::clone(leases),
+        Arc::clone(node),
+        vec![Arc::new(job)],
+        Arc::new(move || busy_admission.active() >= busy_limit),
+    )
+    .spawn(shutdown);
+    tracing::info!("per-repository search calibration enabled");
+}
+
 fn spawn_reaper(
     leases: Arc<dyn Leases>,
     db: Arc<Db>,
@@ -455,7 +478,12 @@ pub async fn start(config: Config) -> Result<RunningServer> {
             shutdown.clone(),
         );
     }
-    let global_tools = crate::api::code_tools(&db, semantic_handle.clone(), search.as_ref(), None);
+    let global_tools = crate::api::code_tools(
+        &db,
+        semantic_handle.clone(),
+        search.as_ref(),
+        crate::search::code_tool::SearchToolContext::default(),
+    );
     let thresholds = crate::api::Thresholds::from_system_one(config.system_one.as_ref());
 
     let agent = Arc::new(
@@ -536,6 +564,17 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         config.agent.max_active_turns,
         config.agent.max_active_turns_per_user,
     );
+    if let Some(service) = search.as_ref().filter(|_| config.search.calibrate) {
+        spawn_calibration(
+            &db,
+            service,
+            &node,
+            &leases,
+            &admission,
+            &config,
+            shutdown.clone(),
+        );
+    }
     if config.search.enrich && search.is_some() {
         spawn_enrichment(
             &config,

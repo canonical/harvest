@@ -14,7 +14,7 @@ use knowledge_server::agent::tool::Tool;
 use knowledge_server::config::{SearchConfig, SearchMode};
 use knowledge_server::llm::types::{LlmResponse, Message, ModelInfo, ToolDefinition, Usage};
 use knowledge_server::llm::LlmProvider;
-use knowledge_server::search::code_tool::SearchCodeTool;
+use knowledge_server::search::code_tool::{SearchCodeTool, SearchToolContext};
 use knowledge_server::search::record::Recorder;
 use knowledge_server::search::wiring;
 
@@ -197,7 +197,7 @@ async fn search_code_falls_back_while_cold_then_answers_from_the_index_and_recor
         Recorder::new(Arc::clone(&db), "node-a"),
     )
     .unwrap();
-    let tool = SearchCodeTool::new(Arc::clone(&service), None);
+    let tool = SearchCodeTool::new(Arc::clone(&service), SearchToolContext::default());
     let params = json!({
         "query": "What does attach_volume call?",
         "repo": "cinder",
@@ -255,7 +255,7 @@ async fn search_code_rejects_missing_scope() {
         Recorder::metrics_only(),
     )
     .unwrap();
-    let tool = SearchCodeTool::new(service, None);
+    let tool = SearchCodeTool::new(service, SearchToolContext::default());
     assert!(tool.execute(json!({"query": "x"})).await.is_err());
 }
 
@@ -289,7 +289,7 @@ async fn search_code_calls_the_model_of_the_asking_user_not_the_server() {
     let user = CountingLlm::answering(r#"{"sufficient": false, "steps": [], "done": true}"#);
     let tool = SearchCodeTool::new(
         Arc::clone(&service),
-        Some(Arc::clone(&user) as Arc<dyn LlmProvider>),
+        SearchToolContext::with_llm(Arc::clone(&user) as Arc<dyn LlmProvider>),
     );
     let answer = tool
         .execute(json!({
@@ -304,4 +304,70 @@ async fn search_code_calls_the_model_of_the_asking_user_not_the_server() {
         "the user's model was never called: {answer}"
     );
     assert_eq!(server.calls(), 0, "the server's model was called: {answer}");
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn focus_reads_prefetch_resolves_scope_and_traces_carry_the_conversation() {
+    let test_db = TestDb::new().await;
+    seed(&test_db.db).await;
+    test_db
+        .db
+        .execute("UPDATE versions SET ingested = true", json!({}))
+        .await
+        .unwrap();
+    let db = Arc::new(test_db.db.clone());
+    let config = SearchConfig {
+        engine: SearchMode::Tiered,
+        ..SearchConfig::default()
+    };
+    let service = wiring::build(
+        &config,
+        Arc::clone(&db),
+        None,
+        Recorder::new(Arc::clone(&db), "node-a"),
+    )
+    .unwrap();
+    warm(&service).await;
+    let tool = SearchCodeTool::new(
+        Arc::clone(&service),
+        SearchToolContext::default().in_conversation("conv-1"),
+    )
+    .with_db(Arc::clone(&db));
+
+    let focused = tool
+        .execute(json!({
+            "repo": "cinder",
+            "version": "v1",
+            "focus": ["attach_volume", "cinder/volume/drivers/lvm.py"],
+        }))
+        .await
+        .unwrap();
+    assert!(focused.contains("def attach_volume"), "{focused}");
+    assert!(focused.contains("class LVMVolumeDriver"), "{focused}");
+    assert!(
+        focused.contains("[cinder:v1:cinder/volume/manager.py:1-2]"),
+        "{focused}"
+    );
+
+    let (input, evidence) = tool
+        .prefetch("What does attach_volume call?")
+        .await
+        .expect("the only ingested repository is searched");
+    assert_eq!(input["repo"], "cinder");
+    assert_eq!(input["version"], "v1");
+    assert!(evidence.contains("initialize_connection"), "{evidence}");
+
+    let mut stored = Vec::new();
+    for _ in 0..100 {
+        stored = db
+            .query("SELECT conversation_id FROM search_traces", json!({}))
+            .await
+            .unwrap();
+        if !stored.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(stored[0]["conversation_id"], "conv-1");
 }

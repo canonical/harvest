@@ -206,6 +206,10 @@ impl Tool for ReadSourcesTool {
         read_sources_definition()
     }
 
+    fn reads_code(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, params: Value) -> Result<String> {
         let repo = params["repo"].as_str().unwrap_or("").trim().to_string();
         let version = params["version"].as_str().unwrap_or("").trim().to_string();
@@ -659,6 +663,10 @@ pub struct CompareSymbolAcrossVersionsTool(pub Arc<Db>);
 
 #[async_trait]
 impl Tool for CompareSymbolAcrossVersionsTool {
+    fn reads_code(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "compare_symbol_across_versions".into(),

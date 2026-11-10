@@ -1275,7 +1275,6 @@ fn py_decorated_class(
         uses: vec![],
         docstring: None,
         is_test: false,
-        is_test: false,
         decorators: decorators.iter().map(|d| d.to_string()).collect(),
     }
 }

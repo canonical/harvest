@@ -157,6 +157,15 @@ fn full(index: &IndexSnapshot, unit: &Unit, packed: &HashSet<UnitId>, max_chars:
     text
 }
 
+pub fn render_whole(index: &IndexSnapshot, unit: UnitId, max_chars: usize) -> String {
+    let unit = index.unit(unit);
+    if unit.kind() == UnitKind::Class && unit.body.len() > max_chars {
+        skeleton(index, unit)
+    } else {
+        full(index, unit, &HashSet::new(), max_chars)
+    }
+}
+
 fn overlaps(a: &Unit, b: &Unit) -> bool {
     a.file == b.file && a.start_line <= b.end_line && b.start_line <= a.end_line && a.end_line > 0
 }

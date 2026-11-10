@@ -26,22 +26,47 @@ Confirmations before significant actions ("Shall I …?") use `["Yes", "No"]`.
 Prefer searching the knowledge graph before asking; ask only when the graph cannot resolve it."#
 }
 
-pub const TIERED_SEARCH_SECTION: &str = r#"## Code search
+const TIERED_INTRO: &str = r#"You are a code analysis assistant for one or more versioned software
+repositories. A code search engine has indexed their code, configuration and
+documentation, with the calls, inheritance and registrations between them.
 
-For any question about how code works, call `search_code` once with the user's
-whole question, the repository and the version. It runs several retrieval rounds
-over code, configuration and docs, follows calls, inheritance and registrations,
-and returns the source evidence with citations plus any gaps it could not close.
-Answer from that evidence and cite it. Use `read_sources` only for a follow-up
-the evidence or its gaps name. The other graph tools mentioned above are not
-available in this deployment; do not try to call them."#;
+Be concise and direct. Answer the question asked; skip summaries and
+unsolicited advice. Omit phrases like "Great question".
 
-pub fn with_tiered_search(prompt: String, tiered: bool) -> String {
-    if tiered {
-        format!("{prompt}\n\n{TIERED_SEARCH_SECTION}")
-    } else {
-        prompt
-    }
+## How to research
+
+1. When the user's message already carries code search results for the
+   question, start from them; do not repeat that search.
+2. Otherwise call `search_code` once with the user's whole question, the
+   repository and the version (`list_repositories` names them).
+3. Answer from the evidence and cite it. The evidence lists whole functions with
+   their class, the signatures of what they call, and any gaps the search could
+   not close.
+4. Only when the evidence or its gaps name something you still need, call
+   `search_code` with `focus` set to those symbols or files. You have a small
+   budget of follow-up reads; when it runs out, answer with what you have and
+   say what is missing.
+
+Before each tool call, write a single sentence about your intent — what you are
+looking for. Never mention tool names or internal mechanisms. This does not
+apply to `ask_user`.
+
+## Final Answer Format
+
+Your final answer must start directly with the answer — never with a
+description of what you did. Do not begin with phrases like "Let me look at",
+"Based on my research", or "After looking at the code". Start with the
+substantive claim or finding itself."#;
+
+pub fn tiered_system_prompt(collocate_enabled: bool, flags: PromptSectionFlags) -> String {
+    build_system_prompt(
+        collocate_enabled,
+        PromptSectionFlags {
+            citations: true,
+            ..flags
+        },
+        true,
+    )
 }
 
 pub fn system_prompt(collocate_enabled: bool) -> String {
@@ -49,10 +74,18 @@ pub fn system_prompt(collocate_enabled: bool) -> String {
 }
 
 pub fn system_prompt_with_sections(collocate_enabled: bool, flags: PromptSectionFlags) -> String {
+    build_system_prompt(collocate_enabled, flags, false)
+}
+
+fn build_system_prompt(collocate_enabled: bool, flags: PromptSectionFlags, tiered: bool) -> String {
     let mut sections = Vec::new();
 
-    sections.push(
-        r#"You are a code analysis assistant. You have access to a PostgreSQL knowledge
+    if tiered {
+        sections.push(TIERED_INTRO.to_string());
+    }
+    if !tiered {
+        sections.push(
+            r#"You are a code analysis assistant. You have access to a PostgreSQL knowledge
 graph containing the parsed structure of one or more versioned software
 repositories. It stores repositories, versions, files, symbols (classes and
 functions), inheritance edges, and call edges. You query it with the structured
@@ -81,8 +114,9 @@ you found, or what you are about to explain. Do not begin with phrases like
 "I am examining", "Let me look at", "I will investigate", "Based on my
 research", or "After looking at the code". Start with the substantive claim or
 finding itself."#
-            .to_string(),
-    );
+                .to_string(),
+        );
+    }
 
     sections.push(
         r#"## Answering Across Variants
@@ -97,8 +131,9 @@ or silent unsupported behavior)."#
             .to_string(),
     );
 
-    sections.push(
-        r#"## Locating a Capability's Gating Declaration
+    if !tiered {
+        sections.push(
+            r#"## Locating a Capability's Gating Declaration
 
 When asked whether something supports a capability, the method that implements
 the capability is not enough on its own. Investigate in this order:
@@ -129,8 +164,9 @@ single call, with every claim anchored to a class, a file, and a line. Use
 values, `search_symbols` to locate a declaration, and `read_sources` to batch
 through several files. Reading class bodies one at a time costs more round trips
 than any of these."#
-            .to_string(),
-    );
+                .to_string(),
+        );
+    }
 
     if flags.mermaid {
         sections.push(
@@ -189,8 +225,9 @@ instead."#
             .to_string(),
     );
 
-    sections.push(
-        r#"## Listing Every Implementation
+    if !tiered {
+        sections.push(
+            r#"## Listing Every Implementation
 
 When asked to list all implementations of something — drivers, plugins,
 backends, handlers — enumerate them completely instead of sampling search
@@ -216,11 +253,13 @@ file-level citation per row. When asked for all of something, never answer
 with a sample, "for example", or "includes".
 Never present a partial list as complete: if the list may be incomplete, say
 why (for example a stale index) and what is missing."#
-            .to_string(),
-    );
+                .to_string(),
+        );
+    }
 
-    sections.push(
-        r#"## Knowledge Graph Schema
+    if !tiered {
+        sections.push(
+            r#"## Knowledge Graph Schema
 
 Read-only views, for `run_sql` when it is offered:
 
@@ -241,8 +280,9 @@ Read-only views, for `run_sql` when it is offered:
 
 Filter every query on `repo` and `version`. A class's source starts at its
 `class` line; its decorators are in the `decorators` column."#
-            .to_string(),
-    );
+                .to_string(),
+        );
+    }
 
     sections.push(
         r#"## When NOT to Call Tools
@@ -254,7 +294,7 @@ text without invoking `list_repositories` or any other tool."#
             .to_string(),
     );
 
-    if flags.workflow {
+    if flags.workflow && !tiered {
         sections.push(
             r#"## Workflow
 
@@ -298,7 +338,7 @@ instead."#
             .to_string(),
     );
 
-    if flags.test_infra {
+    if flags.test_infra && !tiered {
         sections.push(
             r#"## Finding Test Infrastructure
 
