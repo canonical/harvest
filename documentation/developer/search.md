@@ -32,6 +32,13 @@ loop (`LegacyLoopEngine`), the tiered engine and the SQL fallback are measured t
    the question, is expanded into a table of every non-test subclass. When the question also asks
    about a property ("…support active-active"), a class-level attribute of that base class whose
    name matches the question is resolved for every member, including inherited values.
+   Code and documentation are kept apart. Code (functions, classes, chunks, module outlines and
+   configuration) is the evidence. Documentation sections are never ranked against it: a matching
+   section is a signpost, followed to the code it names (identifiers, file paths and the
+   subcommands of commands such as `amafu install`), and that code joins the candidates. The
+   matching sections are listed in a separate, capped Documentation part of the result (at most
+   three items and 15% of the budget), each with the code it points to, so the agent can see where
+   the documentation led without treating it as fact.
 2. **The gate** runs checks cheapest first and stops at the first that decides: symbols named in
    the question that are missing from the evidence, list and caller completeness against the
    graph, dangling references from the top evidence, a calibrated logistic score over retrieval
@@ -128,6 +135,9 @@ model = "claude-haiku-5-5"
 * `loop` keeps today's agent loop and tools.
 * `shadow` keeps the loop for users, runs the tiered engine on the same question after each turn
   and records how much of the loop's cited evidence it found (`shadow_recall`).
+* `search_code` returns a Code part, which the answer must rest on, and a Documentation part
+  marked as not verified. The tiered prompt tells the agent to follow the code when the two
+  disagree, and to say so when only documentation matched.
 * `tiered` gives the agent `search_code`, `read_sources`, `compare_symbol_across_versions` and
   `list_repositories` with a prompt of its own. When the question names an ingested repository,
   or only one is ingested, the server runs the first search before the model's first call and
