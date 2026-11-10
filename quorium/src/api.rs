@@ -24,6 +24,7 @@ pub fn router(quorium: Arc<Quorium>) -> Router {
         .route("/internal/quorium/keepalive", post(keepalive))
         .route("/internal/quorium/write", post(write))
         .route("/internal/quorium/members", get(members))
+        .route("/internal/quorium/leases", get(leases))
         .route("/internal/quorium/servers", post(admit))
         .route("/internal/quorium/servers/:id", delete(remove))
         .route(
@@ -77,6 +78,16 @@ async fn members(State(q): Shared) -> Response {
     }
     match q.raft().ensure_linearizable().await {
         Ok(_) => Json(q.members()).into_response(),
+        Err(e) => failure(StatusCode::SERVICE_UNAVAILABLE, e),
+    }
+}
+
+async fn leases(State(q): Shared) -> Response {
+    if !q.is_leader() {
+        return failure(StatusCode::MISDIRECTED_REQUEST, "not the leader");
+    }
+    match q.raft().ensure_linearizable().await {
+        Ok(_) => Json(q.leases()).into_response(),
         Err(e) => failure(StatusCode::SERVICE_UNAVAILABLE, e),
     }
 }
