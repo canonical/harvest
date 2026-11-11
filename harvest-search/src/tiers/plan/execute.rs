@@ -476,7 +476,7 @@ impl<'a> Executor<'a> {
                     });
                 }
             }
-            if let Some(table) = &output.table {
+            if let Some(table) = output.table.as_ref().filter(|t| !t.text.is_empty()) {
                 executed.tables.push(table.clone());
             }
             outputs.push(output);
@@ -589,6 +589,19 @@ mod tests {
             .summary
             .contains("LVM inherits initialize_connection from VolumeDriver"));
         assert!(executed.candidates.iter().any(|c| c.unit == 3 && c.pinned));
+    }
+
+    #[tokio::test]
+    async fn steps_that_find_nothing_add_no_empty_table() {
+        let index = drivers().await;
+        let executed = Executor::new(&index, Source::Plan).run(
+            &[Step::Callers {
+                of: StepRef::Name("VolumeDriver".into()),
+            }],
+            &[],
+        );
+        assert!(executed.outputs[0].units.is_empty());
+        assert!(executed.tables.is_empty());
     }
 
     #[tokio::test]

@@ -28,6 +28,13 @@ pub struct CodeItem {
     pub truncated: bool,
     pub owner: Option<Location>,
     pub calls: Vec<Location>,
+    pub rows: Vec<TableRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TableRow {
+    pub symbol: Option<Location>,
+    pub detail: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -64,6 +71,36 @@ fn clip(text: &str, max: usize) -> (String, bool) {
         end -= 1;
     }
     (text[..end].to_string(), true)
+}
+
+fn table_row(line: &str) -> TableRow {
+    let symbol_end = line.find(" (").and_then(|open| {
+        let close = open + line[open..].find(')')?;
+        let (file, number) = line[open + 2..close].rsplit_once(':')?;
+        let symbol = Location {
+            name: line[..open].to_string(),
+            file: file.to_string(),
+            line: number.parse().ok()?,
+        };
+        Some((symbol, close + 1))
+    });
+    match symbol_end {
+        Some((symbol, end)) => TableRow {
+            symbol: Some(symbol),
+            detail: line[end..].trim_start_matches(':').trim().to_string(),
+        },
+        None => TableRow {
+            symbol: None,
+            detail: line.trim().to_string(),
+        },
+    }
+}
+
+fn table_rows(text: &str) -> Vec<TableRow> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(table_row)
+        .collect()
 }
 
 fn location(index: &IndexSnapshot, unit: UnitId) -> Location {
@@ -142,6 +179,7 @@ fn code_item(index: Option<&IndexSnapshot>, evidence: &Evidence) -> CodeItem {
                 truncated,
                 owner: owner_of(index, id),
                 calls: calls_of(index, id),
+                rows: Vec::new(),
             }
         }
         _ => {
@@ -161,6 +199,11 @@ fn code_item(index: Option<&IndexSnapshot>, evidence: &Evidence) -> CodeItem {
                 truncated,
                 owner: None,
                 calls: Vec::new(),
+                rows: if table {
+                    table_rows(&evidence.text)
+                } else {
+                    Vec::new()
+                },
             }
         }
     }
@@ -307,7 +350,7 @@ mod tests {
             label: "capability x".into(),
             start_line: 0,
             end_line: 0,
-            text: "MaasClient: x = True".into(),
+            text: "MaasClient (crates/installer/src/maas.rs:86): x = True\nunparsed row".into(),
             score: 1.0,
             found_by: Source::Plan,
             covers: Vec::new(),
@@ -359,7 +402,35 @@ mod tests {
             }]
         );
         assert_eq!(view.items[1].kind, "table");
+        assert_eq!(
+            view.items[1].rows,
+            vec![
+                TableRow {
+                    symbol: Some(Location {
+                        name: "MaasClient".into(),
+                        file: "crates/installer/src/maas.rs".into(),
+                        line: 86
+                    }),
+                    detail: "x = True".into()
+                },
+                TableRow {
+                    symbol: None,
+                    detail: "unparsed row".into()
+                }
+            ]
+        );
         assert_eq!(view.gaps, vec!["MaasClient.state is missing".to_string()]);
+    }
+
+    #[test]
+    fn table_rows_split_the_symbol_location_from_the_detail() {
+        let row = table_row("Base.run (src/base.py:12) extends Runner, Mixin");
+        assert_eq!(
+            row.symbol.map(|s| (s.name, s.file, s.line)),
+            Some(("Base.run".into(), "src/base.py".into(), 12))
+        );
+        assert_eq!(row.detail, "extends Runner, Mixin");
+        assert_eq!(table_row("Driver (a (b)) is odd").symbol, None);
     }
 
     #[tokio::test]
