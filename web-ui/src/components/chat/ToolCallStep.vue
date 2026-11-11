@@ -51,7 +51,11 @@
       </svg>
     </div>
 
-    <div v-if="hasDetail && open" class="tc-step__detail">
+    <div v-if="hasDetail && open && searchView" class="tc-step__detail tc-step__detail--explorer">
+      <CodeSearchExplorer :view="searchView" />
+    </div>
+
+    <div v-else-if="hasDetail && open" class="tc-step__detail">
       <span class="tc-step__tool-tag">{{ step.name }}</span>
 
       <div v-if="step.input" class="tc-step__detail-section">
@@ -69,7 +73,9 @@
 
 <script setup>
 import { ref, computed } from 'vue';
+import CodeSearchExplorer from './CodeSearchExplorer.vue';
 import { describeToolCall } from '../../lib/tool-render.js';
+import { isCodeSearchView } from '../../lib/code-search-view.js';
 import { renderJsonToHtml, renderPreviewToHtml } from '../../lib/format.js';
 
 const props = defineProps({
@@ -78,7 +84,9 @@ const props = defineProps({
 
 const open = ref(false);
 
-const hasDetail = computed(() => !!(props.step.input || props.step.preview));
+const searchView = computed(() => (isCodeSearchView(props.step.view) ? props.step.view : null));
+
+const hasDetail = computed(() => !!(props.step.input || props.step.preview || searchView.value));
 
 const label = computed(() =>
   props.step.description || describeToolCall(props.step.name, props.step.input ?? {})

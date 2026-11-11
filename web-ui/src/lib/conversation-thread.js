@@ -155,7 +155,7 @@ export function createConversationThreadState() {
     msg._gapFillContext = true;
   }
 
-  function completeToolCall(name, preview) {
+  function completeToolCall(name, preview, view = null) {
     const msg = lastAssistant();
     if (!msg) return;
     let marked = false;
@@ -163,6 +163,7 @@ export function createConversationThreadState() {
       if (item.type === 'tool_call' && !marked && item.name === name && item.status === 'running') {
         item.status  = 'done';
         item.preview = preview;
+        if (view) item.view = view;
         marked = true;
       }
     }

@@ -2,13 +2,42 @@ import { renderJsonToHtml, renderPreviewToHtml } from './format.js';
 import { escapeHtml as esc } from './utils.js';
 
 const KIND_PLURALS = { class: 'classes', function: 'functions' };
+const MAX_QUERY_CHARS = 60;
+const MAX_LISTED_TARGETS = 3;
+
+function truncate(text, max) {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function baseName(path) {
+  return String(path).split('/').pop();
+}
+
+function shortVersion(version) {
+  return version ? String(version).split('/').pop() : '';
+}
+
+function listOf(items) {
+  const shown = items.slice(0, MAX_LISTED_TARGETS);
+  const more = items.length - shown.length;
+  return more > 0 ? `${shown.join(', ')} and ${more} more` : shown.join(', ');
+}
+
+function describeCodeSearch(input) {
+  const focus = Array.isArray(input.focus) ? input.focus : [];
+  if (focus.length) return `Reading ${listOf(focus.map(baseName))}`;
+  const scope = [input.repo, shortVersion(input.version)].filter(Boolean).join(' ') || 'the code';
+  return input.query ? `Searching ${scope} for “${truncate(String(input.query).trim(), MAX_QUERY_CHARS)}”` : `Searching ${scope}`;
+}
 
 function decoratedSuffix(decorator) {
   return decorator ? ` decorated @${String(decorator).replace(/^@/, '')}` : '';
 }
 
-export function describeToolCall(name, input, { hostname } = {}) {
+export function describeToolCall(name, input = {}, { hostname } = {}) {
+  input = input ?? {};
   switch (name) {
+    case 'search_code':       return describeCodeSearch(input);
     case 'list_repositories': return 'Discovering available repositories';
     case 'list_agents':       return 'Checking connected agents';
     case 'list_skills':       return 'Listing available skills';

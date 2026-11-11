@@ -34,6 +34,13 @@
   --loading-dot-color:    #0066cc;
   --status-shimmer:       rgba(255, 255, 255, 0.9);
   --status-done:          #1a7f37;
+  --cs-doc:                #8a5a00;
+  --cs-doc-bg:             #fff6e0;
+  --cs-gap:                #b35900;
+  --cs-gap-bg:             #fff1e5;
+  --cs-kind-function:      #6b5bd2;
+  --cs-kind-class:         #1f8a5b;
+  --cs-kind-other:         #5f6b7a;
   --error-text:           #721c24;
 
   --theme-btn-bg:         #ffffff;
@@ -78,6 +85,13 @@
   --loading-dot-color:    #4d9fff;
   --status-shimmer:       rgba(255, 255, 255, 0.45);
   --status-done:          #4cc38a;
+  --cs-doc:                #e3b341;
+  --cs-doc-bg:             #2b2310;
+  --cs-gap:                #f0883e;
+  --cs-gap-bg:             #2d1d0f;
+  --cs-kind-function:      #a297ff;
+  --cs-kind-class:         #4cc38a;
+  --cs-kind-other:         #8b97a6;
   --error-text:           #f08080;
 
   --theme-btn-bg:         #252525;
@@ -141,6 +155,13 @@
     --loading-dot-color:    #4d9fff;
     --status-shimmer:       rgba(255, 255, 255, 0.45);
     --status-done:          #4cc38a;
+    --cs-doc:                #e3b341;
+    --cs-doc-bg:             #2b2310;
+    --cs-gap:                #f0883e;
+    --cs-gap-bg:             #2d1d0f;
+    --cs-kind-function:      #a297ff;
+    --cs-kind-class:         #4cc38a;
+    --cs-kind-other:         #8b97a6;
     --error-text:           #f08080;
 
     --theme-btn-bg:         #252525;
@@ -9621,4 +9642,340 @@ button.activity-line__row:hover .activity-line__steps {
 @keyframes pane-drop-zone-enter {
   from { background: rgba(0, 102, 204, 0.18); box-shadow: inset 0 0 0 0 var(--user-bubble-bg); }
   to   { background: rgba(0, 102, 204, 0.38); box-shadow: inset 0 0 0 2px var(--user-bubble-bg); }
+}
+
+.tc-step__detail--explorer {
+  padding: 0.5rem;
+  background: var(--bg-surface);
+}
+
+.cs {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.cs-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+
+.cs-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  background: var(--bg-page);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.cs-badge--unverified {
+  color: var(--cs-doc);
+  background: var(--cs-doc-bg);
+  border-color: transparent;
+}
+
+.cs-badge--gap {
+  color: var(--cs-gap);
+  background: var(--cs-gap-bg);
+  border-color: transparent;
+}
+
+.cs-panes {
+  display: grid;
+  grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
+  height: 24rem;
+  background: var(--bg-page);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.cs-side {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--border-subtle);
+}
+
+.cs-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.cs-tab {
+  flex: 1;
+  padding: 0.4rem 0.25rem;
+  font: inherit;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+
+.cs-tab[aria-selected="true"] {
+  color: var(--text-primary);
+  border-bottom-color: var(--loading-dot-color);
+}
+
+.cs-tab:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.cs-tab__count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.cs-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.25rem 0;
+}
+
+.cs-list:focus-visible,
+.cs-tab:focus-visible,
+.cs-chip:focus-visible,
+.cs-action:focus-visible,
+.cs-list__entry:focus-visible {
+  outline: 2px solid var(--loading-dot-color);
+  outline-offset: -2px;
+}
+
+.cs-list__file {
+  padding: 0.4rem 0.625rem 0.1rem;
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.cs-list__entry {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  width: 100%;
+  padding: 0.25rem 0.625rem;
+  font: inherit;
+  font-size: 0.76rem;
+  text-align: left;
+  color: var(--text-primary);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.cs-list__entry:hover {
+  background: var(--bg-surface-hover);
+}
+
+.cs-list__entry[aria-selected="true"] {
+  background: var(--citation-bg);
+}
+
+.cs-list__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+}
+
+.cs-list__gap {
+  margin: 0;
+  padding: 0.375rem 0.625rem;
+  font-size: 0.76rem;
+  color: var(--cs-gap);
+}
+
+.cs-kind {
+  flex-shrink: 0;
+  padding: 0.05rem 0.375rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #ffffff;
+  background: var(--cs-kind-other);
+  border-radius: 2px;
+}
+
+.cs-kind--small {
+  min-width: 1.1rem;
+  text-align: center;
+}
+
+.cs-kind--function,
+.cs-kind--method {
+  background: var(--cs-kind-function);
+}
+
+.cs-kind--class {
+  background: var(--cs-kind-class);
+}
+
+.cs-kind--doc {
+  background: var(--cs-doc);
+}
+
+.cs-main {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.625rem;
+}
+
+.cs-detail {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.cs-detail__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.cs-detail__name {
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.cs-detail__location {
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.cs-action {
+  margin-left: auto;
+  padding: 0;
+  font: inherit;
+  font-size: 0.74rem;
+  color: var(--loading-dot-color);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.cs-action:hover {
+  text-decoration: underline;
+}
+
+.cs-code {
+  margin: 0;
+  padding: 0.5rem 0;
+  overflow-x: auto;
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+  font-size: 0.76rem;
+  line-height: 1.55;
+  color: var(--text-code);
+  background: var(--bg-code);
+  border-radius: 2px;
+}
+
+.cs-code__line {
+  display: block;
+  padding-right: 0.75rem;
+  white-space: pre;
+}
+
+.cs-code__line::before {
+  content: attr(data-line);
+  display: inline-block;
+  width: 3.5em;
+  padding-right: 0.75rem;
+  text-align: right;
+  color: #6b7280;
+  user-select: none;
+}
+
+.cs-code--plain .cs-code__line::before {
+  width: 0.75rem;
+  padding-right: 0;
+}
+
+.cs-note {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.cs-excerpt {
+  padding: 0.5rem 0.625rem;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  background: var(--cs-doc-bg);
+  border-left: 2px solid var(--cs-doc);
+  border-radius: 2px;
+}
+
+.cs-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.74rem;
+}
+
+.cs-links__label,
+.cs-links__empty {
+  color: var(--text-muted);
+}
+
+.cs-chip {
+  padding: 0.05rem 0.5rem;
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+  font-size: 0.72rem;
+  color: var(--loading-dot-color);
+  background: var(--bg-page);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.cs-chip:hover {
+  border-color: var(--loading-dot-color);
+}
+
+.cs-chip--outside {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.cs-chip--outside:hover {
+  border-color: var(--border-subtle);
+}
+
+@media (max-width: 640px) {
+  .cs-panes {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 11rem minmax(0, 1fr);
+    height: 32rem;
+  }
+
+  .cs-side {
+    border-right: none;
+    border-bottom: 1px solid var(--border-subtle);
+  }
 }

@@ -615,7 +615,7 @@ function handleChatEvent(event) {
     case 'thinking_delta': chat.addThinkingDelta(event.text); break;
     case 'text_delta':     chat.addTextDelta(event.text); break;
     case 'tool_call':      chat.addToolCall(event.name, event.input, event.description ?? describeToolCall(event.name, event.input ?? {}, { hostname: event.hostname })); break;
-    case 'tool_result':    chat.completeToolCall(event.name, event.preview); break;
+    case 'tool_result':    chat.completeToolCall(event.name, event.preview, event.view); break;
     case 'question':       chat.setQuestion(event.question, event.choices); break;
     case 'confirm_action': chat.addConfirmAction(event.id, event.name, event.input, event.description); break;
     case 'intent':         chat.setIntent(event.mode); break;

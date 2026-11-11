@@ -85,6 +85,14 @@ describe('useAgentStream — chain building', () => {
     expect(s.chain.value[0]).toMatchObject({ status: 'done', preview: 'ok' });
   });
 
+  it('keeps the structured view of a tool result', () => {
+    const s = useAgentStream();
+    const view = { kind: 'code_search', items: [], documentation: [], gaps: [] };
+    s.handleEvent({ type: 'tool_call', name: 'search_code', input: {} });
+    s.handleEvent({ type: 'tool_result', name: 'search_code', preview: 'text', view });
+    expect(s.chain.value[0].view).toEqual(view);
+  });
+
   it('counts tool calls made so far', () => {
     const s = useAgentStream();
     s.handleEvent({ type: 'tool_call', name: 'a', input: {} });
