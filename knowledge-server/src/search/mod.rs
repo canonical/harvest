@@ -4,6 +4,7 @@ pub mod legacy_engine;
 pub mod llm_adapter;
 pub mod record;
 pub mod shadow;
+pub mod view;
 pub mod wiring;
 
 use std::sync::Arc;

@@ -1115,6 +1115,7 @@ mod in_flight_tests {
             &AgentEvent::ToolResult {
                 name: "t1".into(),
                 preview: "r1".into(),
+                view: None,
             },
             None,
             None,
@@ -1139,6 +1140,7 @@ mod in_flight_tests {
             &AgentEvent::ToolResult {
                 name: "t2".into(),
                 preview: "r2".into(),
+                view: None,
             },
             None,
             None,
@@ -1376,6 +1378,7 @@ mod drive_turn_broadcast_tests {
             .send(AgentEvent::ToolResult {
                 name: "t1".into(),
                 preview: "r1".into(),
+                view: None,
             })
             .await
             .unwrap();

@@ -31,7 +31,7 @@ use crate::llm::{
     },
     LlmProvider,
 };
-use tool::Tool;
+use tool::{Tool, ToolOutput};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
@@ -185,6 +185,7 @@ pub enum AgentEvent {
     ToolResult {
         name: String,
         preview: String,
+        view: Option<serde_json::Value>,
     },
     Done {
         answer: String,
@@ -323,6 +324,54 @@ fn earlier_conversation_text(messages: &[Message]) -> String {
 }
 
 const READ_BUDGET_SPENT: &str = "error: the follow-up reads for this question are used up. Answer now from the evidence you already have, and say what is still missing.";
+
+async fn record_tool_result(
+    call: &ToolCall,
+    result: ToolOutput,
+    tool_map: &HashMap<String, &dyn Tool>,
+    event_sender: &mpsc::Sender<AgentEvent>,
+    messages: &mut Vec<Message>,
+) {
+    let failed = result.is_error();
+    let preview = tool_map
+        .get(call.name.as_str())
+        .map(|t| t.preview(&result.text))
+        .unwrap_or_else(|| {
+            result
+                .text
+                .chars()
+                .take(tool::DEFAULT_PREVIEW_CHARS)
+                .collect()
+        });
+    let _ = event_sender
+        .send(AgentEvent::ToolResult {
+            name: call.name.clone(),
+            preview,
+            view: result.view,
+        })
+        .await;
+    if is_enumeration_call(&call.name, &call.input) && !failed {
+        let _ = event_sender
+            .send(AgentEvent::Enumeration {
+                tool: call.name.clone(),
+                input: call.input.clone(),
+                result: result
+                    .text
+                    .chars()
+                    .take(ENUMERATION_RESULT_MAX_CHARS)
+                    .collect(),
+            })
+            .await;
+    }
+    messages.push(Message {
+        role: crate::llm::types::Role::User,
+        content: MessageContent::Parts(vec![ContentPart::ToolResult {
+            tool_use_id: call.id.clone(),
+            content: cap_tool_result(result.text),
+            is_error: false,
+        }]),
+    });
+}
 
 fn append_to_last_user_message(messages: &mut [Message], text: &str) {
     let Some(last) = messages
@@ -1252,12 +1301,13 @@ impl Agent {
                     let _ = event_sender
                         .send(AgentEvent::ToolResult {
                             name: "search_code".into(),
-                            preview: tool.preview(&result),
+                            preview: tool.preview(&result.text),
+                            view: result.view,
                         })
                         .await;
                     append_to_last_user_message(
                         &mut messages,
-                        &format!("{PREFETCH_HEADER}\n{}", cap_tool_result(result)),
+                        &format!("{PREFETCH_HEADER}\n{}", cap_tool_result(result.text)),
                     );
                     prefetched = true;
                 }
@@ -1766,40 +1816,8 @@ impl Agent {
                         )
                         .await;
                     for (call, result) in automatic.iter().zip(results) {
-                        let preview = tool_map
-                            .get(call.name.as_str())
-                            .map(|t| t.preview(&result))
-                            .unwrap_or_else(|| {
-                                result.chars().take(tool::DEFAULT_PREVIEW_CHARS).collect()
-                            });
-                        let _ = event_sender
-                            .send(AgentEvent::ToolResult {
-                                name: call.name.clone(),
-                                preview,
-                            })
+                        record_tool_result(call, result, tool_map, event_sender, &mut messages)
                             .await;
-                        if is_enumeration_call(&call.name, &call.input)
-                            && !result.starts_with("error:")
-                        {
-                            let _ = event_sender
-                                .send(AgentEvent::Enumeration {
-                                    tool: call.name.clone(),
-                                    input: call.input.clone(),
-                                    result: result
-                                        .chars()
-                                        .take(ENUMERATION_RESULT_MAX_CHARS)
-                                        .collect(),
-                                })
-                                .await;
-                        }
-                        messages.push(Message {
-                            role: crate::llm::types::Role::User,
-                            content: MessageContent::Parts(vec![ContentPart::ToolResult {
-                                tool_use_id: call.id.clone(),
-                                content: cap_tool_result(result),
-                                is_error: false,
-                            }]),
-                        });
                     }
                 }
 
@@ -1870,33 +1888,7 @@ impl Agent {
                 .await;
 
             for (call, result) in tool_calls.iter().zip(results) {
-                let preview = tool_map
-                    .get(call.name.as_str())
-                    .map(|t| t.preview(&result))
-                    .unwrap_or_else(|| result.chars().take(tool::DEFAULT_PREVIEW_CHARS).collect());
-                let _ = event_sender
-                    .send(AgentEvent::ToolResult {
-                        name: call.name.clone(),
-                        preview,
-                    })
-                    .await;
-                if is_enumeration_call(&call.name, &call.input) && !result.starts_with("error:") {
-                    let _ = event_sender
-                        .send(AgentEvent::Enumeration {
-                            tool: call.name.clone(),
-                            input: call.input.clone(),
-                            result: result.chars().take(ENUMERATION_RESULT_MAX_CHARS).collect(),
-                        })
-                        .await;
-                }
-                messages.push(Message {
-                    role: crate::llm::types::Role::User,
-                    content: MessageContent::Parts(vec![ContentPart::ToolResult {
-                        tool_use_id: call.id.clone(),
-                        content: cap_tool_result(result),
-                        is_error: false,
-                    }]),
-                });
+                record_tool_result(call, result, tool_map, event_sender, &mut messages).await;
             }
             if nudge_after_results {
                 append_to_last_tool_result(&mut messages, SEARCH_NUDGE);
@@ -2366,7 +2358,7 @@ impl Agent {
         tool_map: &HashMap<String, &dyn Tool>,
         budget: Option<usize>,
         used: &mut usize,
-    ) -> Vec<String> {
+    ) -> Vec<ToolOutput> {
         let mut allowed = Vec::with_capacity(calls.len());
         for call in &calls {
             let reads = tool_map
@@ -2398,12 +2390,12 @@ impl Agent {
             if ok {
                 self.execute_tool_call(call, tool_map).await
             } else {
-                READ_BUDGET_SPENT.to_string()
+                ToolOutput::text(READ_BUDGET_SPENT)
             }
         }))
         .await;
         for (result, counted) in results.iter().zip(counted) {
-            if counted && result.starts_with("error:") {
+            if counted && result.is_error() {
                 *used = used.saturating_sub(1);
             }
         }
@@ -2414,15 +2406,15 @@ impl Agent {
         &self,
         call: &ToolCall,
         tool_map: &HashMap<String, &dyn Tool>,
-    ) -> String {
+    ) -> ToolOutput {
         tracing::info!(tool = call.name, "executing tool call");
         match tool_map.get(call.name.as_str()) {
-            None => format!("error: unknown tool '{}'", call.name),
-            Some(tool) => match tool.execute(call.input.clone()).await {
+            None => ToolOutput::text(format!("error: unknown tool '{}'", call.name)),
+            Some(tool) => match tool.run(call.input.clone()).await {
                 Ok(output) => output,
                 Err(e) => {
                     tracing::error!(tool = call.name, error = %e, "tool execution failed");
-                    format!("error: {e}")
+                    ToolOutput::text(format!("error: {e}"))
                 }
             },
         }
@@ -6847,9 +6839,9 @@ mod tests {
             &self,
             _question: &str,
             _earlier: &str,
-        ) -> Option<(serde_json::Value, String)> {
+        ) -> Option<(serde_json::Value, ToolOutput)> {
             self.prefetch
-                .map(|text| (serde_json::json!({ "query": "q" }), text.to_string()))
+                .map(|text| (serde_json::json!({ "query": "q" }), ToolOutput::text(text)))
         }
     }
 

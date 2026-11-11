@@ -343,6 +343,18 @@ async fn focus_reads_prefetch_resolves_scope_and_traces_carry_the_conversation()
         }))
         .await
         .unwrap();
+    let focused_view = tool
+        .run(json!({
+            "repo": "cinder",
+            "version": "v1",
+            "focus": ["attach_volume"],
+        }))
+        .await
+        .unwrap()
+        .view
+        .expect("focused reads carry a view");
+    assert_eq!(focused_view["focus"][0], "attach_volume");
+    assert_eq!(focused_view["items"][0]["name"], "attach_volume");
     assert!(focused.contains("def attach_volume"), "{focused}");
     assert!(focused.contains("class LVMVolumeDriver"), "{focused}");
     assert!(
@@ -356,7 +368,18 @@ async fn focus_reads_prefetch_resolves_scope_and_traces_carry_the_conversation()
         .expect("the only ingested repository is searched");
     assert_eq!(input["repo"], "cinder");
     assert_eq!(input["version"], "v1");
-    assert!(evidence.contains("initialize_connection"), "{evidence}");
+    assert!(
+        evidence.text.contains("initialize_connection"),
+        "{}",
+        evidence.text
+    );
+    let view = evidence
+        .view
+        .expect("the first search carries a view for the UI");
+    assert_eq!(view["kind"], "code_search");
+    assert!(view["items"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
 
     let mut stored = Vec::new();
     for _ in 0..100 {

@@ -265,9 +265,11 @@ pub async fn handle_query_stream(
                 AgentEvent::ToolCall { name, input } => {
                     chain_builder.tool_call(name, input, None, None)
                 }
-                AgentEvent::ToolResult { name, preview } => {
-                    chain_builder.tool_result(name, preview)
-                }
+                AgentEvent::ToolResult {
+                    name,
+                    preview,
+                    view,
+                } => chain_builder.tool_result(name, preview, view.as_ref()),
                 AgentEvent::Enumeration {
                     tool,
                     input,
