@@ -15,6 +15,7 @@ use crate::question::{Question, QuestionKind};
 use crate::retrieve::{sort_candidates, Candidate};
 
 pub const FEATURES: usize = 16;
+pub const FEATURE_SCHEMA: u32 = 2;
 
 pub const FEATURE_NAMES: [&str; FEATURES] = [
     "rrf",
