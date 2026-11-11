@@ -9990,6 +9990,34 @@ button.activity-line__row:hover .activity-line__steps {
   border-color: var(--border-subtle);
 }
 
+.cs-section-label {
+  margin-bottom: -0.25rem;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.cs-changes {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.cs-changes__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.cs-changes__list li {
+  margin: 0;
+  padding: 0.25rem 0 0.25rem 0.625rem;
+  border-left: 2px solid var(--border-subtle);
+}
+
 .cs-table {
   width: 100%;
   margin: 0;

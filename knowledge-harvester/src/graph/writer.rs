@@ -304,13 +304,12 @@ async fn write_file(tx: &Tx, version_id: i64, file: &ParsedFile, history: &Histo
             .units
             .iter()
             .map(|u| {
-                let mut text = u.text.clone();
-                if u.kind == "module" {
-                    if let Some(subjects) = history.subjects.get(&file.path) {
-                        text.push_str("\nRecent changes:\n");
-                        text.push_str(&subjects.join("\n"));
+                let text = match history.subjects.get(&file.path) {
+                    Some(subjects) if u.kind == "module" => {
+                        crate::units::with_recent_changes(&u.text, subjects)
                     }
-                }
+                    _ => u.text.clone(),
+                };
                 json!({
                     "kind": u.kind, "name": u.name, "start_line": u.start_line, "end_line": u.end_line,
                     "hash": content_hash(&text), "text": text,

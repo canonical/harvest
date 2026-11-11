@@ -189,11 +189,51 @@ pub fn file_units(path: &Path, source: &str) -> Vec<UnitNode> {
     units
 }
 
+pub const RECENT_CHANGES_HEADING: &str = "Recent changes:";
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModuleOutline<'a> {
+    pub language: Option<&'a str>,
+    pub outline: &'a str,
+    pub recent_changes: Vec<&'a str>,
+}
+
+fn module_header(path: &str, language: &str) -> String {
+    format!("{path} ({language})")
+}
+
+pub fn with_recent_changes(outline: &str, subjects: &[String]) -> String {
+    format!(
+        "{outline}\n{RECENT_CHANGES_HEADING}\n{}",
+        subjects.join("\n")
+    )
+}
+
+pub fn split_module_text<'a>(path: &str, text: &'a str) -> ModuleOutline<'a> {
+    let (body, changes) = match text.split_once(&format!("\n{RECENT_CHANGES_HEADING}\n")) {
+        Some((body, changes)) => (
+            body,
+            changes.lines().filter(|l| !l.trim().is_empty()).collect(),
+        ),
+        None => (text, Vec::new()),
+    };
+    let (first, rest) = body.split_once('\n').unwrap_or((body, ""));
+    let language = first
+        .strip_prefix(path)
+        .and_then(|tail| tail.strip_prefix(" ("))
+        .and_then(|tail| tail.strip_suffix(')'));
+    ModuleOutline {
+        language,
+        outline: if language.is_some() { rest } else { body },
+        recent_changes: changes,
+    }
+}
+
 fn module_skeleton(parsed: &ParsedFile) -> Option<UnitNode> {
     if parsed.functions.is_empty() && parsed.classes.is_empty() {
         return None;
     }
-    let mut lines = vec![format!("{} ({})", parsed.path, parsed.language)];
+    let mut lines = vec![module_header(&parsed.path, &parsed.language)];
     for class in &parsed.classes {
         let doc = class
             .docstring
@@ -429,6 +469,32 @@ pub fn add_code_units(parsed: &mut ParsedFile) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn module_text_splits_into_language_outline_and_recent_changes() {
+        let path = "crates/domain/src/install.rs";
+        let outline = format!(
+            "{}\nstruct InstallPlan()\n    pub fn steps(&self)",
+            module_header(path, "rust")
+        );
+        let text = with_recent_changes(
+            &outline,
+            &["Describe node images".into(), "Add slots".into()],
+        );
+        assert_eq!(
+            split_module_text(path, &text),
+            ModuleOutline {
+                language: Some("rust"),
+                outline: "struct InstallPlan()\n    pub fn steps(&self)",
+                recent_changes: vec!["Describe node images", "Add slots"],
+            }
+        );
+        let plain = split_module_text(path, "fn main()");
+        assert_eq!(
+            (plain.language, plain.outline, plain.recent_changes.len()),
+            (None, "fn main()", 0)
+        );
+    }
+
     use super::*;
     use crate::graph::model::ClassNode;
 

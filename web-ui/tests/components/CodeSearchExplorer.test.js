@@ -145,6 +145,21 @@ describe('CodeSearchExplorer', () => {
     w.unmount();
   });
 
+  it('shows a module outline apart from its language and recent changes', () => {
+    const module = {
+      kind: 'module', name: 'crates/domain/src/install.rs', file: 'crates/domain/src/install.rs', start_line: 1, end_line: 39,
+      code: 'struct InstallPlan()', truncated: false, owner: null, calls: [],
+      language: 'rust', recent_changes: ['Describe node images', 'Add boot slots'],
+    };
+    const w = mountExplorer({ items: [module] });
+    expect(w.find('.cs-detail__name').text()).toBe('install.rs');
+    expect(w.find('.cs-detail__title .cs-badge').text()).toBe('rust');
+    expect(w.findAll('.cs-section-label').map(l => l.text())).toEqual(['Outline', 'Recent changes']);
+    expect(w.find('.cs-code').text()).toBe('struct InstallPlan()');
+    expect(w.findAll('.cs-changes__list li').map(l => l.text())).toEqual(['Describe node images', 'Add boot slots']);
+    w.unmount();
+  });
+
   it('says so when a table found nothing', () => {
     const empty = { kind: 'table', name: 'callers of run', file: '', start_line: 0, end_line: 0, code: '', truncated: false, owner: null, calls: [] };
     const w = mountExplorer({ items: [empty] });
