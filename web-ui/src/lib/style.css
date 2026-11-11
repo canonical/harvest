@@ -9653,6 +9653,12 @@ button.activity-line__row:hover .activity-line__steps {
   display: grid;
   gap: 0.5rem;
   min-width: 0;
+  line-height: 1.4;
+}
+
+.cs button {
+  margin: 0;
+  line-height: inherit;
 }
 
 .cs-summary {
@@ -9763,6 +9769,10 @@ button.activity-line__row:hover .activity-line__steps {
   text-align: left;
 }
 
+.cs-list__file:not(:first-child) {
+  margin-top: 0.25rem;
+}
+
 .cs-list__entry {
   display: flex;
   align-items: center;
@@ -9771,6 +9781,7 @@ button.activity-line__row:hover .activity-line__steps {
   padding: 0.25rem 0.625rem;
   font: inherit;
   font-size: 0.76rem;
+  justify-content: flex-start;
   text-align: left;
   color: var(--text-primary);
   background: none;
@@ -9792,6 +9803,10 @@ button.activity-line__row:hover .activity-line__steps {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: 'Ubuntu Mono', 'Courier New', monospace;
+}
+
+.cs-list__name--prose {
+  font-family: inherit;
 }
 
 .cs-list__gap {
@@ -9858,6 +9873,11 @@ button.activity-line__row:hover .activity-line__steps {
   overflow-wrap: anywhere;
 }
 
+.cs-detail__name--prose {
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+
 .cs-detail__location {
   font-family: 'Ubuntu Mono', 'Courier New', monospace;
   font-size: 0.74rem;
@@ -9865,8 +9885,11 @@ button.activity-line__row:hover .activity-line__steps {
   overflow-wrap: anywhere;
 }
 
-.cs-action {
+.cs-detail__title .cs-action {
   margin-left: auto;
+}
+
+.cs-action {
   padding: 0;
   font: inherit;
   font-size: 0.74rem;
@@ -9965,6 +9988,62 @@ button.activity-line__row:hover .activity-line__steps {
 
 .cs-chip--outside:hover {
   border-color: var(--border-subtle);
+}
+
+.cs-table {
+  width: 100%;
+  margin: 0;
+  border-collapse: collapse;
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.cs-table th,
+.cs-table td {
+  padding: 0.35rem 0.5rem;
+  line-height: inherit;
+  text-align: left;
+  vertical-align: top;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.cs-table th {
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.cs-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.cs-table__symbol {
+  width: 55%;
+}
+
+.cs-table__symbol .cs-chip {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.cs-table__location {
+  display: block;
+  margin-top: 0.15rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+  font-size: 0.7rem;
+  color: var(--text-muted);
 }
 
 @media (max-width: 640px) {

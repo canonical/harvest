@@ -38,7 +38,7 @@
                 @click="selectItem(entry.index)"
               >
                 <span class="cs-kind cs-kind--small" :class="`cs-kind--${entry.item.kind}`">{{ kindLetter(entry.item.kind) }}</span>
-                <span class="cs-list__name">{{ entry.item.name }}</span>
+                <span class="cs-list__name">{{ displayName(entry.item) }}</span>
               </button>
             </template>
           </template>
@@ -53,7 +53,7 @@
               @click="selectedDocument = index"
             >
               <span class="cs-kind cs-kind--small cs-kind--doc">D</span>
-              <span class="cs-list__name">{{ entry.name }}</span>
+              <span class="cs-list__name cs-list__name--prose">{{ entry.name }}</span>
             </button>
           </template>
           <template v-else>
@@ -85,19 +85,19 @@
 import { computed, ref } from 'vue';
 import CodeSearchItem from './CodeSearchItem.vue';
 import CodeSearchDocument from './CodeSearchDocument.vue';
-import { TAB, firstTab, groupByFile, itemIndexAt, kindLetter, summarize } from '../../lib/code-search-view.js';
+import { TAB, displayName, firstTab, groupByFile, itemIndexAt, kindLetter, summarize } from '../../lib/code-search-view.js';
 
 const props = defineProps({
   view: { type: Object, required: true },
 });
 
-const tab = ref(firstTab(props.view));
-const selectedItem = ref(0);
-const selectedDocument = ref(0);
-
 const summary = computed(() => summarize(props.view));
 const groups = computed(() => groupByFile(props.view.items));
 const itemOrder = computed(() => groups.value.flatMap(group => group.entries.map(entry => entry.index)));
+
+const tab = ref(firstTab(props.view));
+const selectedItem = ref(itemOrder.value[0] ?? 0);
+const selectedDocument = ref(0);
 const currentItem = computed(() => props.view.items[selectedItem.value] ?? null);
 const currentDocument = computed(() => props.view.documentation[selectedDocument.value] ?? null);
 
