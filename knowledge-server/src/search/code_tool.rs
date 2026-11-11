@@ -6,10 +6,11 @@ use harvest_db::Db;
 use harvest_search::{Degraded, Evidence, Query, Scope, SearchResult};
 use serde_json::{json, Value};
 
-use crate::agent::tool::Tool;
+use crate::agent::tool::{Tool, ToolOutput};
 use crate::llm::types::ToolDefinition;
 use crate::llm::LlmProvider;
 use crate::search::record::TraceContext;
+use crate::search::view::{focus_view, search_view, SearchView};
 use crate::search::SearchService;
 
 #[derive(Clone, Default)]
@@ -60,7 +61,19 @@ impl SearchCodeTool {
         }
     }
 
-    async fn search(&self, question: &str, scope: &Scope, budget: Option<u64>) -> Result<String> {
+    fn with_view(text: String, view: SearchView) -> ToolOutput {
+        match serde_json::to_value(view) {
+            Ok(view) => ToolOutput::with_view(text, view),
+            Err(_) => ToolOutput::text(text),
+        }
+    }
+
+    async fn search(
+        &self,
+        question: &str,
+        scope: &Scope,
+        budget: Option<u64>,
+    ) -> Result<ToolOutput> {
         let mut query = self.service.query(question, &scope.repo, &scope.version);
         if let Some(budget) = budget {
             query.budget = harvest_search::TokenBudget((budget as usize).clamp(1_000, 32_000));
@@ -69,7 +82,17 @@ impl SearchCodeTool {
             .service
             .search(self.context.llm.as_ref(), &query, self.trace())
             .await?;
-        Ok(render(&query, &result))
+        let index = self.service.registry.get(scope);
+        let view = search_view(index.as_deref(), &query, &result);
+        Ok(Self::with_view(render(&query, &result), view))
+    }
+
+    async fn read_focus(&self, scope: &Scope, focus: &[String]) -> Result<ToolOutput> {
+        let budget = harvest_search::TokenBudget(self.service.config.token_budget);
+        let evidence = self.service.focus(scope, focus, budget).await?;
+        let index = self.service.registry.get(scope);
+        let view = focus_view(index.as_deref(), scope, focus, &evidence);
+        Ok(Self::with_view(render_focus(scope, focus, &evidence), view))
     }
 }
 
@@ -187,6 +210,10 @@ impl Tool for SearchCodeTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
+        Ok(self.run(params).await?.text)
+    }
+
+    async fn run(&self, params: Value) -> Result<ToolOutput> {
         let (question, repo, version) = (
             text(&params, "query"),
             text(&params, "repo"),
@@ -208,9 +235,7 @@ impl Tool for SearchCodeTool {
             })
             .unwrap_or_default();
         if !focus.is_empty() {
-            let budget = harvest_search::TokenBudget(self.service.config.token_budget);
-            let evidence = self.service.focus(&scope, &focus, budget).await?;
-            return Ok(render_focus(&scope, &focus, &evidence));
+            return self.read_focus(&scope, &focus).await;
         }
         if question.is_empty() {
             bail!("search_code needs a query, or a focus list of symbols or files");
@@ -227,7 +252,7 @@ impl Tool for SearchCodeTool {
         Some(self.service.config.max_followups)
     }
 
-    async fn prefetch(&self, question: &str, earlier: &str) -> Option<(Value, String)> {
+    async fn prefetch(&self, question: &str, earlier: &str) -> Option<(Value, ToolOutput)> {
         if !self.service.config.prefetch || question.trim().is_empty() {
             return None;
         }

@@ -82,7 +82,11 @@ pub fn chain_of(state: &InFlightState) -> Vec<Value> {
                 description,
                 hostname,
             } => chain.tool_call(name, input, description.as_deref(), hostname.as_deref()),
-            InFlightEvent::ToolResult { name, preview } => chain.tool_result(name, preview),
+            InFlightEvent::ToolResult {
+                name,
+                preview,
+                view,
+            } => chain.tool_result(name, preview, view.as_ref()),
         }
     }
     chain.finish()
@@ -103,6 +107,7 @@ mod tests {
                 InFlightEvent::ToolResult {
                     name: "t".into(),
                     preview: "p".into(),
+                    view: None,
                 },
                 InFlightEvent::TextDelta {
                     text: "world".into(),

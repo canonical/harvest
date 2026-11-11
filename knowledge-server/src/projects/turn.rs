@@ -480,7 +480,11 @@ pub(super) async fn drive_turn(
             AgentEvent::ToolCall { name, input } => {
                 chain_builder.tool_call(name, input, description.as_deref(), hostname.as_deref());
             }
-            AgentEvent::ToolResult { name, preview } => chain_builder.tool_result(name, preview),
+            AgentEvent::ToolResult {
+                name,
+                preview,
+                view,
+            } => chain_builder.tool_result(name, preview, view.as_ref()),
             AgentEvent::Enumeration {
                 tool,
                 input,
@@ -703,9 +707,13 @@ fn turn_event_json(
             }
             Some(v)
         }
-        AgentEvent::ToolResult { name, preview } => Some(json!({
+        AgentEvent::ToolResult {
+            name,
+            preview,
+            view,
+        } => Some(json!({
             "type": "tool_result", "conv_id": conv_id,
-            "name": name, "preview": preview,
+            "name": name, "preview": preview, "view": view,
         })),
         AgentEvent::Phase { label } => Some(json!({
             "type": "phase", "conv_id": conv_id, "label": label,

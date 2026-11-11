@@ -68,13 +68,16 @@ impl ChainBuilder {
         }));
     }
 
-    pub fn tool_result(&mut self, name: &str, preview: &str) {
+    pub fn tool_result(&mut self, name: &str, preview: &str, view: Option<&Value>) {
         if let Some(entry) = self
             .chain
             .iter_mut()
             .find(|e| e["type"] == "tool_call" && e["name"] == name && e["preview"].is_null())
         {
             entry["preview"] = json!(preview);
+            if let Some(view) = view {
+                entry["view"] = view.clone();
+            }
         }
     }
 
@@ -156,7 +159,7 @@ mod tests {
     fn enumerations_are_split_out_of_the_visible_chain() {
         let mut b = ChainBuilder::new();
         b.tool_call("find_subclasses", &json!({ "class": "BaseVD" }), None, None);
-        b.tool_result("find_subclasses", "127 subclasses");
+        b.tool_result("find_subclasses", "127 subclasses", None);
         b.enumeration(
             "find_subclasses",
             &json!({ "class": "BaseVD" }),
@@ -249,7 +252,7 @@ mod tests {
     fn tool_result_fills_matching_pending_preview() {
         let mut b = ChainBuilder::new();
         b.tool_call("search", &json!({"q": "x"}), None, None);
-        b.tool_result("search", "found 3 results");
+        b.tool_result("search", "found 3 results", None);
         assert_eq!(
             b.finish(),
             vec![
@@ -262,7 +265,7 @@ mod tests {
     fn tool_result_for_unknown_name_is_noop() {
         let mut b = ChainBuilder::new();
         b.tool_call("search", &json!({}), None, None);
-        b.tool_result("other_tool", "irrelevant");
+        b.tool_result("other_tool", "irrelevant", None);
         assert_eq!(b.finish()[0]["preview"], Value::Null);
     }
 
@@ -271,7 +274,7 @@ mod tests {
         let mut b = ChainBuilder::new();
         b.tool_call("fn", &json!({}), None, None);
         b.tool_call("fn", &json!({}), None, None);
-        b.tool_result("fn", "result");
+        b.tool_result("fn", "result", None);
         let chain = b.finish();
         assert_eq!(chain[0]["preview"], json!("result"));
         assert_eq!(chain[1]["preview"], Value::Null);
@@ -282,10 +285,10 @@ mod tests {
         let mut b = ChainBuilder::new();
         b.thinking("a");
         b.tool_call("t1", &json!({}), None, None);
-        b.tool_result("t1", "r1");
+        b.tool_result("t1", "r1", None);
         b.text_delta("b");
         b.tool_call("t2", &json!({}), None, None);
-        b.tool_result("t2", "r2");
+        b.tool_result("t2", "r2", None);
 
         let chain = b.finish();
         assert_eq!(chain.len(), 4);
@@ -328,7 +331,7 @@ mod tests {
     fn confirm_action_pushes_pending_entry_in_place() {
         let mut b = ChainBuilder::new();
         b.tool_call("list_agents", &json!({}), None, None);
-        b.tool_result("list_agents", "[]");
+        b.tool_result("list_agents", "[]", None);
         b.confirm_action(
             "tc1",
             "create_lxd_agent",
@@ -364,7 +367,7 @@ mod tests {
     fn trailing_text_delta_after_last_tool_call_is_not_flushed_into_chain() {
         let mut b = ChainBuilder::new();
         b.tool_call("search", &json!({}), None, None);
-        b.tool_result("search", "ok");
+        b.tool_result("search", "ok", None);
         b.text_delta("Here is the final answer");
         assert_eq!(b.finish().len(), 1);
     }
@@ -408,5 +411,16 @@ mod tests {
         let mut b = ChainBuilder::new();
         b.thinking_delta("orphan thinking");
         assert_eq!(b.finish().len(), 0);
+    }
+
+    #[test]
+    fn a_tool_view_is_kept_with_its_call() {
+        let mut b = ChainBuilder::new();
+        b.tool_call("search_code", &json!({}), None, None);
+        let view = json!({ "kind": "code_search", "items": [] });
+        b.tool_result("search_code", "text", Some(&view));
+        let chain = b.finish();
+        assert_eq!(chain[0]["preview"], "text");
+        assert_eq!(chain[0]["view"]["kind"], "code_search");
     }
 }
