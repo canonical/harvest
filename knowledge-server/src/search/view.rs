@@ -3,6 +3,7 @@ use harvest_search::index::corpus::{Relation, UnitKind};
 use harvest_search::index::graph::Direction;
 use harvest_search::index::IndexSnapshot;
 use harvest_search::{Evidence, Query, Scope, SearchResult};
+use knowledge_harvester::units::split_module_text;
 use serde::Serialize;
 
 pub const VIEW_KIND: &str = "code_search";
@@ -29,6 +30,8 @@ pub struct CodeItem {
     pub owner: Option<Location>,
     pub calls: Vec<Location>,
     pub rows: Vec<TableRow>,
+    pub language: Option<String>,
+    pub recent_changes: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -168,7 +171,12 @@ fn code_item(index: Option<&IndexSnapshot>, evidence: &Evidence) -> CodeItem {
             } else {
                 &unit.body
             };
-            let (code, truncated) = clip(source, MAX_ITEM_CODE_CHARS);
+            let module =
+                (unit.kind() == UnitKind::Module).then(|| split_module_text(&unit.file, source));
+            let (code, truncated) = clip(
+                module.as_ref().map_or(source.as_str(), |m| m.outline),
+                MAX_ITEM_CODE_CHARS,
+            );
             CodeItem {
                 kind: unit.kind().as_str().to_string(),
                 name: unit.qualified_name.clone(),
@@ -180,6 +188,10 @@ fn code_item(index: Option<&IndexSnapshot>, evidence: &Evidence) -> CodeItem {
                 owner: owner_of(index, id),
                 calls: calls_of(index, id),
                 rows: Vec::new(),
+                language: module.as_ref().and_then(|m| m.language).map(str::to_string),
+                recent_changes: module
+                    .map(|m| m.recent_changes.into_iter().map(str::to_string).collect())
+                    .unwrap_or_default(),
             }
         }
         _ => {
@@ -204,6 +216,8 @@ fn code_item(index: Option<&IndexSnapshot>, evidence: &Evidence) -> CodeItem {
                 } else {
                     Vec::new()
                 },
+                language: None,
+                recent_changes: Vec::new(),
             }
         }
     }
@@ -431,6 +445,36 @@ mod tests {
         );
         assert_eq!(row.detail, "extends Runner, Mixin");
         assert_eq!(table_row("Driver (a (b)) is odd").symbol, None);
+    }
+
+    #[tokio::test]
+    async fn module_items_show_their_outline_apart_from_language_and_recent_changes() {
+        let file = "crates/domain/src/install.rs";
+        let mut corpus = Corpus::new(Scope::new("amafu", "main"), "g");
+        corpus.push_unit(unit(
+            file,
+            UnitKind::Module,
+            file,
+            "crates/domain/src/install.rs (rust)\nstruct InstallPlan()\nRecent changes:\nDescribe node images",
+            (1, 39),
+        ));
+        let index = IndexSnapshot::build(corpus, &HashingEmbedder::default())
+            .await
+            .unwrap();
+        let evidence = vec![evidence_for(
+            index.unit(0),
+            "packed".into(),
+            1.0,
+            Source::Exact,
+        )];
+        let view = focus_view(Some(&index), &Scope::new("amafu", "main"), &[], &evidence);
+        let module = &view.items[0];
+        assert_eq!(module.code, "struct InstallPlan()");
+        assert_eq!(module.language.as_deref(), Some("rust"));
+        assert_eq!(
+            module.recent_changes,
+            vec!["Describe node images".to_string()]
+        );
     }
 
     #[tokio::test]
