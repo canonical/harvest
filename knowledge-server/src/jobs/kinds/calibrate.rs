@@ -67,7 +67,8 @@ impl Job for CalibrateJob {
                 "repo": repo,
                 "version": tag,
                 "content": format!(
-                    "p{}-n{}-m{}",
+                    "f{}-p{}-n{}-m{}",
+                    harvest_search::retrieve::rerank::FEATURE_SCHEMA,
                     version["parser_version"].as_i64().unwrap_or(0),
                     version["symbols"].as_i64().unwrap_or(0),
                     version["max_symbol"].as_i64().unwrap_or(0)
