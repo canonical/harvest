@@ -9694,7 +9694,7 @@ button.activity-line__row:hover .activity-line__steps {
 .cs-panes {
   display: grid;
   grid-template-columns: minmax(0, 15rem) minmax(0, 1fr);
-  height: 24rem;
+  height: clamp(24rem, 60vh, 44rem);
   background: var(--bg-page);
   border: 1px solid var(--border-subtle);
   border-radius: 4px;
@@ -10050,7 +10050,7 @@ button.activity-line__row:hover .activity-line__steps {
   .cs-panes {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: 11rem minmax(0, 1fr);
-    height: 32rem;
+    height: clamp(32rem, 75vh, 44rem);
   }
 
   .cs-side {
