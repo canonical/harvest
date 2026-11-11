@@ -50,9 +50,12 @@ export function useAgentStream({
     return null;
   }
 
-  function completeToolCall(name, preview) {
+  function completeToolCall(name, preview, view = null) {
     const idx = chain.value.findIndex(s => s.type === 'tool_call' && s.name === name && s.status === 'running');
-    if (idx !== -1) chain.value[idx] = { ...chain.value[idx], status: 'done', preview };
+    if (idx === -1) return;
+    const completed = { ...chain.value[idx], status: 'done', preview };
+    if (view) completed.view = view;
+    chain.value[idx] = completed;
   }
 
   function parseTerraformBundle(content, fallbackPath) {
@@ -129,7 +132,7 @@ export function useAgentStream({
         if (event.name === 'generate_artifact') handleGenerateArtifactCall(event.input);
         break;
       case 'tool_result':
-        completeToolCall(event.name, event.preview);
+        completeToolCall(event.name, event.preview, event.view);
         if (event.name === 'generate_artifact') completeGenerateArtifactCall();
         break;
       case 'parallel_research_started':

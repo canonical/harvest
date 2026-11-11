@@ -29,3 +29,16 @@ describe('prependHistory', () => {
     expect(thread.messages.value.map(m => m.text ?? m.answer)).toEqual(['first', 'reply', 'latest']);
   });
 });
+
+describe('completeToolCall', () => {
+  it('stores the structured view on the completed step', () => {
+    const thread = createConversationThreadState();
+    thread.messages.value.push({ role: 'assistant', status: 'loading', chain: [], tool_calls: [] });
+    thread.addToolCall('search_code', { repo: 'amafu' });
+    const view = { kind: 'code_search', items: [], documentation: [], gaps: [] };
+    thread.completeToolCall('search_code', 'text', view);
+    const step = thread.messages.value.at(-1).chain[0];
+    expect(step.status).toBe('done');
+    expect(step.view).toEqual(view);
+  });
+});

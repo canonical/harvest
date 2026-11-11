@@ -1,4 +1,4 @@
-import { describeToolCall } from './tool-verbs.js';
+import { describeToolCall } from './tool-render.js';
 
 export const MAX_SENTENCE_CHARS = 160;
 

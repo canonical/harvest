@@ -33,7 +33,7 @@ describe('describeActivity while a response is generated', () => {
     [
       'a tool runs without a sentence',
       loading({ chain: [tool('read_sources', { files: ['doc/support-matrix.ini'] })] }),
-      'Reading support-matrix.ini',
+      'Reading 1 source',
     ],
     [
       'a batch of tools shares the sentence before it',
