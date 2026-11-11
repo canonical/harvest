@@ -115,6 +115,45 @@ describe('CodeSearchExplorer', () => {
     w.unmount();
   });
 
+  it('renders a table as rows that link to the symbols in the results', async () => {
+    const table = {
+      kind: 'table', name: 'callers of MaasClient.find', file: '', start_line: 0, end_line: 0,
+      code: 'MaasClient.deploy (crates/installer/src/maas.rs:178)', truncated: false, owner: null, calls: [],
+      rows: [
+        { symbol: location('MaasClient.deploy', 'crates/installer/src/maas.rs', 178), detail: '' },
+        { symbol: location('Installer.run', 'crates/installer/src/run.rs', 12), detail: 'extends Runner' },
+      ],
+    };
+    const w = mountExplorer({ items: [table, ...view().items] });
+    expect(w.find('.cs-detail__name').text()).toBe('MaasClient.deploy');
+    expect(w.findAll('.cs-list__file').at(-1).text()).toBe('Tables');
+    await w.findAll('.cs-list__entry').at(-1).trigger('click');
+    expect(w.find('.cs-detail__location').text()).toBe('2 rows');
+    expect(w.find('.cs-code').exists()).toBe(false);
+    expect(w.findAll('.cs-table th').map(h => h.text())).toEqual(['Symbol', 'Detail']);
+    const rows = w.findAll('.cs-table tbody tr').map(r => [
+      r.find('.cs-chip').text(),
+      r.find('.cs-table__location').text(),
+      r.findAll('td')[1].text(),
+    ]);
+    expect(rows).toEqual([
+      ['MaasClient.deploy', 'crates/installer/src/maas.rs:178', ''],
+      ['Installer.run', 'crates/installer/src/run.rs:12', 'extends Runner'],
+    ]);
+    await w.find('.cs-table button.cs-chip').trigger('click');
+    expect(w.find('.cs-detail__name').text()).toBe('MaasClient.deploy');
+    w.unmount();
+  });
+
+  it('says so when a table found nothing', () => {
+    const empty = { kind: 'table', name: 'callers of run', file: '', start_line: 0, end_line: 0, code: '', truncated: false, owner: null, calls: [] };
+    const w = mountExplorer({ items: [empty] });
+    expect(w.find('.cs-detail__location').text()).toBe('0 rows');
+    expect(w.find('.cs-code').exists()).toBe(false);
+    expect(w.find('.cs-note').text()).toBe('The search found nothing for this table.');
+    w.unmount();
+  });
+
   it('copies the citation of the selected item', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });

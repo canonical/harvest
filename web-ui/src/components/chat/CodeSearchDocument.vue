@@ -2,7 +2,7 @@
   <div class="cs-detail">
     <div class="cs-detail__title">
       <span class="cs-kind cs-kind--doc">doc</span>
-      <span class="cs-detail__name">{{ documentation.name }}</span>
+      <span class="cs-detail__name cs-detail__name--prose">{{ documentation.name }}</span>
       <span class="cs-detail__location">{{ locationLabel(documentation) }}</span>
       <span class="cs-badge cs-badge--unverified">Not verified</span>
     </div>

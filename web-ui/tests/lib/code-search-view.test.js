@@ -3,7 +3,9 @@ import {
   TAB,
   citation,
   firstTab,
+  displayName,
   groupByFile,
+  hasSourceLines,
   highlightedLines,
   isCodeSearchView,
   itemIndexAt,
@@ -34,6 +36,22 @@ describe('code search view helpers', () => {
     const groups = groupByFile(view.items);
     expect(groups.map(g => g.file)).toEqual(['crates/command-line/src/install.rs', 'crates/installer/src/maas.rs']);
     expect(groups[1].entries.map(e => e.index)).toEqual([1, 2]);
+  });
+
+  it('names modules by their file and numbers only real source lines', () => {
+    const module = { kind: 'module', name: 'crates/domain/src/install.rs', file: 'crates/domain/src/install.rs' };
+    const method = { kind: 'method', name: 'MaasClient.find', file: 'crates/installer/src/maas.rs' };
+    expect(displayName(module)).toBe('install.rs');
+    expect(displayName(method)).toBe('MaasClient.find');
+    expect(hasSourceLines(module)).toBe(false);
+    expect(hasSourceLines(method)).toBe(true);
+    expect(hasSourceLines({ kind: 'table', file: '' })).toBe(false);
+  });
+
+  it('puts tables after the code files', () => {
+    const table = { kind: 'table', name: 'callers of run', file: '' };
+    const groups = groupByFile([table, ...view.items]);
+    expect(groups.map(g => g.file)).toEqual(['crates/command-line/src/install.rs', 'crates/installer/src/maas.rs', '']);
   });
 
   it('summarises counts, tier and rounded time', () => {

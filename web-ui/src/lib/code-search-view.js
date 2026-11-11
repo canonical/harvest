@@ -62,7 +62,7 @@ export function groupByFile(items) {
     }
     group.entries.push({ item, index });
   });
-  return groups;
+  return [...groups.filter(g => g.file), ...groups.filter(g => !g.file)];
 }
 
 export function summarize(view) {
@@ -91,6 +91,14 @@ export function locationLabel(entry) {
 
 export function citation(view, entry) {
   return `[${view.repo}:${view.version}:${locationLabel(entry)}]`;
+}
+
+export function displayName(item) {
+  return item.file && item.name === item.file ? item.file.split('/').pop() : item.name;
+}
+
+export function hasSourceLines(item) {
+  return Boolean(item.file) && item.kind !== 'module';
 }
 
 export function kindLetter(kind) {
