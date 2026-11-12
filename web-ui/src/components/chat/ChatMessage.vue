@@ -207,7 +207,7 @@ import ToolCallGroup  from './ToolCallGroup.vue';
 import ParallelResearchBlock from './ParallelResearchBlock.vue';
 import ActivityLine   from './ActivityLine.vue';
 import ProvisionSteps from '../agents/ProvisionSteps.vue';
-import { renderMarkdown, buildCitationIndex, buildFileUrl } from '../../lib/markdown.js';
+import { renderMarkdown, buildCitationIndex, buildFileUrl, parseCitations, withoutOpenBracket } from '../../lib/markdown.js';
 import { mountInlineGraphs } from '../../lib/inline-graph.js';
 import { avatarColor, initials, addCopyButtons, formatDuration } from '../../lib/utils.js';
 import { runningVerb } from '../../lib/tool-verbs.js';
@@ -310,11 +310,10 @@ const renderedAnswer = computed(() =>
     : ''
 );
 
-const renderedPendingAnswer = computed(() =>
-  props.msg.pendingAnswer
-    ? renderMarkdown(props.msg.pendingAnswer, props.repoUrlMap, buildCitationIndex(props.msg.sources))
-    : ''
-);
+const renderedPendingAnswer = computed(() => {
+  const text = withoutOpenBracket(props.msg.pendingAnswer ?? '');
+  return text ? renderMarkdown(text, props.repoUrlMap, buildCitationIndex(parseCitations(text))) : '';
+});
 
 onMounted(() => {
   if (answerBodyRef.value) {

@@ -124,6 +124,15 @@ describe('ChatMessage — activity line', () => {
     expect(w.find('.activity-line__line').text()).toBe('Writing the answer');
   });
 
+  it('numbers citations while the answer streams, in the order the final sources will use', () => {
+    const pendingAnswer = 'Cinder ships these drivers:\n- LVM [cinder:main:drivers/lvm.py:10-20]\n- Ceph [cinder:main:drivers/rbd.py:5] and [cinder:main:drivers/lvm.py:10-20]\n- NFS [cinder:main:drivers/n';
+    const w = mount(ChatMessage, { props: { msg: { ...working, chain: [], pendingAnswer } } });
+    const streaming = w.find('.message__answer--streaming');
+    expect(streaming.findAll('.citation').map(c => c.text())).toEqual(['1', '2', '1']);
+    expect(streaming.text()).not.toContain('cinder:main');
+    expect(streaming.text()).not.toContain('[');
+  });
+
   it('summarises a finished turn and keeps its steps one click away', () => {
     const msg = { ...assistantWithThinking, durationMs: 11000 };
     const w = mount(ChatMessage, { props: { msg } });
