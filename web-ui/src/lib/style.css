@@ -1026,26 +1026,63 @@ details.tc-group[open] {
   stroke-linecap: butt;
 }
 
-.raccoon--animated .raccoon__ray {
+.raccoon--working .raccoon__ray {
   animation: raccoon-sweep 1.5s linear infinite;
 }
 
-.raccoon--animated .raccoon__face {
+.raccoon--working .raccoon__face {
   transform-box: view-box;
   transform-origin: 540px 615px;
   animation: raccoon-bob 1.5s ease-in-out infinite;
 }
 
-.raccoon--animated .raccoon__eye {
+.raccoon--working .raccoon__eye {
   transform-box: fill-box;
   transform-origin: center;
   animation: raccoon-blink 4.5s infinite;
 }
 
-.raccoon--animated .raccoon__nose {
+.raccoon--working .raccoon__nose {
   transform-box: fill-box;
   transform-origin: 50% 30%;
   animation: raccoon-sniff 0.75s ease-in-out infinite;
+}
+
+.raccoon--resting .raccoon__ray {
+  opacity: 0.6;
+}
+
+.raccoon--settling .raccoon__ray {
+  animation: raccoon-burst 0.9s ease-out both;
+}
+
+.raccoon--settling .raccoon__face {
+  transform-box: view-box;
+  transform-origin: 540px 615px;
+  animation: raccoon-nod 0.6s ease-in-out;
+}
+
+.raccoon--settling .raccoon__eye {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: raccoon-happy-blink 0.9s ease-in-out;
+}
+
+@keyframes raccoon-burst {
+  0% { opacity: 0.18; }
+  35% { opacity: 1; }
+  100% { opacity: 0.6; }
+}
+
+@keyframes raccoon-nod {
+  0%, 100% { transform: translateY(0); }
+  40% { transform: translateY(14px); }
+}
+
+@keyframes raccoon-happy-blink {
+  0%, 45% { transform: scaleY(1); }
+  60% { transform: scaleY(0.08); }
+  75%, 100% { transform: scaleY(1); }
 }
 
 @keyframes raccoon-sweep {
@@ -1070,11 +1107,18 @@ details.tc-group[open] {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .raccoon--animated .raccoon__ray,
-  .raccoon--animated .raccoon__face,
-  .raccoon--animated .raccoon__eye,
-  .raccoon--animated .raccoon__nose {
+  .raccoon--working .raccoon__ray,
+  .raccoon--working .raccoon__face,
+  .raccoon--working .raccoon__eye,
+  .raccoon--working .raccoon__nose,
+  .raccoon--settling .raccoon__ray,
+  .raccoon--settling .raccoon__face,
+  .raccoon--settling .raccoon__eye {
     animation: none;
+  }
+
+  .raccoon--settling .raccoon__ray {
+    opacity: 0.6;
   }
 }
 
@@ -1961,27 +2005,19 @@ button.activity-line__row:focus-visible {
   flex-shrink: 0;
   margin: -0.5rem -0.25rem;
   color: var(--text-primary);
+  transition: width 0.5s ease 0.4s, height 0.5s ease 0.4s, margin 0.5s ease 0.4s, color 0.5s ease 0.6s;
+}
+
+.activity-line__raccoon--rest {
+  width: 1.25rem;
+  height: 1.25rem;
+  margin: -0.125rem 0.125rem;
+  color: var(--text-muted);
 }
 
 .activity-line--waiting .activity-line__icon {
   background: var(--loading-dot-color);
   animation: activity-line-pulse 1.4s ease-in-out infinite;
-}
-
-.activity-line--done .activity-line__icon {
-  background: var(--status-done);
-}
-
-.activity-line--done .activity-line__icon::after {
-  content: "";
-  position: absolute;
-  left: 4px;
-  top: 3.5px;
-  width: 6px;
-  height: 3px;
-  border-left: 2px solid var(--bg-page);
-  border-bottom: 2px solid var(--bg-page);
-  transform: rotate(-45deg);
 }
 
 .activity-line--stopped .activity-line__icon {
@@ -2076,9 +2112,10 @@ button.activity-line__row:hover .activity-line__steps {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .activity-line--working .activity-line__icon,
-  .activity-line--waiting .activity-line__icon {
+  .activity-line--waiting .activity-line__icon,
+  .activity-line__raccoon {
     animation: none;
+    transition: none;
   }
 
   .activity-line__line--shimmer {
