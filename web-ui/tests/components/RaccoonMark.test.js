@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { mount } from '@vue/test-utils';
 import RaccoonMark from '../../src/components/chat/RaccoonMark.vue';
-import ToolCallStep from '../../src/components/chat/ToolCallStep.vue';
+import ActivityLine from '../../src/components/chat/ActivityLine.vue';
+import { ACTIVITY_STATE } from '../../src/lib/agent-activity.js';
 import { RAYS, SWEEP_SECONDS, rayDelay } from '../../src/lib/raccoon-mark.js';
 
 describe('RaccoonMark', () => {
@@ -25,9 +26,13 @@ describe('RaccoonMark', () => {
     expect(rayDelay(RAYS.length - 1)).toBe('-0.025s');
   });
 
-  it('animates only while a tool call is running', () => {
-    const step = status => ({ type: 'tool_call', id: 1, name: 'search_code', status, input: { repo: 'amafu', query: 'q' } });
-    expect(mount(ToolCallStep, { props: { step: step('running') } }).find('.raccoon').classes()).toContain('raccoon--animated');
-    expect(mount(ToolCallStep, { props: { step: step('done') } }).find('.raccoon').classes()).not.toContain('raccoon--animated');
+  it('replaces the status line spinner only while the agent is working', () => {
+    const line = state => mount(ActivityLine, { props: { activity: { state, text: 'Searching amafu' } } });
+    const working = line(ACTIVITY_STATE.WORKING);
+    expect(working.find('.raccoon').classes()).toContain('raccoon--animated');
+    expect(working.find('.activity-line__icon').exists()).toBe(false);
+    const done = line(ACTIVITY_STATE.DONE);
+    expect(done.find('.raccoon').exists()).toBe(false);
+    expect(done.find('.activity-line__icon').exists()).toBe(true);
   });
 });

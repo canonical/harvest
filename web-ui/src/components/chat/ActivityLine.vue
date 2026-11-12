@@ -7,7 +7,8 @@
       :aria-expanded="canExpand ? String(expanded) : undefined"
       @click="toggle"
     >
-      <span class="activity-line__icon" aria-hidden="true"></span>
+      <RaccoonMark v-if="isWorking" class="activity-line__raccoon" animated />
+      <span v-else class="activity-line__icon" aria-hidden="true"></span>
       <span class="activity-line__text">
         <Transition name="activity-line-slide">
           <span :key="lineKey" class="activity-line__line" :class="{ 'activity-line__line--shimmer': isWorking }">
@@ -38,6 +39,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue';
+import RaccoonMark from './RaccoonMark.vue';
 import { ACTIVITY_STATE, isContinuation, stepLabel } from '../../lib/agent-activity.js';
 
 const props = defineProps({
