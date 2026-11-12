@@ -1026,25 +1026,26 @@ details.tc-group[open] {
   stroke-linecap: butt;
 }
 
+.raccoon__face,
+.raccoon__nose,
+.raccoon__eye {
+  transform-box: view-box;
+  transform-origin: 0 0;
+}
+
 .raccoon--working .raccoon__ray {
   animation: raccoon-sweep 1.5s linear infinite;
 }
 
 .raccoon--working .raccoon__face {
-  transform-box: view-box;
-  transform-origin: 540px 615px;
   animation: raccoon-bob 1.5s ease-in-out infinite;
 }
 
 .raccoon--working .raccoon__eye {
-  transform-box: fill-box;
-  transform-origin: center;
   animation: raccoon-blink 4.5s infinite;
 }
 
 .raccoon--working .raccoon__nose {
-  transform-box: fill-box;
-  transform-origin: 50% 30%;
   animation: raccoon-sniff 0.75s ease-in-out infinite;
 }
 
@@ -1057,14 +1058,10 @@ details.tc-group[open] {
 }
 
 .raccoon--settling .raccoon__face {
-  transform-box: view-box;
-  transform-origin: 540px 615px;
   animation: raccoon-nod 0.6s ease-in-out;
 }
 
 .raccoon--settling .raccoon__eye {
-  transform-box: fill-box;
-  transform-origin: center;
   animation: raccoon-happy-blink 0.9s ease-in-out;
 }
 
@@ -1076,13 +1073,13 @@ details.tc-group[open] {
 
 @keyframes raccoon-nod {
   0%, 100% { transform: translateY(0); }
-  40% { transform: translateY(14px); }
+  40% { transform: translateY(6px); }
 }
 
 @keyframes raccoon-happy-blink {
-  0%, 45% { transform: scaleY(1); }
-  60% { transform: scaleY(0.08); }
-  75%, 100% { transform: scaleY(1); }
+  0%, 45% { transform: translate(var(--pivot-x), var(--pivot-y)) scaleY(1) translate(calc(-1 * var(--pivot-x)), calc(-1 * var(--pivot-y))); }
+  60% { transform: translate(var(--pivot-x), var(--pivot-y)) scaleY(0.08) translate(calc(-1 * var(--pivot-x)), calc(-1 * var(--pivot-y))); }
+  75%, 100% { transform: translate(var(--pivot-x), var(--pivot-y)) scaleY(1) translate(calc(-1 * var(--pivot-x)), calc(-1 * var(--pivot-y))); }
 }
 
 @keyframes raccoon-sweep {
@@ -1091,19 +1088,19 @@ details.tc-group[open] {
 }
 
 @keyframes raccoon-bob {
-  0%, 100% { transform: translateY(4px) rotate(-1.5deg); }
-  50% { transform: translateY(-4px) rotate(1.5deg); }
+  0%, 100% { transform: translate(var(--pivot-x), var(--pivot-y)) translateY(4px) rotate(-1.5deg) translate(calc(-1 * var(--pivot-x)), calc(-1 * var(--pivot-y))); }
+  50% { transform: translate(var(--pivot-x), var(--pivot-y)) translateY(-4px) rotate(1.5deg) translate(calc(-1 * var(--pivot-x)), calc(-1 * var(--pivot-y))); }
 }
 
 @keyframes raccoon-blink {
-  0%, 90%, 100% { transform: scaleY(1); }
-  93% { transform: scaleY(0.08); }
-  96% { transform: scaleY(1); }
+  0%, 90%, 100% { transform: translate(var(--pivot-x), var(--pivot-y)) scaleY(1) translate(calc(-1 * var(--pivot-x)), calc(-1 * var(--pivot-y))); }
+  93% { transform: translate(var(--pivot-x), var(--pivot-y)) scaleY(0.08) translate(calc(-1 * var(--pivot-x)), calc(-1 * var(--pivot-y))); }
+  96% { transform: translate(var(--pivot-x), var(--pivot-y)) scaleY(1) translate(calc(-1 * var(--pivot-x)), calc(-1 * var(--pivot-y))); }
 }
 
 @keyframes raccoon-sniff {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.1); }
+  0%, 100% { transform: translate(var(--pivot-x), var(--pivot-y)) scale(1) translate(calc(-1 * var(--pivot-x)), calc(-1 * var(--pivot-y))); }
+  50% { transform: translate(var(--pivot-x), var(--pivot-y)) scale(1.1) translate(calc(-1 * var(--pivot-x)), calc(-1 * var(--pivot-y))); }
 }
 
 @media (prefers-reduced-motion: reduce) {

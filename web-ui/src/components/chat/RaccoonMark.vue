@@ -9,10 +9,17 @@
     <defs>
       <mask :id="maskId" maskUnits="userSpaceOnUse">
         <circle :cx="CENTER.x" :cy="CENTER.y" :r="DISC_RADIUS" fill="#fff" />
-        <g class="raccoon__face">
+        <g class="raccoon__face" :style="pivotStyle(FACE_PIVOT)">
           <path :d="FACE" fill="#000" />
-          <path class="raccoon__nose" :d="NOSE" fill="#fff" />
-          <path v-for="(eye, index) in EYES" :key="index" class="raccoon__eye" :d="eye" fill="#000" />
+          <path class="raccoon__nose" :style="pivotStyle(NOSE_PIVOT)" :d="NOSE" fill="#fff" />
+          <path
+            v-for="(eye, index) in EYES"
+            :key="index"
+            class="raccoon__eye"
+            :style="pivotStyle(eye.pivot)"
+            :d="eye.path"
+            fill="#000"
+          />
         </g>
       </mask>
     </defs>
@@ -31,7 +38,9 @@ let marks = 0;
 
 <script setup>
 import { computed } from 'vue';
-import { CENTER, DISC_RADIUS, EYES, FACE, NOSE, RACCOON_MODE, RAYS, VIEW_BOX, rayDelay } from '../../lib/raccoon-mark.js';
+import {
+  CENTER, DISC_RADIUS, EYES, FACE, FACE_PIVOT, NOSE, NOSE_PIVOT, RACCOON_MODE, RAYS, VIEW_BOX, pivotStyle, rayDelay,
+} from '../../lib/raccoon-mark.js';
 
 const props = defineProps({
   mode: {
