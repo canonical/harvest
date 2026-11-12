@@ -21,6 +21,7 @@
           </span>
         </Transition>
       </span>
+      <span v-if="details.length" class="activity-line__details" :title="details.join(' · ')">{{ details.join(' · ') }}</span>
       <span v-if="elapsed" class="activity-line__elapsed">{{ elapsed }}</span>
       <span v-if="canExpand" class="activity-line__steps">
         {{ stepsLabel }}
@@ -53,6 +54,7 @@ const props = defineProps({
   steps:    { type: Number, default: 0 },
   expanded: { type: Boolean, default: false },
   elapsed:  { type: String, default: null },
+  details:  { type: Array, default: () => [] },
 });
 
 const emit = defineEmits(['toggle']);

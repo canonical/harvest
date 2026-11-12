@@ -92,12 +92,16 @@ function describeWork(msg) {
   return working(REVIEWING);
 }
 
+function outcomeText(lead, steps, fallback) {
+  return [lead, steps ? stepLabel(steps) : null].filter(Boolean).join(' · ') || fallback;
+}
+
 function describeOutcome(msg, duration) {
-  const steps = stepLabel(stepCount(msg));
+  const steps = stepCount(msg);
   if (msg.status === 'error') {
-    return { state: ACTIVITY_STATE.STOPPED, text: duration ? `Stopped after ${duration} · ${steps}` : `Stopped · ${steps}` };
+    return { state: ACTIVITY_STATE.STOPPED, text: outcomeText(duration ? `Stopped after ${duration}` : 'Stopped', steps, 'Stopped') };
   }
-  return { state: ACTIVITY_STATE.DONE, text: duration ? `Worked for ${duration} · ${steps}` : steps };
+  return { state: ACTIVITY_STATE.DONE, text: outcomeText(duration && `Worked for ${duration}`, steps, 'Done') };
 }
 
 export function describeActivity(msg, duration = null) {
