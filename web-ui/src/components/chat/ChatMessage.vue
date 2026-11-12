@@ -28,33 +28,14 @@
     </template>
 
     <template v-else>
-      <div v-if="msg.provider_used || (durationLabel && !showActivity) || costLabel" class="message__meta-row">
-        <div v-if="msg.provider_used" class="provider-badge" :title="msg.provider_used.provider_id">
-          <svg class="provider-badge__icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
-            <path d="M.81 7.36a1.92 1.92 0 1 1 3.799.572A1.92 1.92 0 0 1 .81 7.36M8.826 3.033a1.92 1.92 0 1 1 3.755.806 1.92 1.92 0 1 1-3.755-.806M7.04 12.585a4.68 4.68 0 0 1-3.19-2.432 2.76 2.76 0 0 1-1.64.202 6.25 6.25 0 0 0 4.498 3.77c.45.098.908.144 1.364.141a2.74 2.74 0 0 1-.562-1.605 5 5 0 0 1-.47-.076M8.394 12.193a1.92 1.92 0 0 1 3.754.805 1.92 1.92 0 1 1-3.754-.805M12.943 11.89a6.3 6.3 0 0 0 1.22-2.587 6.3 6.3 0 0 0-.905-4.782 2.77 2.77 0 0 1-1.08 1.265 4.7 4.7 0 0 1-.154 4.674c.45.37.77.87.919 1.43M2.56 4.892a2.75 2.75 0 0 1 1.603.41 4.68 4.68 0 0 1 3.77-2.015q.012-.218.057-.433c.088-.411.268-.795.525-1.124A6.31 6.31 0 0 0 2.56 4.892"/>
-          </svg>
-          {{ msg.provider_used.model }} · {{ msg.provider_used.kind }}
-        </div>
-        <div v-if="costLabel" class="cost-badge" :title="costLabel">{{ costLabel }}</div>
-        <div v-if="durationLabel && !showActivity" class="duration-badge" :class="{ 'duration-badge--live': msg.status === 'loading' }" title="Response generation time">
-          <svg class="duration-badge__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
-            <circle cx="8" cy="8" r="6.3"/>
-            <path d="M8 4.8V8.2l2.3 1.3" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          {{ durationLabel }}
-        </div>
-      </div>
-
-      <div v-if="showStatusBar" class="message__status-bar" :class="{ 'message__status-bar--sticky': isLoading }">
-        <div v-if="msg.intent && !isLoading" class="intent-badge" :class="`intent-badge--${msg.intent}`">
-          {{ intentLabel }}
-        </div>
+      <div v-if="showActivity" class="message__status-bar" :class="{ 'message__status-bar--sticky': isLoading }">
         <ActivityLine
           v-if="showActivity"
           :activity="activity"
           :steps="steps"
           :expanded="chainExpanded"
           :elapsed="isLoading ? durationLabel : null"
+          :details="runDetails"
           @toggle="chainExpanded = !chainExpanded"
         />
       </div>
@@ -312,22 +293,16 @@ const isLoading = computed(() => props.msg.status === 'loading');
 const isAssistant = computed(() => props.msg.role === 'assistant');
 const steps = computed(() => stepCount(props.msg));
 const activity = computed(() => describeActivity(props.msg, durationLabel.value));
-const showActivity = computed(() => isAssistant.value && (isLoading.value || steps.value > 0));
-const showStatusBar = computed(() => showActivity.value || Boolean(props.msg.intent && !isLoading.value));
+const runDetails = computed(() =>
+  isLoading.value ? [] : [props.msg.provider_used?.model, costLabel.value].filter(Boolean)
+);
+const showActivity = computed(() =>
+  isAssistant.value && (isLoading.value || steps.value > 0 || runDetails.value.length > 0 || Boolean(durationLabel.value))
+);
 const hasConfirmations = computed(() => (props.msg.chain ?? []).some(i => i.type === 'confirm_action'));
 const isStreamingAnswer = computed(() =>
   Boolean(props.msg.pendingAnswer && !props.msg.answer && isAnswerText(props.msg.pendingAnswer))
 );
-
-const intentLabel = computed(() => {
-  switch (props.msg.intent) {
-    case 'conversational': return 'Answering';
-    case 'research':      return 'Researching';
-    case 'action':        return 'Executing';
-    case 'hybrid':        return 'Researching → Executing';
-    default:              return '';
-  }
-});
 
 const renderedAnswer = computed(() =>
   props.msg.answer

@@ -84,6 +84,11 @@ describe('describeActivity after a response', () => {
     expect(describeActivity({ status: 'done', chain: steps }).text).toBe('2 steps');
   });
 
+  it('leaves out the step count when the answer needed no steps', () => {
+    expect(describeActivity({ status: 'done', chain: [] }, '3s').text).toBe('Worked for 3s');
+    expect(describeActivity({ status: 'done', chain: [] }).text).toBe('Done');
+  });
+
   it('marks an interrupted or failed turn as stopped', () => {
     const msg = { status: 'error', chain: steps };
     expect(describeActivity(msg, '4s')).toEqual({ state: ACTIVITY_STATE.STOPPED, text: 'Stopped after 4s · 2 steps' });

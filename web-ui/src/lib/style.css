@@ -1707,73 +1707,6 @@ a.source-loc:hover .source-loc__line {
   text-underline-offset: 2px;
 }
 
-.message__meta-row {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.provider-badge {
-  display: inline-flex;
-  align-items: center;
-  align-self: flex-start;
-  gap: 0.35rem;
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  background: var(--bg-source-chip);
-  border: 1px solid var(--border-source-chip);
-  border-radius: 2px;
-  padding: 0.2rem 0.65rem;
-}
-
-.provider-badge__icon {
-  width: 0.7rem;
-  height: 0.7rem;
-  color: #E95420;
-  flex-shrink: 0;
-}
-
-.duration-badge {
-  display: inline-flex;
-  align-items: center;
-  align-self: flex-start;
-  gap: 0.3rem;
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  background: var(--bg-source-chip);
-  border: 1px solid var(--border-source-chip);
-  border-radius: 2px;
-  padding: 0.2rem 0.65rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.duration-badge--live {
-  color: var(--loading-dot-color);
-  background: rgba(0, 102, 204, 0.12);
-  border-color: rgba(0, 102, 204, 0.2);
-}
-
-.duration-badge__icon {
-  width: 0.7rem;
-  height: 0.7rem;
-  flex-shrink: 0;
-}
-
-.cost-badge {
-  display: inline-flex;
-  align-items: center;
-  align-self: flex-start;
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  background: var(--bg-source-chip);
-  border: 1px solid var(--border-source-chip);
-  border-radius: 2px;
-  padding: 0.2rem 0.65rem;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
 .deployment-cost-panel {
   margin-top: 1.5rem;
   padding: 1rem 1.25rem;
@@ -1893,39 +1826,6 @@ a.source-loc:hover .source-loc__line {
   font-weight: 700;
 }
 
-.intent-badge {
-  display: inline-flex;
-  align-items: center;
-  font-size: 0.72rem;
-  font-weight: 600;
-  border-radius: 2px;
-  padding: 0.2rem 0.65rem;
-}
-
-.intent-badge--conversational {
-  color: var(--text-muted);
-  background: var(--bg-source-chip);
-  border: 1px solid var(--border-source-chip);
-}
-
-.intent-badge--research {
-  color: var(--loading-dot-color);
-  background: rgba(0, 102, 204, 0.12);
-  border: 1px solid rgba(0, 102, 204, 0.2);
-}
-
-.intent-badge--action {
-  color: var(--error-text);
-  background: rgba(199, 22, 43, 0.1);
-  border: 1px solid rgba(199, 22, 43, 0.2);
-}
-
-.intent-badge--hybrid {
-  color: var(--loading-dot-color);
-  background: rgba(0, 102, 204, 0.12);
-  border: 1px solid rgba(0, 102, 204, 0.2);
-}
-
 .message-error--muted {
   color: var(--text-muted);
   font-style: italic;
@@ -1982,6 +1882,22 @@ button.activity-line__row:focus-visible {
   clip: rect(0 0 0 0);
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+.activity-line--done .activity-line__text,
+.activity-line--stopped .activity-line__text {
+  flex: 0 1 auto;
+}
+
+.activity-line__details {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .activity-line__elapsed {

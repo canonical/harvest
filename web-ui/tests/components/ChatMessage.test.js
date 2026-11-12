@@ -351,34 +351,37 @@ const assistantWithProvider = {
   provider_used: { provider_id: 'anthropic-main', kind: 'anthropic', model: 'claude-sonnet-5' },
 };
 
-describe('ChatMessage — provider badge', () => {
-  it('renders a badge with the model and kind when provider_used is set', () => {
-    const w = mount(ChatMessage, { props: { msg: assistantWithProvider } });
-    const badge = w.find('.provider-badge');
-    expect(badge.exists()).toBe(true);
-    expect(badge.text()).toContain('claude-sonnet-5');
-    expect(badge.text()).toContain('anthropic');
+describe('ChatMessage — run details on the status line', () => {
+  const withUsage = {
+    ...assistantWithProvider,
+    durationMs: 18000,
+    llm_call_count: 4,
+    cost_microusd: 31900,
+    usage: { input_tokens: 49267, output_tokens: 853 },
+  };
+
+  it('puts the model, calls, cost and tokens on the status line after the time', () => {
+    const w = mount(ChatMessage, { props: { msg: withUsage } });
+    const line = w.find('.message__status-bar .activity-line');
+    expect(line.find('.activity-line__line').text()).toBe('Worked for 18s');
+    expect(line.find('.activity-line__details').text()).toBe('claude-sonnet-5 · 4 calls · $0.0319 · 49,267 in / 853 out');
   });
 
-  it('does not render a badge when provider_used is absent', () => {
-    const w = mount(ChatMessage, { props: { msg: assistantDone } });
+  it('shows no badges above the status line', () => {
+    const w = mount(ChatMessage, { props: { msg: withUsage } });
     expect(w.find('.provider-badge').exists()).toBe(false);
+    expect(w.find('.cost-badge').exists()).toBe(false);
+    expect(w.find('.duration-badge').exists()).toBe(false);
   });
 
-  it('renders the Ubuntu logo icon inside the badge', () => {
-    const w = mount(ChatMessage, { props: { msg: assistantWithProvider } });
-    expect(w.find('.provider-badge .provider-badge__icon').exists()).toBe(true);
+  it('keeps run details off the line while the answer is still loading', () => {
+    const w = mount(ChatMessage, { props: { msg: { ...withUsage, status: 'loading' } } });
+    expect(w.find('.activity-line__details').exists()).toBe(false);
   });
 
-  it('renders before the tool-use chain, not after it', () => {
-    const msg = { ...assistantWithThinking, provider_used: { provider_id: 'a', kind: 'anthropic', model: 'claude-sonnet-5' } };
-    const w = mount(ChatMessage, { props: { msg } });
-    const html = w.html();
-    const badgeIndex = html.indexOf('provider-badge');
-    const chainIndex = html.indexOf('tc-chain');
-    expect(badgeIndex).toBeGreaterThan(-1);
-    expect(chainIndex).toBeGreaterThan(-1);
-    expect(badgeIndex).toBeLessThan(chainIndex);
+  it('leaves the status line out when there is nothing to report', () => {
+    const w = mount(ChatMessage, { props: { msg: assistantDone } });
+    expect(w.find('.activity-line').exists()).toBe(false);
   });
 });
 
@@ -420,9 +423,10 @@ describe('ChatMessage — status bar (intent + phase)', () => {
     expect(w.find('.phase-label').exists()).toBe(false);
   });
 
-  it('still shows intent badge when done', () => {
+  it('never shows the intent classification as a label', () => {
     const w = mount(ChatMessage, { props: { msg: doneWithIntent } });
-    expect(w.find('.intent-badge').exists()).toBe(true);
+    expect(w.find('.intent-badge').exists()).toBe(false);
+    expect(w.text()).not.toContain('Researching');
   });
 });
 
