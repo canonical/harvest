@@ -1016,8 +1016,62 @@ details.tc-group[open] {
   flex-shrink: 0;
 }
 
-.tc-step__icon--spinning {
-  animation: spin 0.8s linear infinite;
+.raccoon__rays {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: butt;
+}
+
+.raccoon--animated .raccoon__ray {
+  animation: raccoon-sweep 1.5s linear infinite;
+}
+
+.raccoon--animated .raccoon__face {
+  transform-box: view-box;
+  transform-origin: 540px 615px;
+  animation: raccoon-bob 1.5s ease-in-out infinite;
+}
+
+.raccoon--animated .raccoon__eye {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: raccoon-blink 4.5s infinite;
+}
+
+.raccoon--animated .raccoon__nose {
+  transform-box: fill-box;
+  transform-origin: 50% 30%;
+  animation: raccoon-sniff 0.75s ease-in-out infinite;
+}
+
+@keyframes raccoon-sweep {
+  0% { opacity: 1; }
+  60%, 100% { opacity: 0.18; }
+}
+
+@keyframes raccoon-bob {
+  0%, 100% { transform: translateY(4px) rotate(-1.5deg); }
+  50% { transform: translateY(-4px) rotate(1.5deg); }
+}
+
+@keyframes raccoon-blink {
+  0%, 90%, 100% { transform: scaleY(1); }
+  93% { transform: scaleY(0.08); }
+  96% { transform: scaleY(1); }
+}
+
+@keyframes raccoon-sniff {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .raccoon--animated .raccoon__ray,
+  .raccoon--animated .raccoon__face,
+  .raccoon--animated .raccoon__eye,
+  .raccoon--animated .raccoon__nose {
+    animation: none;
+  }
 }
 
 .tc-step__label {
