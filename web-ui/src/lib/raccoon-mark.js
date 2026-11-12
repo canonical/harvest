@@ -3,6 +3,12 @@ export const CENTER = { x: 540, y: 615.5 };
 export const DISC_RADIUS = 273;
 export const SWEEP_SECONDS = 1.5;
 
+export const RACCOON_MODE = Object.freeze({
+  WORKING: 'working',
+  SETTLING: 'settling',
+  RESTING: 'resting',
+});
+
 export const RAYS = [
   [["M803.0 615.5L1084.0 615.5", 14.5]],
   [["M801.6 643.0L1081.0 672.4", 14.5]],

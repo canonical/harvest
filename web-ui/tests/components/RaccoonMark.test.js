@@ -26,13 +26,26 @@ describe('RaccoonMark', () => {
     expect(rayDelay(RAYS.length - 1)).toBe('-0.025s');
   });
 
-  it('replaces the status line spinner only while the agent is working', () => {
-    const line = state => mount(ActivityLine, { props: { activity: { state, text: 'Searching amafu' } } });
-    const working = line(ACTIVITY_STATE.WORKING);
-    expect(working.find('.raccoon').classes()).toContain('raccoon--animated');
-    expect(working.find('.activity-line__icon').exists()).toBe(false);
-    const done = line(ACTIVITY_STATE.DONE);
-    expect(done.find('.raccoon').exists()).toBe(false);
-    expect(done.find('.activity-line__icon').exists()).toBe(true);
+  it('sweeps while the agent works and settles once when it finishes live', async () => {
+    const line = mount(ActivityLine, { props: { activity: { state: ACTIVITY_STATE.WORKING, text: 'Searching amafu' } } });
+    expect(line.find('.raccoon').classes()).toContain('raccoon--working');
+    expect(line.find('.activity-line__icon').exists()).toBe(false);
+    await line.setProps({ activity: { state: ACTIVITY_STATE.DONE, text: 'Worked for 20s · 2 steps' } });
+    expect(line.find('.raccoon').classes()).toContain('raccoon--settling');
+    expect(line.find('.activity-line__raccoon').classes()).toContain('activity-line__raccoon--rest');
+    expect(line.find('.raccoon__ray').attributes('style')).toBeUndefined();
+  });
+
+  it('rests without replaying the settle on answers that were already complete', () => {
+    const line = mount(ActivityLine, { props: { activity: { state: ACTIVITY_STATE.DONE, text: 'Worked for 20s' } } });
+    expect(line.find('.raccoon').classes()).toContain('raccoon--resting');
+  });
+
+  it('keeps the plain icon when the agent waits or is stopped', () => {
+    for (const state of [ACTIVITY_STATE.WAITING, ACTIVITY_STATE.STOPPED]) {
+      const line = mount(ActivityLine, { props: { activity: { state, text: 'x' } } });
+      expect(line.find('.raccoon').exists()).toBe(false);
+      expect(line.find('.activity-line__icon').exists()).toBe(true);
+    }
   });
 });

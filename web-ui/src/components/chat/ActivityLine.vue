@@ -7,7 +7,12 @@
       :aria-expanded="canExpand ? String(expanded) : undefined"
       @click="toggle"
     >
-      <RaccoonMark v-if="isWorking" class="activity-line__raccoon" animated />
+      <RaccoonMark
+        v-if="raccoonMode"
+        class="activity-line__raccoon"
+        :class="{ 'activity-line__raccoon--rest': !isWorking }"
+        :mode="raccoonMode"
+      />
       <span v-else class="activity-line__icon" aria-hidden="true"></span>
       <span class="activity-line__text">
         <Transition name="activity-line-slide">
@@ -41,6 +46,7 @@
 import { computed, ref, watch } from 'vue';
 import RaccoonMark from './RaccoonMark.vue';
 import { ACTIVITY_STATE, isContinuation, stepLabel } from '../../lib/agent-activity.js';
+import { RACCOON_MODE } from '../../lib/raccoon-mark.js';
 
 const props = defineProps({
   activity: { type: Object, required: true },
@@ -52,12 +58,19 @@ const props = defineProps({
 const emit = defineEmits(['toggle']);
 
 const lineKey = ref(0);
+const finishedLive = ref(false);
 
 const canExpand = computed(() => props.steps > 0);
 const isWorking = computed(() => props.activity.state === ACTIVITY_STATE.WORKING);
 const isSettled = computed(() =>
   props.activity.state === ACTIVITY_STATE.DONE || props.activity.state === ACTIVITY_STATE.STOPPED
 );
+
+const raccoonMode = computed(() => {
+  if (isWorking.value) return RACCOON_MODE.WORKING;
+  if (props.activity.state !== ACTIVITY_STATE.DONE) return null;
+  return finishedLive.value ? RACCOON_MODE.SETTLING : RACCOON_MODE.RESTING;
+});
 
 const stepsLabel = computed(() => {
   if (!isSettled.value) return stepLabel(props.steps);
@@ -67,6 +80,10 @@ const stepsLabel = computed(() => {
 function toggle() {
   if (canExpand.value) emit('toggle');
 }
+
+watch(() => props.activity.state, (next, previous) => {
+  finishedLive.value = next === ACTIVITY_STATE.DONE && previous !== ACTIVITY_STATE.DONE;
+});
 
 watch(() => props.activity.text, (next, previous) => {
   if (!isContinuation(previous, next)) lineKey.value += 1;

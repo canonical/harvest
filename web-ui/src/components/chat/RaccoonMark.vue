@@ -1,7 +1,7 @@
 <template>
   <svg
     class="raccoon"
-    :class="{ 'raccoon--animated': animated }"
+    :class="`raccoon--${mode}`"
     :viewBox="VIEW_BOX"
     aria-hidden="true"
     xmlns="http://www.w3.org/2000/svg"
@@ -17,7 +17,7 @@
       </mask>
     </defs>
     <g class="raccoon__rays">
-      <g v-for="(segments, index) in RAYS" :key="index" class="raccoon__ray" :style="{ animationDelay: rayDelay(index) }">
+      <g v-for="(segments, index) in RAYS" :key="index" class="raccoon__ray" :style="isWorking ? { animationDelay: rayDelay(index) } : null">
         <path v-for="([d, width], part) in segments" :key="part" :d="d" :stroke-width="width" />
       </g>
     </g>
@@ -30,11 +30,18 @@ let marks = 0;
 </script>
 
 <script setup>
-import { CENTER, DISC_RADIUS, EYES, FACE, NOSE, RAYS, VIEW_BOX, rayDelay } from '../../lib/raccoon-mark.js';
+import { computed } from 'vue';
+import { CENTER, DISC_RADIUS, EYES, FACE, NOSE, RACCOON_MODE, RAYS, VIEW_BOX, rayDelay } from '../../lib/raccoon-mark.js';
 
-defineProps({
-  animated: { type: Boolean, default: false },
+const props = defineProps({
+  mode: {
+    type: String,
+    default: RACCOON_MODE.RESTING,
+    validator: value => Object.values(RACCOON_MODE).includes(value),
+  },
 });
+
+const isWorking = computed(() => props.mode === RACCOON_MODE.WORKING);
 
 const maskId = `raccoon-mask-${++marks}`;
 </script>
