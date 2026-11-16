@@ -88,6 +88,42 @@ impl GitClient {
         Some(callbacks)
     }
 
+    pub fn push(&self, repo_path: &Path, url: &str, refspec: &str) -> Result<String> {
+        let repo = Repository::open(repo_path)?;
+        let mut remote = repo.remote_anonymous(url)?;
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let rejection = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let mut callbacks = self.callbacks().unwrap_or_default();
+        {
+            let messages = std::sync::Arc::clone(&messages);
+            callbacks.sideband_progress(move |data| {
+                if let Ok(mut text) = messages.lock() {
+                    text.push_str(&String::from_utf8_lossy(data));
+                }
+                true
+            });
+        }
+        {
+            let rejection = std::sync::Arc::clone(&rejection);
+            callbacks.push_update_reference(move |reference, status| {
+                if let (Some(reason), Ok(mut slot)) = (status, rejection.lock()) {
+                    *slot = Some(format!("{reference}: {reason}"));
+                }
+                Ok(())
+            });
+        }
+        let mut options = git2::PushOptions::new();
+        options.remote_callbacks(callbacks);
+        remote
+            .push(&[refspec], Some(&mut options))
+            .with_context(|| format!("pushing to {url}"))?;
+        if let Some(reason) = rejection.lock().ok().and_then(|r| r.clone()) {
+            anyhow::bail!("the remote rejected the push: {reason}");
+        }
+        let text = messages.lock().map(|m| m.clone()).unwrap_or_default();
+        Ok(text)
+    }
+
     pub fn repo_path(&self, repo_name: &str) -> PathBuf {
         self.clone_root.join(repo_name)
     }
@@ -381,6 +417,32 @@ fn parse_refs(refs: Vec<(String, String)>) -> Vec<TagInfo> {
 
 #[cfg(test)]
 mod tests {
+
+    fn sh(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn push_sends_a_ref_and_reports_rejections() {
+        let root = tempfile::TempDir::new().unwrap();
+        let remote = root.path().join("remote.git");
+        let work = root.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        sh(root.path(), &["init", "-q", "--bare", remote.to_str().unwrap()]);
+        sh(&work, &["init", "-q", "-b", "main"]);
+        sh(&work, &["-c", "user.name=a", "-c", "user.email=a@b", "commit", "-q", "--allow-empty", "-m", "one"]);
+        let client = GitClient::new(root.path().to_path_buf());
+        let url = remote.to_str().unwrap();
+        client.push(&work, url, "refs/heads/main:refs/heads/feature").unwrap();
+        let pushed = Repository::open(&remote).unwrap();
+        assert!(pushed.find_reference("refs/heads/feature").is_ok());
+
+        sh(&work, &["-c", "user.name=a", "-c", "user.email=a@b", "commit", "-q", "--amend", "--allow-empty", "-m", "rewritten"]);
+        let refused = client.push(&work, url, "refs/heads/main:refs/heads/feature");
+        assert!(refused.is_err());
+    }
+
     use super::*;
     use git2::{Repository, Signature, Time};
     use tempfile::TempDir;

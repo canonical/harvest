@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { openCodeSession, closeCodeSession, isOpen, suggestBranch } from '../../src/lib/code-api.js';
+import { openCodeSession, closeCodeSession, isOpen, suggestBranch, proposeChange, changeRequestName } from '../../src/lib/code-api.js';
 import { classifyDiffLines } from '../../src/lib/diff-lines.js';
 
 function respond(status, body) {
@@ -38,6 +38,24 @@ describe('code api', () => {
   it('suggests a branch name from a description', () => {
     expect(suggestBranch('Fix the Login page!')).toBe('harvest/fix-the-login-page');
     expect(suggestBranch('  ')).toBe('');
+  });
+});
+
+describe('change requests', () => {
+  it('proposes a change with a title and description', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockReturnValue(respond(200, { url: 'u', state: 'open' }));
+    await proposeChange('s1', 'Fix login', 'Details');
+    const [url, options] = fetch.mock.calls[0];
+    expect(url).toBe('/code/sessions/s1/change-request');
+    expect(JSON.parse(options.body)).toEqual({ title: 'Fix login', description: 'Details' });
+  });
+
+  it('names change requests the way each platform does', () => {
+    expect(changeRequestName('github')).toBe('Pull request');
+    expect(changeRequestName('gitlab')).toBe('Merge request');
+    expect(changeRequestName('gerrit')).toBe('Gerrit change');
+    expect(changeRequestName('launchpad')).toBe('Merge proposal');
+    expect(changeRequestName('other')).toBe('Change request');
   });
 });
 

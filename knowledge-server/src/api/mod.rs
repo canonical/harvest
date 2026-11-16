@@ -530,6 +530,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                 get(code::get_session).delete(code::close_session),
             )
             .route("/code/sessions/:id/changes", get(code::session_changes))
+            .route("/code/sessions/:id/change-request", post(code::propose_change))
             .route("/code/sessions/:id/preview", get(crate::code::previews::handlers::session_preview))
             .route("/code/sessions/:id/preview/share", put(crate::code::previews::handlers::share))
             .route("/code/sessions/:id/query/stream", post(code::session_query_stream))

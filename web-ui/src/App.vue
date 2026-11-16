@@ -365,7 +365,7 @@ onMounted(async () => {
     auth.fetchConfig();
     if (!auth.isLoggedIn) {
       const user = await auth.fetchMe();
-      if (!user && !isAuthRoute.value) {
+      if (!user && !route.meta.public) {
         router.push('/login');
         return;
       }

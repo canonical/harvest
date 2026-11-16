@@ -11,7 +11,7 @@ use serde_json::json;
 
 use super::projects::{self, CodeProject};
 use super::sessions::{self, CloseReason, Session};
-use super::{images, CodeEnv};
+use super::{change_requests, images, CodeEnv};
 use crate::access::repos::{check_remote, RepoAccess, RepoScope};
 use crate::api::query::{stream_turn, QueryRequest};
 use crate::api::repositories::{start_ingestion, IngestionSource};
@@ -240,7 +240,8 @@ pub async fn get_session(
     let env = env(&state)?;
     let session = session_for(env, &user, &id).await?;
     let project = projects::get(&env.db, &session.project_id).await.map_err(internal)?;
-    Ok(Json(json!({ "session": session, "project": project })).into_response())
+    let change_request = change_requests::for_session(env, &id).await.map_err(internal)?;
+    Ok(Json(json!({ "session": session, "project": project, "change_request": change_request })).into_response())
 }
 
 pub async fn close_session(
@@ -265,13 +266,37 @@ pub async fn session_changes(
         .await
         .map_err(|e| failure(StatusCode::CONFLICT, e.to_string()))?;
     let base = images::quote(&format!("refs/remotes/origin/{}", session.base_branch));
-    let diff = sessions::run_checked(env, &container, &format!("git add -N . && git diff {base}"))
+    let diff = sessions::run_checked(env, &container, &format!(
+            "index=$(mktemp) && cp .git/index \"$index\" && GIT_INDEX_FILE=\"$index\" git add -N . && \
+             GIT_INDEX_FILE=\"$index\" git diff {base}; status=$?; rm -f \"$index\"; exit $status"
+        ))
         .await
         .map_err(|e| failure(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let commits = sessions::run_checked(env, &container, &format!("git log --oneline {base}..HEAD"))
         .await
         .unwrap_or_default();
     Ok(Json(json!({ "diff": diff, "commits": commits.lines().collect::<Vec<_>>() })).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct ProposalBody {
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+pub async fn propose_change(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<CodeState>>,
+    Path(id): Path<String>,
+    Json(body): Json<ProposalBody>,
+) -> Reply {
+    let env = env(&state)?;
+    session_for(env, &user, &id).await?;
+    let request = change_requests::submit(env, &id, &body.title, &body.description)
+        .await
+        .map_err(|e| failure(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    Ok(Json(request).into_response())
 }
 
 pub async fn session_query_stream(
