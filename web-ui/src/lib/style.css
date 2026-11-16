@@ -1754,6 +1754,7 @@ a.source-loc:hover .source-loc__line {
 
 .nav-cost-block {
   display: flex;
+  flex-shrink: 0;
   flex-direction: column;
   gap: 0.15rem;
   padding: 0.35rem 0.75rem;
@@ -10137,7 +10138,14 @@ button.activity-line__row:hover .activity-line__steps {
 .mode-nav {
   display: flex;
   flex-direction: column;
+}
+
+.nav-scroll {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .mode-switch {

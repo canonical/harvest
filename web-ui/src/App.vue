@@ -53,66 +53,69 @@
             </div>
 
             <div class="p-panel__content">
-              <ModeNavigation :mode="space.mode" @navigate="closeNavMobile">
-                <div v-if="usesProjects(space.mode)" class="project-selector-section">
-                  <span class="project-selector__label is-fading-when-collapsed">Project</span>
-                  <button
-                    class="project-selector__toggle"
-                    type="button"
-                    :aria-expanded="projectDropdownOpen"
-                    @click="toggleProjectDropdown"
-                  >
-                    <svg class="project-selector__folder-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                    <span class="project-selector__name is-fading-when-collapsed">{{ project.selectedProject?.name ?? 'Select project' }}</span>
-                    <svg class="project-selector__chevron is-fading-when-collapsed" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 6 8 10 12 6"/></svg>
-                  </button>
-                  <div v-if="projectDropdownOpen" class="project-selector__dropdown">
-                    <input
-                      v-model="projectSearch"
-                      type="search"
-                      class="project-selector__search-input"
-                      placeholder="Search projects…"
-                      autocomplete="off"
-                      @click.stop
-                    />
-                    <div class="project-selector__list">
-                      <button
-                        v-for="p in filteredProjects"
-                        :key="p.id"
-                        type="button"
-                        class="project-selector__item"
-                        :class="{ 'is-selected': p.id === project.selectedProjectId }"
-                        @click="chooseProject(p)"
-                      >
-                        <span class="project-item__name">{{ p.name }}</span>
-                        <span v-if="p.role && p.role !== 'owner'" class="p-chip project-item__group-badge">{{ p.role }}</span>
-                      </button>
-                      <p v-if="!filteredProjects.length" class="project-selector__empty"></p>
-                    </div>
-                    <div class="project-selector__footer">
-                      <button type="button" class="project-selector__new-btn" @click="openCreateProject">+ New project</button>
+              <div class="nav-scroll">
+                <ModeNavigation :mode="space.mode" @navigate="closeNavMobile">
+                  <div v-if="usesProjects(space.mode)" class="project-selector-section">
+                    <span class="project-selector__label is-fading-when-collapsed">Project</span>
+                    <button
+                      class="project-selector__toggle"
+                      type="button"
+                      :aria-expanded="projectDropdownOpen"
+                      @click="toggleProjectDropdown"
+                    >
+                      <svg class="project-selector__folder-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                      <span class="project-selector__name is-fading-when-collapsed">{{ project.selectedProject?.name ?? 'Select project' }}</span>
+                      <svg class="project-selector__chevron is-fading-when-collapsed" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 6 8 10 12 6"/></svg>
+                    </button>
+                    <div v-if="projectDropdownOpen" class="project-selector__dropdown">
+                      <input
+                        v-model="projectSearch"
+                        type="search"
+                        class="project-selector__search-input"
+                        placeholder="Search projects…"
+                        autocomplete="off"
+                        @click.stop
+                      />
+                      <div class="project-selector__list">
+                        <button
+                          v-for="p in filteredProjects"
+                          :key="p.id"
+                          type="button"
+                          class="project-selector__item"
+                          :class="{ 'is-selected': p.id === project.selectedProjectId }"
+                          @click="chooseProject(p)"
+                        >
+                          <span class="project-item__name">{{ p.name }}</span>
+                          <span v-if="p.role && p.role !== 'owner'" class="p-chip project-item__group-badge">{{ p.role }}</span>
+                        </button>
+                        <p v-if="!filteredProjects.length" class="project-selector__empty"></p>
+                      </div>
+                      <div class="project-selector__footer">
+                        <button type="button" class="project-selector__new-btn" @click="openCreateProject">+ New project</button>
+                      </div>
                     </div>
                   </div>
-                </div>
-              </ModeNavigation>
+                </ModeNavigation>
 
-              <div v-if="usesProjects(space.mode) && projectCostLabel" class="nav-cost-block is-fading-when-collapsed">
-                <div class="nav-cost-block__row">
-                  <span class="nav-cost-block__label">Chat spend</span>
-                  <span class="nav-cost-block__value">{{ chatCostLabel }}</span>
+                <div v-if="usesProjects(space.mode) && projectCostLabel" class="nav-cost-block is-fading-when-collapsed">
+                  <div class="nav-cost-block__row">
+                    <span class="nav-cost-block__label">Chat spend</span>
+                    <span class="nav-cost-block__value">{{ chatCostLabel }}</span>
+                  </div>
+                  <div class="nav-cost-block__row">
+                    <span class="nav-cost-block__label">Design spend</span>
+                    <span class="nav-cost-block__value">{{ designCostLabel }}</span>
+                  </div>
+                  <div class="nav-cost-block__row">
+                    <span class="nav-cost-block__label">Deploy spend</span>
+                    <span class="nav-cost-block__value">{{ deployCostLabel }}</span>
+                  </div>
+                  <div class="nav-cost-block__row nav-cost-block__row--total">
+                    <span class="nav-cost-block__label nav-cost-block__label--total">Total project spend</span>
+                    <span class="nav-cost-block__value nav-cost-block__value--total">{{ projectCostLabel }}</span>
+                  </div>
                 </div>
-                <div class="nav-cost-block__row">
-                  <span class="nav-cost-block__label">Design spend</span>
-                  <span class="nav-cost-block__value">{{ designCostLabel }}</span>
-                </div>
-                <div class="nav-cost-block__row">
-                  <span class="nav-cost-block__label">Deploy spend</span>
-                  <span class="nav-cost-block__value">{{ deployCostLabel }}</span>
-                </div>
-                <div class="nav-cost-block__row nav-cost-block__row--total">
-                  <span class="nav-cost-block__label nav-cost-block__label--total">Total project spend</span>
-                  <span class="nav-cost-block__value nav-cost-block__value--total">{{ projectCostLabel }}</span>
-                </div>
+
               </div>
 
               <div class="p-side-navigation--icons sidenav-bottom-container">
