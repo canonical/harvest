@@ -9,6 +9,7 @@ const AgentConsoleView = () => import('../views/AgentConsoleView.vue');
 const routes = [
   { path: '/login',          component: () => import('../views/LoginView.vue'),         meta: { public: true } },
   { path: '/register',       component: () => import('../views/RegisterView.vue'),       meta: { public: true } },
+  { path: '/preview/:id',    component: () => import('../views/PreviewView.vue'), props: true, meta: { public: true, bare: true } },
   { path: '/authenticate/:uuid', component: () => import('../views/AuthenticateView.vue'), meta: { public: true } },
   { path: '/',               redirect: '/chat' },
 

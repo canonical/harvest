@@ -27,6 +27,23 @@
       />
     </div>
 
+    <div v-if="view === 'preview'" class="code-session__preview">
+      <p v-if="!preview" class="u-text--muted">No preview yet. Ask the agent to set one up, for example “let me try it”.</p>
+      <template v-else>
+        <div class="preview-share">
+          <label for="preview-audience">Shared with</label>
+          <select id="preview-audience" :value="preview.audience" :disabled="sharing" @change="share($event.target.value)">
+            <option v-for="audience in AUDIENCES" :key="audience.id" :value="audience.id">{{ audience.label }}</option>
+          </select>
+          <template v-if="preview.audience !== 'owner'">
+            <input class="preview-share__link" :value="link" readonly aria-label="Share link" @focus="$event.target.select()" />
+            <button class="p-button--base is-dense" type="button" @click="copyLink">{{ copied ? 'Copied' : 'Copy link' }}</button>
+          </template>
+        </div>
+        <PreviewPanel :preview-id="preview.id" />
+      </template>
+    </div>
+
     <div v-if="view === 'changes'" class="code-session__changes">
       <p v-if="changesError" class="u-text--muted">{{ changesError }}</p>
       <template v-else-if="changes">
@@ -46,12 +63,15 @@ import { ref, computed, watch, onUnmounted } from 'vue';
 import ChatPaneContent from '../components/chat/ChatPaneContent.vue';
 import { getCodeSession, closeCodeSession, getSessionChanges, isOpen } from '../lib/code-api.js';
 import { classifyDiffLines } from '../lib/diff-lines.js';
+import PreviewPanel from '../components/code/PreviewPanel.vue';
+import { AUDIENCES, getSessionPreview, sharePreview, shareUrl } from '../lib/preview-api.js';
 
 const props = defineProps({ id: { type: String, required: true } });
 
 const TABS = [
   { id: 'chat', label: 'Chat' },
   { id: 'changes', label: 'Changes' },
+  { id: 'preview', label: 'Preview' },
 ];
 const STATUS_LABELS = { starting: 'Starting container…', active: 'Active', closed: 'Ended', failed: 'Failed' };
 const POLL_MS = 2000;
@@ -63,6 +83,10 @@ const changes = ref(null);
 const changesError = ref('');
 const error = ref('');
 const closing = ref(false);
+const preview = ref(null);
+const sharing = ref(false);
+const copied = ref(false);
+const link = computed(() => (preview.value ? shareUrl(preview.value.id) : ''));
 let timer = null;
 
 const statusLabel = computed(() => STATUS_LABELS[session.value?.status] ?? session.value?.status);
@@ -107,6 +131,39 @@ async function close() {
 }
 
 watch(() => props.id, load, { immediate: true });
-watch(view, (tab) => { if (tab === 'changes') loadChanges(); });
+async function loadPreview() {
+  try {
+    preview.value = (await getSessionPreview(props.id)).preview;
+  } catch (e) {
+    error.value = e.message;
+  }
+}
+
+async function share(audience) {
+  sharing.value = true;
+  try {
+    await sharePreview(props.id, audience);
+    preview.value = { ...preview.value, audience };
+  } catch (e) {
+    error.value = e.message;
+  } finally {
+    sharing.value = false;
+  }
+}
+
+async function copyLink() {
+  try {
+    await navigator.clipboard.writeText(link.value);
+    copied.value = true;
+    setTimeout(() => { copied.value = false; }, 1500);
+  } catch {
+    copied.value = false;
+  }
+}
+
+watch(view, (tab) => {
+  if (tab === 'changes') loadChanges();
+  if (tab === 'preview') loadPreview();
+});
 onUnmounted(stopPolling);
 </script>

@@ -332,6 +332,7 @@ pub async fn close(env: &CodeEnv, id: &str, reason: CloseReason) -> Result<()> {
     let Some(session) = get(env, id).await? else {
         return Ok(());
     };
+    super::previews::clones::release_session(env, id).await?;
     if let Some(container) = &session.container {
         release(env, container).await;
     }

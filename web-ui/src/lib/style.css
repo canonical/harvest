@@ -10237,3 +10237,29 @@ button.activity-line__row:hover .activity-line__steps {
 .code-diff .diff-del { color: #c7162b; }
 .code-diff .diff-hunk { color: var(--text-muted); }
 .code-diff .diff-file { font-weight: 600; }
+
+.code-session__preview { flex: 1; min-height: 0; overflow: auto; padding: 1rem; display: flex; flex-direction: column; gap: .75rem; }
+.preview-share { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.preview-share label { margin: 0; }
+.preview-share select, .preview-share input, .preview-share .p-button--base { margin: 0; }
+.preview-share select { width: auto; }
+.preview-share__link { flex: 1 1 16rem; font-size: .875rem; }
+.preview-panel { display: flex; flex-direction: column; gap: .5rem; flex: 1; min-height: 0; }
+.preview-panel__waiting { display: flex; gap: .75rem; align-items: center; color: var(--text-muted); padding: 1rem 0; }
+.preview-panel__toolbar { display: flex; gap: .75rem; align-items: center; justify-content: flex-end; }
+.preview-panel__toolbar .p-button--base { margin: 0; }
+.preview-frame { flex: 1; min-height: 60vh; width: 100%; border: 1px solid var(--border-color); border-radius: 4px; background: #fff; }
+.preview-runner { display: flex; flex-direction: column; gap: .5rem; }
+.preview-runner__request { display: flex; flex-direction: column; gap: .25rem; }
+.preview-runner__request label { margin: .25rem 0 0; }
+.preview-runner__request textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8125rem; margin: 0; }
+.preview-runner__line { display: flex; gap: .5rem; align-items: center; }
+.preview-runner__line select { width: auto; margin: 0; }
+.preview-runner__line input { flex: 1; margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.preview-runner__line .p-button--positive { margin: 0; }
+.preview-terminal { background: var(--bg-code); color: var(--text-code); border-radius: 4px; padding: .75rem; min-height: 16rem; max-height: 60vh; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8125rem; }
+.preview-terminal pre { margin: 0 0 .5rem; padding: 0; background: none; white-space: pre-wrap; }
+.preview-terminal__command { font-weight: 600; }
+.preview-terminal__exit { color: var(--error-text); margin-bottom: .5rem; }
+.preview-page { display: flex; flex-direction: column; min-height: 100vh; padding: 1rem; gap: .75rem; background: var(--bg-page); color: var(--text-primary); }
+.preview-page__header { display: flex; gap: .75rem; align-items: baseline; flex-wrap: wrap; }

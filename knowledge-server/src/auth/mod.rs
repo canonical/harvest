@@ -29,23 +29,29 @@ pub struct AuthState {
 }
 
 fn token_from_request(req: &Request) -> Option<String> {
-    if let Some(auth) = req.headers().get(axum::http::header::AUTHORIZATION) {
-        if let Ok(s) = auth.to_str() {
-            if let Some(bearer) = s.strip_prefix("Bearer ") {
-                return Some(bearer.to_string());
-            }
-        }
-    }
-    req.headers()
-        .get(axum::http::header::COOKIE)
+    token_from_headers(req.headers())
+}
+
+pub fn token_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(bearer) = headers
+        .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|cookies| {
-            cookies
-                .split(';')
-                .map(|c| c.trim())
-                .find(|c| c.starts_with("token="))
-                .map(|c| c["token=".len()..].to_string())
-        })
+        .and_then(|s| s.strip_prefix("Bearer "))
+    {
+        return Some(bearer.to_string());
+    }
+    cookie(headers, "token")
+}
+
+pub fn cookie(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    let prefix = format!("{name}=");
+    headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|cookies| cookies.split(';'))
+        .map(str::trim)
+        .find_map(|c| c.strip_prefix(&prefix).map(String::from))
 }
 
 pub async fn require_auth(

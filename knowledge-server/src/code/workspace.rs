@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::images::{quote, tail};
-use super::{projects, sessions, CodeEnv, WORKSPACE};
+use super::{previews, projects, sessions, CodeEnv, WORKSPACE};
 use crate::agent::tool::Tool;
 use crate::llm::types::ToolDefinition;
 use crate::lxd::containers::Command;
@@ -57,9 +57,10 @@ enum Operation {
     List,
     Changes,
     SaveSetup,
+    Preview,
 }
 
-const OPERATIONS: [Operation; 7] = [
+const OPERATIONS: [Operation; 8] = [
     Operation::Run,
     Operation::Read,
     Operation::Write,
@@ -67,6 +68,7 @@ const OPERATIONS: [Operation; 7] = [
     Operation::List,
     Operation::Changes,
     Operation::SaveSetup,
+    Operation::Preview,
 ];
 
 impl Operation {
@@ -142,6 +144,19 @@ impl Operation {
                     "required": ["script"]
                 }),
             ),
+            Self::Preview => (
+                "configure_preview",
+                "Let the user try the work: kind 'web' for a web app shown in the browser, 'api' for an HTTP API they can send requests to, 'cli' for a command-line tool they can run commands with. For web and api, give the port the app listens on and the command that starts it; Harvest starts it in the background when nothing listens yet, with the PORT and HARVEST_BASE_PATH environment variables set. Web apps are served under HARVEST_BASE_PATH, so configure the app's base path with it when the app builds absolute URLs. People the user shares the preview with each get their own copy of this container.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["web", "api", "cli"] },
+                        "port": { "type": "integer" },
+                        "start_command": { "type": "string" }
+                    },
+                    "required": ["kind"]
+                }),
+            ),
         };
         ToolDefinition {
             name: name.into(),
@@ -181,6 +196,26 @@ impl WorkspaceTool {
         Ok(text)
     }
 
+    async fn configure_preview(&self, container: &str, params: &Value) -> Result<String> {
+        let kind = params["kind"]
+            .as_str()
+            .and_then(previews::Kind::parse)
+            .ok_or_else(|| anyhow::anyhow!("kind must be web, api or cli"))?;
+        let settings = previews::Settings {
+            kind,
+            port: params["port"].as_u64().and_then(|p| u16::try_from(p).ok()),
+            start_command: params["start_command"].as_str(),
+        };
+        let preview = previews::configure(&self.env.db, &self.session_id, settings).await?;
+        if kind.needs_port() {
+            previews::runtime::address(&self.env, container, &preview).await?;
+        }
+        Ok(format!(
+            "The preview is ready. The user opens it from the Preview tab of this session and can share it from there (/#/preview/{}).",
+            preview.id
+        ))
+    }
+
     async fn perform(&self, params: &Value) -> Result<String> {
         let text = |key: &str| params[key].as_str().unwrap_or_default();
         if let Operation::SaveSetup = self.operation {
@@ -191,6 +226,9 @@ impl WorkspaceTool {
             return Ok("Saved. New containers for this project will run this script.".into());
         }
         let container = self.container().await?;
+        if let Operation::Preview = self.operation {
+            return self.configure_preview(&container, params).await;
+        }
         let lxd = &self.env.lxd;
         match self.operation {
             Operation::Run => {
@@ -240,7 +278,7 @@ impl WorkspaceTool {
                 );
                 self.shell(&container, &script, Duration::from_secs(60)).await
             }
-            Operation::SaveSetup => unreachable!(),
+            Operation::SaveSetup | Operation::Preview => unreachable!(),
         }
     }
 }
