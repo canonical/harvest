@@ -44,7 +44,7 @@ describe('router beforeEach fresh-load guard', () => {
       ['/deployments', '/deploy/deployments'],
       ['/agents', '/deploy/agents'],
       ['/skills', '/deploy/skills'],
-      ['/repositories', '/code'],
+      ['/repositories', '/code/repositories'],
     ]) {
       const router = await freshRouter();
       await router.push(from);

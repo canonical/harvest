@@ -307,7 +307,12 @@ async fn answer_chat(
     .await;
     let agent = state
         .qs
-        .personal_agent(&principal.user_id, Some(conv_id.as_str()), user_llm)
+        .agent_in(
+            crate::modes::Space::personal(&principal.user_id),
+            &principal.user_id,
+            Some(conv_id.as_str()),
+            user_llm,
+        )
         .await;
 
     let message = with_diagram_instruction(&req.message, diagrams_mode);

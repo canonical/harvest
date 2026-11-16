@@ -542,6 +542,13 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         collocate.clone().map(Arc::new),
     );
 
+    let code = lxd.clone().map(|lxd| crate::code::CodeEnv {
+        db: Arc::clone(&db),
+        lxd,
+        credentials: credentials.clone(),
+        settings: crate::code::CodeSettings::from(&config.code),
+    });
+
     let toolbox = Arc::new(crate::toolsets::build_toolbox(
         crate::toolsets::ToolboxDeps {
             db: Arc::clone(&db),
@@ -553,6 +560,7 @@ pub async fn start(config: Config) -> Result<RunningServer> {
             collocate: collocate.clone(),
             collocate_registry: Arc::clone(&collocate_registry),
             server_url: server_url.clone(),
+            code: code.clone(),
         },
     ));
     let agent_builder = Arc::new(ProjectAgentBuilder {
@@ -627,8 +635,12 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         live: Arc::clone(&live),
         admission: Arc::clone(&admission),
         credentials,
+        code,
     };
 
+    if let Some(code) = &state.code {
+        crate::code::keeper::spawn(Arc::clone(&leases), code.clone());
+    }
     if let Some(credentials) = &state.credentials {
         crate::access::recheck::spawn(
             Arc::clone(&leases),

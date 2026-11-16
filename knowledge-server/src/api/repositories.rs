@@ -262,67 +262,80 @@ pub async fn handle_add_repository(
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
 
-    match state.ingestion.is_active(&name).await {
-        Ok(true) => {
-            return (
-                StatusCode::CONFLICT,
-                format!("repository '{}' is already being ingested", name),
-            )
-                .into_response();
-        }
-        Ok(false) => {}
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-
-    let job_id = match state.ingestion.try_start(&name, "ingest").await {
-        Ok(Some(id)) => id,
-        Ok(None) => {
-            return (
-                StatusCode::CONFLICT,
-                format!("repository '{}' is already being ingested", name),
-            )
-                .into_response();
-        }
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    let source = IngestionSource {
+        name: name.clone(),
+        url,
+        browse_url: body.browse_url.clone(),
+        refs: body.refs.clone(),
+        credentials,
     };
+    match start_ingestion(&state, source).await {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "name": name, "status": "ingesting" })),
+        )
+            .into_response(),
+        Err(IngestionRefused::AlreadyRunning) => (
+            StatusCode::CONFLICT,
+            format!("repository '{}' is already being ingested", name),
+        )
+            .into_response(),
+        Err(IngestionRefused::Storage(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+pub struct IngestionSource {
+    pub name: String,
+    pub url: String,
+    pub browse_url: Option<String>,
+    pub refs: Vec<String>,
+    pub credentials: GitCredentials,
+}
+
+#[derive(Debug)]
+pub enum IngestionRefused {
+    AlreadyRunning,
+    Storage(String),
+}
+
+pub async fn start_ingestion(state: &GraphState, source: IngestionSource) -> Result<(), IngestionRefused> {
+    let name = source.name.clone();
+    if state
+        .ingestion
+        .is_active(&name)
+        .await
+        .map_err(|e| IngestionRefused::Storage(e.to_string()))?
+    {
+        return Err(IngestionRefused::AlreadyRunning);
+    }
+    let job_id = state
+        .ingestion
+        .try_start(&name, "ingest")
+        .await
+        .map_err(|e| IngestionRefused::Storage(e.to_string()))?
+        .ok_or(IngestionRefused::AlreadyRunning)?;
     let jobs = state.ingestion.clone();
     let bus = Arc::clone(&state.bus);
     let db = (*state.db).clone();
     let cache = Arc::clone(&state.cache);
-    let name_for_response = name.clone();
-
     tokio::spawn(async move {
         crate::ingestion::run_ingestion(
             jobs,
             job_id,
             db,
-            name.clone(),
-            url,
-            body.browse_url.clone(),
-            body.refs.clone(),
-            credentials,
+            source.name,
+            source.url,
+            source.browse_url,
+            source.refs,
+            source.credentials,
         )
         .await;
-
-        let mut cache_write = cache.write().await;
-        let keys_to_remove: Vec<String> = cache_write
-            .keys()
-            .filter(|k| k.starts_with(&format!("{}:", name)))
-            .cloned()
-            .collect();
-        for key in keys_to_remove {
-            cache_write.remove(&key);
-        }
-        drop(cache_write);
-        bus.publish(GRAPH_TOPIC, format!("{}:", name));
+        drop_cached_graphs(&cache, &format!("{name}:")).await;
+        bus.publish(GRAPH_TOPIC, format!("{name}:"));
     });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({ "name": name_for_response, "status": "ingesting" })),
-    )
-        .into_response()
+    Ok(())
 }
+
 
 pub async fn handle_verify_repository(
     Extension(user): Extension<Claims>,

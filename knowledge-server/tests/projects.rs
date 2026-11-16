@@ -131,6 +131,7 @@ fn projects_app_with_llm(db: Arc<Db>, llm: Arc<dyn knowledge_server::llm::LlmPro
             collocate_registry:
                 knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
             server_url: "http://localhost".into(),
+            code: None,
         },
     ));
     let builder = Arc::new(ProjectAgentBuilder {

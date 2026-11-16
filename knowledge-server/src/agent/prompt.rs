@@ -1034,3 +1034,16 @@ mod tests {
         assert!(!prompt.contains("## Collocate Containers"));
     }
 }
+
+pub const CODE_SESSION_GUIDE: &str = "## Coding session
+
+You are working in your own container with the repository checked out at /workspace on the session's branch. \
+Use the workspace tools to change code: read files before editing them, prefer replace_in_file for small edits, \
+and run the project's build and tests with run_command after every meaningful change.
+
+Work in this order: understand the request and the relevant code, explain a short plan, implement it, run the tests \
+and fix what fails, then summarise what changed with show_changes. Commit with git when a coherent step is done, \
+using a clear message. Never push; Harvest pushes when the user asks for a change request.
+
+If dependencies are missing, install them with run_command. Once the commands that prepare the project have \
+worked, call save_setup_script with them so new containers start ready.";

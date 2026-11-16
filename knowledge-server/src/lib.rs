@@ -6,6 +6,7 @@ pub mod artifacts;
 pub mod auth;
 pub mod chat_layouts;
 pub mod cluster;
+pub mod code;
 pub mod collocate;
 pub mod config;
 pub mod conversations;

@@ -109,14 +109,18 @@ pub struct QueryState {
 }
 
 impl QueryState {
-    pub async fn personal_agent(
+    pub async fn agent_in(
         &self,
+        space: Space,
         user_id: &str,
         conversation_id: Option<&str>,
         llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        let space = Space::personal(user_id);
         let conversation_id = conversation_id.unwrap_or_default();
+        let appendix = match space.mode() {
+            crate::modes::Mode::Code => Some(prompt::CODE_SESSION_GUIDE),
+            _ => None,
+        };
         let turn = match &self.db {
             Some(db) => TurnContext::load(db, user_id, space, conversation_id, llm).await,
             None => TurnContext::unrestricted(user_id, space, conversation_id, llm),
@@ -128,7 +132,8 @@ impl QueryState {
         )
         .with_system_one(self.system_one.clone())
         .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
-        .with_parallel_research(true);
+        .with_parallel_research(true)
+        .with_prompt_appendix(appendix);
         Arc::new(match self.thresholds {
             Some(t) => t.apply(agent),
             None => agent,
@@ -159,6 +164,7 @@ pub struct AppState {
     pub live: Arc<crate::projects::live::ProjectLive>,
     pub admission: Arc<crate::turns::admission::TurnAdmission>,
     pub credentials: Option<Arc<CredentialStore>>,
+    pub code: Option<crate::code::CodeEnv>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -507,6 +513,27 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         )
         .with_state(state.credentials.clone());
 
+    let code_state = Arc::new(crate::code::handlers::CodeState {
+        env: state.code.clone(),
+        graph: Arc::clone(&graph_state),
+        query: Arc::clone(&query_state),
+    });
+    let code_router = {
+        use crate::code::handlers as code;
+        Router::new()
+            .route("/code/projects", get(code::list_projects).post(code::open_project))
+            .route("/code/projects/:id", get(code::get_project))
+            .route("/code/projects/:id/setup", put(code::set_setup))
+            .route("/code/projects/:id/sessions", post(code::open_session))
+            .route(
+                "/code/sessions/:id",
+                get(code::get_session).delete(code::close_session),
+            )
+            .route("/code/sessions/:id/changes", get(code::session_changes))
+            .route("/code/sessions/:id/query/stream", post(code::session_query_stream))
+            .with_state(code_state)
+    };
+
     let members_router = Router::new()
         .route(
             "/projects/:pid/members",
@@ -841,6 +868,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .merge(credential_router)
         .merge(personal_router)
         .merge(members_router)
+        .merge(code_router)
         .merge(api_key_router)
         .merge(conv_router)
         .merge(chat_layout_router)

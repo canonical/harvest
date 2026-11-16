@@ -108,6 +108,7 @@ fn templates_app(db: Arc<Db>) -> Router {
             collocate_registry:
                 knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
             server_url: "http://localhost".into(),
+            code: None,
         },
     ));
     let builder = Arc::new(ProjectAgentBuilder {
