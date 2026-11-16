@@ -19,10 +19,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::agent::{
-    artifact_tools, deployment_tools, graph_tools, lxd_tools, machine_tools, port_forward_tools,
-    prompt, skill_tools, terraform_tools, tool, Agent,
-};
+use crate::agent::{deployment_tools, graph_tools, prompt, tool, Agent};
 use crate::artifacts::handlers::{self as artifact_handlers, ArtifactState};
 use crate::auth::api_keys::ApiKeyStore;
 use crate::auth::user_keys::UserKeyStore;
@@ -39,8 +36,10 @@ use crate::machines::{
     handlers::{machines_protected_router, machines_router, MachineState},
     MachineRegistry,
 };
+use crate::modes::Space;
 use crate::projects::handlers::{self as proj_handlers, ProjectState};
 use crate::skills::{handlers as skill_handlers, SkillStore};
+use crate::toolsets::{Toolbox, ToolsetId, TurnContext};
 use harvest_db::Db;
 
 pub type GraphCache = RwLock<HashMap<String, Arc<String>>>;
@@ -102,25 +101,23 @@ pub struct QueryState {
     pub compaction_threshold_chars: usize,
     pub compaction_keep_last: usize,
     pub pricing: Arc<crate::cost::PricingTable>,
-    pub semantic: Option<Arc<graph_tools::SemanticHandle>>,
-    pub search: Option<Arc<crate::search::SearchService>>,
+    pub toolbox: Arc<Toolbox>,
     pub admission: Arc<crate::turns::admission::TurnAdmission>,
 }
 
 impl QueryState {
-    pub fn code_tools(
+    pub fn personal_tools(
         &self,
-        db: &Arc<Db>,
-        llm: &Arc<dyn LlmProvider>,
+        user_id: &str,
         conversation_id: Option<&str>,
+        llm: &Arc<dyn LlmProvider>,
     ) -> Vec<Box<dyn tool::Tool>> {
-        code_tools(
-            db,
-            self.semantic.clone(),
-            self.search.as_ref(),
-            crate::search::code_tool::SearchToolContext::with_llm(Arc::clone(llm))
-                .in_conversation(conversation_id.unwrap_or_default()),
-        )
+        self.toolbox.tools(&TurnContext {
+            user_id: user_id.to_string(),
+            space: Space::personal(user_id),
+            conversation_id: conversation_id.unwrap_or_default().to_string(),
+            llm: Arc::clone(llm),
+        })
     }
 }
 
@@ -216,17 +213,12 @@ pub struct ProjectAgentBuilder {
     pub system_one: Option<Arc<crate::llm::system_one::SystemOneClient>>,
     pub db: Arc<Db>,
     pub registry: Arc<MachineRegistry>,
-    pub skills: Arc<SkillStore>,
-    pub lxd: Option<Arc<LxdClient>>,
-    pub collocate: Option<crate::collocate::client::CollocateHandle>,
-    pub collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
-    pub server_url: String,
     pub max_iterations: usize,
     pub compaction_threshold_chars: usize,
     pub compaction_keep_last: usize,
     pub thresholds: Option<Thresholds>,
-    pub semantic: Option<Arc<graph_tools::SemanticHandle>>,
     pub search: Option<Arc<crate::search::SearchService>>,
+    pub toolbox: Arc<Toolbox>,
 }
 
 pub fn code_tools(
@@ -244,18 +236,18 @@ pub fn code_tools(
 }
 
 impl ProjectAgentBuilder {
-    fn code_tools(
+    fn deploy_turn(
         &self,
+        project_id: String,
+        conversation_id: String,
         llm: &Arc<dyn LlmProvider>,
-        conversation_id: &str,
-    ) -> Vec<Box<dyn tool::Tool>> {
-        code_tools(
-            &self.db,
-            self.semantic.clone(),
-            self.search.as_ref(),
-            crate::search::code_tool::SearchToolContext::with_llm(Arc::clone(llm))
-                .in_conversation(conversation_id),
-        )
+    ) -> TurnContext {
+        TurnContext {
+            user_id: String::new(),
+            space: Space::deploy_project(project_id),
+            conversation_id,
+            llm: Arc::clone(llm),
+        }
     }
 
     fn base_tools(
@@ -264,117 +256,8 @@ impl ProjectAgentBuilder {
         conversation_id: String,
         llm: &Arc<dyn LlmProvider>,
     ) -> Vec<Box<dyn tool::Tool>> {
-        let mut tools = self.code_tools(llm, &conversation_id);
-        tools.push(Box::new(machine_tools::ListAgentsTool {
-            registry: Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(machine_tools::RunCommandTool {
-            registry: Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(skill_tools::ListSkillsTool {
-            store: Arc::clone(&self.skills),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(skill_tools::LoadSkillTool {
-            store: Arc::clone(&self.skills),
-            project_id: project_id.clone(),
-        }));
-        if let Some(lxd) = &self.lxd {
-            tools.push(Box::new(lxd_tools::CreateLxdAgentTool {
-                db: Arc::clone(&self.db),
-                lxd: Arc::clone(lxd),
-                server_url: self.server_url.clone(),
-                project_id: project_id.clone(),
-            }));
-        }
-        tools.push(Box::new(lxd_tools::DeleteAgentTool {
-            db: Arc::clone(&self.db),
-            lxd: self.lxd.clone(),
-            registry: Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(port_forward_tools::ListPortForwardsTool {
-            db: Arc::clone(&self.db),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(port_forward_tools::CreatePortForwardTool {
-            db: Arc::clone(&self.db),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(port_forward_tools::UpdatePortForwardTool {
-            db: Arc::clone(&self.db),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(port_forward_tools::DeletePortForwardTool {
-            db: Arc::clone(&self.db),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(artifact_tools::GenerateArtifactTool {
-            db: Arc::clone(&self.db),
-            project_id: project_id.clone(),
-            server_url: self.server_url.clone(),
-        }));
-        tools.push(Box::new(terraform_tools::RunTerraformPlanTool {
-            db: Arc::clone(&self.db),
-            registry: Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(terraform_tools::RunTerraformApplyTool {
-            db: Arc::clone(&self.db),
-            registry: Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(terraform_tools::RunTerraformDestroyTool {
-            db: Arc::clone(&self.db),
-            registry: Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        if let Some(handle) = &self.collocate {
-            tools.push(Box::new(crate::collocate::tools::CollocateRunTool {
-                handle: handle.clone(),
-                project_id: project_id.clone(),
-            }));
-            tools.push(Box::new(
-                crate::collocate::tools::CollocateCreateSessionTool {
-                    handle: handle.clone(),
-                    registry: Arc::clone(&self.collocate_registry),
-                    project_id: project_id.clone(),
-                    conversation_id: conversation_id.clone(),
-                },
-            ));
-            tools.push(Box::new(crate::collocate::tools::CollocateExecTool {
-                handle: handle.clone(),
-                registry: Arc::clone(&self.collocate_registry),
-                project_id: project_id.clone(),
-                conversation_id: conversation_id.clone(),
-            }));
-            tools.push(Box::new(
-                crate::collocate::tools::CollocateDeleteSessionTool {
-                    handle: handle.clone(),
-                    registry: Arc::clone(&self.collocate_registry),
-                    project_id: project_id.clone(),
-                    conversation_id: conversation_id.clone(),
-                },
-            ));
-            tools.push(Box::new(
-                crate::collocate::tools::CollocateListContainersTool {
-                    registry: Arc::clone(&self.collocate_registry),
-                    project_id: project_id.clone(),
-                    conversation_id: conversation_id.clone(),
-                },
-            ));
-            tools.push(Box::new(
-                crate::collocate::tools::CollocateTransferFileTool {
-                    handle: handle.clone(),
-                    registry: Arc::clone(&self.collocate_registry),
-                    project_id: project_id.clone(),
-                    conversation_id: conversation_id.clone(),
-                },
-            ));
-        }
-        tools
+        self.toolbox
+            .tools(&self.deploy_turn(project_id, conversation_id, llm))
     }
 
     pub fn build(&self, project_id: String) -> Arc<Agent> {
@@ -501,15 +384,10 @@ impl ProjectAgentBuilder {
         ctx: &deployments::DeploymentContext,
         llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        let mut tools = self.code_tools(&llm, "");
-        tools.push(Box::new(skill_tools::ListSkillsTool {
-            store: Arc::clone(&self.skills),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(skill_tools::LoadSkillTool {
-            store: Arc::clone(&self.skills),
-            project_id,
-        }));
+        let turn = self.deploy_turn(project_id, String::new(), &llm);
+        let tools = self
+            .toolbox
+            .tools_from(&[ToolsetId::Knowledge, ToolsetId::Skills], &turn);
         let agent = Agent::new(llm, tools, self.max_iterations)
             .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
             .with_system_prompt(prompt::deployment_system_prompt(ctx));
@@ -608,8 +486,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         compaction_threshold_chars: state.agent_builder.compaction_threshold_chars,
         compaction_keep_last: state.agent_builder.compaction_keep_last,
         pricing: Arc::clone(&state.pricing),
-        semantic: state.semantic.clone(),
-        search: state.agent_builder.search.clone(),
+        toolbox: Arc::clone(&state.agent_builder.toolbox),
         admission: Arc::clone(&state.admission),
     });
     let agent_router = Router::new()

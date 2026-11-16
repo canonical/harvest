@@ -1,3 +1,4 @@
+pub mod access;
 pub mod admin;
 pub mod agent;
 pub mod api;
@@ -17,8 +18,10 @@ pub mod llm;
 pub mod lxd;
 pub mod machines;
 pub mod metrics;
+pub mod modes;
 pub mod projects;
 pub mod search;
 pub mod server;
 pub mod skills;
+pub mod toolsets;
 pub mod turns;

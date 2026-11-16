@@ -531,22 +531,30 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         collocate.clone().map(Arc::new),
     );
 
+    let toolbox = Arc::new(crate::toolsets::build_toolbox(
+        crate::toolsets::ToolboxDeps {
+            db: Arc::clone(&db),
+            semantic: semantic_handle.clone(),
+            search: search.clone(),
+            skills: Arc::clone(&skill_registry),
+            registry: Arc::clone(&machine_registry),
+            lxd: lxd.clone(),
+            collocate: collocate.clone(),
+            collocate_registry: Arc::clone(&collocate_registry),
+            server_url: server_url.clone(),
+        },
+    ));
     let agent_builder = Arc::new(ProjectAgentBuilder {
         llm: Arc::clone(&llm_provider),
         system_one: system_one_client.clone(),
         db: Arc::clone(&db),
         registry: Arc::clone(&machine_registry),
-        skills: Arc::clone(&skill_registry),
-        lxd: lxd.clone(),
-        collocate,
-        collocate_registry: Arc::clone(&collocate_registry),
-        server_url: server_url.clone(),
         max_iterations,
         compaction_threshold_chars,
         compaction_keep_last,
         thresholds: Some(thresholds),
-        semantic: semantic_handle.clone(),
         search: search.clone(),
+        toolbox,
     });
 
     let pricing = Arc::new(crate::cost::PricingTable::from_configs(&config.llm));
