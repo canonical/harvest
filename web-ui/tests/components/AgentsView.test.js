@@ -79,8 +79,8 @@ describe('AgentsView', () => {
     await flushPromises();
     const links = w.findAll('a.console-icon-btn');
     expect(links).toHaveLength(2);
-    expect(links[0].attributes('href')).toBe('/agents/ag-1/console');
-    expect(links[1].attributes('href')).toBe('/agents/ag-2/console');
+    expect(links[0].attributes('href')).toBe('/deploy/agents/ag-1/console');
+    expect(links[1].attributes('href')).toBe('/deploy/agents/ag-2/console');
   });
 
   it('shows online status dot', async () => {

@@ -1,4 +1,5 @@
 use harvest_db::Db;
+use knowledge_server::modes::Owner;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -678,7 +679,7 @@ fn spawn_dag_fake_agent(
 async fn seed_terraform_artifact(db: &Db, project_id: &str, content: &str) -> String {
     let created = create_artifact(
         db,
-        project_id,
+        &Owner::Project(project_id.to_string()),
         ArtifactKind::Terraform,
         "Infra",
         content,
@@ -692,7 +693,7 @@ async fn seed_terraform_artifact(db: &Db, project_id: &str, content: &str) -> St
 async fn seed_bash_artifact(db: &Db, project_id: &str, content: &str) -> String {
     let created = create_artifact(
         db,
-        project_id,
+        &Owner::Project(project_id.to_string()),
         ArtifactKind::Bash,
         "Script",
         content,
@@ -709,9 +710,16 @@ async fn seed_bash_artifact_titled(
     title: &str,
     content: &str,
 ) -> String {
-    let created = create_artifact(db, project_id, ArtifactKind::Bash, title, content, "system")
-        .await
-        .unwrap();
+    let created = create_artifact(
+        db,
+        &Owner::Project(project_id.to_string()),
+        ArtifactKind::Bash,
+        title,
+        content,
+        "system",
+    )
+    .await
+    .unwrap();
     created["id"].as_str().unwrap().to_string()
 }
 
@@ -743,7 +751,7 @@ async fn link_terraform_bundle(db: &Db, deployment_id: &str, artifact_id: &str) 
 async fn seed_design_doc(db: &Db, project_id: &str, deployment_id: &str, content: &str) -> String {
     let created = create_artifact(
         db,
-        project_id,
+        &Owner::Project(project_id.to_string()),
         ArtifactKind::Markdown,
         "Design",
         content,
@@ -2025,7 +2033,7 @@ async fn generate_design_includes_selected_artifacts_and_links_template() {
 
     let a1 = create_artifact(
         &db,
-        &pid,
+        &Owner::Project(pid.clone()),
         ArtifactKind::Markdown,
         "Requirements",
         "We need 3 VMs across two zones",
@@ -2036,7 +2044,7 @@ async fn generate_design_includes_selected_artifacts_and_links_template() {
     let a1_id = a1["id"].as_str().unwrap().to_string();
     let a2 = create_artifact(
         &db,
-        &pid,
+        &Owner::Project(pid.clone()),
         ArtifactKind::Markdown,
         "Constraints",
         "No public IPs are allowed",
@@ -2099,7 +2107,7 @@ async fn generate_design_ignores_artifacts_belonging_to_other_projects() {
 
     let own = create_artifact(
         &db,
-        &pid,
+        &Owner::Project(pid.clone()),
         ArtifactKind::Markdown,
         "Own",
         "OWN-MARKER-keep",
@@ -2110,7 +2118,7 @@ async fn generate_design_ignores_artifacts_belonging_to_other_projects() {
     let own_id = own["id"].as_str().unwrap().to_string();
     let foreign = create_artifact(
         &db,
-        &other_pid,
+        &Owner::Project(other_pid.clone()),
         ArtifactKind::Markdown,
         "Foreign",
         "FOREIGN-MARKER-leak",

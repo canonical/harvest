@@ -1,10 +1,13 @@
 pub mod handlers;
+pub mod http;
+pub mod owned;
 
+use crate::modes::Owner;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde_json::json;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use harvest_db::Db;
@@ -60,14 +63,14 @@ impl SkillStore {
         Self { db }
     }
 
-    pub async fn list_for_project(&self, project_id: &str) -> Vec<SkillSummary> {
+    pub async fn list_for(&self, owner: &Owner) -> Vec<SkillSummary> {
         let rows = self
             .db
             .query(
                 "SELECT name, description FROM skills
-             WHERE project_id IS NULL OR project_id = $pid
+             WHERE is_global OR project_id = $pid OR user_id = $uid
              ORDER BY is_global DESC, name ASC",
-                json!({ "pid": project_id }),
+                owner_params(owner),
             )
             .await
             .unwrap_or_default();
@@ -80,15 +83,17 @@ impl SkillStore {
             .collect()
     }
 
-    pub async fn load_content(&self, name: &str, project_id: &str) -> Option<String> {
+    pub async fn load_content(&self, name: &str, owner: &Owner) -> Option<String> {
+        let mut params = owner_params(owner);
+        params["name"] = json!(name);
         let rows = self
             .db
             .query(
                 "SELECT content FROM skills
-             WHERE name = $name AND (project_id IS NULL OR project_id = $pid)
+             WHERE name = $name AND (is_global OR project_id = $pid OR user_id = $uid)
              ORDER BY is_global DESC
              LIMIT 1",
-                json!({ "name": name, "pid": project_id }),
+                params,
             )
             .await
             .unwrap_or_default();
@@ -97,6 +102,10 @@ impl SkillStore {
             .next()
             .and_then(|r| r["content"].as_str().map(|s| s.to_string()))
     }
+}
+
+fn owner_params(owner: &Owner) -> Value {
+    json!({ "pid": owner.project_id(), "uid": owner.user_id() })
 }
 
 pub async fn seed_defaults_if_needed(db: &Db) -> Result<()> {
@@ -128,7 +137,7 @@ pub async fn seed_defaults_if_needed(db: &Db) -> Result<()> {
         db.query(
             "INSERT INTO skills (id, project_id, name, description, content, created_by, created_at, updated_at)
              VALUES ($id, NULL, $name, $description, $content, 'system', $now, $now)
-             ON CONFLICT (name) WHERE project_id IS NULL DO NOTHING",
+             ON CONFLICT (name) WHERE is_global DO NOTHING",
             json!({
                 "id": id, "name": name, "description": description,
                 "content": content, "now": now,

@@ -1,4 +1,5 @@
 use harvest_db::Db;
+use knowledge_server::modes::Owner;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -693,7 +694,7 @@ async fn skill_store_list_for_project_includes_global_and_own_skills() {
     )
     .await;
 
-    let list = store.list_for_project(&pid).await;
+    let list = store.list_for(&Owner::Project(pid.clone())).await;
     let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
     assert!(
         names.contains(&"juju"),
@@ -702,6 +703,48 @@ async fn skill_store_list_for_project_includes_global_and_own_skills() {
     assert!(
         names.contains(&"proj-a-only"),
         "project's own skill missing from list: {names:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn a_personal_skill_is_visible_only_to_its_owner_and_cannot_shadow_a_global_one() {
+    db!(c, db);
+    for (id, email) in [("alice", "alice@example.com"), ("bob", "bob@example.com")] {
+        db.execute(
+            "INSERT INTO users (id, email, provider) VALUES ($id, $email, 'local')",
+            serde_json::json!({ "id": id, "email": email }),
+        )
+        .await
+        .unwrap();
+    }
+    seed_skill_raw(&db, "juju", "juju guide", "juju body", true, None).await;
+    let alice = Owner::User("alice".into());
+    let owned = knowledge_server::skills::owned::OwnedSkills::new(&db, &alice);
+    let new = |name| knowledge_server::skills::owned::NewSkill {
+        name,
+        description: "mine",
+        content: "my body",
+    };
+    owned.create(new("my-notes"), "alice").await.unwrap();
+    assert!(matches!(
+        owned.create(new("juju"), "alice").await,
+        Err(knowledge_server::skills::owned::SkillError::NameTaken)
+    ));
+
+    let store = SkillStore::new(Arc::clone(&db));
+    let names = |list: Vec<knowledge_server::skills::SkillSummary>| {
+        list.into_iter().map(|s| s.name).collect::<Vec<_>>()
+    };
+    let for_alice = names(store.list_for(&alice).await);
+    assert!(for_alice.contains(&"my-notes".to_string()) && for_alice.contains(&"juju".to_string()));
+    let for_bob = names(store.list_for(&Owner::User("bob".into())).await);
+    assert!(!for_bob.contains(&"my-notes".to_string()), "{for_bob:?}");
+    assert_eq!(
+        store
+            .load_content("my-notes", &Owner::User("bob".into()))
+            .await,
+        None
     );
 }
 
@@ -723,7 +766,7 @@ async fn skill_store_list_for_project_excludes_other_projects_skills() {
     )
     .await;
 
-    let list_b = store.list_for_project(&pid_b).await;
+    let list_b = store.list_for(&Owner::Project(pid_b.clone())).await;
     let names: Vec<&str> = list_b.iter().map(|s| s.name.as_str()).collect();
     assert!(
         !names.contains(&"proj-a-only"),
@@ -739,7 +782,9 @@ async fn skill_store_load_content_resolves_global_skill_by_name() {
     let pid = make_project_raw(&db, "proj-a").await;
     seed_skill_raw(&db, "juju", "juju guide", "juju body content", true, None).await;
 
-    let content = store.load_content("juju", &pid).await;
+    let content = store
+        .load_content("juju", &Owner::Project(pid.clone()))
+        .await;
     assert_eq!(content.as_deref(), Some("juju body content"));
 }
 
@@ -759,7 +804,9 @@ async fn skill_store_load_content_resolves_project_skill_by_name() {
     )
     .await;
 
-    let content = store.load_content("proj-a-only", &pid).await;
+    let content = store
+        .load_content("proj-a-only", &Owner::Project(pid.clone()))
+        .await;
     assert_eq!(content.as_deref(), Some("custom body content"));
 }
 
@@ -780,7 +827,9 @@ async fn skill_store_load_content_project_skill_not_resolvable_from_other_projec
     )
     .await;
 
-    let content = store.load_content("proj-a-only", &pid_b).await;
+    let content = store
+        .load_content("proj-a-only", &Owner::Project(pid_b.clone()))
+        .await;
     assert_eq!(content, None);
 }
 
@@ -791,7 +840,9 @@ async fn skill_store_load_content_unknown_name_returns_none() {
     let store = SkillStore::new(Arc::clone(&db));
     let pid = make_project_raw(&db, "proj-a").await;
 
-    let content = store.load_content("nonexistent", &pid).await;
+    let content = store
+        .load_content("nonexistent", &Owner::Project(pid.clone()))
+        .await;
     assert_eq!(content, None);
 }
 
@@ -1323,7 +1374,7 @@ async fn list_skills_definition_has_correct_name() {
     let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = ListSkillsTool {
         store,
-        project_id: "any".into(),
+        owner: Owner::Project("any".into()),
     };
     assert_eq!(tool.definition().name, "list_skills");
 }
@@ -1335,7 +1386,7 @@ async fn load_skill_definition_has_correct_name() {
     let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = LoadSkillTool {
         store,
-        project_id: "any".into(),
+        owner: Owner::Project("any".into()),
     };
     assert_eq!(tool.definition().name, "load_skill");
 }
@@ -1351,7 +1402,7 @@ async fn list_skills_returns_json_array_with_seeded_skill() {
     let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = ListSkillsTool {
         store,
-        project_id: pid,
+        owner: Owner::Project(pid),
     };
 
     let result = tool.execute(json!({})).await.unwrap();
@@ -1374,7 +1425,7 @@ async fn list_skills_each_item_has_name_and_description() {
     let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = ListSkillsTool {
         store,
-        project_id: pid,
+        owner: Owner::Project(pid),
     };
 
     let result = tool.execute(json!({})).await.unwrap();
@@ -1400,7 +1451,7 @@ async fn load_skill_returns_content_for_known_skill() {
     let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = LoadSkillTool {
         store,
-        project_id: pid,
+        owner: Owner::Project(pid),
     };
 
     let result = tool.execute(json!({ "name": "juju" })).await.unwrap();
@@ -1419,7 +1470,7 @@ async fn load_skill_missing_name_param_returns_error() {
     let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = LoadSkillTool {
         store,
-        project_id: pid,
+        owner: Owner::Project(pid),
     };
 
     let result = tool.execute(json!({})).await;
@@ -1434,7 +1485,7 @@ async fn load_skill_unknown_name_returns_error() {
     let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = LoadSkillTool {
         store,
-        project_id: pid,
+        owner: Owner::Project(pid),
     };
 
     let result = tool.execute(json!({ "name": "nonexistent" })).await;
@@ -1450,7 +1501,7 @@ async fn load_skill_preview_is_markdown_envelope() {
     let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool = LoadSkillTool {
         store,
-        project_id: pid,
+        owner: Owner::Project(pid),
     };
 
     let preview = tool.preview("# Heading\nsome text");
@@ -1485,7 +1536,7 @@ async fn load_skill_scoped_to_project_via_agent_tool() {
     let store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let tool_b = LoadSkillTool {
         store,
-        project_id: pid_b,
+        owner: Owner::Project(pid_b),
     };
 
     let result = tool_b.execute(json!({ "name": "proj-a-only" })).await;

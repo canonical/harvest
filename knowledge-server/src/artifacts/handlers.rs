@@ -1,3 +1,4 @@
+use crate::modes::Owner;
 use axum::{
     body::Body,
     extract::{Extension, Path, Query, State},
@@ -103,12 +104,13 @@ pub async fn require_artifact_access(
 ) -> Result<Value, ApiError> {
     let rows = db.query(
         "SELECT a.id, a.title, a.kind, a.content, a.created_by, a.created_at, a.updated_at,
-                p.id AS project_id
+                a.project_id, a.user_id
          FROM artifacts a
-         JOIN projects p ON p.id = a.project_id
+         LEFT JOIN projects p ON p.id = a.project_id
          WHERE a.id = $aid
-           AND ($role = 'admin' OR EXISTS (
-                 SELECT 1 FROM user_groups ug WHERE ug.user_id = $uid AND ug.group_id = p.group_id))",
+           AND (a.user_id = $uid
+                OR (a.project_id IS NOT NULL AND ($role = 'admin' OR EXISTS (
+                     SELECT 1 FROM user_groups ug WHERE ug.user_id = $uid AND ug.group_id = p.group_id))))",
         json!({ "aid": artifact_id, "uid": user_id, "role": user_role }),
     ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
@@ -119,7 +121,7 @@ pub async fn require_artifact_access(
 
 pub async fn create_artifact(
     db: &Db,
-    project_id: &str,
+    owner: &Owner,
     kind: ArtifactKind,
     title: &str,
     content: &str,
@@ -131,12 +133,12 @@ pub async fn create_artifact(
     let id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
     db.query(
-        "INSERT INTO artifacts (id, project_id, title, kind, content, created_by, created_at, updated_at)
-         VALUES ($id, $pid, $title, $kind, $content, $created_by, $now, $now)
+        "INSERT INTO artifacts (id, project_id, user_id, title, kind, content, created_by, created_at, updated_at)
+         VALUES ($id, $pid, $uid, $title, $kind, $content, $created_by, $now, $now)
          RETURNING id",
         json!({
-            "pid": project_id, "id": id, "title": title, "kind": kind.as_str(),
-            "content": content, "created_by": created_by, "now": now,
+            "pid": owner.project_id(), "uid": owner.user_id(), "id": id, "title": title,
+            "kind": kind.as_str(), "content": content, "created_by": created_by, "now": now,
         }),
     ).await?;
     Ok(json!({ "id": id, "title": title, "kind": kind.as_str(), "created_at": now }))
@@ -196,6 +198,21 @@ pub async fn update_artifact_route(
     .await
     .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
     Ok(Json(result))
+}
+
+pub async fn get_owned_artifact(
+    db: &Db,
+    owner: &Owner,
+    artifact_id: &str,
+) -> anyhow::Result<Option<Value>> {
+    let rows = db
+        .query(
+            "SELECT id, title, kind, content FROM artifacts
+         WHERE id = $aid AND (project_id = $pid OR user_id = $uid)",
+            json!({ "pid": owner.project_id(), "uid": owner.user_id(), "aid": artifact_id }),
+        )
+        .await?;
+    Ok(rows.into_iter().next())
 }
 
 pub async fn get_artifact_in_project(

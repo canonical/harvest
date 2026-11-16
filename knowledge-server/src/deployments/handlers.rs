@@ -1511,7 +1511,7 @@ async fn save_design_doc(
 
     let created = create_artifact(
         db,
-        project_id,
+        &crate::modes::Owner::Project(project_id.to_string()),
         ArtifactKind::Markdown,
         &title,
         &content,
@@ -2579,7 +2579,7 @@ pub async fn apply_provision_change(
                 if destroy_artifact_id.is_empty() {
                     let created = create_artifact(
                         &state.db,
-                        &project_id,
+                        &crate::modes::Owner::Project(project_id.to_string()),
                         ArtifactKind::Bash,
                         &destroy_title,
                         content,
@@ -2671,7 +2671,7 @@ pub async fn apply_provision_change(
         if existing_id.is_empty() {
             let created = create_artifact(
                 &state.db,
-                &project_id,
+                &crate::modes::Owner::Project(project_id.to_string()),
                 ArtifactKind::Bash,
                 title,
                 content,
@@ -2763,9 +2763,16 @@ pub(crate) async fn add_context_artifact_core(
     kind: ArtifactKind,
     content: &str,
 ) -> Result<Value, ApiError> {
-    let created = create_artifact(db, project_id, kind, title, content, "user")
-        .await
-        .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    let created = create_artifact(
+        db,
+        &crate::modes::Owner::Project(project_id.to_string()),
+        kind,
+        title,
+        content,
+        "user",
+    )
+    .await
+    .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
     let artifact_id = created["id"].as_str().unwrap_or_default().to_string();
     db.query(
         "INSERT INTO deployment_context_artifacts (deployment_id, artifact_id)

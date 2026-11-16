@@ -96,7 +96,8 @@ impl LlmProvider for ErrorLlm {
 fn query_app(agent: Arc<Agent>) -> Router {
     let llm = Arc::clone(agent.llm());
     let qs = Arc::new(QueryState {
-        agent,
+        thresholds: None,
+        system_one: None,
         db: None,
         llm,
         llm_configs: Arc::new(vec![]),
@@ -438,7 +439,8 @@ use knowledge_server::conversations::handlers as conv_handlers;
 fn query_app_with_db(agent: Arc<Agent>, db: Arc<Db>) -> Router {
     let llm = Arc::clone(agent.llm());
     let qs = Arc::new(QueryState {
-        agent,
+        thresholds: None,
+        system_one: None,
         db: Some(Arc::clone(&db)),
         llm,
         llm_configs: Arc::new(vec![]),

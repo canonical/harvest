@@ -63,7 +63,7 @@ function makeRouter() {
   return createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/agents', component: { template: '<div/>' } },
+      { path: '/deploy/agents', component: { template: '<div/>' } },
       { path: '/agents/:agentId/console', component: AgentConsoleView },
     ],
   });
@@ -97,7 +97,7 @@ describe('AgentConsoleView', () => {
     const { w, router } = await mountView();
     const push = vi.spyOn(router, 'push');
     await w.find('#console-back-btn').trigger('click');
-    expect(push).toHaveBeenCalledWith('/agents');
+    expect(push).toHaveBeenCalledWith('/deploy/agents');
   });
 
   it('disables power/restart for manually-installed agents', async () => {
@@ -161,7 +161,7 @@ describe('AgentConsoleView', () => {
     await w.find('#console-delete-confirm-btn').trigger('click');
     await flushPromises();
     expect(api.deleteAgent).toHaveBeenCalledWith('proj-1', 'ag-1');
-    expect(push).toHaveBeenCalledWith('/agents');
+    expect(push).toHaveBeenCalledWith('/deploy/agents');
   });
 
   it('connects the console socket for the current agent', async () => {

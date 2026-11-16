@@ -94,7 +94,8 @@ pub struct GraphState {
 
 #[derive(Clone)]
 pub struct QueryState {
-    pub agent: Arc<Agent>,
+    pub thresholds: Option<Thresholds>,
+    pub system_one: Option<Arc<crate::llm::system_one::SystemOneClient>>,
     pub db: Option<Arc<Db>>,
     pub llm: Arc<dyn LlmProvider>,
     pub llm_configs: Arc<Vec<LlmProviderConfig>>,
@@ -108,21 +109,30 @@ pub struct QueryState {
 }
 
 impl QueryState {
-    pub async fn personal_tools(
+    pub async fn personal_agent(
         &self,
         user_id: &str,
         conversation_id: Option<&str>,
-        llm: &Arc<dyn LlmProvider>,
-    ) -> Vec<Box<dyn tool::Tool>> {
+        llm: Arc<dyn LlmProvider>,
+    ) -> Arc<Agent> {
         let space = Space::personal(user_id);
         let conversation_id = conversation_id.unwrap_or_default();
         let turn = match &self.db {
-            Some(db) => {
-                TurnContext::load(db, user_id, space, conversation_id, Arc::clone(llm)).await
-            }
-            None => TurnContext::unrestricted(user_id, space, conversation_id, Arc::clone(llm)),
+            Some(db) => TurnContext::load(db, user_id, space, conversation_id, llm).await,
+            None => TurnContext::unrestricted(user_id, space, conversation_id, llm),
         };
-        self.toolbox.tools(&turn)
+        let agent = Agent::new(
+            Arc::clone(&turn.llm),
+            self.toolbox.tools(&turn),
+            self.max_iterations,
+        )
+        .with_system_one(self.system_one.clone())
+        .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+        .with_parallel_research(true);
+        Arc::new(match self.thresholds {
+            Some(t) => t.apply(agent),
+            None => agent,
+        })
     }
 }
 
@@ -402,7 +412,8 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .with_state(Arc::clone(&auth_state));
 
     let query_state = Arc::new(QueryState {
-        agent: Arc::clone(&state.agent),
+        thresholds: state.agent_builder.thresholds,
+        system_one: state.agent_builder.system_one.clone(),
         db: Some(Arc::clone(&state.db)),
         llm: Arc::clone(&state.llm),
         llm_configs: Arc::clone(&state.llm_configs),
@@ -497,6 +508,23 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
             delete(credential_handlers::delete_account),
         )
         .with_state(state.credentials.clone());
+
+    let personal_router = Router::new()
+        .route(
+            "/me/artifacts",
+            get(crate::personal::list_artifacts).post(crate::personal::create_personal_artifact),
+        )
+        .route(
+            "/me/skills",
+            get(crate::personal::list_skills).post(crate::personal::create_skill),
+        )
+        .route(
+            "/me/skills/:id",
+            get(crate::personal::get_skill)
+                .put(crate::personal::update_skill)
+                .delete(crate::personal::delete_skill),
+        )
+        .with_state(Arc::clone(&state.db));
 
     let api_key_state = Arc::new(api_keys::ApiKeyState {
         store: Arc::clone(&state.api_key_store),
@@ -802,6 +830,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let mut protected_router = Router::new()
         .merge(me_router)
         .merge(credential_router)
+        .merge(personal_router)
         .merge(api_key_router)
         .merge(conv_router)
         .merge(chat_layout_router)

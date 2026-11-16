@@ -11,17 +11,15 @@ pub struct SkillsToolset {
 
 impl Toolset for SkillsToolset {
     fn tools(&self, turn: &TurnContext) -> Vec<Box<dyn Tool>> {
-        let Some(project_id) = turn.space.deploy_project_id() else {
-            return Vec::new();
-        };
+        let owner = turn.space.owner();
         vec![
             Box::new(ListSkillsTool {
                 store: Arc::clone(&self.store),
-                project_id: project_id.to_string(),
+                owner: owner.clone(),
             }),
             Box::new(LoadSkillTool {
                 store: Arc::clone(&self.store),
-                project_id: project_id.to_string(),
+                owner,
             }),
         ]
     }

@@ -1,3 +1,4 @@
+use crate::modes::Owner;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -9,12 +10,12 @@ use crate::skills::SkillStore;
 
 pub struct ListSkillsTool {
     pub store: Arc<SkillStore>,
-    pub project_id: String,
+    pub owner: Owner,
 }
 
 pub struct LoadSkillTool {
     pub store: Arc<SkillStore>,
-    pub project_id: String,
+    pub owner: Owner,
 }
 
 #[async_trait]
@@ -38,7 +39,7 @@ impl Tool for ListSkillsTool {
     async fn execute(&self, _params: Value) -> Result<String> {
         let summaries: Vec<Value> = self
             .store
-            .list_for_project(&self.project_id)
+            .list_for(&self.owner)
             .await
             .into_iter()
             .map(|s| {
@@ -78,7 +79,7 @@ impl Tool for LoadSkillTool {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("name is required"))?;
         self.store
-            .load_content(name, &self.project_id)
+            .load_content(name, &self.owner)
             .await
             .ok_or_else(|| anyhow::anyhow!("unknown skill '{name}'"))
     }

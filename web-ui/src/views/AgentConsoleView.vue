@@ -267,7 +267,7 @@ async function initTerminal() {
 }
 
 function goBack() {
-  router.push('/agents');
+  router.push('/deploy/agents');
 }
 
 async function refreshAgent() {
@@ -343,7 +343,7 @@ async function confirmDelete() {
   deleting.value = true;
   try {
     await deleteAgent(props.projectId, agentId);
-    router.push('/agents');
+    router.push('/deploy/agents');
   } catch (e) {
     actionError.value = e.message || 'Failed to delete agent';
   } finally {

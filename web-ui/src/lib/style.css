@@ -10133,3 +10133,48 @@ button.activity-line__row:hover .activity-line__steps {
   font-size: 0.8rem;
   color: var(--text-muted);
 }
+
+.mode-nav {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.mode-switch {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.25rem;
+  margin: 0.5rem 0.75rem 0.75rem;
+  padding: 0.25rem;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+}
+
+.mode-switch__item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.35rem 0.25rem;
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.7);
+  text-decoration: none;
+  border-radius: 3px;
+}
+
+.mode-switch__item .p-side-navigation__icon {
+  position: static;
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+}
+
+.mode-switch__item:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.mode-switch__item.is-active {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.16);
+}
