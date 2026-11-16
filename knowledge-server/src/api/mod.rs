@@ -279,7 +279,6 @@ impl ProjectAgentBuilder {
     pub fn deployment_agent(
         &self,
         turn: &TurnContext,
-        group_id: String,
         ctx: &deployments::DeploymentContext,
     ) -> Arc<Agent> {
         let project_id = turn
@@ -295,7 +294,6 @@ impl ProjectAgentBuilder {
         }));
         tools.push(Box::new(deployment_tools::UpdateProductTemplateTool {
             db: Arc::clone(&self.db),
-            group_id,
             deployment_id: ctx.deployment_id.clone(),
         }));
         tools.push(Box::new(deployment_tools::SetExecutionPlanTool {
@@ -509,6 +507,18 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         )
         .with_state(state.credentials.clone());
 
+    let members_router = Router::new()
+        .route(
+            "/projects/:pid/members",
+            get(crate::projects::members::list_members).put(crate::projects::members::add_member),
+        )
+        .route(
+            "/projects/:pid/members/:uid",
+            put(crate::projects::members::set_member_role)
+                .delete(crate::projects::members::remove_member),
+        )
+        .with_state(Arc::clone(&state.db));
+
     let personal_router = Router::new()
         .route(
             "/me/artifacts",
@@ -589,7 +599,6 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let skill_store = Arc::new(SkillStore::new(Arc::clone(&state.db)));
 
     let project_router = Router::new()
-        .route("/groups", get(proj_handlers::list_my_groups))
         .route(
             "/projects",
             get(proj_handlers::list_projects).post(proj_handlers::create_project),
@@ -831,6 +840,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .merge(me_router)
         .merge(credential_router)
         .merge(personal_router)
+        .merge(members_router)
         .merge(api_key_router)
         .merge(conv_router)
         .merge(chat_layout_router)
@@ -853,32 +863,26 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         protected_router = protected_router.merge(docs_router);
     }
 
-    let protected_router = protected_router.layer(from_fn_with_state(
-        Arc::clone(&jwt_secret),
-        auth::require_auth,
-    ));
+    let protected_router = protected_router
+        .layer(from_fn_with_state(
+            Arc::clone(&state.db),
+            crate::access::guard::project_guard,
+        ))
+        .layer(from_fn_with_state(
+            Arc::clone(&jwt_secret),
+            auth::require_auth,
+        ));
 
     let admin_auth_routes = Router::new()
         .route("/admin/users", get(crate::admin::handlers::list_users))
         .route(
+            "/admin/conversation-moves",
+            get(crate::admin::handlers::list_conversation_moves)
+                .post(crate::admin::handlers::move_conversations),
+        )
+        .route(
             "/admin/users/:id/role",
             put(crate::admin::handlers::set_user_role),
-        )
-        .route(
-            "/admin/users/:id/groups",
-            put(crate::admin::handlers::set_user_groups),
-        )
-        .route(
-            "/admin/groups",
-            get(crate::admin::handlers::list_groups).post(crate::admin::handlers::create_group),
-        )
-        .route(
-            "/admin/groups/:id",
-            delete(crate::admin::handlers::delete_group),
-        )
-        .route(
-            "/admin/groups/:id/default",
-            put(crate::admin::handlers::set_group_default),
         )
         .with_state(Arc::clone(&auth_state));
 

@@ -10178,3 +10178,26 @@ button.activity-line__row:hover .activity-line__steps {
   color: #ffffff;
   background: rgba(255, 255, 255, 0.16);
 }
+
+.project-members__invite {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.project-members__invite input {
+  flex: 1 1 16rem;
+  margin: 0;
+}
+
+.project-members__invite select,
+.project-members__invite button {
+  margin: 0;
+  width: auto;
+}
+
+.project-members__table select {
+  margin: 0;
+  width: auto;
+}

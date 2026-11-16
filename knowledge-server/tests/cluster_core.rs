@@ -297,13 +297,7 @@ async fn design_pdf_generation_is_leased_to_one_node() {
     let t = TestDb::new().await;
     let db = &t.db;
     db.execute(
-        "INSERT INTO groups (id, name, description, created_at) VALUES ('g', 'g', '', now())",
-        json!({}),
-    )
-    .await
-    .unwrap();
-    db.execute(
-        "INSERT INTO projects (id, group_id, name, created_at) VALUES ('p', 'g', 'p', now())",
+        "INSERT INTO deploy_projects (id, name, created_at) VALUES ('p', 'p', now())",
         json!({}),
     )
     .await

@@ -62,7 +62,7 @@
                 ref="inputEl"
                 v-model="query"
                 class="p-search-box__input"
-                placeholder="Ask anything…"
+                :placeholder="readOnly ? 'You can read this project but not chat in it' : 'Ask anything…'"
                 rows="1"
                 :disabled="inputDisabled"
                 @keydown.enter.exact.prevent="sendQuery"
@@ -174,6 +174,7 @@ import { INTERRUPTED_MESSAGE } from '../../lib/conversation-thread.js';
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useAuthStore }    from '../../stores/auth.js';
 import { useLlmStore }     from '../../stores/llm.js';
+import { useProjectStore } from '../../stores/project.js';
 import { useChatInstance } from '../../composables/useChatInstance.js';
 import { useStickyScroll } from '../../composables/useStickyScroll.js';
 import ChatMessage         from './ChatMessage.vue';
@@ -221,6 +222,8 @@ const messagesEl     = ref(null);
 const { stuck, handleScroll, follow, jumpToLatest } = useStickyScroll();
 
 const remoteLocked   = ref(false);
+const projectStore   = useProjectStore();
+const readOnly       = computed(() => Boolean(props.projectId) && projectStore.selectedProject?.role === 'viewer');
 const lockedBy       = ref('');
 const presence       = ref([]);
 let   projectEs      = null;
@@ -228,7 +231,7 @@ let   projectEs      = null;
 const pendingAttachments = computed(() => chat.pendingAttachments);
 
 const inputDisabled = computed(() =>
-  chat.loading || remoteLocked.value
+  chat.loading || remoteLocked.value || readOnly.value
 );
 
 const presenceOthers = computed(() => {

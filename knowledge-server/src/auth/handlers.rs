@@ -103,7 +103,6 @@ pub async fn register(
         .into_iter()
         .next()
         .ok_or_else(|| err(StatusCode::CONFLICT, "email already registered"))?;
-    assign_default_groups(&state, &id).await?;
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
     Ok((
@@ -122,43 +121,6 @@ async fn insert_user(db: &Db, sql: &str, params: Value) -> anyhow::Result<Vec<Va
     let rows = tx.query(sql, params).await?;
     tx.commit().await?;
     Ok(rows)
-}
-
-async fn assign_default_groups(state: &AuthState, user_id: &str) -> Result<(), ApiError> {
-    let rows = state
-        .db
-        .query(
-            "WITH defaults AS (SELECT id FROM groups WHERE is_default),
-         inserted AS (
-             INSERT INTO user_groups (user_id, group_id)
-             SELECT u.id, d.id FROM users u CROSS JOIN defaults d WHERE u.id = $id
-             ON CONFLICT DO NOTHING
-         )
-         SELECT id FROM defaults",
-            json!({ "id": user_id }),
-        )
-        .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    if !rows.is_empty() {
-        return Ok(());
-    }
-
-    let group_id = Uuid::new_v4().to_string();
-    state
-        .db
-        .query(
-            "WITH g AS (
-             INSERT INTO groups (id, name, description, is_default, created_at)
-             SELECT $gid, u.name || '''s workspace', '', false, now() FROM users u WHERE u.id = $uid
-             RETURNING id
-         )
-         INSERT INTO user_groups (user_id, group_id) SELECT $uid, id FROM g
-         RETURNING group_id AS id",
-            json!({ "uid": user_id, "gid": group_id }),
-        )
-        .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -388,9 +350,7 @@ pub async fn google_callback(
         .into_iter()
         .next()
         .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    if user["is_new"].as_bool().unwrap_or(false) {
-        assign_default_groups(&state, user["id"].as_str().unwrap_or_default()).await?;
-    }
+    if user["is_new"].as_bool().unwrap_or(false) {}
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
     let _ = session;
@@ -558,9 +518,7 @@ pub async fn oidc_callback(
         tracing::error!("OIDC user upsert returned no rows");
         err(StatusCode::INTERNAL_SERVER_ERROR, "server error")
     })?;
-    if user["is_new"].as_bool().unwrap_or(false) {
-        assign_default_groups(&state, user["id"].as_str().unwrap_or_default()).await?;
-    }
+    if user["is_new"].as_bool().unwrap_or(false) {}
     let token = issue_token(&state.config.jwt_secret, &user)?;
 
     Ok((

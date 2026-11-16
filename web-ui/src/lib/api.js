@@ -350,14 +350,13 @@ async function projectFetch(url, options = {}) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `Request failed (${res.status})`);
   }
-  return res.json();
+  return res.status === 204 ? null : res.json();
 }
 
 const projectUrl = (id) => `${PROJECTS_URL}/${encodeURIComponent(id)}`;
 const conversationUrl = (projectId, convId) =>
   `${PROJECTS_URL}/${encodeURIComponent(projectId)}/conversations/${encodeURIComponent(convId)}`;
 
-export const fetchMyGroups      = ()         => projectFetch('/groups');
 export const fetchProjects      = ()         => projectFetch(PROJECTS_URL);
 export const createProject      = (body)     => projectFetch(PROJECTS_URL, { method: 'POST', body: JSON.stringify(body) });
 export const getProject         = (id)       => projectFetch(projectUrl(id));
@@ -762,12 +761,7 @@ async function adminFetch(url, options = {}) {
 }
 
 export const listAdminUsers      = ()             => adminFetch('/admin/users');
-export const listAdminGroups     = ()             => adminFetch('/admin/groups');
 export const updateUserRole      = (id, role)     => adminFetch(`/admin/users/${encodeURIComponent(id)}/role`,   { method: 'PUT', body: JSON.stringify({ role }) });
-export const updateUserGroups    = (id, groupIds) => adminFetch(`/admin/users/${encodeURIComponent(id)}/groups`, { method: 'PUT', body: JSON.stringify({ group_ids: groupIds }) });
-export const createAdminGroup    = (name, desc)   => adminFetch('/admin/groups', { method: 'POST', body: JSON.stringify({ name, description: desc }) });
-export const deleteAdminGroup    = (id)           => adminFetch(`/admin/groups/${encodeURIComponent(id)}`, { method: 'DELETE' });
-export const setGroupDefault     = (id, isDefault) => adminFetch(`/admin/groups/${encodeURIComponent(id)}/default`, { method: 'PUT', body: JSON.stringify({ is_default: isDefault }) });
 
 export const fetchProjectCost          = (projectId)            => projectFetch(`${projectUrl(projectId)}/cost`);
 export const fetchProjectCostByModel   = (projectId)            => projectFetch(`${projectUrl(projectId)}/cost/by-model`);
@@ -775,3 +769,11 @@ export const fetchProjectCostByUser    = (projectId)            => projectFetch(
 export const fetchConversationCost     = (projectId, convId)    => projectFetch(`${projectUrl(projectId)}/conversations/${encodeURIComponent(convId)}/cost`);
 export const fetchDeploymentCost       = (projectId, depId)     => projectFetch(`${deploymentUrl(projectId, depId)}/cost`);
 export const fetchDeploymentCostCalls  = (projectId, depId)     => projectFetch(`${deploymentUrl(projectId, depId)}/cost/calls`);
+
+export const listConversationMoves = ()    => adminFetch('/admin/conversation-moves');
+export const moveConversations     = (ids) => adminFetch('/admin/conversation-moves', { method: 'POST', body: JSON.stringify({ ids }) });
+
+export const listProjectMembers   = (projectId)                => projectFetch(`${projectUrl(projectId)}/members`);
+export const addProjectMember     = (projectId, email, role)   => projectFetch(`${projectUrl(projectId)}/members`, { method: 'PUT', body: JSON.stringify({ email, role }) });
+export const setProjectMemberRole = (projectId, userId, role)  => projectFetch(`${projectUrl(projectId)}/members/${encodeURIComponent(userId)}`, { method: 'PUT', body: JSON.stringify({ role }) });
+export const removeProjectMember  = (projectId, userId)        => projectFetch(`${projectUrl(projectId)}/members/${encodeURIComponent(userId)}`, { method: 'DELETE' });

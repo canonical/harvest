@@ -27,6 +27,7 @@ const PAGES = Object.freeze({
     { to: '/deploy/agents', label: 'Agents', icon: 'agents' },
     { to: '/deploy/skills', label: 'Skills', icon: 'skills' },
     { to: '/deploy/templates', label: 'Product templates', icon: 'templates' },
+    { to: '/deploy/settings', label: 'Project settings', icon: 'members' },
   ],
 });
 

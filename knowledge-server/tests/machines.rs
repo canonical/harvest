@@ -295,15 +295,13 @@ mod db_tests {
     async fn seed_project(db: &Db, install_token: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         db.query(
-            "WITH g AS (
-                 INSERT INTO groups (id, name) VALUES ('g1', 'g1') ON CONFLICT (id) DO UPDATE SET name = groups.name
-                 RETURNING id
-             )
-             INSERT INTO projects (id, install_token, name, group_id, created_by, created_at)
-             SELECT $id, $tok, 'test', g.id, 'u1', '2026-01-01T00:00:00+00:00' FROM g
+            "INSERT INTO deploy_projects (id, install_token, name, created_by, created_at)
+             VALUES ($id, $tok, 'test', 'u1', '2026-01-01T00:00:00+00:00')
              RETURNING id",
             json!({ "id": id, "tok": install_token }),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         id
     }
 

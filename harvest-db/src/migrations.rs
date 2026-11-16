@@ -46,6 +46,10 @@ const MIGRATIONS: &[(i32, &str)] = &[
         20,
         include_str!("../migrations/0020_personal_ownership.sql"),
     ),
+    (
+        21,
+        include_str!("../migrations/0021_deploy_projects.sql"),
+    ),
 ];
 
 pub fn fingerprint() -> u64 {

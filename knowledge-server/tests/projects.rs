@@ -115,6 +115,7 @@ fn projects_app(db: Arc<Db>) -> Router {
 }
 
 fn projects_app_with_llm(db: Arc<Db>, llm: Arc<dyn knowledge_server::llm::LlmProvider>) -> Router {
+    let access_db = Arc::clone(&db);
     let secret = Arc::new(JWT_SECRET.to_string());
     let agent = Arc::new(Agent::new(Arc::clone(&llm), vec![], 4));
     let registry = MachineRegistry::new();
@@ -184,7 +185,28 @@ fn projects_app_with_llm(db: Arc<Db>, llm: Arc<dyn knowledge_server::llm::LlmPro
             route_post(project_query_stream),
         )
         .with_state(state)
+        .merge(members_routes(Arc::clone(&access_db)))
+        .layer(from_fn_with_state(
+            access_db,
+            knowledge_server::access::guard::project_guard,
+        ))
         .layer(from_fn_with_state(secret, auth::require_auth))
+}
+
+fn members_routes(db: Arc<Db>) -> Router {
+    use knowledge_server::projects::members::{
+        add_member, list_members, remove_member, set_member_role,
+    };
+    Router::new()
+        .route(
+            "/projects/:pid/members",
+            route_get(list_members).put(add_member),
+        )
+        .route(
+            "/projects/:pid/members/:uid",
+            axum::routing::put(set_member_role).delete(remove_member),
+        )
+        .with_state(db)
 }
 
 async fn make_user(db: &Db, email: &str, name: &str, role: &str) -> (String, String) {
@@ -201,22 +223,11 @@ async fn make_user(db: &Db, email: &str, name: &str, role: &str) -> (String, Str
     (id, token)
 }
 
-async fn make_group(db: &Db, name: &str) -> String {
-    let id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    db.query(
-        "INSERT INTO groups (id, name, description, created_at) VALUES ($id, $name, '', $now)",
-        json!({"id":id,"name":name,"now":now}),
-    )
-    .await
-    .unwrap();
-    id
-}
-
-async fn join_group(db: &Db, user_id: &str, group_id: &str) {
-    db.query(
-        "INSERT INTO user_groups (user_id, group_id) VALUES ($uid, $gid) ON CONFLICT DO NOTHING",
-        json!({"uid":user_id,"gid":group_id}),
+async fn add_member_row(db: &Db, project_id: &str, user_id: &str, role: &str) {
+    db.execute(
+        "INSERT INTO deploy_project_members (project_id, user_id, role) VALUES ($pid, $uid, $role)
+         ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role",
+        json!({"pid": project_id, "uid": user_id, "role": role}),
     )
     .await
     .unwrap();
@@ -373,7 +384,7 @@ mod auth_guards {
     async fn create_project_without_token_returns_401() {
         let (status, _) = send(
             stub_router(),
-            req_post_anon("/projects", json!({"name":"x","group_id":"g"})),
+            req_post_anon("/projects", json!({"name":"x"})),
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -399,54 +410,52 @@ async fn list_projects_empty_for_new_user() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn create_project_succeeds_for_group_member() {
+async fn creating_a_project_makes_its_creator_the_owner() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
 
     let (status, body) = send(
         projects_app(db),
         req_post(
             "/projects",
             &tok,
-            json!({"name":"My Project","group_id":gid,"description":"desc"}),
+            json!({"name":"My Project","description":"desc"}),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body["name"], "My Project");
     assert_eq!(body["description"], "desc");
-    assert_eq!(body["group_id"], gid);
+    assert_eq!(body["role"], "owner");
     assert!(body["id"].is_string());
 }
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn create_project_blocked_for_non_member() {
+async fn a_project_is_invisible_to_people_it_was_not_shared_with() {
     db!(c, db);
-    let (_, tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&db, "eng").await;
-
+    let (_, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_, bob_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
+    let app = projects_app(Arc::clone(&db));
     let (status, _) = send(
-        projects_app(db),
-        req_post("/projects", &tok, json!({"name":"Sneaky","group_id":gid})),
+        app.clone(),
+        req_post("/projects", &alice_tok, json!({"name":"Private"})),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, list) = send(app, req_get("/projects", &bob_tok)).await;
+    assert_eq!(list, json!([]));
 }
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_returns_400_for_empty_name() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
 
     let (status, body) = send(
         projects_app(db),
-        req_post("/projects", &tok, json!({"name":"   ","group_id":gid})),
+        req_post("/projects", &tok, json!({"name":"   "})),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -455,50 +464,20 @@ async fn create_project_returns_400_for_empty_name() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn create_project_returns_404_for_unknown_group() {
+async fn list_projects_shows_only_projects_shared_with_the_user() {
     db!(c, db);
-    let (_, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-
-    let (status, _) = send(
-        projects_app(db),
-        req_post(
-            "/projects",
-            &tok,
-            json!({"name":"X","group_id":"nonexistent"}),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn list_projects_shows_only_own_group_projects() {
-    db!(c, db);
-    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let (bob_id, bob_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
-    let g_eng = make_group(&db, "eng").await;
-    let g_data = make_group(&db, "data").await;
-    join_group(&db, &alice_id, &g_eng).await;
-    join_group(&db, &bob_id, &g_data).await;
+    let (_alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_bob_id, bob_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
 
     let app = projects_app(Arc::clone(&db));
     send(
         app.clone(),
-        req_post(
-            "/projects",
-            &alice_tok,
-            json!({"name":"Eng Project","group_id":g_eng}),
-        ),
+        req_post("/projects", &alice_tok, json!({"name":"Eng Project"})),
     )
     .await;
     send(
         app.clone(),
-        req_post(
-            "/projects",
-            &bob_tok,
-            json!({"name":"Data Project","group_id":g_data}),
-        ),
+        req_post("/projects", &bob_tok, json!({"name":"Data Project"})),
     )
     .await;
 
@@ -513,19 +492,13 @@ async fn list_projects_shows_only_own_group_projects() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_project_returns_404_for_non_member() {
     db!(c, db);
-    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, bob_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &alice_id, &gid).await;
 
     let app = projects_app(Arc::clone(&db));
     let (_, created) = send(
         app.clone(),
-        req_post(
-            "/projects",
-            &alice_tok,
-            json!({"name":"Secret","group_id":gid}),
-        ),
+        req_post("/projects", &alice_tok, json!({"name":"Secret"})),
     )
     .await;
     let pid = created["id"].as_str().unwrap().to_string();
@@ -536,25 +509,19 @@ async fn get_project_returns_404_for_non_member() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn update_project_succeeds_for_any_group_member() {
+async fn an_editor_can_rename_the_project() {
     db!(c, db);
-    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (bob_id, bob_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &alice_id, &gid).await;
-    join_group(&db, &bob_id, &gid).await;
 
     let app = projects_app(Arc::clone(&db));
     let (_, created) = send(
         app.clone(),
-        req_post(
-            "/projects",
-            &alice_tok,
-            json!({"name":"Original","group_id":gid}),
-        ),
+        req_post("/projects", &alice_tok, json!({"name":"Original"})),
     )
     .await;
     let pid = created["id"].as_str().unwrap().to_string();
+    add_member_row(&db, &pid, &bob_id, "editor").await;
 
     let (status, _) = send(
         app.clone(),
@@ -573,16 +540,14 @@ async fn update_project_succeeds_for_any_group_member() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn delete_project_removes_it_for_group_member() {
+async fn the_owner_can_delete_the_project() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
 
     let app = projects_app(Arc::clone(&db));
     let (_, created) = send(
         app.clone(),
-        req_post("/projects", &tok, json!({"name":"Temp","group_id":gid})),
+        req_post("/projects", &tok, json!({"name":"Temp"})),
     )
     .await;
     let pid = created["id"].as_str().unwrap().to_string();
@@ -596,17 +561,15 @@ async fn delete_project_removes_it_for_group_member() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn admins_list_only_the_projects_of_their_groups() {
+async fn admins_list_only_the_projects_they_belong_to() {
     db!(c, db);
-    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, admin_tok) = make_user(&db, "z@x.com", "Admin", "admin").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &alice_id, &gid).await;
 
     let app = projects_app(Arc::clone(&db));
     send(
         app.clone(),
-        req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &alice_tok, json!({"name":"P"})),
     )
     .await;
 
@@ -621,17 +584,15 @@ async fn admins_list_only_the_projects_of_their_groups() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn admin_can_access_project_in_any_group() {
+async fn admin_can_open_any_project() {
     db!(c, db);
-    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, admin_tok) = make_user(&db, "z@x.com", "Admin", "admin").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &alice_id, &gid).await;
 
     let app = projects_app(Arc::clone(&db));
     let (_, created) = send(
         app.clone(),
-        req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &alice_tok, json!({"name":"P"})),
     )
     .await;
     let pid = created["id"].as_str().unwrap().to_string();
@@ -644,15 +605,13 @@ async fn admin_can_access_project_in_any_group() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_project_conversations_returns_404_for_non_member() {
     db!(c, db);
-    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, bob_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &alice_id, &gid).await;
 
     let app = projects_app(Arc::clone(&db));
     let (_, project) = send(
         app.clone(),
-        req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &alice_tok, json!({"name":"P"})),
     )
     .await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -667,21 +626,19 @@ async fn list_project_conversations_returns_404_for_non_member() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn create_project_conversation_visible_to_all_group_members() {
+async fn project_conversations_are_visible_to_every_member() {
     db!(c, db);
-    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (bob_id, bob_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &alice_id, &gid).await;
-    join_group(&db, &bob_id, &gid).await;
 
     let app = projects_app(Arc::clone(&db));
     let (_, project) = send(
         app.clone(),
-        req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &alice_tok, json!({"name":"P"})),
     )
     .await;
     let pid = project["id"].as_str().unwrap().to_string();
+    add_member_row(&db, &pid, &bob_id, "editor").await;
 
     let (status, conv) = send(
         app.clone(),
@@ -717,13 +674,11 @@ async fn create_project_conversation_visible_to_all_group_members() {
 async fn project_conversation_stores_created_by() {
     db!(c, db);
     let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &alice_id, &gid).await;
 
     let app = projects_app(Arc::clone(&db));
     let (_, project) = send(
         app.clone(),
-        req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &alice_tok, json!({"name":"P"})),
     )
     .await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -756,21 +711,19 @@ async fn project_conversation_stores_created_by() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn any_group_member_can_update_project_conversation() {
+async fn any_editor_can_update_a_project_conversation() {
     db!(c, db);
-    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (bob_id, bob_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &alice_id, &gid).await;
-    join_group(&db, &bob_id, &gid).await;
 
     let app = projects_app(Arc::clone(&db));
     let (_, project) = send(
         app.clone(),
-        req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &alice_tok, json!({"name":"P"})),
     )
     .await;
     let pid = project["id"].as_str().unwrap().to_string();
+    add_member_row(&db, &pid, &bob_id, "editor").await;
 
     let (_, conv) = send(
         app.clone(),
@@ -810,19 +763,17 @@ async fn any_group_member_can_update_project_conversation() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn only_creator_can_delete_project_conversation() {
     db!(c, db);
-    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (bob_id, bob_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &alice_id, &gid).await;
-    join_group(&db, &bob_id, &gid).await;
 
     let app = projects_app(Arc::clone(&db));
     let (_, project) = send(
         app.clone(),
-        req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &alice_tok, json!({"name":"P"})),
     )
     .await;
     let pid = project["id"].as_str().unwrap().to_string();
+    add_member_row(&db, &pid, &bob_id, "editor").await;
 
     let (_, conv) = send(
         app.clone(),
@@ -861,15 +812,13 @@ async fn only_creator_can_delete_project_conversation() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn admin_can_delete_any_project_conversation() {
     db!(c, db);
-    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, admin_tok) = make_user(&db, "z@x.com", "Admin", "admin").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &alice_id, &gid).await;
 
     let app = projects_app(Arc::clone(&db));
     let (_, project) = send(
         app.clone(),
-        req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &alice_tok, json!({"name":"P"})),
     )
     .await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -897,15 +846,13 @@ async fn admin_can_delete_any_project_conversation() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn project_query_returns_404_for_non_member() {
     db!(c, db);
-    let (alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_alice_id, alice_tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, bob_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &alice_id, &gid).await;
 
     let app = projects_app(Arc::clone(&db));
     let (_, project) = send(
         app.clone(),
-        req_post("/projects", &alice_tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &alice_tok, json!({"name":"P"})),
     )
     .await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -924,16 +871,14 @@ async fn project_query_returns_404_for_non_member() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn project_query_succeeds_for_group_member() {
+async fn project_query_succeeds_for_the_owner() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
 
     let app = projects_app(Arc::clone(&db));
     let (_, project) = send(
         app.clone(),
-        req_post("/projects", &tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &tok, json!({"name":"P"})),
     )
     .await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -955,15 +900,13 @@ async fn project_query_succeeds_for_group_member() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn second_turn_preserves_first_turns_sources_and_chain() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
 
     let llm = FixedTextLlm::new("see [myrepo:v1.0:src/lib.rs:42]");
     let app = projects_app_with_llm(Arc::clone(&db), llm);
     let (_, project) = send(
         app.clone(),
-        req_post("/projects", &tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &tok, json!({"name":"P"})),
     )
     .await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -1015,9 +958,7 @@ async fn second_turn_preserves_first_turns_sources_and_chain() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn tool_call_chain_persists_with_preview() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
 
     let llm = ScriptedLlm::new(vec![
         LlmResponse::ToolCalls {
@@ -1038,7 +979,7 @@ async fn tool_call_chain_persists_with_preview() {
     let app = projects_app_with_llm(Arc::clone(&db), llm);
     let (_, project) = send(
         app.clone(),
-        req_post("/projects", &tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &tok, json!({"name":"P"})),
     )
     .await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -1080,9 +1021,7 @@ async fn tool_call_chain_persists_with_preview() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn ask_user_question_persists_across_reload() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
 
     let llm = ScriptedLlm::new(vec![LlmResponse::ToolCalls {
         calls: vec![ToolCall {
@@ -1100,7 +1039,7 @@ async fn ask_user_question_persists_across_reload() {
     let app = projects_app_with_llm(Arc::clone(&db), llm);
     let (_, project) = send(
         app.clone(),
-        req_post("/projects", &tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &tok, json!({"name":"P"})),
     )
     .await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -1136,9 +1075,7 @@ async fn ask_user_question_persists_across_reload() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn confirm_action_persists_pending_then_resume_continues_the_turn() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
 
     let llm = ScriptedLlm::new(vec![
         LlmResponse::ToolCalls {
@@ -1159,7 +1096,7 @@ async fn confirm_action_persists_pending_then_resume_continues_the_turn() {
     let app = projects_app_with_llm(Arc::clone(&db), llm);
     let (_, project) = send(
         app.clone(),
-        req_post("/projects", &tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &tok, json!({"name":"P"})),
     )
     .await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -1227,14 +1164,12 @@ async fn confirm_action_persists_pending_then_resume_continues_the_turn() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn resume_confirm_action_404s_without_pending_action() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
 
     let app = projects_app(Arc::clone(&db));
     let (_, project) = send(
         app.clone(),
-        req_post("/projects", &tok, json!({"name":"P","group_id":gid})),
+        req_post("/projects", &tok, json!({"name":"P"})),
     )
     .await;
     let pid = project["id"].as_str().unwrap().to_string();
@@ -1268,4 +1203,133 @@ async fn resume_confirm_action_404s_without_pending_action() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+async fn shared_project(db: &Arc<Db>) -> (Router, String, String, String, String) {
+    let (_, owner_tok) = make_user(db, "owner@x.com", "Owner", "regular").await;
+    let (viewer_id, viewer_tok) = make_user(db, "viewer@x.com", "Viewer", "regular").await;
+    let app = projects_app(Arc::clone(db));
+    let (_, project) = send(
+        app.clone(),
+        req_post("/projects", &owner_tok, json!({"name":"Shared"})),
+    )
+    .await;
+    let pid = project["id"].as_str().unwrap().to_string();
+    let (status, _) = send(
+        app.clone(),
+        req_put(
+            &format!("/projects/{pid}/members"),
+            &owner_tok,
+            json!({"email":"viewer@x.com","role":"viewer"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    (app, pid, owner_tok, viewer_id, viewer_tok)
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn a_viewer_reads_project_chats_but_cannot_start_one() {
+    db!(c, db);
+    let (app, pid, _, _, viewer_tok) = shared_project(&db).await;
+    let (status, _) = send(
+        app.clone(),
+        req_get(&format!("/projects/{pid}/conversations"), &viewer_tok),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send(
+        app,
+        req_post(
+            &format!("/projects/{pid}/conversations"),
+            &viewer_tok,
+            json!({"title":"x"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body["error"].as_str().unwrap().contains("editor"));
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn only_owners_can_share_and_a_project_keeps_at_least_one_owner() {
+    db!(c, db);
+    let (app, pid, owner_tok, viewer_id, viewer_tok) = shared_project(&db).await;
+    let (status, _) = send(
+        app.clone(),
+        req_put(
+            &format!("/projects/{pid}/members/{viewer_id}"),
+            &viewer_tok,
+            json!({"role":"owner"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (_, members) = send(
+        app.clone(),
+        req_get(&format!("/projects/{pid}/members"), &owner_tok),
+    )
+    .await;
+    let owner_id = members
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "owner")
+        .unwrap()["user_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, _) = send(
+        app.clone(),
+        req_del(&format!("/projects/{pid}/members/{owner_id}"), &owner_tok),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (status, members) = send(
+        app.clone(),
+        req_put(
+            &format!("/projects/{pid}/members/{viewer_id}"),
+            &owner_tok,
+            json!({"role":"owner"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        members
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "owner")
+            .count(),
+        2
+    );
+    let (status, _) = send(
+        app,
+        req_del(&format!("/projects/{pid}/members/{owner_id}"), &owner_tok),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn sharing_with_an_unknown_email_is_refused() {
+    db!(c, db);
+    let (app, pid, owner_tok, _, _) = shared_project(&db).await;
+    let (status, body) = send(
+        app,
+        req_put(
+            &format!("/projects/{pid}/members"),
+            &owner_tok,
+            json!({"email":"nobody@x.com","role":"editor"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body["error"].as_str().unwrap().contains("email"));
 }

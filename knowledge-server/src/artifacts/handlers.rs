@@ -102,17 +102,20 @@ pub async fn require_artifact_access(
     user_role: &str,
     artifact_id: &str,
 ) -> Result<Value, ApiError> {
-    let rows = db.query(
-        "SELECT a.id, a.title, a.kind, a.content, a.created_by, a.created_at, a.updated_at,
+    let rows = db
+        .query(
+            "SELECT a.id, a.title, a.kind, a.content, a.created_by, a.created_at, a.updated_at,
                 a.project_id, a.user_id
          FROM artifacts a
-         LEFT JOIN projects p ON p.id = a.project_id
          WHERE a.id = $aid
            AND (a.user_id = $uid
                 OR (a.project_id IS NOT NULL AND ($role = 'admin' OR EXISTS (
-                     SELECT 1 FROM user_groups ug WHERE ug.user_id = $uid AND ug.group_id = p.group_id))))",
-        json!({ "aid": artifact_id, "uid": user_id, "role": user_role }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+                     SELECT 1 FROM deploy_project_members m
+                     WHERE m.project_id = a.project_id AND m.user_id = $uid))))",
+            json!({ "aid": artifact_id, "uid": user_id, "role": user_role }),
+        )
+        .await
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
 
     rows.into_iter()
         .next()

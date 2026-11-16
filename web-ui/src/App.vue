@@ -85,7 +85,7 @@
                         @click="chooseProject(p)"
                       >
                         <span class="project-item__name">{{ p.name }}</span>
-                        <span v-if="p.group_name" class="p-chip project-item__group-badge">{{ p.group_name }}</span>
+                        <span v-if="p.role && p.role !== 'owner'" class="p-chip project-item__group-badge">{{ p.role }}</span>
                       </button>
                       <p v-if="!filteredProjects.length" class="project-selector__empty"></p>
                     </div>
@@ -180,18 +180,11 @@
           <label>Description</label>
           <input v-model="newProjectDesc" type="text" placeholder="Optional description" />
         </div>
-        <div class="form-group">
-          <label>Group</label>
-          <select v-model="newProjectGroupId" :disabled="availableGroups.length === 0">
-            <option v-if="availableGroups.length === 0" value="" disabled>You are not a member of any group</option>
-            <option v-for="g in availableGroups" :key="g.id" :value="g.id">{{ g.name }}</option>
-          </select>
-        </div>
         <p v-if="createProjectError" class="auth-error">{{ createProjectError }}</p>
         <button
           class="p-button--positive is-dense"
           type="button"
-          :disabled="!newProjectName || !newProjectGroupId || creatingProject"
+          :disabled="!newProjectName || creatingProject"
           @click="submitCreateProject"
         >Create</button>
       </div>
@@ -244,10 +237,8 @@ const projectSearch        = ref('');
 const showCreateProject    = ref(false);
 const newProjectName       = ref('');
 const newProjectDesc       = ref('');
-const newProjectGroupId    = ref('');
 const createProjectError   = ref('');
 const creatingProject      = ref(false);
-const availableGroups      = ref([]);
 const projectCostMicrousd  = ref(0);
 const chatCostMicrousd     = ref(0);
 const designCostMicrousd   = ref(0);
@@ -311,7 +302,7 @@ const filteredProjects = computed(() => {
   return project.projects.filter(p =>
     p.name.toLowerCase().includes(q) ||
     (p.description ?? '').toLowerCase().includes(q) ||
-    (p.group_name  ?? '').toLowerCase().includes(q)
+    (p.role ?? '').toLowerCase().includes(q)
   );
 });
 
@@ -343,26 +334,22 @@ async function handleLogout() {
   router.push('/login');
 }
 
-async function openCreateProject() {
+function openCreateProject() {
   projectDropdownOpen.value = false;
   newProjectName.value  = '';
   newProjectDesc.value  = '';
-  newProjectGroupId.value = '';
   createProjectError.value = '';
-  availableGroups.value = await project.fetchGroups();
-  if (availableGroups.value.length === 1) newProjectGroupId.value = availableGroups.value[0].id;
   showCreateProject.value = true;
 }
 
 async function submitCreateProject() {
-  if (!newProjectName.value || !newProjectGroupId.value) return;
+  if (!newProjectName.value) return;
   creatingProject.value    = true;
   createProjectError.value = '';
   try {
     const created = await project.createProject({
       name:        newProjectName.value,
       description: newProjectDesc.value,
-      group_id:    newProjectGroupId.value,
     });
     showCreateProject.value = false;
     project.selectProjectById(created.id);

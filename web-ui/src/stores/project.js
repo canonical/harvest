@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import { fetchProjects as apiFetchProjects, createProject as apiCreateProject, fetchMyGroups, updateMe } from '../lib/api.js';
+import { fetchProjects as apiFetchProjects, createProject as apiCreateProject, updateMe } from '../lib/api.js';
 
 const LS_KEY = 'harvest_selected_project_id';
 
@@ -73,13 +73,10 @@ export const useProjectStore = defineStore('project', () => {
     return project;
   }
 
-  async function fetchGroups() {
-    try { return await fetchMyGroups(); } catch { return []; }
-  }
 
   return {
     projects, selectedProject, selectedProjectId,
     fetchProjects, selectProject, clearProject, selectProjectById, _flushPending,
-    createProject, fetchGroups, markReady, whenReady,
+    createProject, markReady, whenReady,
   };
 });
