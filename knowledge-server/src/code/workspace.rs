@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::images::{quote, tail};
+use super::workspace_search::{self, Search};
 use super::{change_requests, previews, projects, sessions, CodeEnv, WORKSPACE};
 use crate::agent::tool::Tool;
 use crate::llm::types::ToolDefinition;
@@ -52,6 +53,7 @@ pub fn replace_once(text: &str, old: &str, new: &str) -> Result<String> {
 enum Operation {
     Run,
     Read,
+    Search,
     Write,
     Replace,
     List,
@@ -61,9 +63,10 @@ enum Operation {
     Propose,
 }
 
-const OPERATIONS: [Operation; 9] = [
+const OPERATIONS: [Operation; 10] = [
     Operation::Run,
     Operation::Read,
+    Operation::Search,
     Operation::Write,
     Operation::Replace,
     Operation::List,
@@ -99,6 +102,20 @@ impl Operation {
                         "end_line": { "type": "integer" }
                     },
                     "required": ["path"]
+                }),
+            ),
+            Self::Search => (
+                "search_workspace",
+                "Search the files in /workspace as they are now, including your uncommitted edits and new files, with git grep. Returns path:line:text matches. Use it to find code you changed or added, which the code graph and search tools do not know about.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Extended regular expression, or literal text when fixed is true" },
+                        "path": { "type": "string", "description": "Optional file, directory or glob to search under, e.g. src or *.py" },
+                        "fixed": { "type": "boolean" },
+                        "ignore_case": { "type": "boolean" }
+                    },
+                    "required": ["pattern"]
                 }),
             ),
             Self::Write => (
@@ -227,6 +244,23 @@ impl WorkspaceTool {
         ))
     }
 
+    async fn search(&self, container: &str, params: &Value) -> Result<String> {
+        let search = Search::from_params(params)?;
+        let output = self
+            .env
+            .lxd
+            .run(
+                container,
+                Command::shell(&search.script()).in_dir(WORKSPACE).timeout(workspace_search::TIMEOUT),
+            )
+            .await?;
+        search.report(output.exit_code, &output.stdout, &output.stderr)
+    }
+
+    fn changes_files(&self) -> bool {
+        matches!(self.operation, Operation::Run | Operation::Write | Operation::Replace)
+    }
+
     async fn perform(&self, params: &Value) -> Result<String> {
         let text = |key: &str| params[key].as_str().unwrap_or_default();
         if let Operation::SaveSetup = self.operation {
@@ -239,6 +273,7 @@ impl WorkspaceTool {
         let container = self.container().await?;
         match self.operation {
             Operation::Preview => return self.configure_preview(&container, params).await,
+            Operation::Search => return self.search(&container, params).await,
             Operation::Propose => {
                 let request =
                     change_requests::submit(&self.env, &self.session_id, text("title"), text("description")).await?;
@@ -295,7 +330,7 @@ impl WorkspaceTool {
                 );
                 self.shell(&container, &script, Duration::from_secs(60)).await
             }
-            Operation::SaveSetup | Operation::Preview | Operation::Propose => unreachable!(),
+            Operation::SaveSetup | Operation::Preview | Operation::Propose | Operation::Search => unreachable!(),
         }
     }
 }
@@ -307,7 +342,11 @@ impl Tool for WorkspaceTool {
     }
 
     async fn execute(&self, params: Value) -> Result<String> {
-        match self.perform(&params).await {
+        let outcome = self.perform(&params).await;
+        if self.changes_files() {
+            self.env.drift.invalidate(&self.session_id);
+        }
+        match outcome {
             Ok(text) => Ok(text),
             Err(e) => Ok(format!("error: {e}")),
         }

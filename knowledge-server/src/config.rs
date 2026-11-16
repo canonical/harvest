@@ -663,6 +663,7 @@ pub struct CodeConfig {
     pub warm_days: u64,
     pub idle_hours: u64,
     pub max_preview_copies: usize,
+    pub reindex_hours: u64,
 }
 
 impl Default for CodeConfig {
@@ -672,6 +673,7 @@ impl Default for CodeConfig {
             warm_days: 7,
             idle_hours: 24,
             max_preview_copies: 5,
+            reindex_hours: 6,
         }
     }
 }

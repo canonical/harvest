@@ -236,24 +236,18 @@ pub async fn reap_dead_nodes(db: &Db, node: &ClusterNode) -> Result<u64> {
     ).await
 }
 
-pub async fn run_ingestion(
-    jobs: IngestionJobs,
-    job_id: String,
-    db: Db,
-    name: String,
-    url: String,
-    browse_url: Option<String>,
-    refs: Vec<String>,
-    credentials: GitCredentials,
-) {
+pub struct IngestionSource {
+    pub name: String,
+    pub url: String,
+    pub browse_url: Option<String>,
+    pub refs: Vec<String>,
+    pub credentials: GitCredentials,
+    pub force: bool,
+}
+
+pub async fn run_ingestion(jobs: IngestionJobs, job_id: String, db: Db, source: IngestionSource) {
     let (progress_tx, writer) = jobs.progress_writer(job_id.clone());
-    let source = Source {
-        name: &name,
-        url: &url,
-        browse_url: browse_url.as_deref(),
-        refs: &refs,
-        credentials,
-    };
+    let name = source.name.clone();
     let result = perform_ingestion(db, source, progress_tx).await;
     let _ = writer.await;
     let outcome = result.map_err(|e| {
@@ -265,32 +259,23 @@ pub async fn run_ingestion(
     }
 }
 
-struct Source<'a> {
-    name: &'a str,
-    url: &'a str,
-    browse_url: Option<&'a str>,
-    refs: &'a [String],
-    credentials: GitCredentials,
-}
-
 async fn perform_ingestion(
     db: Db,
-    source: Source<'_>,
+    source: IngestionSource,
     progress_tx: mpsc::UnboundedSender<String>,
 ) -> anyhow::Result<Vec<String>> {
-    let name = source.name;
     let repo = RepoConfig {
-        name: name.to_string(),
-        url: source.url.to_string(),
-        browse_url: source.browse_url.map(String::from),
-        refs: Some(source.refs.to_vec()),
+        name: source.name.clone(),
+        url: source.url,
+        browse_url: source.browse_url,
+        refs: Some(source.refs),
     };
 
     let mut pipeline = Pipeline::with_db(db)?;
     pipeline.set_credentials(source.credentials);
     pipeline.set_progress_tx(progress_tx);
-    pipeline.process_single(&repo, false).await?;
-    let versions = pipeline.ingested_versions(name).await?;
+    pipeline.process_single(&repo, source.force).await?;
+    let versions = pipeline.ingested_versions(&source.name).await?;
     Ok(versions)
 }
 

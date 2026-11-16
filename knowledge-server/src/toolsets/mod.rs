@@ -16,6 +16,7 @@ pub use skills::SkillsToolset;
 pub use terraform::TerraformToolset;
 
 use harvest_db::Db;
+use harvest_search::Scope;
 
 use crate::access::repos::{RepoAccess, RepoScope};
 use crate::agent::graph_tools::SemanticHandle;
@@ -37,6 +38,7 @@ pub struct TurnContext {
     pub repos: RepoScope,
     pub conversation_id: String,
     pub llm: Arc<dyn LlmProvider>,
+    pub focus: Option<Scope>,
 }
 
 impl TurnContext {
@@ -60,6 +62,7 @@ impl TurnContext {
             repos,
             conversation_id: conversation_id.into(),
             llm,
+            focus: None,
         }
     }
 
@@ -75,7 +78,13 @@ impl TurnContext {
             repos: RepoScope::All,
             conversation_id: conversation_id.into(),
             llm,
+            focus: None,
         }
+    }
+
+    pub fn focused_on(mut self, focus: Option<Scope>) -> Self {
+        self.focus = focus;
+        self
     }
 }
 
@@ -131,6 +140,7 @@ pub fn build_toolbox(deps: ToolboxDeps) -> Toolbox {
                 db: Arc::clone(&deps.db),
                 semantic: deps.semantic,
                 search: deps.search,
+                workspace: deps.code.clone(),
             },
         )
         .with(
@@ -239,6 +249,7 @@ mod tests {
             space,
             repos: RepoScope::All,
             conversation_id: "c".into(),
+            focus: None,
             llm: Arc::new(MockProvider::new(
                 "m".into(),
                 Default::default(),

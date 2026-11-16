@@ -108,6 +108,7 @@ fn query_app(agent: Arc<Agent>) -> Router {
         pricing: Arc::new(knowledge_server::cost::PricingTable::default()),
         toolbox: Arc::new(knowledge_server::toolsets::Toolbox::default()),
         admission: knowledge_server::turns::admission::TurnAdmission::unlimited(),
+        code: None,
     });
     Router::new()
         .route("/query", post(handle_query))
@@ -451,6 +452,7 @@ fn query_app_with_db(agent: Arc<Agent>, db: Arc<Db>) -> Router {
         pricing: Arc::new(knowledge_server::cost::PricingTable::default()),
         toolbox: Arc::new(knowledge_server::toolsets::Toolbox::default()),
         admission: knowledge_server::turns::admission::TurnAdmission::unlimited(),
+        code: None,
     });
     let query_router = Router::new()
         .route("/query/stream", post(handle_query_stream))

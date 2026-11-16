@@ -17,6 +17,7 @@ use crate::search::SearchService;
 pub struct SearchToolContext {
     pub llm: Option<Arc<dyn LlmProvider>>,
     pub conversation_id: Option<String>,
+    pub focus: Option<Scope>,
 }
 
 impl SearchToolContext {
@@ -24,7 +25,13 @@ impl SearchToolContext {
         Self {
             llm: Some(llm),
             conversation_id: None,
+            focus: None,
         }
+    }
+
+    pub fn focused_on(mut self, focus: Option<Scope>) -> Self {
+        self.focus = focus;
+        self
     }
 
     pub fn in_conversation(mut self, conversation_id: impl Into<String>) -> Self {
@@ -256,7 +263,10 @@ impl Tool for SearchCodeTool {
         if !self.service.config.prefetch || question.trim().is_empty() {
             return None;
         }
-        let scope = SearchService::resolve_scope(self.db.as_ref()?, question, earlier).await?;
+        let scope = match &self.context.focus {
+            Some(focus) => focus.clone(),
+            None => SearchService::resolve_scope(self.db.as_ref()?, question, earlier).await?,
+        };
         if self.service.registry.get(&scope).is_none() {
             let registry = Arc::clone(&self.service.registry);
             let warming = scope.clone();

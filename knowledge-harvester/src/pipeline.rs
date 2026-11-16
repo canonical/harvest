@@ -163,8 +163,7 @@ impl Pipeline {
                 }
                 _ => {}
             }
-            self.process_version(&repo_path, &repo.name, &tag.name, tag.timestamp)
-                .await?;
+            self.process_version(&repo_path, &repo.name, &tag).await?;
         }
 
         self.emit("Cleaning up temporary clone…");
@@ -179,14 +178,14 @@ impl Pipeline {
         &self,
         repo_path: &Path,
         repo: &str,
-        tag: &str,
-        timestamp: i64,
+        version: &crate::git::TagInfo,
     ) -> Result<()> {
+        let tag = version.name.as_str();
         self.emit(format!("Processing ref '{}'…", tag));
         tracing::info!(repo, tag, "ingesting version");
 
         self.writer
-            .upsert_version(repo, tag, timestamp, false)
+            .upsert_version(repo, tag, version.timestamp, false)
             .await?;
 
         self.emit(format!("Checking out '{}'…", tag));
@@ -218,6 +217,7 @@ impl Pipeline {
         let parsers = Arc::clone(&self.parsers);
         let repo_owned = repo.to_owned();
         let tag_owned = tag.to_owned();
+        let commit_sha = version.commit_sha.clone();
         let repo_clone = repo_owned.clone();
         let tag_clone = tag_owned.clone();
         let repo_root = repo_path.to_path_buf();
@@ -292,7 +292,7 @@ impl Pipeline {
         ));
 
         self.writer
-            .write_version_with_history(&repo_owned, &tag_owned, &parsed, &history)
+            .write_version_with_history(&repo_owned, &tag_owned, Some(&commit_sha), &parsed, &history)
             .await?;
         self.emit(format!(
             "Ref '{}' ingested successfully ({} files).",

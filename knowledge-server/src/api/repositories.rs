@@ -18,6 +18,7 @@ use crate::access::repos::{check_remote, RepoAccess, RepoScope};
 use crate::api::GraphCache;
 use crate::api::GraphState;
 use crate::auth::jwt::Claims;
+pub use crate::ingestion::IngestionSource;
 use crate::ingestion::IngestionStatus;
 
 pub const GRAPH_TOPIC: &str = "graph:invalidate";
@@ -268,6 +269,7 @@ pub async fn handle_add_repository(
         browse_url: body.browse_url.clone(),
         refs: body.refs.clone(),
         credentials,
+        force: false,
     };
     match start_ingestion(&state, source).await {
         Ok(()) => (
@@ -282,14 +284,6 @@ pub async fn handle_add_repository(
             .into_response(),
         Err(IngestionRefused::Storage(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
-}
-
-pub struct IngestionSource {
-    pub name: String,
-    pub url: String,
-    pub browse_url: Option<String>,
-    pub refs: Vec<String>,
-    pub credentials: GitCredentials,
 }
 
 #[derive(Debug)]
@@ -319,17 +313,7 @@ pub async fn start_ingestion(state: &GraphState, source: IngestionSource) -> Res
     let db = (*state.db).clone();
     let cache = Arc::clone(&state.cache);
     tokio::spawn(async move {
-        crate::ingestion::run_ingestion(
-            jobs,
-            job_id,
-            db,
-            source.name,
-            source.url,
-            source.browse_url,
-            source.refs,
-            source.credentials,
-        )
-        .await;
+        crate::ingestion::run_ingestion(jobs, job_id, db, source).await;
         drop_cached_graphs(&cache, &format!("{name}:")).await;
         bus.publish(GRAPH_TOPIC, format!("{name}:"));
     });
@@ -498,17 +482,15 @@ pub async fn handle_ingest_versions(
     let repo_name = repo.clone();
 
     tokio::spawn(async move {
-        crate::ingestion::run_ingestion(
-            jobs,
-            job_id,
-            db,
-            repo_name.clone(),
+        let source = IngestionSource {
+            name: repo_name.clone(),
             url,
-            None,
-            body.refs.clone(),
+            browse_url: None,
+            refs: body.refs.clone(),
             credentials,
-        )
-        .await;
+            force: false,
+        };
+        crate::ingestion::run_ingestion(jobs, job_id, db, source).await;
 
         let mut cache_write = cache.write().await;
         let keys_to_remove: Vec<String> = cache_write

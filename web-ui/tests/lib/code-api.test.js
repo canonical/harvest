@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { openCodeSession, closeCodeSession, isOpen, suggestBranch, proposeChange, changeRequestName } from '../../src/lib/code-api.js';
+import { openCodeSession, closeCodeSession, isOpen, suggestBranch, proposeChange, changeRequestName, indexSummary } from '../../src/lib/code-api.js';
 import { classifyDiffLines } from '../../src/lib/diff-lines.js';
 
 function respond(status, body) {
@@ -64,5 +64,13 @@ describe('diff lines', () => {
     const kinds = classifyDiffLines('diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n same')
       .map((line) => line.kind);
     expect(kinds).toEqual(['diff-file', 'diff-file', 'diff-file', 'diff-hunk', 'diff-del', 'diff-add', 'diff-context']);
+  });
+
+  it('summarises the state of a project code graph', () => {
+    expect(indexSummary(null)).toBe('not indexed');
+    expect(indexSummary({ ingested: false })).toBe('being built');
+    expect(indexSummary({ ingested: true, version: 'main', commit: '0123456789abcdef' })).toBe('main at 0123456789ab');
+    expect(indexSummary({ ingested: true, version: 'main', commit: null, error: 'denied' }))
+      .toBe('main; the last refresh failed: denied');
   });
 });

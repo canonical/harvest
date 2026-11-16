@@ -5,9 +5,11 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::images;
+use super::index;
 use super::projects;
 use super::sessions::{self, container_name, CloseReason};
 use super::CodeEnv;
+use crate::api::GraphState;
 use crate::cluster::lease::{self, Leases};
 use crate::lxd::containers::Source;
 
@@ -30,7 +32,7 @@ pub fn image_need(image: Option<&images::Image>, setting_hash: &str) -> ImageNee
     }
 }
 
-pub async fn tick(env: &CodeEnv) -> Result<()> {
+pub async fn tick(env: &CodeEnv, graph: &GraphState) -> Result<()> {
     let warm_for = env.settings.warm_for.as_secs_f64();
     let warm = env
         .db
@@ -46,6 +48,7 @@ pub async fn tick(env: &CodeEnv) -> Result<()> {
         }
     }
     cool_down(env, warm_for).await?;
+    index::refresh_due(env, graph).await?;
     super::previews::clones::reap(env).await?;
     super::change_requests::refresh(env).await?;
     for id in sessions::idle_sessions(env).await? {
@@ -134,14 +137,14 @@ async fn cool_down(env: &CodeEnv, warm_for: f64) -> Result<()> {
     Ok(())
 }
 
-pub fn spawn(leases: Arc<dyn Leases>, env: CodeEnv) {
+pub fn spawn(leases: Arc<dyn Leases>, env: CodeEnv, graph: Arc<GraphState>) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(EVERY);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
             let result = lease::run_exclusive(leases.as_ref(), LEASE_KEY, || async {
-                if let Err(e) = tick(&env).await {
+                if let Err(e) = tick(&env, &graph).await {
                     tracing::warn!(error = %e, "code pool keeper failed");
                 }
             })
