@@ -12,6 +12,12 @@ pub struct TagInfo {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteListing {
+    pub default_branch: Option<String>,
+    pub branches: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum GitCredentials {
     #[default]
     Anonymous,
@@ -111,6 +117,30 @@ impl GitClient {
             )?;
         }
         Ok(())
+    }
+
+    pub fn list_remote(&self, url: &str) -> Result<RemoteListing> {
+        let tmp_dir = tempfile::TempDir::new()?;
+        let repo = Repository::init_opts(
+            tmp_dir.path(),
+            &git2::RepositoryInitOptions::new().external_template(false),
+        )?;
+        let mut remote = repo.remote("origin", url)?;
+        remote.connect_auth(git2::Direction::Fetch, self.callbacks(), None)?;
+        let default_branch = remote
+            .default_branch()
+            .ok()
+            .and_then(|b| b.as_str().map(|s| s.trim_start_matches("refs/heads/").to_string()));
+        let branches = remote
+            .list()?
+            .iter()
+            .filter_map(|h| h.name().strip_prefix("refs/heads/").map(String::from))
+            .collect();
+        remote.disconnect()?;
+        Ok(RemoteListing {
+            default_branch,
+            branches,
+        })
     }
 
     pub fn list_remote_refs(&self, url: &str) -> Result<Vec<TagInfo>> {
