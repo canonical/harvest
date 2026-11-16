@@ -37,6 +37,7 @@
         >
           <span class="repo-list-item__name">{{ r.name }}</span>
           <span class="repo-list-item__meta">
+            <span v-if="r.visibility === 'private'" class="repo-status-badge repo-status-badge--private" title="Only people with access to this repository can see it">private</span>
             <span v-if="r.ingestion_status" class="repo-status-badge" :class="`repo-status-badge--${r.ingestion_status}`">{{ r.ingestion_status }}</span>
             <span v-if="r.versions.length" class="repo-list-item__versions">{{ r.versions.length }} version{{ r.versions.length !== 1 ? 's' : '' }}</span>
           </span>
@@ -193,6 +194,7 @@
           <label for="add-repo-url">Git URL</label>
           <input id="add-repo-url" v-model="addForm.url" type="text" placeholder="https://github.com/owner/repo.git" @keydown.enter="verifyUrl" :disabled="verifying" />
           <span v-if="verifyError" class="auth-error">{{ verifyError }}</span>
+          <span v-else-if="verifiedVisibility === 'private'" class="repo-verify-note">Private repository. Only people who can read it with their own credentials will see it in Harvest.</span>
         </div>
         <div v-if="verifying" class="repo-verify-loading">
           <LoadingSpinner text="Connecting to repository…" />
@@ -415,6 +417,7 @@ const addError = ref('');
 const adding = ref(false);
 const verifying = ref(false);
 const verifyError = ref('');
+const verifiedVisibility = ref('');
 const availableRefs = ref([]);
 const selectedRefs = ref(new Set());
 const refSearch = ref('');
@@ -570,12 +573,14 @@ async function verifyUrl() {
 
   verifying.value = true;
   verifyError.value = '';
+  verifiedVisibility.value = '';
   availableRefs.value = [];
   selectedRefs.value = new Set();
 
   try {
     const result = await verifyRepository(url);
     availableRefs.value = result.refs;
+    verifiedVisibility.value = result.visibility;
 
     if (!addForm.value.name.trim()) {
       const parts = url.replace(/\.git$/, '').split('/');

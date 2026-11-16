@@ -129,6 +129,7 @@ fn test_claims() -> Claims {
 
 fn repos_app(db: Arc<Db>) -> Router {
     let state = Arc::new(GraphState {
+        credentials: None,
         ingestion: knowledge_server::ingestion::IngestionJobs::standalone(Arc::clone(&db)),
         db,
         cache: Arc::new(RwLock::new(HashMap::new())),
@@ -137,6 +138,7 @@ fn repos_app(db: Arc<Db>) -> Router {
     Router::new()
         .route("/repositories", get(handle_list_repositories))
         .with_state(state)
+        .layer(axum::Extension(test_claims()))
 }
 
 fn make_agent(text: &str) -> Arc<Agent> {
@@ -527,6 +529,37 @@ async fn repositories_returns_versions_for_repo() {
         versions.iter().any(|v| v.as_str() == Some("v1.0")),
         "versions: {versions:?}"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn a_private_repository_is_listed_only_for_users_granted_access() {
+    let test_db = TestDb::new().await;
+    let db = Arc::new(test_db.db.clone());
+    seed_one_repo(&db).await;
+    db.execute(
+        "INSERT INTO users (id, email, provider) VALUES ('test-user-id', 'test@example.com', 'local')",
+        json!({}),
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "UPDATE repositories SET visibility = 'private' WHERE name = 'testrepo'",
+        json!({}),
+    )
+    .await
+    .unwrap();
+
+    let (_, hidden) = body_status_json(repos_app(Arc::clone(&db)), get_req("/repositories")).await;
+    assert_eq!(hidden.as_array().unwrap().len(), 0);
+
+    knowledge_server::access::repos::RepoAccess::new(&db)
+        .grant("testrepo", "test-user-id")
+        .await
+        .unwrap();
+    let (_, shown) = body_status_json(repos_app(db), get_req("/repositories")).await;
+    assert_eq!(shown[0]["name"], "testrepo");
+    assert_eq!(shown[0]["visibility"], "private");
 }
 
 fn docs_app(docs_dir: PathBuf) -> Router {

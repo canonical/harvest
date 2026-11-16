@@ -146,6 +146,8 @@
       </div>
     </section>
 
+    <GitAccessSection />
+
     <div v-if="editing" class="modal" @click.self="closeEdit">
       <div class="modal-content">
         <button class="modal-close" type="button" @click="closeEdit">✕</button>
@@ -218,6 +220,7 @@ import { useLlmStore } from '../stores/llm.js';
 import { useAuthStore } from '../stores/auth.js';
 import { setLlmUserKey, deleteLlmUserKey, fetchApiKeys, createApiKey, renameApiKey, revokeApiKey } from '../lib/api.js';
 import LoadingSpinner from '../components/deployment/LoadingSpinner.vue';
+import GitAccessSection from '../components/settings/GitAccessSection.vue';
 
 const llm = useLlmStore();
 const auth = useAuthStore();

@@ -391,6 +391,17 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         shutdown.clone(),
     );
 
+    let credentials = match config.security.user_key_encryption_key.as_ref() {
+        Some(key_hex) => {
+            let crypto = Crypto::from_hex(key_hex).context("invalid user_key_encryption_key")?;
+            Some(Arc::new(crate::credentials::CredentialStore::new(
+                Arc::clone(&db),
+                Arc::new(crypto),
+            )))
+        }
+        None => None,
+    };
+
     let has_user_key_providers = config.llm.iter().any(|c| c.user_provided_key());
     let user_key_store = if has_user_key_providers {
         let key_hex = config.security.user_key_encryption_key.as_ref().context(
@@ -615,7 +626,16 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         semantic: semantic_handle,
         live: Arc::clone(&live),
         admission: Arc::clone(&admission),
+        credentials,
     };
+
+    if let Some(credentials) = &state.credentials {
+        crate::access::recheck::spawn(
+            Arc::clone(&leases),
+            Arc::clone(&db),
+            Arc::clone(credentials),
+        );
+    }
 
     let cache: Arc<GraphCache> = Arc::new(RwLock::new(HashMap::new()));
     tokio::spawn({

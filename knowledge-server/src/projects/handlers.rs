@@ -1,4 +1,6 @@
 use crate::access::{Action, Authorizer, Caller, Denied};
+use crate::modes::Space;
+use crate::toolsets::TurnContext;
 use axum::{
     extract::{Extension, Path, Query, State},
     http::{HeaderName, HeaderValue, StatusCode},
@@ -1712,18 +1714,17 @@ pub async fn project_query(
         &user.sub,
     )
     .await;
-    let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-        state.agent_builder.build_for_conversation(
-            project_id.clone(),
-            body.conversation_id.clone().unwrap_or_default(),
-        )
-    } else {
-        state.agent_builder.build_for_conversation_with_llm(
-            project_id.clone(),
-            body.conversation_id.clone().unwrap_or_default(),
-            user_llm.clone(),
-        )
-    };
+    let turn = TurnContext::load(
+        &state.db,
+        &user.sub,
+        Space::deploy_project(project_id.clone()),
+        body.conversation_id.clone().unwrap_or_default(),
+        user_llm.clone(),
+    )
+    .await;
+    let agent = state
+        .agent_builder
+        .conversation_agent(&turn, state.agent_builder.system_one.clone());
     let history = match &body.conversation_id {
         Some(conv_id) => load_project_context(&state.db, &project_id, conv_id)
             .await

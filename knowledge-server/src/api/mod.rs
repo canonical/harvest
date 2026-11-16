@@ -28,6 +28,7 @@ use crate::chat_layouts::handlers::{self as chat_layout_handlers, ChatLayoutStat
 use crate::config::AuthConfig;
 use crate::config::{LlmProviderConfig, UiConfig};
 use crate::conversations::handlers::{self as conv_handlers, ConvState};
+use crate::credentials::{handlers as credential_handlers, CredentialStore};
 use crate::deployments::{self, handlers as deployment_handlers};
 use crate::ingestion::IngestionRegistry;
 use crate::llm::LlmProvider;
@@ -85,6 +86,7 @@ pub async fn resolve_user_system_one(
 #[derive(Clone)]
 pub struct GraphState {
     pub db: Arc<Db>,
+    pub credentials: Option<Arc<CredentialStore>>,
     pub cache: Arc<GraphCache>,
     pub ingestion: IngestionRegistry,
     pub bus: Arc<crate::cluster::bus::ClusterBus>,
@@ -106,18 +108,21 @@ pub struct QueryState {
 }
 
 impl QueryState {
-    pub fn personal_tools(
+    pub async fn personal_tools(
         &self,
         user_id: &str,
         conversation_id: Option<&str>,
         llm: &Arc<dyn LlmProvider>,
     ) -> Vec<Box<dyn tool::Tool>> {
-        self.toolbox.tools(&TurnContext {
-            user_id: user_id.to_string(),
-            space: Space::personal(user_id),
-            conversation_id: conversation_id.unwrap_or_default().to_string(),
-            llm: Arc::clone(llm),
-        })
+        let space = Space::personal(user_id);
+        let conversation_id = conversation_id.unwrap_or_default();
+        let turn = match &self.db {
+            Some(db) => {
+                TurnContext::load(db, user_id, space, conversation_id, Arc::clone(llm)).await
+            }
+            None => TurnContext::unrestricted(user_id, space, conversation_id, Arc::clone(llm)),
+        };
+        self.toolbox.tools(&turn)
     }
 }
 
@@ -143,6 +148,7 @@ pub struct AppState {
     pub semantic: Option<Arc<graph_tools::SemanticHandle>>,
     pub live: Arc<crate::projects::live::ProjectLive>,
     pub admission: Arc<crate::turns::admission::TurnAdmission>,
+    pub credentials: Option<Arc<CredentialStore>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -236,95 +242,42 @@ pub fn code_tools(
 }
 
 impl ProjectAgentBuilder {
-    fn deploy_turn(
-        &self,
-        project_id: String,
-        conversation_id: String,
-        llm: &Arc<dyn LlmProvider>,
-    ) -> TurnContext {
-        TurnContext {
-            user_id: String::new(),
-            space: Space::deploy_project(project_id),
-            conversation_id,
-            llm: Arc::clone(llm),
-        }
-    }
-
-    fn base_tools(
-        &self,
-        project_id: String,
-        conversation_id: String,
-        llm: &Arc<dyn LlmProvider>,
-    ) -> Vec<Box<dyn tool::Tool>> {
-        self.toolbox
-            .tools(&self.deploy_turn(project_id, conversation_id, llm))
-    }
-
-    pub fn build(&self, project_id: String) -> Arc<Agent> {
-        self.build_with_llm(project_id, Arc::clone(&self.llm))
-    }
-
-    pub fn build_with_llm(&self, project_id: String, llm: Arc<dyn LlmProvider>) -> Arc<Agent> {
-        self.build_for_conversation_with_llm(project_id, String::new(), llm)
-    }
-
-    pub fn build_for_conversation(
-        &self,
-        project_id: String,
-        conversation_id: String,
-    ) -> Arc<Agent> {
-        self.build_for_conversation_with_llm(project_id, conversation_id, Arc::clone(&self.llm))
-    }
-
-    pub fn build_for_conversation_with_llm(
-        &self,
-        project_id: String,
-        conversation_id: String,
-        llm: Arc<dyn LlmProvider>,
-    ) -> Arc<Agent> {
-        self.build_for_conversation_with_llm_and_system_one(
-            project_id,
-            conversation_id,
-            llm,
-            self.system_one.clone(),
-        )
-    }
-
-    pub fn build_for_conversation_with_llm_and_system_one(
-        &self,
-        project_id: String,
-        conversation_id: String,
-        llm: Arc<dyn LlmProvider>,
-        system_one: Option<Arc<crate::llm::system_one::SystemOneClient>>,
-    ) -> Arc<Agent> {
-        let tools = self.base_tools(project_id, conversation_id, &llm);
-        let agent = Agent::new(llm, tools, self.max_iterations)
-            .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
-            .with_system_one(system_one)
-            .with_parallel_research(true);
+    fn finish(&self, agent: Agent) -> Arc<Agent> {
+        let agent =
+            agent.with_compaction(self.compaction_threshold_chars, self.compaction_keep_last);
         match self.thresholds {
             Some(t) => Arc::new(t.apply(agent)),
             None => Arc::new(agent),
         }
     }
 
-    pub fn build_for_deployment(
+    pub fn conversation_agent(
         &self,
-        project_id: String,
-        group_id: String,
-        ctx: &deployments::DeploymentContext,
+        turn: &TurnContext,
+        system_one: Option<Arc<crate::llm::system_one::SystemOneClient>>,
     ) -> Arc<Agent> {
-        self.build_for_deployment_with_llm(project_id, group_id, ctx, Arc::clone(&self.llm))
+        let agent = Agent::new(
+            Arc::clone(&turn.llm),
+            self.toolbox.tools(turn),
+            self.max_iterations,
+        )
+        .with_system_one(system_one)
+        .with_parallel_research(true);
+        self.finish(agent)
     }
 
-    pub fn build_for_deployment_with_llm(
+    pub fn deployment_agent(
         &self,
-        project_id: String,
+        turn: &TurnContext,
         group_id: String,
         ctx: &deployments::DeploymentContext,
-        llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        let mut tools = self.base_tools(project_id.clone(), String::new(), &llm);
+        let project_id = turn
+            .space
+            .deploy_project_id()
+            .unwrap_or_default()
+            .to_string();
+        let mut tools = self.toolbox.tools(turn);
         tools.push(Box::new(deployment_tools::LinkDeploymentArtifactTool {
             db: Arc::clone(&self.db),
             project_id: project_id.clone(),
@@ -337,70 +290,42 @@ impl ProjectAgentBuilder {
         }));
         tools.push(Box::new(deployment_tools::SetExecutionPlanTool {
             db: Arc::clone(&self.db),
-            project_id: project_id.clone(),
+            project_id,
             deployment_id: ctx.deployment_id.clone(),
         }));
-        let agent = Agent::new(llm, tools, self.max_iterations)
-            .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+        let agent = Agent::new(Arc::clone(&turn.llm), tools, self.max_iterations)
             .with_system_prompt(prompt::deployment_system_prompt(ctx));
-        match self.thresholds {
-            Some(t) => Arc::new(t.apply(agent)),
-            None => Arc::new(agent),
-        }
+        self.finish(agent)
     }
 
-    pub fn build_for_deployment_text_only(
+    pub fn deployment_text_agent(
         &self,
-        ctx: &deployments::DeploymentContext,
-    ) -> Arc<Agent> {
-        self.build_for_deployment_text_only_with_llm(ctx, Arc::clone(&self.llm))
-    }
-
-    pub fn build_for_deployment_text_only_with_llm(
-        &self,
-        ctx: &deployments::DeploymentContext,
         llm: Arc<dyn LlmProvider>,
+        ctx: &deployments::DeploymentContext,
     ) -> Arc<Agent> {
         let agent = Agent::new(llm, Vec::new(), self.max_iterations)
-            .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
             .with_system_prompt(prompt::deployment_system_prompt(ctx));
-        match self.thresholds {
-            Some(t) => Arc::new(t.apply(agent)),
-            None => Arc::new(agent),
-        }
+        self.finish(agent)
     }
 
-    pub fn build_for_deployment_design(
+    pub fn deployment_design_agent(
         &self,
-        project_id: String,
+        turn: &TurnContext,
         ctx: &deployments::DeploymentContext,
     ) -> Arc<Agent> {
-        self.build_for_deployment_design_with_llm(project_id, ctx, Arc::clone(&self.llm))
-    }
-
-    pub fn build_for_deployment_design_with_llm(
-        &self,
-        project_id: String,
-        ctx: &deployments::DeploymentContext,
-        llm: Arc<dyn LlmProvider>,
-    ) -> Arc<Agent> {
-        let turn = self.deploy_turn(project_id, String::new(), &llm);
         let tools = self
             .toolbox
-            .tools_from(&[ToolsetId::Knowledge, ToolsetId::Skills], &turn);
-        let agent = Agent::new(llm, tools, self.max_iterations)
-            .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+            .tools_from(&[ToolsetId::Knowledge, ToolsetId::Skills], turn);
+        let agent = Agent::new(Arc::clone(&turn.llm), tools, self.max_iterations)
             .with_system_prompt(prompt::deployment_system_prompt(ctx));
-        match self.thresholds {
-            Some(t) => Arc::new(t.apply(agent)),
-            None => Arc::new(agent),
-        }
+        self.finish(agent)
     }
 }
 
 pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Router {
     let graph_state = Arc::new(GraphState {
         db: Arc::clone(&state.db),
+        credentials: state.credentials.clone(),
         cache,
         ingestion: state.ingestion.clone(),
         bus: Arc::clone(state.live.bus()),
@@ -559,6 +484,19 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
             post(auth_tui::authorize_request),
         )
         .with_state(Arc::clone(&auth_state));
+
+    let credential_router = Router::new()
+        .route("/me/credentials", get(credential_handlers::get_credentials))
+        .route(
+            "/me/ssh-key",
+            put(credential_handlers::put_ssh_key).delete(credential_handlers::delete_ssh_key),
+        )
+        .route("/me/accounts", put(credential_handlers::put_account))
+        .route(
+            "/me/accounts/:host",
+            delete(credential_handlers::delete_account),
+        )
+        .with_state(state.credentials.clone());
 
     let api_key_state = Arc::new(api_keys::ApiKeyState {
         store: Arc::clone(&state.api_key_store),
@@ -863,6 +801,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
 
     let mut protected_router = Router::new()
         .merge(me_router)
+        .merge(credential_router)
         .merge(api_key_router)
         .merge(conv_router)
         .merge(chat_layout_router)

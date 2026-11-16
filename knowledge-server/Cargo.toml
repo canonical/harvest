@@ -85,6 +85,7 @@ http = "1"
 # Archive extraction
 zip = "2"
 serde_yaml = "0.9.34"
+tempfile = "3"
 
 [dev-dependencies]
 http-body-util       = "0.1.3"

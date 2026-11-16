@@ -314,7 +314,8 @@ async fn answer_chat(
                 Arc::clone(&user_llm),
                 state
                     .qs
-                    .personal_tools(&principal.user_id, Some(conv_id.as_str()), &user_llm),
+                    .personal_tools(&principal.user_id, Some(conv_id.as_str()), &user_llm)
+                    .await,
                 state.qs.max_iterations,
             )
             .with_compaction(

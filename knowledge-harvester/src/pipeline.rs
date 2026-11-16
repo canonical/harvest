@@ -61,6 +61,10 @@ impl Pipeline {
         self.process_repo(repo, force).await
     }
 
+    pub fn set_credentials(&mut self, credentials: crate::git::GitCredentials) {
+        self.git = self.git.clone().with_credentials(credentials);
+    }
+
     pub async fn list_remote_refs(&self, url: &str) -> Result<Vec<crate::git::TagInfo>> {
         let git = self.git.clone();
         let url = url.to_string();
