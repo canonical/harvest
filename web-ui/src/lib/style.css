@@ -10141,25 +10141,26 @@ button.activity-line__row:hover .activity-line__steps {
 }
 
 .mode-switch {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.25rem;
-  margin: 0.5rem 0.75rem 0.75rem;
-  padding: 0.25rem;
-  background: rgba(255, 255, 255, 0.06);
-  border-radius: 4px;
+  display: inline-flex;
+  align-self: flex-start;
+  margin: 0.5rem 1rem 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 0.125rem;
 }
 
-.mode-switch__item {
+.mode-switch__item,
+.mode-switch__item:visited {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 0.15rem;
-  padding: 0.35rem 0.25rem;
-  font-size: 0.75rem;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2rem;
   color: rgba(255, 255, 255, 0.7);
   text-decoration: none;
-  border-radius: 3px;
+}
+
+.mode-switch__item + .mode-switch__item {
+  border-left: 1px solid rgba(255, 255, 255, 0.2);
 }
 
 .mode-switch__item .p-side-navigation__icon {
@@ -10171,12 +10172,32 @@ button.activity-line__row:hover .activity-line__steps {
 
 .mode-switch__item:hover {
   color: #ffffff;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.1);
 }
 
-.mode-switch__item.is-active {
+.mode-switch__item.is-active,
+.mode-switch__item.is-active:visited {
   color: #ffffff;
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.mode-switch__item:focus:not(:focus-visible):not(:hover) > .p-tooltip__message {
+  display: none;
+}
+
+.mode-switch__item:focus-visible {
+  outline: 0.1875rem solid var(--vf-color-focus, #2065ae);
+  outline-offset: -0.1875rem;
+}
+
+@media (min-width: 620px) and (max-width: 1035px) {
+  .l-navigation:not(:hover):not(:focus-within):not(.is-pinned) .mode-switch {
+    margin-left: 0.6875rem;
+  }
+
+  .l-navigation:not(:hover):not(:focus-within):not(.is-pinned) .mode-switch__item:not(.is-active) {
+    display: none;
+  }
 }
 
 .project-members__invite {
