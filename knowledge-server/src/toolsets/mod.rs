@@ -20,6 +20,8 @@ use harvest_db::Db;
 use crate::access::repos::{RepoAccess, RepoScope};
 use crate::agent::graph_tools::SemanticHandle;
 use crate::agent::tool::Tool;
+use crate::code::workspace::WorkspaceToolset;
+use crate::code::CodeEnv;
 use crate::collocate::client::CollocateHandle;
 use crate::collocate::sessions::SessionContainerRegistry;
 use crate::llm::LlmProvider;
@@ -89,13 +91,14 @@ pub enum ToolsetId {
     DeployAgents,
     Terraform,
     Sandboxes,
+    Workspace,
 }
 
 pub fn for_mode(mode: Mode) -> &'static [ToolsetId] {
     use ToolsetId::*;
     match mode {
         Mode::Chat => &[Knowledge, Artifacts, Skills],
-        Mode::Code => &[Knowledge],
+        Mode::Code => &[Knowledge, Workspace],
         Mode::Deploy => &[
             Knowledge,
             Artifacts,
@@ -117,6 +120,7 @@ pub struct ToolboxDeps {
     pub collocate: Option<CollocateHandle>,
     pub collocate_registry: Arc<SessionContainerRegistry>,
     pub server_url: String,
+    pub code: Option<CodeEnv>,
 }
 
 pub fn build_toolbox(deps: ToolboxDeps) -> Toolbox {
@@ -153,6 +157,10 @@ pub fn build_toolbox(deps: ToolboxDeps) -> Toolbox {
                 registry: deps.registry,
             },
         );
+    let toolbox = match deps.code {
+        Some(env) => toolbox.with(ToolsetId::Workspace, WorkspaceToolset { env }),
+        None => toolbox,
+    };
     match deps.collocate {
         Some(handle) => toolbox.with(
             ToolsetId::Sandboxes,

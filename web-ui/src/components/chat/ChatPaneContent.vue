@@ -24,7 +24,7 @@
               @click="loadEarlier"
             >{{ loadingEarlier ? 'Loading…' : 'Load earlier messages' }}</button>
             <div v-if="!chat.messages.length" class="chat-empty-state">
-              <p>{{ projectId ? 'Ask anything about codebases or control agents' : 'Ask anything about the repositories you can access' }}</p>
+              <p>{{ emptyStateText }}</p>
             </div>
 
             <ChatMessage
@@ -98,6 +98,7 @@
           </div>
           <LlmModelPicker />
           <button
+            v-if="!codeSessionId"
             class="chat-history-toggle-btn"
             type="button"
             aria-label="Toggle conversation history"
@@ -170,6 +171,7 @@
 </template>
 
 <script setup>
+import { sessionQueryStream } from '../../lib/code-api.js';
 import { INTERRUPTED_MESSAGE } from '../../lib/conversation-thread.js';
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useAuthStore }    from '../../stores/auth.js';
@@ -201,6 +203,7 @@ const props = defineProps({
   tabId:          { type: String, required: true },
   conversationId: { type: String, default: null },
   projectId:      { type: String, default: null },
+  codeSessionId:  { type: String, default: null },
 });
 
 const emit = defineEmits(['update:conversationId', 'title-updated']);
@@ -211,6 +214,11 @@ const llm   = useLlmStore();
 
 const query          = ref('');
 const historyOpen    = ref(false);
+const emptyStateText = computed(() => {
+  if (props.codeSessionId) return 'Describe the change you want; Harvest plans it, implements it and runs the tests';
+  if (props.projectId) return 'Ask anything about codebases or control agents';
+  return 'Ask anything about the repositories you can access';
+});
 const conversations  = ref([]);
 const activeConvId   = ref(props.conversationId ?? null);
 const deletingConv   = ref(null);
@@ -378,6 +386,7 @@ function handleProjectEvent(event) {
 }
 
 async function loadConversationList() {
+  if (props.codeSessionId) return;
   try {
     const list = props.projectId
       ? await listProjectConversations(props.projectId)
@@ -533,7 +542,7 @@ async function sendQuery() {
   await nextTick(); jumpToLatest(messagesEl.value);
 
   try {
-    if (!activeConvId.value) {
+    if (!activeConvId.value && !props.codeSessionId) {
       const title = text.length > 60 ? text.slice(0, 57) + '…' : text;
       const conv = await createConversation(title);
       setActiveConvId(conv.id);
@@ -542,11 +551,18 @@ async function sendQuery() {
         conversations.value = [conv, ...conversations.value];
       }
     }
-    await queryStream(text, activeConvId.value, attachments, (event) => {
+    const onEvent = (event) => {
       handleStreamEvent(event);
       if (event.type === 'done') { if (stuck.value) scrollToLastMessage(); }
       else nextTick(() => follow(messagesEl.value));
-    }, llm.selection);
+    };
+    if (props.codeSessionId) {
+      await sessionQueryStream(props.codeSessionId, {
+        query: text, conversationId: activeConvId.value, attachments, providerSelection: llm.selection,
+      }, onEvent);
+    } else {
+      await queryStream(text, activeConvId.value, attachments, onEvent, llm.selection);
+    }
   } catch (err) {
     chat.setError(err.message);
   }

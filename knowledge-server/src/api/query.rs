@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use crate::agent::{chain::ChainBuilder, AgentEvent, Attachment};
 use crate::api::{resolve_user_llm, QueryState};
 use crate::auth::jwt::Claims;
+use crate::modes::Space;
 use crate::conversations::handlers::{append_user_turn, load_conversation_context};
 use crate::conversations::store::ConversationContext;
 use crate::conversations::summary::spawn_refresh as spawn_summary_refresh;
@@ -91,7 +92,7 @@ async fn answer_query(user: Claims, qs: Arc<QueryState>, req: QueryRequest) -> R
     let selection = selection_from(&req);
     let user_llm = resolve_user_llm(&qs.llm, &qs.llm_configs, &qs.user_key_store, &user.sub).await;
     let agent = qs
-        .personal_agent(&user.sub, req.conversation_id.as_deref(), user_llm)
+        .agent_in(Space::personal(&user.sub), &user.sub, req.conversation_id.as_deref(), user_llm)
         .await;
     match agent
         .query(&req.query, &history, attachments, selection.as_ref())
@@ -171,7 +172,18 @@ pub async fn handle_query_stream(
     State(qs): State<Arc<QueryState>>,
     headers: HeaderMap,
     Json(req): Json<QueryRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    let space = Space::personal(&user.sub);
+    stream_turn(user, qs, headers, req, space).await
+}
+
+pub async fn stream_turn(
+    user: Claims,
+    qs: Arc<QueryState>,
+    headers: HeaderMap,
+    req: QueryRequest,
+    space: Space,
+) -> Response {
     let claim = match claim_request(&qs, &user.sub, &headers, req.conversation_id.as_deref()).await
     {
         Ok(claim) => claim,
@@ -192,7 +204,7 @@ pub async fn handle_query_stream(
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
     let user_llm = resolve_user_llm(&qs.llm, &qs.llm_configs, &qs.user_key_store, &user.sub).await;
     let agent = qs
-        .personal_agent(&user.sub, req.conversation_id.as_deref(), user_llm)
+        .agent_in(space, &user.sub, req.conversation_id.as_deref(), user_llm)
         .await;
     let llm = Arc::clone(agent.llm());
     let qs_ctx = Arc::clone(&qs);

@@ -178,6 +178,8 @@ pub struct Config {
     #[serde(default)]
     pub lxd: Option<LxdConfig>,
     #[serde(default)]
+    pub code: CodeConfig,
+    #[serde(default)]
     pub collocate: Option<CollocateConfig>,
     #[serde(default)]
     pub security: SecurityConfig,
@@ -652,6 +654,24 @@ pub struct LxdConfig {
     pub image_server: String,
     #[serde(default = "default_lxd_profile")]
     pub profile: String,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct CodeConfig {
+    pub pool_size: usize,
+    pub warm_days: u64,
+    pub idle_hours: u64,
+}
+
+impl Default for CodeConfig {
+    fn default() -> Self {
+        Self {
+            pool_size: 2,
+            warm_days: 7,
+            idle_hours: 24,
+        }
+    }
 }
 
 fn default_lxd_project() -> String {
@@ -2113,6 +2133,15 @@ mod tests {
 #[cfg(test)]
 mod cluster_config_tests {
     use super::*;
+
+    #[test]
+    fn code_settings_default_to_two_warm_containers_for_a_week() {
+        let config = with_sections("");
+        assert_eq!(config.code, CodeConfig::default());
+        let tuned = with_sections("[code]\npool_size = 1\n");
+        assert_eq!(tuned.code.pool_size, 1);
+        assert_eq!(tuned.code.warm_days, 7);
+    }
 
     fn with_sections(extra: &str) -> Config {
         let text = format!(

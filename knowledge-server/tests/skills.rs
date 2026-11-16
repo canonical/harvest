@@ -111,6 +111,7 @@ fn skills_app(db: Arc<Db>) -> Router {
             collocate_registry:
                 knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
             server_url: "http://localhost".into(),
+            code: None,
         },
     ));
     let builder = Arc::new(ProjectAgentBuilder {
@@ -190,16 +191,6 @@ async fn make_project_raw(db: &Db, name: &str) -> String {
     .await
     .unwrap();
     id
-}
-
-async fn add_member_row(db: &Db, project_id: &str, user_id: &str, role: &str) {
-    db.execute(
-        "INSERT INTO deploy_project_members (project_id, user_id, role) VALUES ($pid, $uid, $role)
-         ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-        json!({"pid": project_id, "uid": user_id, "role": role}),
-    )
-    .await
-    .unwrap();
 }
 
 async fn seed_project(app: &Router, token: &str, name: &str) -> String {

@@ -239,6 +239,7 @@ fn deployments_app_with_llm(
             collocate_registry:
                 knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
             server_url: "http://localhost".into(),
+            code: None,
         },
     ));
     let builder = Arc::new(ProjectAgentBuilder {
@@ -412,16 +413,6 @@ async fn make_user(db: &Db, email: &str, name: &str, role: &str) -> (String, Str
     .unwrap();
     let token = jwt::issue(JWT_SECRET, &id, email, name, role).unwrap();
     (id, token)
-}
-
-async fn add_member_row(db: &Db, project_id: &str, user_id: &str, role: &str) {
-    db.execute(
-        "INSERT INTO deploy_project_members (project_id, user_id, role) VALUES ($pid, $uid, $role)
-         ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-        json!({"pid": project_id, "uid": user_id, "role": role}),
-    )
-    .await
-    .unwrap();
 }
 
 async fn seed_project(app: &Router, token: &str, name: &str) -> String {

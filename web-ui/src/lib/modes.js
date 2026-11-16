@@ -17,7 +17,8 @@ const PAGES = Object.freeze({
     { to: '/chat/skills', label: 'Skills', icon: 'skills' },
   ],
   [MODE.CODE]: [
-    { to: '/code', label: 'Repositories', icon: 'code', exact: true },
+    { to: '/code', label: 'Projects', icon: 'code', exact: true },
+    { to: '/code/repositories', label: 'Knowledge', icon: 'artifacts' },
   ],
   [MODE.DEPLOY]: [
     { to: '/deploy/chat', label: 'Chat', icon: 'chat' },

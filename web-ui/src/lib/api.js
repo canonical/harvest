@@ -98,9 +98,13 @@ function withProviderSelection(body, providerSelection) {
 }
 
 export async function queryStream(query, conversationId, attachments, onEvent, providerSelection) {
+  return streamQuery(QUERY_STREAM_URL, { query, conversationId, attachments, providerSelection }, onEvent);
+}
+
+export async function streamQuery(url, { query, conversationId, attachments, providerSelection }, onEvent) {
   const body = withProviderSelection({ query, conversation_id: conversationId, attachments }, providerSelection);
 
-  const response = await fetch(QUERY_STREAM_URL, {
+  const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

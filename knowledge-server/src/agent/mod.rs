@@ -405,6 +405,7 @@ pub struct Agent {
     compaction_threshold_chars: usize,
     compaction_keep_last: usize,
     system_prompt_override: Option<String>,
+    prompt_appendix: Option<String>,
     enable_parallel_research: bool,
     llm_concurrency: Arc<Semaphore>,
     fast_path_threshold: f64,
@@ -433,6 +434,7 @@ impl Agent {
             compaction_threshold_chars: usize::MAX,
             compaction_keep_last: 6,
             system_prompt_override: None,
+            prompt_appendix: None,
             enable_parallel_research: false,
             llm_concurrency: Arc::new(Semaphore::new(20)),
             fast_path_threshold: 0.7,
@@ -518,6 +520,18 @@ impl Agent {
         self
     }
 
+    pub fn with_prompt_appendix(mut self, appendix: Option<&str>) -> Self {
+        self.prompt_appendix = appendix.map(String::from);
+        self
+    }
+
+    fn with_appendix(&self, prompt: String) -> String {
+        match &self.prompt_appendix {
+            Some(appendix) => format!("{prompt}\n\n{appendix}"),
+            None => prompt,
+        }
+    }
+
     fn uses_tiered_search(&self) -> bool {
         self.tools
             .iter()
@@ -540,6 +554,11 @@ impl Agent {
     }
 
     async fn effective_system_prompt_for_query(&self, user_query: &str) -> String {
+        let prompt = self.base_system_prompt_for_query(user_query).await;
+        self.with_appendix(prompt)
+    }
+
+    async fn base_system_prompt_for_query(&self, user_query: &str) -> String {
         if self.system_prompt_override.is_some() {
             return self.effective_system_prompt();
         }
