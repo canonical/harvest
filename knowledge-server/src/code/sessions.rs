@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use super::chats;
 use super::images::{self, quote};
 use super::projects::{self, CodeProject};
 use super::repo_git;
@@ -40,12 +41,11 @@ pub struct Session {
     pub container: Option<String>,
     pub status: String,
     pub error: Option<String>,
-    pub conversation_id: Option<String>,
 }
 
 const SELECT: &str = "SELECT s.id, s.project_id, s.user_id, s.branch, s.base_branch, s.container,
-           s.status, s.error, c.id AS conversation_id
-    FROM code_sessions s LEFT JOIN conversations c ON c.code_session_id = s.id";
+           s.status, s.error
+    FROM code_sessions s";
 
 fn from_row(row: &Value) -> Session {
     let text = |key: &str| row[key].as_str().map(String::from);
@@ -58,7 +58,6 @@ fn from_row(row: &Value) -> Session {
         container: text("container"),
         status: text("status").unwrap_or_default(),
         error: text("error"),
-        conversation_id: text("conversation_id"),
     }
 }
 
@@ -75,8 +74,8 @@ pub async fn list_for(env: &CodeEnv, project_id: &str, user_id: &str) -> Result<
         .db
         .query(
             "SELECT s.id, s.branch, s.base_branch, s.status, s.close_reason, s.error,
-                    s.created_at, s.last_active_at, c.id AS conversation_id, c.title
-             FROM code_sessions s LEFT JOIN conversations c ON c.code_session_id = s.id
+                    s.created_at, s.last_active_at
+             FROM code_sessions s
              WHERE s.project_id = $pid AND s.user_id = $uid
              ORDER BY s.status IN ('starting', 'active') DESC, s.last_active_at DESC",
             json!({ "pid": project_id, "uid": user_id }),
@@ -119,22 +118,14 @@ pub async fn open(
         return Ok(from_row(row));
     }
     let id = Uuid::new_v4().to_string();
-    let now = harvest_db::now_rfc3339();
     env.db
         .execute(
-            "WITH s AS (
-                 INSERT INTO code_sessions (id, project_id, user_id, branch, base_branch, status)
-                 VALUES ($id, $pid, $uid, $branch, $base, 'starting')
-                 RETURNING id
-             )
-             INSERT INTO conversations (id, user_id, title, created_by, created_at, updated_at, code_session_id)
-             SELECT $cid, $uid, $branch, $uid, $now, $now, s.id FROM s",
-            json!({
-                "id": id, "pid": project.id, "uid": user_id, "branch": branch, "base": base_branch,
-                "cid": Uuid::new_v4().to_string(), "now": now,
-            }),
+            "INSERT INTO code_sessions (id, project_id, user_id, branch, base_branch, status)
+             VALUES ($id, $pid, $uid, $branch, $base, 'starting')",
+            json!({ "id": id, "pid": project.id, "uid": user_id, "branch": branch, "base": base_branch }),
         )
         .await?;
+    chats::create(&env.db, &id, user_id, branch).await?;
     projects::touch(&env.db, &project.id).await?;
     let started = {
         let env = env.clone();
@@ -342,6 +333,24 @@ pub async fn close(env: &CodeEnv, id: &str, reason: CloseReason) -> Result<()> {
             "UPDATE code_sessions SET status = 'closed', close_reason = $reason, closed_at = now(), container = NULL
              WHERE id = $id AND status IN ('starting', 'active', 'failed')",
             json!({ "id": id, "reason": reason.as_str() }),
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn layout(env: &CodeEnv, id: &str) -> Result<Option<Value>> {
+    let rows = env
+        .db
+        .query("SELECT layout FROM code_sessions WHERE id = $id", json!({ "id": id }))
+        .await?;
+    Ok(rows.first().map(|r| r["layout"].clone()).filter(|l| !l.is_null()))
+}
+
+pub async fn save_layout(env: &CodeEnv, id: &str, layout: &Value) -> Result<()> {
+    env.db
+        .execute(
+            "UPDATE code_sessions SET layout = $layout::jsonb WHERE id = $id",
+            json!({ "id": id, "layout": layout }),
         )
         .await?;
     Ok(())

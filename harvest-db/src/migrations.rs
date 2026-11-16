@@ -66,6 +66,10 @@ const MIGRATIONS: &[(i32, &str)] = &[
         25,
         include_str!("../migrations/0025_code_index_refresh.sql"),
     ),
+    (
+        26,
+        include_str!("../migrations/0026_session_workspaces.sql"),
+    ),
 ];
 
 pub fn fingerprint() -> u64 {

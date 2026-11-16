@@ -532,7 +532,9 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         query: Arc::clone(&query_state),
     });
     let code_router = {
+        use crate::code::chat_handlers as chat;
         use crate::code::handlers as code;
+        use crate::code::previews::owner;
         Router::new()
             .route("/code/projects", get(code::list_projects).post(code::open_project))
             .route("/code/projects/:id", get(code::get_project))
@@ -544,8 +546,12 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
             )
             .route("/code/sessions/:id/changes", get(code::session_changes))
             .route("/code/sessions/:id/change-request", post(code::propose_change))
-            .route("/code/sessions/:id/preview", get(crate::code::previews::handlers::session_preview))
-            .route("/code/sessions/:id/preview/share", put(crate::code::previews::handlers::share))
+            .route("/code/sessions/:id/chats", get(chat::list).post(chat::create))
+            .route("/code/sessions/:id/chats/:chat", delete(chat::delete))
+            .route("/code/sessions/:id/layout", get(chat::layout).put(chat::save_layout))
+            .route("/code/sessions/:id/previews", get(owner::list).post(owner::create))
+            .route("/code/previews/:id", delete(owner::delete))
+            .route("/code/previews/:id/share", put(owner::share))
             .route("/code/sessions/:id/query/stream", post(code::session_query_stream))
             .with_state(code_state)
     };

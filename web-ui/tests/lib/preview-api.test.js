@@ -19,11 +19,11 @@ describe('preview api', () => {
     expect(AUDIENCES.map((a) => a.id)).toEqual(['owner', 'repository', 'link']);
   });
 
-  it('shares a session preview with an audience', async () => {
+  it('shares one preview with an audience', async () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, status: 204, json: () => Promise.resolve(null) });
-    await sharePreview('s1', 'link');
+    await sharePreview('p1', 'link');
     const [url, options] = fetch.mock.calls[0];
-    expect(url).toBe('/code/sessions/s1/preview/share');
+    expect(url).toBe('/code/previews/p1/share');
     expect(options.method).toBe('PUT');
     expect(JSON.parse(options.body)).toEqual({ audience: 'link' });
   });
@@ -37,5 +37,11 @@ describe('preview api', () => {
     const { url } = await enterPreview('p1');
     expect(url).toBe('https://p1.preview.example/__harvest/enter?ticket=t');
     expect(fetch).toHaveBeenCalledWith('/previews/p1/enter', expect.objectContaining({ method: 'POST', credentials: 'same-origin' }));
+  });
+
+  it('can ask to land on a path of the previewed app', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ url: 'u' }) });
+    await enterPreview('p1', '/admin');
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ to: '/admin' });
   });
 });

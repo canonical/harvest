@@ -6,12 +6,11 @@ use axum::{
     extract::{Path, State},
     http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Redirect, Response},
-    Extension, Json,
+    Json,
 };
 use serde::Deserialize;
 use serde_json::json;
 
-use super::super::handlers::CodeState;
 use super::super::images::tail;
 use super::super::{CodeEnv, WORKSPACE};
 use super::clones::{self, Target};
@@ -19,8 +18,8 @@ use super::origin::PreviewOrigin;
 use super::pass::Passes;
 use super::site::ENTER_PATH;
 use super::visit::{Identity, Visit};
-use super::{runtime, Audience, Kind};
-use crate::auth::jwt::{self, Claims};
+use super::{runtime, Kind};
+use crate::auth::jwt;
 use crate::auth::{cookie, token_from_headers};
 use crate::lxd::containers::Command;
 
@@ -136,6 +135,7 @@ pub async fn info(
         "status": status,
         "error": error,
         "web_enabled": state.origin.is_some(),
+        "framable": state.origin.as_ref().is_some_and(PreviewOrigin::is_secure),
     })))
 }
 
@@ -143,6 +143,7 @@ pub async fn enter(
     State(state): State<Arc<PreviewState>>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    body: Option<Json<EnterBody>>,
 ) -> Response {
     let harvest_visit = match visit(&state, &id, &headers).await {
         Ok(visit) => visit,
@@ -158,13 +159,25 @@ pub async fn enter(
             "web previews are turned off on this server; an administrator sets preview_domain under [code] to enable them",
         );
     };
-    match state.passes.ticket(&id, &visit.viewer.key()) {
-        Ok(ticket) => {
-            let url = origin.url_for(&id, &format!("{ENTER_PATH}?ticket={ticket}"));
-            harvest_visit.finish(Json(json!({ "url": url })))
-        }
+    let to = body.and_then(|Json(body)| body.to);
+    match state.passes.ticket(&id, &visit.viewer.key()).and_then(|ticket| enter_url(origin, &id, &ticket, to.as_deref())) {
+        Ok(url) => harvest_visit.finish(Json(json!({ "url": url }))),
         Err(e) => failure(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+#[derive(Deserialize, Default)]
+pub struct EnterBody {
+    pub to: Option<String>,
+}
+
+pub fn enter_url(origin: &PreviewOrigin, preview_id: &str, ticket: &str, to: Option<&str>) -> anyhow::Result<String> {
+    let mut url = reqwest::Url::parse(&origin.url_for(preview_id, ENTER_PATH))?;
+    url.query_pairs_mut().append_pair("ticket", ticket);
+    if let Some(to) = to.filter(|t| !t.trim().is_empty()) {
+        url.query_pairs_mut().append_pair("to", to);
+    }
+    Ok(url.to_string())
 }
 
 pub async fn reset(
@@ -297,45 +310,20 @@ pub async fn exec(
     }
 }
 
-pub async fn session_preview(
-    Extension(user): Extension<Claims>,
-    State(state): State<Arc<CodeState>>,
-    Path(id): Path<String>,
-) -> Response {
-    let Some(env) = &state.env else {
-        return failure(StatusCode::SERVICE_UNAVAILABLE, "previews need LXD");
-    };
-    if let Err(response) = super::super::handlers::session_for(env, &user, &id).await {
-        return response;
-    }
-    match super::for_session(&env.db, &id).await {
-        Ok(preview) => Json(json!({ "preview": preview })).into_response(),
-        Err(e) => failure(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::CodeConfig;
 
-#[derive(Deserialize)]
-pub struct ShareBody {
-    pub audience: String,
-}
-
-pub async fn share(
-    Extension(user): Extension<Claims>,
-    State(state): State<Arc<CodeState>>,
-    Path(id): Path<String>,
-    Json(body): Json<ShareBody>,
-) -> Response {
-    let Some(env) = &state.env else {
-        return failure(StatusCode::SERVICE_UNAVAILABLE, "previews need LXD");
-    };
-    if let Err(response) = super::super::handlers::session_for(env, &user, &id).await {
-        return response;
-    }
-    let Some(audience) = Audience::parse(&body.audience) else {
-        return failure(StatusCode::BAD_REQUEST, "choose owner, repository or link");
-    };
-    match super::set_audience(&env.db, &id, audience).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => failure(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    #[test]
+    fn the_enter_link_carries_the_ticket_and_an_encoded_landing_path() {
+        let origin = PreviewOrigin::from_config(&CodeConfig {
+            preview_domain: Some("preview.example.com".into()),
+            ..CodeConfig::default()
+        })
+        .unwrap();
+        let url = enter_url(&origin, "abc", "t.k", Some("/admin?tab=1&x")).unwrap();
+        assert_eq!(url, "https://p-abc.preview.example.com/__harvest/enter?ticket=t.k&to=%2Fadmin%3Ftab%3D1%26x");
+        assert!(enter_url(&origin, "abc", "t", None).unwrap().ends_with("?ticket=t"));
     }
 }

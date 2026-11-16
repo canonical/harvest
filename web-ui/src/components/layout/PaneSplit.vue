@@ -17,13 +17,13 @@
 
 <script setup>
 import Pane from './Pane.vue';
-import { useChatWorkspaceStore } from '../../stores/chatWorkspace.js';
+import { useLayoutWorkspace } from '../../lib/layout-workspace.js';
 
 const props = defineProps({
   node: { type: Object, required: true },
 });
 
-const workspace = useChatWorkspaceStore();
+const workspace = useLayoutWorkspace();
 
 const MIN_FRACTION = 0.08;
 

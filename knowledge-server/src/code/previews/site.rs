@@ -16,6 +16,7 @@ use tower::ServiceExt as _;
 
 use super::super::CodeEnv;
 use super::clones::Target;
+use super::framing;
 use super::origin::PreviewOrigin;
 use super::pass::{Passes, PASS_LIFETIME};
 use super::proxy::{self, Visitor, PASS_COOKIE};
@@ -32,6 +33,7 @@ pub struct Site {
     pub origin: PreviewOrigin,
     pub passes: Arc<Passes>,
     pub harvest_url: String,
+    harvest_origin: String,
     http: reqwest::Client,
     addresses: Mutex<HashMap<String, (String, Instant)>>,
 }
@@ -47,6 +49,7 @@ impl Site {
             env,
             origin,
             passes,
+            harvest_origin: framing::origin_of(&harvest_url),
             harvest_url,
             http,
             addresses: Mutex::new(HashMap::new()),
@@ -136,6 +139,7 @@ fn preview_id(site: &Site, headers: &HeaderMap) -> Option<String> {
 #[derive(Deserialize)]
 pub struct EnterQuery {
     ticket: String,
+    to: Option<String>,
 }
 
 async fn enter(State(site): State<Arc<Site>>, headers: HeaderMap, Query(query): Query<EnterQuery>) -> Response {
@@ -158,17 +162,24 @@ async fn enter(State(site): State<Arc<Site>>, headers: HeaderMap, Query(query): 
     let Ok(pass) = site.passes.pass(&id, &visit.viewer.key()) else {
         return page(StatusCode::INTERNAL_SERVER_ERROR, "Harvest could not open this preview.");
     };
-    let mut response = Redirect::to("/").into_response();
+    let mut response = Redirect::to(&landing_path(query.to.as_deref())).into_response();
     if let Ok(cookie) = HeaderValue::from_str(&pass_cookie(&pass, site.origin.is_secure())) {
         response.headers_mut().insert(header::SET_COOKIE, cookie);
     }
     response
 }
 
+pub fn landing_path(to: Option<&str>) -> String {
+    match to.map(str::trim) {
+        Some(path) if path.starts_with('/') && !path.starts_with("//") && !path.contains('\\') => path.to_string(),
+        _ => "/".to_string(),
+    }
+}
+
 pub fn pass_cookie(pass: &str, secure: bool) -> String {
-    let secure = if secure { "; Secure" } else { "" };
+    let context = if secure { "SameSite=None; Secure; Partitioned" } else { "SameSite=Lax" };
     format!(
-        "{PASS_COOKIE}={pass}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}",
+        "{PASS_COOKIE}={pass}; Path=/; HttpOnly; {context}; Max-Age={}",
         PASS_LIFETIME.as_secs()
     )
 }
@@ -215,7 +226,10 @@ async fn serve(
     }
     let forwarded = proxy::forwarded_headers(&headers, &visitor);
     match proxy::forward(&site.http, &address, method, &uri, forwarded, body).await {
-        Ok(response) => response,
+        Ok(mut response) => {
+            framing::allow_framing_by(response.headers_mut(), &site.harvest_origin);
+            response
+        }
         Err(e) => {
             site.remember_address(&container, None);
             page(StatusCode::BAD_GATEWAY, &format!("The app did not answer: {}", escape(&e.to_string())))
@@ -236,7 +250,23 @@ mod tests {
         let cookie = pass_cookie("abc", false);
         assert_eq!(cookie, "harvest_preview=abc; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400");
         assert!(!cookie.contains("Domain="));
-        assert!(pass_cookie("abc", true).ends_with("; Secure"));
+    }
+
+    #[test]
+    fn over_https_the_pass_also_works_inside_harvest_frames() {
+        assert_eq!(
+            pass_cookie("abc", true),
+            "harvest_preview=abc; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=86400"
+        );
+    }
+
+    #[test]
+    fn entering_only_lands_on_paths_of_the_preview() {
+        assert_eq!(landing_path(Some("/admin?x=1")), "/admin?x=1");
+        assert_eq!(landing_path(None), "/");
+        for outside in ["//evil.example", "https://evil.example", "admin", "/\\evil"] {
+            assert_eq!(landing_path(Some(outside)), "/", "{outside}");
+        }
     }
 
     #[test]
