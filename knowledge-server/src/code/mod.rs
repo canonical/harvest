@@ -1,6 +1,7 @@
 pub mod handlers;
 pub mod images;
 pub mod keeper;
+pub mod previews;
 pub mod projects;
 pub mod repo_git;
 pub mod sessions;
@@ -24,6 +25,7 @@ pub struct CodeSettings {
     pub pool_size: usize,
     pub warm_for: Duration,
     pub session_idle: Duration,
+    pub max_preview_copies: usize,
 }
 
 impl From<&CodeConfig> for CodeSettings {
@@ -33,6 +35,7 @@ impl From<&CodeConfig> for CodeSettings {
             pool_size: config.pool_size,
             warm_for: Duration::from_secs(config.warm_days * 24 * HOUR),
             session_idle: Duration::from_secs(config.idle_hours * HOUR),
+            max_preview_copies: config.max_preview_copies,
         }
     }
 }

@@ -1,5 +1,5 @@
 <template>
-  <template v-if="!auth.isLoggedIn && isAuthRoute">
+  <template v-if="route.meta.bare || (!auth.isLoggedIn && isAuthRoute)">
     <router-view />
   </template>
 

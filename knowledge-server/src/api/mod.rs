@@ -12,7 +12,7 @@ pub mod tool_description;
 use axum::{
     extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
-    routing::{delete, get, patch, post, put},
+    routing::{any, delete, get, patch, post, put},
     Json, Router,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -530,8 +530,26 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                 get(code::get_session).delete(code::close_session),
             )
             .route("/code/sessions/:id/changes", get(code::session_changes))
+            .route("/code/sessions/:id/preview", get(crate::code::previews::handlers::session_preview))
+            .route("/code/sessions/:id/preview/share", put(crate::code::previews::handlers::share))
             .route("/code/sessions/:id/query/stream", post(code::session_query_stream))
             .with_state(code_state)
+    };
+
+    let preview_router = {
+        use crate::code::previews::handlers as preview;
+        Router::new()
+            .route("/previews/:id", get(preview::info))
+            .route("/previews/:id/reset", post(preview::reset))
+            .route("/previews/:id/request", post(preview::send_request))
+            .route("/previews/:id/exec", post(preview::exec))
+            .route("/previews/:id/web", get(preview::web_root))
+            .route("/previews/:id/web/", any(preview::web))
+            .route("/previews/:id/web/*path", any(preview::web))
+            .with_state(Arc::new(preview::PreviewState::new(
+                state.code.clone(),
+                Arc::clone(&jwt_secret),
+            )))
     };
 
     let members_router = Router::new()
@@ -953,6 +971,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     Router::new()
         .merge(public_router)
         .merge(external_router)
+        .merge(preview_router)
         .merge(machines_public)
         .merge(protected_router)
         .merge(admin_router)

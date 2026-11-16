@@ -89,8 +89,40 @@ impl LxdClient {
             .await
             .context("creating LXD container")?;
         self.run_async(resp, 600).await?;
+        if let Source::Copy(original) = source {
+            self.keep_id_shift(original, name).await?;
+        }
         self.start_instance(name).await?;
         self.wait_running(name, 120).await
+    }
+
+    async fn instance_config(&self, name: &str) -> Result<Value> {
+        let resp = self
+            .http
+            .get(self.url(&format!("/1.0/instances/{name}?{}", self.project_qs())))
+            .send()
+            .await
+            .context("reading LXD instance")?;
+        let body: Value = resp.json().await.context("parsing LXD instance")?;
+        Ok(body["metadata"]["config"].clone())
+    }
+
+    async fn keep_id_shift(&self, original: &str, copy: &str) -> Result<()> {
+        let Some(current) = self.instance_config(original).await?["volatile.idmap.current"]
+            .as_str()
+            .map(String::from)
+        else {
+            return Ok(());
+        };
+        let resp = self
+            .http
+            .patch(self.url(&format!("/1.0/instances/{copy}?{}", self.project_qs())))
+            .json(&json!({ "config": { "volatile.last_state.idmap": current } }))
+            .send()
+            .await
+            .context("updating LXD instance")?;
+        self.run_async(resp, 60).await?;
+        Ok(())
     }
 
     pub async fn publish(&self, instance: &str, alias: &str) -> Result<()> {

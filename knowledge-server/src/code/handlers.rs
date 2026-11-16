@@ -64,7 +64,7 @@ async fn project_for(env: &CodeEnv, user: &Claims, id: &str) -> Result<CodeProje
     Ok(project)
 }
 
-async fn session_for(env: &CodeEnv, user: &Claims, id: &str) -> Result<Session, Response> {
+pub(crate) async fn session_for(env: &CodeEnv, user: &Claims, id: &str) -> Result<Session, Response> {
     sessions::get(env, id)
         .await
         .map_err(internal)?
