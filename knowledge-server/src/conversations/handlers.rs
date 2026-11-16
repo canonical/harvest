@@ -189,7 +189,7 @@ pub async fn list(
                 k.revoked_at AS origin_api_key_revoked_at
          FROM conversations c
          LEFT JOIN user_api_keys k ON k.id = c.origin_api_key_id
-         WHERE c.user_id = $uid
+         WHERE c.user_id = $uid AND c.code_session_id IS NULL
          ORDER BY c.updated_at DESC",
             json!({ "uid": user.sub }),
         )

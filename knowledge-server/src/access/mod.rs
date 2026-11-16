@@ -114,7 +114,9 @@ impl<'a> Authorizer<'a> {
         action: Action,
     ) -> Result<(), Denied> {
         match space {
-            Space::Personal { user_id } => personal(caller, user_id),
+            Space::Personal { user_id } | Space::CodeSession { user_id, .. } => {
+                personal(caller, user_id)
+            }
             Space::DeployProject { project_id } => self
                 .deploy_project(caller, project_id, action)
                 .await
