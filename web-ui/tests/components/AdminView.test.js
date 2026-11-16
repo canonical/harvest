@@ -4,110 +4,67 @@ import { createPinia } from 'pinia';
 import AdminView from '../../src/views/AdminView.vue';
 
 const USERS = [
-  { id: 'u1', name: 'Alice Admin', email: 'alice@example.com', role: 'admin',   group_ids: ['g1'], provider: 'local' },
-  { id: 'u2', name: 'Bob User',   email: 'bob@example.com',   role: 'regular', group_ids: [],     provider: 'google' },
+  { id: 'u1', name: 'Alice Admin', email: 'alice@example.com', role: 'admin', provider: 'local' },
+  { id: 'u2', name: 'Bob User', email: 'bob@example.com', role: 'regular', provider: 'google' },
 ];
 
-const GROUPS = [
-  { id: 'g1', name: 'Engineering', description: 'Dev team' },
-  { id: 'g2', name: 'Design',      description: '' },
+const MOVES = [
+  { id: 'c1', title: 'How does search rank?', project_name: 'Test', author_email: 'alice@example.com' },
+  { id: 'c2', title: 'Where is the parser?', project_name: 'Test', author_email: 'bob@example.com' },
 ];
 
-function mockFetch({ users = USERS, groups = GROUPS } = {}) {
-  global.fetch = vi.fn((url) => {
-    if (url.includes('/admin/users')) {
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(users) });
-    }
-    if (url.includes('/admin/groups')) {
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(groups) });
-    }
-    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+function mockFetch() {
+  const calls = [];
+  global.fetch = vi.fn((url, options = {}) => {
+    calls.push({ url, method: options.method ?? 'GET', body: options.body ? JSON.parse(options.body) : null });
+    const respond = (body) => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+    if (url.includes('/admin/users')) return respond(USERS);
+    if (url.includes('/admin/conversation-moves') && options.method === 'POST') return respond({ moved: 1 });
+    if (url.includes('/admin/conversation-moves')) return respond(MOVES);
+    return respond({});
   });
+  return calls;
+}
+
+function mountAdmin() {
+  return mount(AdminView, { global: { plugins: [createPinia()] } });
 }
 
 describe('AdminView', () => {
   beforeEach(() => { vi.restoreAllMocks(); });
 
-  it('shows users tab and groups tab', async () => {
+  it('lists users with their role and counts them', async () => {
     mockFetch();
-    const w = mount(AdminView, { global: { plugins: [createPinia()] } });
-    await flushPromises();
-    expect(w.text()).toMatch(/users/i);
-    expect(w.text()).toMatch(/groups/i);
-  });
-
-  it('renders user list after load', async () => {
-    mockFetch();
-    const w = mount(AdminView, { global: { plugins: [createPinia()] } });
+    const w = mountAdmin();
     await flushPromises();
     expect(w.text()).toContain('Alice Admin');
-    expect(w.text()).toContain('alice@example.com');
-    expect(w.text()).toContain('Bob User');
+    expect(w.text()).toContain('bob@example.com');
+    expect(w.text()).toMatch(/2\s*users/);
+    expect(w.text()).not.toMatch(/group/i);
   });
 
-  it('shows stats header with user and group counts', async () => {
-    mockFetch();
-    const w = mount(AdminView, { global: { plugins: [createPinia()] } });
+  it('changes a user role', async () => {
+    const calls = mockFetch();
+    const w = mountAdmin();
     await flushPromises();
-    expect(w.text()).toMatch(/2\s*user/i);
-    expect(w.text()).toMatch(/2\s*group/i);
+    await w.findAll('button').filter(b => b.text() === 'Edit')[1].trigger('click');
+    await w.find('#edit-user-role').setValue('admin');
+    await w.findAll('button').find(b => b.text() === 'Save').trigger('click');
+    await flushPromises();
+    expect(calls.find(c => c.method === 'PUT')).toMatchObject({ url: '/admin/users/u2/role', body: { role: 'admin' } });
   });
 
-  it('switches to groups tab and shows group list', async () => {
-    mockFetch();
-    const w = mount(AdminView, { global: { plugins: [createPinia()] } });
+  it('moves the selected code-only chats to chat mode', async () => {
+    const calls = mockFetch();
+    const w = mountAdmin();
     await flushPromises();
-    const tabBtn = w.findAll('button').find(b => b.text().match(/groups/i));
-    expect(tabBtn).toBeDefined();
-    await tabBtn.trigger('click');
-    expect(w.text()).toContain('Engineering');
-    expect(w.text()).toContain('Design');
-  });
-
-  it('opens edit user modal when Edit button clicked', async () => {
-    mockFetch();
-    const w = mount(AdminView, { global: { plugins: [createPinia()] } });
+    await w.find('[data-testid="tab-moves"]').trigger('click');
     await flushPromises();
-    const editBtn = w.findAll('button').find(b => b.text() === 'Edit');
-    expect(editBtn).toBeDefined();
-    await editBtn.trigger('click');
-    expect(w.find('.modal, dialog').exists()).toBe(true);
-    expect(w.text()).toMatch(/role/i);
-  });
-
-  it('opens create group modal when add group button clicked', async () => {
-    mockFetch();
-    const w = mount(AdminView, { global: { plugins: [createPinia()] } });
+    expect(w.text()).toContain('How does search rank?');
+    await w.findAll('input[type="checkbox"]')[2].setValue(false);
+    await w.findAll('button').find(b => b.text().startsWith('Move 1 chat')).trigger('click');
     await flushPromises();
-    const groupsTabBtn = w.findAll('button').find(b => b.text().match(/groups/i));
-    await groupsTabBtn.trigger('click');
-    const addBtn = w.findAll('button').find(b => b.text().match(/add group|create group|\+ group/i));
-    expect(addBtn).toBeDefined();
-    await addBtn.trigger('click');
-    expect(w.find('.modal, dialog').exists()).toBe(true);
-    expect(w.find('input[name="group-name"], #group-name-input').exists() || w.text().match(/group name/i)).toBeTruthy();
-  });
-
-  it('toggles a group as default for new users', async () => {
-    mockFetch({ groups: [
-      { id: 'g1', name: 'Engineering', description: 'Dev team', is_default: false },
-      { id: 'g2', name: 'Design',      description: '',         is_default: true },
-    ] });
-    const w = mount(AdminView, { global: { plugins: [createPinia()] } });
-    await flushPromises();
-    const groupsTabBtn = w.findAll('button').find(b => b.text().match(/groups/i));
-    await groupsTabBtn.trigger('click');
-
-    const checkboxes = w.findAll('input[type="checkbox"]');
-    expect(checkboxes[0].element.checked).toBe(false);
-    expect(checkboxes[1].element.checked).toBe(true);
-
-    await checkboxes[0].setValue(true);
-    await flushPromises();
-
-    const call = global.fetch.mock.calls.find(([url]) => url.includes('/admin/groups/g1/default'));
-    expect(call).toBeDefined();
-    expect(call[1].method).toBe('PUT');
-    expect(JSON.parse(call[1].body)).toEqual({ is_default: true });
+    expect(calls.find(c => c.method === 'POST')).toMatchObject({ url: '/admin/conversation-moves', body: { ids: ['c1'] } });
+    expect(w.text()).toContain('Moved 1 chat to Chat mode.');
   });
 });

@@ -24,24 +24,41 @@ describe('router beforeEach fresh-load guard', () => {
     expect(router.currentRoute.value.path).toBe('/artifacts/abc-123');
   });
 
-  it('still redirects a non-directEntry route to / on a fresh load', async () => {
+  it('sends a fresh load of a page that needs context back to the chat home', async () => {
     const router = await freshRouter();
-    await router.push('/agents');
+    await router.push('/deploy/chat');
     await router.isReady();
-    expect(router.currentRoute.value.path).toBe('/');
+    expect(router.currentRoute.value.path).toBe('/chat');
   });
 
-  it('redirects /deployments/:id to /deploy on a fresh load', async () => {
+  it('opens chat mode from the root', async () => {
     const router = await freshRouter();
-    await router.push('/deployments/abc-123');
+    await router.push('/');
     await router.isReady();
-    expect(router.currentRoute.value.path).toBe('/deploy');
+    expect(router.currentRoute.value.path).toBe('/chat');
   });
 
-  it('redirects /deployments to /deploy on a fresh load', async () => {
+  it('moves the old deploy pages under deploy mode', async () => {
+    for (const [from, to] of [
+      ['/deployments/abc-123', '/deploy/deployments'],
+      ['/deployments', '/deploy/deployments'],
+      ['/agents', '/deploy/agents'],
+      ['/skills', '/deploy/skills'],
+      ['/repositories', '/code/repositories'],
+    ]) {
+      const router = await freshRouter();
+      await router.push(from);
+      await router.isReady();
+      expect(router.currentRoute.value.path).toBe(to);
+    }
+  });
+
+  it('tags every page with the mode it belongs to', async () => {
     const router = await freshRouter();
-    await router.push('/deployments');
-    await router.isReady();
-    expect(router.currentRoute.value.path).toBe('/deploy');
+    const modes = Object.fromEntries(router.getRoutes().map(r => [r.path, r.meta.mode]));
+    expect(modes['/chat']).toBe('chat');
+    expect(modes['/chat/skills']).toBe('chat');
+    expect(modes['/code']).toBe('code');
+    expect(modes['/deploy/agents']).toBe('deploy');
   });
 });

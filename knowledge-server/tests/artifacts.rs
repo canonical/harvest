@@ -70,21 +70,32 @@ fn artifacts_app(db: Arc<Db>) -> Router {
     let llm: Arc<dyn LlmProvider> = FixedTextLlm::new("stub");
     let agent = Arc::new(Agent::new(Arc::clone(&llm), vec![], 2));
     let registry = MachineRegistry::new();
+    let toolbox = Arc::new(knowledge_server::toolsets::build_toolbox(
+        knowledge_server::toolsets::ToolboxDeps {
+            db: Arc::clone(&db),
+            semantic: None,
+            search: None,
+            skills: Arc::new(knowledge_server::skills::SkillStore::new(Arc::clone(&db))),
+            registry: Arc::clone(&registry),
+            lxd: None,
+            collocate: None,
+            collocate_registry:
+                knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
+            server_url: "http://localhost".into(),
+            code: None,
+        },
+    ));
     let builder = Arc::new(ProjectAgentBuilder {
         llm: Arc::clone(&llm),
         db: Arc::clone(&db),
         registry: Arc::clone(&registry),
-        skills: Arc::new(knowledge_server::skills::SkillStore::new(Arc::clone(&db))),
-        lxd: None,
         system_one: None,
-        collocate: None,
-        collocate_registry: knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
-        server_url: "http://localhost".into(),
         max_iterations: 2,
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last: 6,
         thresholds: None,
-        semantic: None,
+        search: None,
+        toolbox,
     });
     let project_state = Arc::new(ProjectState::new(
         Arc::clone(&db),
@@ -137,27 +148,6 @@ async fn make_user(db: &Db, email: &str, name: &str, role: &str) -> (String, Str
     .unwrap();
     let token = jwt::issue(JWT_SECRET, &id, email, name, role).unwrap();
     (id, token)
-}
-
-async fn make_group(db: &Db, name: &str) -> String {
-    let id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    db.query(
-        "INSERT INTO groups (id, name, description, created_at) VALUES ($id, $name, '', $now)",
-        json!({"id":id,"name":name,"now":now}),
-    )
-    .await
-    .unwrap();
-    id
-}
-
-async fn join_group(db: &Db, user_id: &str, group_id: &str) {
-    db.query(
-        "INSERT INTO user_groups (user_id, group_id) VALUES ($uid, $gid) ON CONFLICT DO NOTHING",
-        json!({"uid":user_id,"gid":group_id}),
-    )
-    .await
-    .unwrap();
 }
 
 fn cookie(token: &str) -> String {
@@ -240,14 +230,10 @@ macro_rules! db {
     };
 }
 
-async fn seed_project(app: &Router, token: &str, group_id: &str) -> String {
+async fn seed_project(app: &Router, token: &str) -> String {
     let (_, body) = send(
         app.clone(),
-        req_post(
-            "/projects",
-            token,
-            json!({"name":"Test Project","group_id":group_id}),
-        ),
+        req_post("/projects", token, json!({"name":"Test Project"})),
     )
     .await;
     body["id"].as_str().unwrap().to_string()
@@ -257,11 +243,9 @@ async fn seed_project(app: &Router, token: &str, group_id: &str) -> String {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_artifacts_empty_for_new_project() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = artifacts_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid).await;
+    let pid = seed_project(&app, &tok).await;
 
     let (status, body) = send(app, req_get(&format!("/projects/{pid}/artifacts"), &tok)).await;
     assert_eq!(status, StatusCode::OK);
@@ -272,11 +256,9 @@ async fn list_artifacts_empty_for_new_project() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_markdown_artifact_returns_201_with_fields() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = artifacts_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid).await;
+    let pid = seed_project(&app, &tok).await;
 
     let (status, body) = send(
         app,
@@ -302,11 +284,9 @@ async fn create_markdown_artifact_returns_201_with_fields() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_artifact_rejects_invalid_kind() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = artifacts_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid).await;
+    let pid = seed_project(&app, &tok).await;
 
     let (status, _) = send(
         app,
@@ -328,11 +308,9 @@ async fn create_artifact_rejects_invalid_kind() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_artifact_requires_title() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = artifacts_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid).await;
+    let pid = seed_project(&app, &tok).await;
 
     let (status, _) = send(
         app,
@@ -354,11 +332,9 @@ async fn create_artifact_requires_title() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_artifact_by_id_returns_full_content() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = artifacts_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid).await;
+    let pid = seed_project(&app, &tok).await;
 
     let content = "# Report\n\nDetails here.";
     let (_, create_body) = send(
@@ -387,12 +363,10 @@ async fn get_artifact_by_id_returns_full_content() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn non_member_cannot_access_artifact() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, outsider_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
     let app = artifacts_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid).await;
+    let pid = seed_project(&app, &tok).await;
 
     let (_, create_body) = send(
         app.clone(),
@@ -415,12 +389,10 @@ async fn non_member_cannot_access_artifact() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn admin_can_access_any_artifact() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
     let app = artifacts_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid).await;
+    let pid = seed_project(&app, &tok).await;
 
     let (_, create_body) = send(
         app.clone(),
@@ -444,11 +416,9 @@ async fn admin_can_access_any_artifact() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn download_markdown_artifact_returns_text_with_attachment_header() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = artifacts_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid).await;
+    let pid = seed_project(&app, &tok).await;
 
     let content = "# Hello\n\nWorld.";
     let (_, create_body) = send(
@@ -480,11 +450,9 @@ async fn download_markdown_artifact_returns_text_with_attachment_header() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn download_pdf_artifact_returns_pdf_bytes() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = artifacts_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid).await;
+    let pid = seed_project(&app, &tok).await;
 
     let (_, create_body) = send(
         app.clone(),
@@ -514,11 +482,9 @@ async fn download_pdf_artifact_returns_pdf_bytes() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn delete_artifact_removes_it() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = artifacts_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid).await;
+    let pid = seed_project(&app, &tok).await;
 
     let (_, create_body) = send(
         app.clone(),
@@ -544,11 +510,9 @@ async fn delete_artifact_removes_it() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_artifacts_after_create_returns_summary_without_content() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = artifacts_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid).await;
+    let pid = seed_project(&app, &tok).await;
 
     send(
         app.clone(),

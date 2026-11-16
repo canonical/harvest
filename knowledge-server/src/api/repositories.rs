@@ -10,8 +10,15 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use axum::response::Response;
+use axum::Extension;
+use knowledge_harvester::git::GitCredentials;
+
+use crate::access::repos::{check_remote, RepoAccess, RepoScope};
 use crate::api::GraphCache;
 use crate::api::GraphState;
+use crate::auth::jwt::Claims;
+pub use crate::ingestion::IngestionSource;
 use crate::ingestion::IngestionStatus;
 
 pub const GRAPH_TOPIC: &str = "graph:invalidate";
@@ -22,10 +29,50 @@ pub async fn drop_cached_graphs(cache: &GraphCache, prefix: &str) {
     cache.retain(|key, _| !key.starts_with(prefix));
 }
 
+async fn scope(state: &GraphState, user: &Claims) -> RepoScope {
+    RepoAccess::new(&state.db)
+        .scope_for(&user.sub)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "could not load repository access; showing none");
+            RepoScope::only(Vec::<String>::new())
+        })
+}
+
+pub(crate) async fn require_repo(
+    state: &GraphState,
+    user: &Claims,
+    repo: &str,
+) -> Result<(), Response> {
+    if scope(state, user).await.allows(repo) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            format!("repository '{repo}' not found"),
+        )
+            .into_response())
+    }
+}
+
+async fn credentials_for(state: &GraphState, user: &Claims, url: &str) -> GitCredentials {
+    let Some(store) = &state.credentials else {
+        return GitCredentials::Anonymous;
+    };
+    store
+        .git_credentials(&user.sub, url)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "could not load git credentials");
+            GitCredentials::Anonymous
+        })
+}
+
 #[derive(Serialize)]
 pub struct RepositoryInfo {
     pub name: String,
     pub url: Option<String>,
+    pub visibility: String,
     pub versions: Vec<String>,
     pub ingestion_status: Option<String>,
     pub ingestion_error: Option<String>,
@@ -53,6 +100,7 @@ pub struct RefInfo {
 #[derive(Serialize)]
 pub struct VerifyResult {
     pub url: String,
+    pub visibility: String,
     pub refs: Vec<RefInfo>,
 }
 
@@ -100,11 +148,15 @@ pub struct RepositoryStats {
     pub totals: RepositoryTotals,
 }
 
-pub async fn handle_list_repositories(State(state): State<Arc<GraphState>>) -> impl IntoResponse {
+pub async fn handle_list_repositories(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<GraphState>>,
+) -> impl IntoResponse {
+    let scope = scope(&state, &user).await;
     let result = state
         .db
         .query(
-            "SELECT r.name, r.url, array_agg(v.tag ORDER BY v.timestamp) AS versions
+            "SELECT r.name, r.url, r.visibility, array_agg(v.tag ORDER BY v.timestamp) AS versions
              FROM repositories r JOIN versions v ON v.repository_id = r.id AND v.ingested
              GROUP BY r.id
              ORDER BY r.name",
@@ -125,6 +177,7 @@ pub async fn handle_list_repositories(State(state): State<Arc<GraphState>>) -> i
         Ok(rows) => {
             let mut repos: Vec<RepositoryInfo> = rows
                 .into_iter()
+                .filter(|row| scope.allows(row["name"].as_str().unwrap_or_default()))
                 .map(|row| {
                     let name = row["name"].as_str().unwrap_or("").to_string();
                     let (ingestion_status, ingestion_error) = ingestion_statuses
@@ -134,6 +187,7 @@ pub async fn handle_list_repositories(State(state): State<Arc<GraphState>>) -> i
                     RepositoryInfo {
                         name: name.clone(),
                         url: row["url"].as_str().map(String::from),
+                        visibility: row["visibility"].as_str().unwrap_or("public").to_string(),
                         versions: row["versions"]
                             .as_array()
                             .cloned()
@@ -149,10 +203,11 @@ pub async fn handle_list_repositories(State(state): State<Arc<GraphState>>) -> i
 
             for (name, (ingestion_status, ingestion_error)) in ingestion_statuses.iter() {
                 let exists = repos.iter().any(|r| r.name == *name);
-                if !exists {
+                if !exists && scope.allows(name) {
                     repos.push(RepositoryInfo {
                         name: name.clone(),
                         url: None,
+                        visibility: "public".into(),
                         versions: vec![],
                         ingestion_status: ingestion_status.clone(),
                         ingestion_error: ingestion_error.clone(),
@@ -171,6 +226,7 @@ pub async fn handle_list_repositories(State(state): State<Arc<GraphState>>) -> i
 }
 
 pub async fn handle_add_repository(
+    Extension(user): Extension<Claims>,
     State(state): State<Arc<GraphState>>,
     Json(body): Json<AddRepositoryBody>,
 ) -> impl IntoResponse {
@@ -193,68 +249,80 @@ pub async fn handle_add_repository(
             .into_response();
     }
 
-    match state.ingestion.is_active(&name).await {
-        Ok(true) => {
-            return (
-                StatusCode::CONFLICT,
-                format!("repository '{}' is already being ingested", name),
-            )
-                .into_response();
+    let credentials = credentials_for(&state, &user, &url).await;
+    let check = match check_remote(&url, credentials.clone()).await {
+        Ok(check) => check,
+        Err(reason) => {
+            return (StatusCode::FORBIDDEN, Json(json!({ "error": reason }))).into_response()
         }
-        Ok(false) => {}
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    if let Err(e) = RepoAccess::new(&state.db)
+        .register(&name, &url, check.visibility, &user.sub)
+        .await
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
 
-    let job_id = match state.ingestion.try_start(&name, "ingest").await {
-        Ok(Some(id)) => id,
-        Ok(None) => {
-            return (
-                StatusCode::CONFLICT,
-                format!("repository '{}' is already being ingested", name),
-            )
-                .into_response();
-        }
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    let source = IngestionSource {
+        name: name.clone(),
+        url,
+        browse_url: body.browse_url.clone(),
+        refs: body.refs.clone(),
+        credentials,
+        force: false,
     };
+    match start_ingestion(&state, source).await {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "name": name, "status": "ingesting" })),
+        )
+            .into_response(),
+        Err(IngestionRefused::AlreadyRunning) => (
+            StatusCode::CONFLICT,
+            format!("repository '{}' is already being ingested", name),
+        )
+            .into_response(),
+        Err(IngestionRefused::Storage(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+#[derive(Debug)]
+pub enum IngestionRefused {
+    AlreadyRunning,
+    Storage(String),
+}
+
+pub async fn start_ingestion(state: &GraphState, source: IngestionSource) -> Result<(), IngestionRefused> {
+    let name = source.name.clone();
+    if state
+        .ingestion
+        .is_active(&name)
+        .await
+        .map_err(|e| IngestionRefused::Storage(e.to_string()))?
+    {
+        return Err(IngestionRefused::AlreadyRunning);
+    }
+    let job_id = state
+        .ingestion
+        .try_start(&name, "ingest")
+        .await
+        .map_err(|e| IngestionRefused::Storage(e.to_string()))?
+        .ok_or(IngestionRefused::AlreadyRunning)?;
     let jobs = state.ingestion.clone();
     let bus = Arc::clone(&state.bus);
     let db = (*state.db).clone();
     let cache = Arc::clone(&state.cache);
-    let name_for_response = name.clone();
-
     tokio::spawn(async move {
-        crate::ingestion::run_ingestion(
-            jobs,
-            job_id,
-            db,
-            name.clone(),
-            url,
-            body.browse_url.clone(),
-            body.refs.clone(),
-        )
-        .await;
-
-        let mut cache_write = cache.write().await;
-        let keys_to_remove: Vec<String> = cache_write
-            .keys()
-            .filter(|k| k.starts_with(&format!("{}:", name)))
-            .cloned()
-            .collect();
-        for key in keys_to_remove {
-            cache_write.remove(&key);
-        }
-        drop(cache_write);
-        bus.publish(GRAPH_TOPIC, format!("{}:", name));
+        crate::ingestion::run_ingestion(jobs, job_id, db, source).await;
+        drop_cached_graphs(&cache, &format!("{name}:")).await;
+        bus.publish(GRAPH_TOPIC, format!("{name}:"));
     });
-
-    (
-        StatusCode::ACCEPTED,
-        Json(json!({ "name": name_for_response, "status": "ingesting" })),
-    )
-        .into_response()
+    Ok(())
 }
 
+
 pub async fn handle_verify_repository(
+    Extension(user): Extension<Claims>,
     State(state): State<Arc<GraphState>>,
     Json(body): Json<VerifyRepositoryBody>,
 ) -> impl IntoResponse {
@@ -262,42 +330,22 @@ pub async fn handle_verify_repository(
     if url.is_empty() {
         return (StatusCode::BAD_REQUEST, "url is required".to_string()).into_response();
     }
-
-    let pipeline = match knowledge_harvester::pipeline::Pipeline::with_db((*state.db).clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to initialize: {e}"),
-            )
-                .into_response();
-        }
-    };
-
-    match pipeline.list_remote_refs(&url).await {
-        Ok(refs) => {
-            let ref_infos: Vec<RefInfo> = refs
+    let credentials = credentials_for(&state, &user, &url).await;
+    match check_remote(&url, credentials).await {
+        Ok(check) => Json(VerifyResult {
+            url,
+            visibility: check.visibility.as_str().to_string(),
+            refs: check
+                .refs
                 .into_iter()
                 .map(|t| RefInfo {
                     name: t.name,
                     commit_sha: t.commit_sha,
                 })
-                .collect();
-            Json(VerifyResult {
-                url,
-                refs: ref_infos,
-            })
-            .into_response()
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            let status = if msg.contains("not found") || msg.contains("could not find") {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::BAD_GATEWAY
-            };
-            (status, msg).into_response()
-        }
+                .collect(),
+        })
+        .into_response(),
+        Err(reason) => (StatusCode::FORBIDDEN, Json(json!({ "error": reason }))).into_response(),
     }
 }
 
@@ -358,10 +406,14 @@ pub struct IngestVersionsBody {
 }
 
 pub async fn handle_ingest_versions(
+    Extension(user): Extension<Claims>,
     State(state): State<Arc<GraphState>>,
     Path(repo): Path<String>,
     Json(body): Json<IngestVersionsBody>,
 ) -> impl IntoResponse {
+    if let Err(response) = require_repo(&state, &user, &repo).await {
+        return response;
+    }
     if body.refs.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -422,6 +474,7 @@ pub async fn handle_ingest_versions(
         }
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
+    let credentials = credentials_for(&state, &user, &url).await;
     let jobs = state.ingestion.clone();
     let bus = Arc::clone(&state.bus);
     let db = (*state.db).clone();
@@ -429,16 +482,15 @@ pub async fn handle_ingest_versions(
     let repo_name = repo.clone();
 
     tokio::spawn(async move {
-        crate::ingestion::run_ingestion(
-            jobs,
-            job_id,
-            db,
-            repo_name.clone(),
+        let source = IngestionSource {
+            name: repo_name.clone(),
             url,
-            None,
-            body.refs.clone(),
-        )
-        .await;
+            browse_url: None,
+            refs: body.refs.clone(),
+            credentials,
+            force: false,
+        };
+        crate::ingestion::run_ingestion(jobs, job_id, db, source).await;
 
         let mut cache_write = cache.write().await;
         let keys_to_remove: Vec<String> = cache_write
@@ -461,9 +513,13 @@ pub async fn handle_ingest_versions(
 }
 
 pub async fn handle_resync_version(
+    Extension(user): Extension<Claims>,
     State(state): State<Arc<GraphState>>,
     Path((repo, version)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if let Err(response) = require_repo(&state, &user, &repo).await {
+        return response;
+    }
     match state.ingestion.is_active(&repo).await {
         Ok(true) => {
             return (
@@ -505,6 +561,8 @@ pub async fn handle_resync_version(
         }
     };
 
+    let credentials = credentials_for(&state, &user, &url).await;
+
     let job_id = match state.ingestion.try_start(&repo, "resync").await {
         Ok(Some(id)) => id,
         Ok(None) => {
@@ -531,6 +589,7 @@ pub async fn handle_resync_version(
             repo_name.clone(),
             url,
             version_name.clone(),
+            credentials,
         )
         .await;
 
@@ -594,9 +653,13 @@ pub async fn handle_delete_version(
 }
 
 pub async fn handle_repository_progress(
+    Extension(user): Extension<Claims>,
     State(state): State<Arc<GraphState>>,
     Path(repo): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(response) = require_repo(&state, &user, &repo).await {
+        return response;
+    }
     let job = match state.ingestion.latest(&repo).await {
         Ok(Some(job)) => job,
         Ok(None) => {
@@ -670,10 +733,14 @@ pub async fn handle_repository_progress(
 }
 
 pub async fn handle_get_repository_stats(
+    Extension(user): Extension<Claims>,
     State(state): State<Arc<GraphState>>,
     Path(repo): Path<String>,
     Query(params): Query<StatsQuery>,
 ) -> impl IntoResponse {
+    if let Err(response) = require_repo(&state, &user, &repo).await {
+        return response;
+    }
     let versions_result = state
         .db
         .query(

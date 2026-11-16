@@ -2,6 +2,21 @@ import { describe, it, expect } from 'vitest';
 import { describeToolCall } from '../../src/lib/tool-render.js';
 
 describe('describeToolCall', () => {
+  it('names the repository, short version and query of a code search', () => {
+    expect(describeToolCall('search_code', { repo: 'cinder', version: 'unmaintained/2024.1', query: 'volume drivers' }))
+      .toBe('Searching cinder 2024.1 for “volume drivers”');
+  });
+
+  it('describes a focused code search as reading its targets', () => {
+    expect(describeToolCall('search_code', { repo: 'amafu', focus: ['MaasClient', 'crates/installer/src/maas.rs', 'a.rs', 'b.rs'] }))
+      .toBe('Reading MaasClient, maas.rs, a.rs and 1 more');
+  });
+
+  it('truncates long code search queries and tolerates a missing input', () => {
+    expect(describeToolCall('search_code', { repo: 'r', query: 'x'.repeat(200) })).toContain('…');
+    expect(describeToolCall('search_code', null)).toBe('Searching the code');
+  });
+
   it('describes search_symbols with query and scope', () => {
     const label = describeToolCall('search_symbols', { query: 'retry', repo: 'my-repo' });
     expect(label).toContain('retry');

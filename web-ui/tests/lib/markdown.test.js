@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderMarkdown, buildFileUrl, buildCitationIndex, substituteCitations, parseCitations } from '../../src/lib/markdown.js';
+import { renderMarkdown, buildFileUrl, buildCitationIndex, substituteCitations, parseCitations, withoutOpenBracket } from '../../src/lib/markdown.js';
 
 describe('substituteCitations', () => {
   const sources = [{ repo: 'acme/repo', version: 'main', file: 'src/lib.rs', line: 42 }];
@@ -149,5 +149,19 @@ describe('citations whose repository name has spaces and parentheses', () => {
 
   it('leaves bracketed prose alone', () => {
     expect(parseCitations('[Note: see the driver: lvm.py]')).toEqual([]);
+  });
+});
+
+describe('citations in an answer that is still streaming', () => {
+  it('records a citation without a line as line 0 so it gets a number', () => {
+    const [source] = parseCitations('See [repo:main:README.md].');
+    expect(source.line).toBe(0);
+    expect(buildCitationIndex([source])['repo:main:README.md:0']).toBe(1);
+    expect(substituteCitations('See [repo:main:README.md].', {}, buildCitationIndex([source]))).toContain('>1<');
+  });
+
+  it('drops a citation that has not been closed yet', () => {
+    expect(withoutOpenBracket('Helpers. [repo:main:src/utils/')).toBe('Helpers. ');
+    expect(withoutOpenBracket('Done [repo:main:a.py:1].')).toBe('Done [repo:main:a.py:1].');
   });
 });

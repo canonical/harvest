@@ -35,6 +35,8 @@ fn function(
         source: source.into(),
         impl_type: None,
         docstring: None,
+        is_test: false,
+        statement_lines: Vec::new(),
         calls,
     }
 }
@@ -76,6 +78,7 @@ async fn seed_graph(writer: &GraphWriter) {
             embeds: vec![],
             uses: vec![],
             docstring: None,
+            is_test: false,
             decorators: vec![],
         }],
         imports: vec![ImportNode {
@@ -85,6 +88,7 @@ async fn seed_graph(writer: &GraphWriter) {
             target: "std::collections::HashMap".into(),
             line: 1,
         }],
+        ..ParsedFile::default()
     };
     let v2 = ParsedFile {
         path: "src/lib.rs".into(),
@@ -102,6 +106,7 @@ async fn seed_graph(writer: &GraphWriter) {
         ],
         classes: vec![],
         imports: vec![],
+        ..ParsedFile::default()
     };
 
     writer
@@ -161,6 +166,37 @@ async fn list_repositories_flags_versions_indexed_by_an_older_parser() {
     let stale: Vec<Value> = serde_json::from_str(&tool.execute(json!({})).await.unwrap()).unwrap();
     let myrepo = stale.iter().find(|r| r["repo"] == "myrepo").unwrap();
     assert_eq!(myrepo["stale_versions"], json!(["v1.0"]));
+}
+
+fn scoped(mut params: Value, repos: &[&str]) -> Value {
+    knowledge_server::access::repos::RepoScope::only(repos.iter().copied()).write_into(&mut params);
+    params
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn listing_and_searching_stay_inside_the_callers_repositories() {
+    setup!(client, test_db);
+    let list = ListRepositoriesTool(Arc::clone(&client));
+    let search = SearchSymbolsTool::new(Arc::clone(&client));
+
+    let visible: Vec<Value> =
+        serde_json::from_str(&list.execute(scoped(json!({}), &["myrepo"])).await.unwrap()).unwrap();
+    assert!(repos_from(&visible).contains(&"myrepo".to_string()));
+    let hidden: Vec<Value> =
+        serde_json::from_str(&list.execute(scoped(json!({}), &["other"])).await.unwrap()).unwrap();
+    assert!(hidden.is_empty(), "listed outside the scope: {hidden:?}");
+
+    let found = search
+        .execute(scoped(json!({ "query": "beta" }), &["myrepo"]))
+        .await
+        .unwrap();
+    assert!(found.contains("myrepo"), "{found}");
+    let outside = search
+        .execute(scoped(json!({ "query": "beta" }), &["other"]))
+        .await
+        .unwrap();
+    assert!(!outside.contains("myrepo"), "{outside}");
 }
 
 #[tokio::test]
@@ -624,10 +660,13 @@ async fn search_symbols_matches_docstring_prose() {
                     source: "def provision():\n    return 1".into(),
                     impl_type: None,
                     docstring: Some("Provisions a block volume over iSCSI.".into()),
+                    is_test: false,
+                    statement_lines: Vec::new(),
                     calls: vec![],
                 }],
                 classes: vec![],
                 imports: vec![],
+                ..ParsedFile::default()
             }],
         )
         .await
@@ -688,9 +727,11 @@ async fn search_symbols_matches_capability_constant_inside_a_class() {
                     embeds: vec![],
                     uses: vec![],
                     docstring: None,
+                    is_test: false,
                     decorators: vec![],
                 }],
                 imports: vec![],
+                ..ParsedFile::default()
             }],
         )
         .await
@@ -756,9 +797,11 @@ async fn search_symbols_ranks_capability_above_path_match() {
                         embeds: vec![],
                         uses: vec![],
                         docstring: None,
+                        is_test: false,
                         decorators: vec![],
                     }],
                     imports: vec![],
+                    ..ParsedFile::default()
                 },
                 ParsedFile {
                     path: "pkg/SUPPORTS_ACTIVE_ACTIVE_helper.py".into(),
@@ -778,9 +821,11 @@ async fn search_symbols_ranks_capability_above_path_match() {
                         embeds: vec![],
                         uses: vec![],
                         docstring: None,
+                        is_test: false,
                         decorators: vec![],
                     }],
                     imports: vec![],
+                    ..ParsedFile::default()
                 },
             ],
         )
@@ -837,10 +882,13 @@ async fn search_symbols_returns_bounded_previews_not_full_source() {
                     source: format!("fn huge() {{ {long} }}"),
                     impl_type: None,
                     docstring: None,
+                    is_test: false,
+                    statement_lines: Vec::new(),
                     calls: vec![],
                 }],
                 classes: vec![],
                 imports: vec![],
+                ..ParsedFile::default()
             }],
         )
         .await
@@ -1065,8 +1113,76 @@ async fn backfill_refuses_to_run_without_embedding_storage() {
     assert!(err.contains("not available"), "unexpected error: {err}");
 }
 
-const SEMANTIC_CTE: &str = "), semantic_scored AS (\n    SELECT s.id,\n           (1 - (s.embedding <=> $qvec::vector))::float8 AS semantic_score\n    FROM symbols s\n    WHERE s.embedding IS NOT NULL\n      AND s.embedding_model = $qmodel\n      AND ($repo = '' OR s.repo = $repo)\n      AND ($version = '' OR s.version = $version)\n)";
+const SEMANTIC_CTE: &str = "), semantic_scored AS (\n    SELECT s.id,\n           (1 - (s.embedding <=> $qvec::vector))::float8 AS semantic_score\n    FROM symbols s\n    JOIN versions v     ON v.id = s.version_id\n    JOIN repositories r ON r.id = v.repository_id\n    WHERE s.embedding IS NOT NULL\n      AND s.embedding_model = $qmodel\n      AND ($repo = '' OR r.name = $repo)\n      AND ($version = '' OR v.tag = $version)\n    ORDER BY s.embedding <=> $qvec::vector\n    LIMIT $semantic_k\n)";
 const SEMANTIC_CTE_STUB: &str = "), semantic_scored AS (\n    SELECT s.id, NULL::float8 AS semantic_score FROM symbols s WHERE false\n)";
+
+fn zero_vector() -> String {
+    let mut values = vec!["0.0"; 768];
+    values[0] = "1.0";
+    format!("[{}]", values.join(","))
+}
+
+async fn pgvector_installed(client: &harvest_db::Db) -> bool {
+    client
+        .query(
+            "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') AS present",
+            json!({}),
+        )
+        .await
+        .ok()
+        .and_then(|rows| rows.into_iter().next())
+        .and_then(|r| r["present"].as_bool())
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn hybrid_sql_returns_semantic_only_matches_through_the_hnsw_index() {
+    setup!(client, _test_db);
+    if !pgvector_installed(&client).await {
+        eprintln!("skipping: pgvector is not installed");
+        return;
+    }
+    client
+        .execute(
+            "UPDATE symbols SET embedding = $v::vector, embedding_model = 'text-embedding-004' WHERE name = 'beta'",
+            json!({ "v": zero_vector() }),
+        )
+        .await
+        .unwrap();
+    client
+        .batch_execute(knowledge_server::agent::semantic::HNSW_INDEX_SQL)
+        .await
+        .unwrap();
+    let params = json!({
+        "query": "zzzz-no-lexical-match", "repo": "myrepo", "version": "", "kind": "any", "limit": 10,
+        "path_prefix": "", "offset": 0, "decorator": "",
+        "qvec": zero_vector(), "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
+        "semantic_k": SEMANTIC_CANDIDATES, "_scope_all": true, "_scope_repos": [],
+    });
+    let rows = client
+        .query(HYBRID_SEARCH_SQL, params.clone())
+        .await
+        .unwrap();
+    assert!(names_from(&rows).contains(&"beta".to_string()), "{rows:?}");
+
+    let mut params = params;
+    params["repo"] = json!("");
+    let tx = client.begin().await.unwrap();
+    tx.batch_execute("SET LOCAL enable_seqscan = off; SET LOCAL enable_sort = off")
+        .await
+        .unwrap();
+    let plan = tx
+        .query(&format!("EXPLAIN {HYBRID_SEARCH_SQL}"), params)
+        .await
+        .unwrap();
+    let plan: String = plan
+        .iter()
+        .filter_map(|r| r["QUERY PLAN"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plan.contains("idx_symbols_embedding_hnsw"), "{plan}");
+}
 
 async fn hybrid_sql_for(client: &harvest_db::Db) -> String {
     let available: bool = client
@@ -1097,7 +1213,8 @@ async fn hybrid_sql_executes_the_full_lexical_cte_chain() {
     let params = json!({
         "query": "alpha", "repo": "myrepo", "version": "", "kind": "any", "limit": 10,
         "path_prefix": "", "offset": 0, "decorator": "",
-        "qvec": "[0.0]", "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
+        "qvec": zero_vector(), "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
+        "semantic_k": SEMANTIC_CANDIDATES, "_scope_all": true, "_scope_repos": [],
     });
     let rows = client
         .query(&sql, params)
@@ -1114,7 +1231,8 @@ async fn hybrid_sql_reports_capability_matches() {
     let params = json!({
         "query": "i32", "repo": "myrepo", "version": "", "kind": "any", "limit": 10,
         "path_prefix": "", "offset": 0, "decorator": "",
-        "qvec": "[0.0]", "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
+        "qvec": zero_vector(), "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
+        "semantic_k": SEMANTIC_CANDIDATES, "_scope_all": true, "_scope_repos": [],
     });
     let rows = client
         .query(&sql, params)
@@ -1187,6 +1305,7 @@ fn py_decorated_class(
         embeds: vec![],
         uses: vec![],
         docstring: None,
+        is_test: false,
         decorators: decorators.iter().map(|d| d.to_string()).collect(),
     }
 }
@@ -1204,6 +1323,7 @@ async fn seed_hierarchy(client: &Arc<harvest_db::Db>) {
         functions: vec![],
         classes,
         imports: vec![],
+        ..ParsedFile::default()
     };
     let registered = &["registry.driver"];
     writer

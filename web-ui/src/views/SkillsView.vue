@@ -1,6 +1,6 @@
 <template>
   <div class="skills-page">
-    <div v-if="!projectId" class="no-project-state">
+    <div v-if="!collection" class="no-project-state">
       <p>Select a project to manage its skills.</p>
     </div>
 
@@ -15,7 +15,7 @@
               data-testid="tab-project"
               type="button"
               @click="activeTab = 'project'"
-            >This project's skills</button>
+            >{{ projectId ? "This project's skills" : 'My skills' }}</button>
           </li>
           <li class="p-tabs__item" role="presentation">
             <button
@@ -232,69 +232,67 @@
       </section>
     </template>
 
-    <div v-if="deletingSkill" class="modal" @click.self="deletingSkill = null">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="deletingSkill = null">✕</button>
-        <h3>Delete skill</h3>
-        <p>Delete <strong>{{ deletingSkill.name }}</strong>? This cannot be undone.</p>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="deletingSkill = null">Cancel</button>
-          <button
-            class="p-button--negative is-dense"
-            data-testid="confirm-delete"
-            type="button"
-            :disabled="deleting"
-            @click="submitDelete"
-          >Delete</button>
-        </div>
-      </div>
-    </div>
-
-    <div v-if="showCreate" class="modal" @click.self="showCreate = null">
-      <div class="modal-content modal-content--wide">
-        <button class="modal-close" type="button" @click="showCreate = null">✕</button>
-        <h3>New {{ showCreate }} skill</h3>
-        <div class="form-group">
-          <label>Name</label>
-          <input v-model="newName" type="text" data-testid="skill-name-input" placeholder="Name" />
-        </div>
-        <div class="form-group">
-          <label>Description</label>
-          <input v-model="newDescription" type="text" placeholder="Short description" />
-        </div>
-        <div class="form-group">
-          <label>Content</label>
-          <textarea v-model="newContent" class="memories-textarea" rows="8" placeholder="Write in Markdown…" />
-        </div>
-        <div v-if="createError" class="p-notification--negative">
-          <div class="p-notification__content">
-            <p class="p-notification__message">{{ createError }}</p>
-          </div>
-        </div>
+    <AppModal v-if="deletingSkill" @close="deletingSkill = null">
+      <h2>Delete skill</h2>
+      <p>Delete <strong>{{ deletingSkill.name }}</strong>? This cannot be undone.</p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="deletingSkill = null">Cancel</button>
         <button
-          class="p-button--positive is-dense"
-          data-testid="save-create"
+          class="p-button--negative is-dense"
+          data-testid="confirm-delete"
           type="button"
-          :disabled="!newName || submitting"
-          @click="submitCreate"
-        >Save</button>
+          :disabled="deleting"
+          @click="submitDelete"
+        >Delete</button>
       </div>
-    </div>
+    </AppModal>
+
+    <AppModal v-if="showCreate" size="wide" @close="showCreate = null">
+      <h2>New {{ showCreate }} skill</h2>
+      <div class="form-group">
+        <label>Name</label>
+        <input v-model="newName" type="text" data-testid="skill-name-input" placeholder="Name" />
+      </div>
+      <div class="form-group">
+        <label>Description</label>
+        <input v-model="newDescription" type="text" placeholder="Short description" />
+      </div>
+      <div class="form-group">
+        <label>Content</label>
+        <textarea v-model="newContent" class="memories-textarea" rows="8" placeholder="Write in Markdown…" />
+      </div>
+      <div v-if="createError" class="p-notification--negative">
+        <div class="p-notification__content">
+          <p class="p-notification__message">{{ createError }}</p>
+        </div>
+      </div>
+      <button
+        class="p-button--positive is-dense"
+        data-testid="save-create"
+        type="button"
+        :disabled="!newName || submitting"
+        @click="submitCreate"
+      >Save</button>
+    </AppModal>
   </div>
 </template>
 
 <script setup>
-import { ref, watch } from 'vue';
+import AppModal from '../components/ui/AppModal.vue';
+import { computed, ref, watch } from 'vue';
 import { renderMarkdown } from '../lib/markdown.js';
 import { useAuthStore } from '../stores/auth.js';
 import {
   listGlobalSkills, getGlobalSkill, createGlobalSkill, updateGlobalSkill, deleteGlobalSkill,
-  listProjectSkills, getProjectSkill, createProjectSkill, updateProjectSkill, deleteProjectSkill,
 } from '../lib/api.js';
+import { skillCollection } from '../lib/owned-api.js';
 
 const props = defineProps({
   projectId: { type: String, default: null },
+  personal:  { type: Boolean, default: false },
 });
+
+const collection = computed(() => (props.projectId || props.personal ? skillCollection(props.projectId) : null));
 
 const auth = useAuthStore();
 
@@ -344,10 +342,10 @@ async function loadGlobalList() {
 }
 
 async function loadProjectList() {
-  if (!props.projectId) return;
+  if (!collection.value) return;
   projectLoading.value = true;
   try {
-    projectSkills.value = await listProjectSkills(props.projectId);
+    projectSkills.value = await collection.value.list();
   } catch {
     projectSkills.value = [];
   }
@@ -373,7 +371,7 @@ async function selectProjectSkill(id) {
   editingProject.value        = false;
   projectContentLoading.value = true;
   try {
-    selectedProjectSkill.value = await getProjectSkill(props.projectId, id);
+    selectedProjectSkill.value = await collection.value.get(id);
   } catch {
     selectedProjectSkill.value = null;
   }
@@ -429,7 +427,7 @@ async function saveEditProject() {
   savingEdit.value = true;
   editError.value  = '';
   try {
-    await updateProjectSkill(props.projectId, selectedProjectSkill.value.id, {
+    await collection.value.update(selectedProjectSkill.value.id, {
       name: editProjectName.value,
       description: editProjectDescription.value,
       content: editProjectContent.value,
@@ -463,7 +461,7 @@ async function submitCreate() {
       await loadGlobalList();
       await selectGlobalSkill(created.id);
     } else {
-      const created = await createProjectSkill(props.projectId, { name: newName.value, description: newDescription.value, content: newContent.value });
+      const created = await collection.value.create({ name: newName.value, description: newDescription.value, content: newContent.value });
       showCreate.value = null;
       await loadProjectList();
       await selectProjectSkill(created.id);
@@ -492,7 +490,7 @@ async function submitDelete() {
         selectedGlobalSkill.value = null;
       }
     } else {
-      await deleteProjectSkill(props.projectId, target.id);
+      await collection.value.remove(target.id);
       projectSkills.value = projectSkills.value.filter(s => s.id !== target.id);
       if (selectedProjectId.value === target.id) {
         selectedProjectId.value    = null;
@@ -506,12 +504,12 @@ async function submitDelete() {
   }
 }
 
-watch(() => props.projectId, (id) => {
+watch(collection, (current) => {
   selectedProjectId.value    = null;
   selectedProjectSkill.value = null;
   projectSkills.value        = [];
   editingProject.value       = false;
-  if (id) {
+  if (current) {
     loadGlobalList();
     loadProjectList();
   }

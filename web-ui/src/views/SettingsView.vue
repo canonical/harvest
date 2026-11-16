@@ -146,78 +146,73 @@
       </div>
     </section>
 
-    <div v-if="editing" class="modal" @click.self="closeEdit">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="closeEdit">✕</button>
-        <h3>{{ editing.key_set ? 'Update' : 'Set' }} API key for {{ editing.name || editing.kind }}</h3>
-        <p class="modal-lede">Your key is encrypted at rest and never shared with other users.</p>
-        <div class="form-group">
-          <label for="api-key-input">API Key</label>
-          <input
-            id="api-key-input"
-            v-model="keyInput"
-            type="password"
-            placeholder="Paste your API key here"
-            autocomplete="off"
-          />
-        </div>
-        <p v-if="editError" class="auth-error">{{ editError }}</p>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="closeEdit">Cancel</button>
-          <button
-            class="p-button--positive is-dense"
-            type="button"
-            :disabled="!keyInput || saving"
-            @click="saveKey"
-          >{{ saving ? 'Saving…' : 'Save' }}</button>
-        </div>
-      </div>
-    </div>
+    <GitAccessSection />
 
-    <div v-if="creatingApiKey" class="modal" @click.self="closeCreateApiKey">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="closeCreateApiKey">✕</button>
-        <h3>Create API key</h3>
-        <div class="form-group">
-          <label for="api-key-name-input">Name</label>
-          <input id="api-key-name-input" v-model="apiKeyNameInput" type="text" placeholder="e.g. Zapier Production" autocomplete="off" />
-        </div>
-        <p v-if="apiKeyCreateError" class="auth-error">{{ apiKeyCreateError }}</p>
-        <div v-if="createdApiKeySecret" class="api-key-secret">
-          <p>Copy this key now. You will not be able to see it again.</p>
-          <textarea readonly rows="3" :value="createdApiKeySecret" />
-        </div>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="closeCreateApiKey">{{ createdApiKeySecret ? 'Done' : 'Cancel' }}</button>
-          <button v-if="!createdApiKeySecret" class="p-button--positive is-dense" type="button" :disabled="!apiKeyNameInput.trim() || creatingApiKeyPending" @click="submitCreateApiKey">{{ creatingApiKeyPending ? 'Creating...' : 'Create' }}</button>
-        </div>
+    <AppModal v-if="editing" @close="closeEdit">
+      <h2>{{ editing.key_set ? 'Update' : 'Set' }} API key for {{ editing.name || editing.kind }}</h2>
+      <p class="modal-lede">Your key is encrypted at rest and never shared with other users.</p>
+      <div class="form-group">
+        <label for="api-key-input">API Key</label>
+        <input
+          id="api-key-input"
+          v-model="keyInput"
+          type="password"
+          placeholder="Paste your API key here"
+          autocomplete="off"
+        />
       </div>
-    </div>
+      <p v-if="editError" class="auth-error">{{ editError }}</p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="closeEdit">Cancel</button>
+        <button
+          class="p-button--positive is-dense"
+          type="button"
+          :disabled="!keyInput || saving"
+          @click="saveKey"
+        >{{ saving ? 'Saving…' : 'Save' }}</button>
+      </div>
+    </AppModal>
 
-    <div v-if="renamingApiKey" class="modal" @click.self="closeRenameApiKey">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="closeRenameApiKey">✕</button>
-        <h3>Rename API key</h3>
-        <div class="form-group">
-          <label for="rename-api-key-input">Name</label>
-          <input id="rename-api-key-input" v-model="renameApiKeyInput" type="text" autocomplete="off" />
-        </div>
-        <p v-if="renameApiKeyError" class="auth-error">{{ renameApiKeyError }}</p>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="closeRenameApiKey">Cancel</button>
-          <button class="p-button--positive is-dense" type="button" :disabled="!renameApiKeyInput.trim() || renamingApiKeyPending" @click="submitRenameApiKey">{{ renamingApiKeyPending ? 'Saving...' : 'Save' }}</button>
-        </div>
+    <AppModal v-if="creatingApiKey" @close="closeCreateApiKey">
+      <h2>Create API key</h2>
+      <div class="form-group">
+        <label for="api-key-name-input">Name</label>
+        <input id="api-key-name-input" v-model="apiKeyNameInput" type="text" placeholder="e.g. Zapier Production" autocomplete="off" />
       </div>
-    </div>
+      <p v-if="apiKeyCreateError" class="auth-error">{{ apiKeyCreateError }}</p>
+      <div v-if="createdApiKeySecret" class="api-key-secret">
+        <p>Copy this key now. You will not be able to see it again.</p>
+        <textarea readonly rows="3" :value="createdApiKeySecret" />
+      </div>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="closeCreateApiKey">{{ createdApiKeySecret ? 'Done' : 'Cancel' }}</button>
+        <button v-if="!createdApiKeySecret" class="p-button--positive is-dense" type="button" :disabled="!apiKeyNameInput.trim() || creatingApiKeyPending" @click="submitCreateApiKey">{{ creatingApiKeyPending ? 'Creating...' : 'Create' }}</button>
+      </div>
+    </AppModal>
+
+    <AppModal v-if="renamingApiKey" @close="closeRenameApiKey">
+      <h2>Rename API key</h2>
+      <div class="form-group">
+        <label for="rename-api-key-input">Name</label>
+        <input id="rename-api-key-input" v-model="renameApiKeyInput" type="text" autocomplete="off" />
+      </div>
+      <p v-if="renameApiKeyError" class="auth-error">{{ renameApiKeyError }}</p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="closeRenameApiKey">Cancel</button>
+        <button class="p-button--positive is-dense" type="button" :disabled="!renameApiKeyInput.trim() || renamingApiKeyPending" @click="submitRenameApiKey">{{ renamingApiKeyPending ? 'Saving...' : 'Save' }}</button>
+      </div>
+    </AppModal>
   </div>
 </template>
 
 <script setup>
+import AppModal from '../components/ui/AppModal.vue';
 import { ref, computed, onMounted } from 'vue';
 import { useLlmStore } from '../stores/llm.js';
 import { useAuthStore } from '../stores/auth.js';
 import { setLlmUserKey, deleteLlmUserKey, fetchApiKeys, createApiKey, renameApiKey, revokeApiKey } from '../lib/api.js';
 import LoadingSpinner from '../components/deployment/LoadingSpinner.vue';
+import GitAccessSection from '../components/settings/GitAccessSection.vue';
 
 const llm = useLlmStore();
 const auth = useAuthStore();
@@ -410,36 +405,6 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.settings-page {
-  flex: 1;
-  overflow-y: auto;
-  padding: 2rem 3rem;
-  max-width: 900px;
-  margin: 0 auto;
-}
-
-.settings-header h2 {
-  margin: 0 0 2rem;
-  font-size: 1.5rem;
-  font-weight: 600;
-}
-
-.settings-section {
-  margin-bottom: 2.5rem;
-}
-
-.settings-section__heading h3 {
-  margin: 0 0 0.25rem;
-  font-size: 1.125rem;
-  font-weight: 600;
-}
-
-.settings-section__description {
-  margin: 0 0 1.25rem;
-  font-size: 0.875rem;
-  color: var(--text-muted);
-}
-
 .settings-account-card {
   display: flex;
   align-items: center;

@@ -1,5 +1,6 @@
 <template>
   <div class="chat-workspace">
+    <h1 class="u-off-screen">Chat</h1>
     <div class="chat-workspace__toolbar">
       <div class="chat-workspace__toolbar-actions">
         <button
@@ -63,52 +64,59 @@
 
   <SourcePanel />
 
-  <div
-    v-if="newLayoutConfirm"
-    class="modal"
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="new-layout-confirm-title"
-    @click.self="newLayoutConfirm = false"
-  >
-    <div class="modal-content" data-testid="new-layout-confirm">
-      <button class="modal-close" type="button" aria-label="Close" @click="newLayoutConfirm = false">✕</button>
-      <h3 id="new-layout-confirm-title">Save current layout?</h3>
-      <p>The current layout has unsaved changes. Do you want to save it before creating a new one?</p>
-      <div class="modal-actions">
-        <button class="p-button--base is-dense" type="button" @click="newLayoutConfirm = false">Cancel</button>
-        <button class="p-button--base is-dense" type="button" data-testid="new-layout-dont-save-btn" @click="confirmNewLayoutWithoutSave">Don't save</button>
-        <button
-          class="p-button--positive is-dense"
-          type="button"
-          data-testid="new-layout-save-btn"
-          :disabled="!newLayoutSaveName.trim()"
-          @click="confirmNewLayoutWithSave"
-        >Save and continue</button>
-      </div>
-      <div class="form-group" style="margin-top: 0.75rem;">
-        <input
-          v-model="newLayoutSaveName"
-          type="text"
-          class="new-layout-save-name-input"
-          :placeholder="currentLayoutNamePlaceholder"
-          @keydown.enter.prevent="confirmNewLayoutWithSave"
-        />
-      </div>
+  <AppModal v-if="newLayoutConfirm" data-testid="new-layout-confirm" @close="newLayoutConfirm = false">
+    <h3 id="new-layout-confirm-title">Save current layout?</h3>
+    <p>The current layout has unsaved changes. Do you want to save it before creating a new one?</p>
+    <div class="modal-actions">
+      <button class="p-button--base is-dense" type="button" @click="newLayoutConfirm = false">Cancel</button>
+      <button class="p-button--base is-dense" type="button" data-testid="new-layout-dont-save-btn" @click="confirmNewLayoutWithoutSave">Don't save</button>
+      <button
+        class="p-button--positive is-dense"
+        type="button"
+        data-testid="new-layout-save-btn"
+        :disabled="!newLayoutSaveName.trim()"
+        @click="confirmNewLayoutWithSave"
+      >Save and continue</button>
     </div>
-  </div>
+    <div class="form-group" style="margin-top: 0.75rem;">
+      <input
+        v-model="newLayoutSaveName"
+        type="text"
+        class="new-layout-save-name-input"
+        :placeholder="currentLayoutNamePlaceholder"
+        @keydown.enter.prevent="confirmNewLayoutWithSave"
+      />
+    </div>
+  </AppModal>
 </template>
 
 <script setup>
+import AppModal from '../components/ui/AppModal.vue';
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import PaneSplit from '../components/chat/PaneSplit.vue';
+import PaneSplit from '../components/layout/PaneSplit.vue';
+import ChatTab from '../components/chat/ChatTab.vue';
 import LayoutShapeIcon from '../components/chat/LayoutShapeIcon.vue';
 import SourcePanel from '../components/SourcePanel.vue';
 import { useChatWorkspaceStore } from '../stores/chatWorkspace.js';
+import { useProjectStore } from '../stores/project.js';
+import { createTab } from '../lib/pane-layout.js';
+import { operationsOf, provideLayoutWorkspace } from '../lib/layout-workspace.js';
+import { peekChatInstance, tabActivity } from '../composables/useChatInstance.js';
 
 defineProps({ projectId: { type: String, default: null } });
 
 const workspace = useChatWorkspaceStore();
+const project = useProjectStore();
+
+provideLayoutWorkspace({
+  id: 'chat',
+  tabKinds: [{ kind: 'chat', label: 'Chat', icon: 'chat' }],
+  content: ChatTab,
+  titleOf: (tab) => tab.title || 'New chat',
+  activityOf: (tab, isActive) => tabActivity(peekChatInstance(tab.tabId), tab.seenReplies, isActive),
+  createTab: (_kind, { activeTab }) => createTab({ projectId: activeTab?.projectId ?? project.selectedProjectId }),
+  ...operationsOf(workspace),
+});
 
 const layoutsOpen   = ref(false);
 const newLayoutName = ref('');

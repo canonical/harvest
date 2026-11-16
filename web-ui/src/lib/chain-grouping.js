@@ -1,5 +1,4 @@
 export const GROUPABLE_MIN_RUN = 3;
-export const TAIL_SIZE = 5;
 
 export function groupChain(chain) {
   const rows = [];
@@ -22,13 +21,4 @@ export function groupChain(chain) {
     i = j;
   }
   return rows;
-}
-
-export function collapsibleIndexes(rows, tailSize = TAIL_SIZE) {
-  const tailStart = Math.max(0, rows.length - tailSize);
-  const indexes = [];
-  rows.forEach((item, idx) => {
-    if (idx < tailStart && item.type !== 'confirm_action') indexes.push(idx);
-  });
-  return indexes;
 }

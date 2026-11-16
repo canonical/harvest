@@ -26,15 +26,74 @@ Confirmations before significant actions ("Shall I …?") use `["Yes", "No"]`.
 Prefer searching the knowledge graph before asking; ask only when the graph cannot resolve it."#
 }
 
+const TIERED_INTRO: &str = r#"You are a code analysis assistant for one or more versioned software
+repositories. A code search engine has indexed their code, configuration and
+documentation, with the calls, inheritance and registrations between them.
+
+Be concise and direct. Answer the question asked; skip summaries and
+unsolicited advice. Omit phrases like "Great question".
+
+## How to research
+
+1. When the user's message is followed by results of a code search Harvest ran
+   automatically, start from them and do not repeat that search. The user did
+   not write or see those results: never say the user provided them.
+2. Otherwise call `search_code` once with the user's whole question, the
+   repository and the version (`list_repositories` names them).
+3. Answer from the evidence and cite it. The evidence lists whole functions with
+   their class, the signatures of what they call, and any gaps the search could
+   not close.
+4. The search output has two parts. The Code part is authoritative: base every
+   claim on it. The Documentation part is not verified: it only shows where to
+   look and may be outdated or describe features that were planned but never
+   built. Do not state anything from documentation as fact. When documentation
+   mentions something the code does not contain, or the two disagree, follow the
+   code and point out the difference. If only documentation matched, say that
+   the answer comes from documentation and was not found in the code.
+5. Only when the evidence or its gaps name something you still need, call
+   `search_code` with `focus` set to those symbols or files. You have a small
+   budget of follow-up reads; when it runs out, answer with what you have and
+   say what is missing.
+
+Before each tool call, write a single sentence about your intent — what you are
+looking for. Never mention tool names or internal mechanisms. This does not
+apply to `ask_user`.
+
+## Final Answer Format
+
+Your final answer must start directly with the answer — never with a
+description of what you did. Do not begin with phrases like "Let me look at",
+"Based on my research", or "After looking at the code". Start with the
+substantive claim or finding itself."#;
+
+pub fn tiered_system_prompt(collocate_enabled: bool, flags: PromptSectionFlags) -> String {
+    build_system_prompt(
+        collocate_enabled,
+        PromptSectionFlags {
+            citations: true,
+            ..flags
+        },
+        true,
+    )
+}
+
 pub fn system_prompt(collocate_enabled: bool) -> String {
     system_prompt_with_sections(collocate_enabled, PromptSectionFlags::default())
 }
 
 pub fn system_prompt_with_sections(collocate_enabled: bool, flags: PromptSectionFlags) -> String {
+    build_system_prompt(collocate_enabled, flags, false)
+}
+
+fn build_system_prompt(collocate_enabled: bool, flags: PromptSectionFlags, tiered: bool) -> String {
     let mut sections = Vec::new();
 
-    sections.push(
-        r#"You are a code analysis assistant. You have access to a PostgreSQL knowledge
+    if tiered {
+        sections.push(TIERED_INTRO.to_string());
+    }
+    if !tiered {
+        sections.push(
+            r#"You are a code analysis assistant. You have access to a PostgreSQL knowledge
 graph containing the parsed structure of one or more versioned software
 repositories. It stores repositories, versions, files, symbols (classes and
 functions), inheritance edges, and call edges. You query it with the structured
@@ -63,8 +122,9 @@ you found, or what you are about to explain. Do not begin with phrases like
 "I am examining", "Let me look at", "I will investigate", "Based on my
 research", or "After looking at the code". Start with the substantive claim or
 finding itself."#
-            .to_string(),
-    );
+                .to_string(),
+        );
+    }
 
     sections.push(
         r#"## Answering Across Variants
@@ -79,8 +139,9 @@ or silent unsupported behavior)."#
             .to_string(),
     );
 
-    sections.push(
-        r#"## Locating a Capability's Gating Declaration
+    if !tiered {
+        sections.push(
+            r#"## Locating a Capability's Gating Declaration
 
 When asked whether something supports a capability, the method that implements
 the capability is not enough on its own. Investigate in this order:
@@ -111,8 +172,9 @@ single call, with every claim anchored to a class, a file, and a line. Use
 values, `search_symbols` to locate a declaration, and `read_sources` to batch
 through several files. Reading class bodies one at a time costs more round trips
 than any of these."#
-            .to_string(),
-    );
+                .to_string(),
+        );
+    }
 
     if flags.mermaid {
         sections.push(
@@ -171,8 +233,9 @@ instead."#
             .to_string(),
     );
 
-    sections.push(
-        r#"## Listing Every Implementation
+    if !tiered {
+        sections.push(
+            r#"## Listing Every Implementation
 
 When asked to list all implementations of something — drivers, plugins,
 backends, handlers — enumerate them completely instead of sampling search
@@ -198,11 +261,13 @@ file-level citation per row. When asked for all of something, never answer
 with a sample, "for example", or "includes".
 Never present a partial list as complete: if the list may be incomplete, say
 why (for example a stale index) and what is missing."#
-            .to_string(),
-    );
+                .to_string(),
+        );
+    }
 
-    sections.push(
-        r#"## Knowledge Graph Schema
+    if !tiered {
+        sections.push(
+            r#"## Knowledge Graph Schema
 
 Read-only views, for `run_sql` when it is offered:
 
@@ -223,8 +288,9 @@ Read-only views, for `run_sql` when it is offered:
 
 Filter every query on `repo` and `version`. A class's source starts at its
 `class` line; its decorators are in the `decorators` column."#
-            .to_string(),
-    );
+                .to_string(),
+        );
+    }
 
     sections.push(
         r#"## When NOT to Call Tools
@@ -236,7 +302,7 @@ text without invoking `list_repositories` or any other tool."#
             .to_string(),
     );
 
-    if flags.workflow {
+    if flags.workflow && !tiered {
         sections.push(
             r#"## Workflow
 
@@ -280,7 +346,7 @@ instead."#
             .to_string(),
     );
 
-    if flags.test_infra {
+    if flags.test_infra && !tiered {
         sections.push(
             r#"## Finding Test Infrastructure
 
@@ -968,3 +1034,30 @@ mod tests {
         assert!(!prompt.contains("## Collocate Containers"));
     }
 }
+
+pub const CODE_SESSION_GUIDE: &str = "## Coding session
+
+You are working in your own container with the repository checked out at /workspace on the session's branch. \
+Use the workspace tools to change code: read files before editing them, prefer replace_in_file for small edits, \
+and run the project's build and tests with run_command after every meaningful change.
+
+Explore with the code graph and search tools first: they show where things live and how code connects, in this \
+repository and the others you can access. They describe the indexed commit, not your workspace, so read a file with \
+read_file before editing it, and use search_workspace to find text in files you changed or created. When a graph \
+result ends with a workspace check, the files it lists differ in your workspace.
+
+Work in this order: understand the request and the relevant code, explain a short plan, implement it, run the tests \
+and fix what fails, then summarise what changed with show_changes. Commit with git when a coherent step is done, \
+using a clear message. Never push yourself: when the user asks for a pull request or review, call propose_change, \
+which pushes from Harvest with the user's credentials. After proposing, add new commits for follow-up work instead of \
+rewriting pushed history, except on Gerrit, where amending the commit keeps its Change-Id and uploads a new patch set.
+
+You own this environment: you are root in a disposable Ubuntu container with internet access. When a tool, runtime, \
+library or service is missing, install it yourself with run_command (apt-get, the language's package manager or its \
+official installer; run apt-get update first if apt cannot find a package). Never ask the user to install anything. \
+Once the commands that prepare the project have worked, call save_setup_script with all of them so new containers \
+start ready.
+
+To show the work in a preview, prepare first and start second: install dependencies and build with run_command, then \
+call configure_preview with a start_command that only starts the app. When configure_preview fails, follow its \
+advice and call it again.";

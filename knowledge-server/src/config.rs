@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Deserialize, Clone, Default)]
 pub struct SystemOneThresholds {
@@ -178,6 +178,8 @@ pub struct Config {
     #[serde(default)]
     pub lxd: Option<LxdConfig>,
     #[serde(default)]
+    pub code: CodeConfig,
+    #[serde(default)]
     pub collocate: Option<CollocateConfig>,
     #[serde(default)]
     pub security: SecurityConfig,
@@ -185,6 +187,107 @@ pub struct Config {
     pub semantic: SemanticConfig,
     #[serde(default)]
     pub cluster: ClusterConfig,
+    #[serde(default)]
+    pub search: SearchConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    #[default]
+    Loop,
+    Tiered,
+    Shadow,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct FastModelConfig {
+    pub provider_id: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+fn default_search_deadline_ms() -> u64 {
+    7_000
+}
+fn default_search_token_budget() -> usize {
+    8_000
+}
+fn default_search_tier3_turns() -> usize {
+    6
+}
+fn default_search_refresh_secs() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchConfig {
+    #[serde(default)]
+    pub engine: SearchMode,
+    #[serde(default = "default_search_deadline_ms")]
+    pub deadline_ms: u64,
+    #[serde(default = "default_search_token_budget")]
+    pub token_budget: usize,
+    #[serde(default)]
+    pub cache_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub fast_model: Option<FastModelConfig>,
+    #[serde(default = "default_search_tier3_turns")]
+    pub tier3_turns: usize,
+    #[serde(default)]
+    pub judge: bool,
+    #[serde(default)]
+    pub reranker: Option<PathBuf>,
+    #[serde(default)]
+    pub gate: Option<PathBuf>,
+    #[serde(default)]
+    pub warm: Vec<String>,
+    #[serde(default = "default_search_refresh_secs")]
+    pub refresh_secs: u64,
+    #[serde(default)]
+    pub enrich: bool,
+    #[serde(default = "default_search_max_followups")]
+    pub max_followups: usize,
+    #[serde(default = "default_true")]
+    pub prefetch: bool,
+    #[serde(default = "default_true")]
+    pub calibrate: bool,
+}
+
+fn default_search_max_followups() -> usize {
+    3
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        Self {
+            engine: SearchMode::default(),
+            deadline_ms: default_search_deadline_ms(),
+            token_budget: default_search_token_budget(),
+            cache_dir: None,
+            fast_model: None,
+            tier3_turns: default_search_tier3_turns(),
+            judge: false,
+            reranker: None,
+            gate: None,
+            warm: Vec::new(),
+            refresh_secs: default_search_refresh_secs(),
+            max_followups: default_search_max_followups(),
+            prefetch: true,
+            calibrate: true,
+            enrich: false,
+        }
+    }
+}
+
+impl SearchConfig {
+    pub fn warm_scopes(&self) -> Vec<(String, String)> {
+        self.warm
+            .iter()
+            .filter_map(|s| s.rsplit_once('@'))
+            .map(|(repo, version)| (repo.to_string(), version.to_string()))
+            .collect()
+    }
 }
 
 fn default_heartbeat_interval_ms() -> u64 {
@@ -551,6 +654,34 @@ pub struct LxdConfig {
     pub image_server: String,
     #[serde(default = "default_lxd_profile")]
     pub profile: String,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct CodeConfig {
+    pub pool_size: usize,
+    pub warm_days: u64,
+    pub idle_hours: u64,
+    pub max_preview_copies: usize,
+    pub reindex_hours: u64,
+    pub preview_domain: Option<String>,
+    pub preview_scheme: String,
+    pub preview_ttl_hours: u64,
+}
+
+impl Default for CodeConfig {
+    fn default() -> Self {
+        Self {
+            pool_size: 2,
+            warm_days: 7,
+            idle_hours: 24,
+            max_preview_copies: 5,
+            reindex_hours: 6,
+            preview_domain: None,
+            preview_scheme: "https".into(),
+            preview_ttl_hours: 24,
+        }
+    }
 }
 
 fn default_lxd_project() -> String {
@@ -2012,6 +2143,15 @@ mod tests {
 #[cfg(test)]
 mod cluster_config_tests {
     use super::*;
+
+    #[test]
+    fn code_settings_default_to_two_warm_containers_for_a_week() {
+        let config = with_sections("");
+        assert_eq!(config.code, CodeConfig::default());
+        let tuned = with_sections("[code]\npool_size = 1\n");
+        assert_eq!(tuned.code.pool_size, 1);
+        assert_eq!(tuned.code.warm_days, 7);
+    }
 
     fn with_sections(extra: &str) -> Config {
         let text = format!(

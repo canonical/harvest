@@ -550,11 +550,8 @@ mod tests {
     async fn a_turn_that_lost_its_lock_cannot_write() {
         let test_db = TestDb::new().await;
         let db = &test_db.db;
-        db.execute("INSERT INTO groups (id, name) VALUES ('g', 'g')", json!({}))
-            .await
-            .unwrap();
         db.execute(
-            "INSERT INTO projects (id, name, group_id, created_at) VALUES ('p', 'p', 'g', now())",
+            "INSERT INTO deploy_projects (id, name, created_at) VALUES ('p', 'p', now())",
             json!({}),
         )
         .await

@@ -1,4 +1,5 @@
 use harvest_db::Db;
+use knowledge_server::modes::Owner;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -226,21 +227,32 @@ fn deployments_app_with_llm(
     let skill_store = Arc::new(SkillStore::new(Arc::clone(&db)));
     let agent = Arc::new(Agent::new(Arc::clone(&llm), vec![], 2));
     let registry = MachineRegistry::new();
+    let toolbox = Arc::new(knowledge_server::toolsets::build_toolbox(
+        knowledge_server::toolsets::ToolboxDeps {
+            db: Arc::clone(&db),
+            semantic: None,
+            search: None,
+            skills: Arc::clone(&skill_store),
+            registry: Arc::clone(&registry),
+            lxd: None,
+            collocate: None,
+            collocate_registry:
+                knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
+            server_url: "http://localhost".into(),
+            code: None,
+        },
+    ));
     let builder = Arc::new(ProjectAgentBuilder {
         llm: Arc::clone(&llm),
         db: Arc::clone(&db),
         registry: Arc::clone(&registry),
-        skills: Arc::clone(&skill_store),
-        lxd: None,
         system_one: None,
-        collocate: None,
-        collocate_registry: knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
-        server_url: "http://localhost".into(),
         max_iterations: 5,
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last: 6,
         thresholds: None,
-        semantic: None,
+        search: None,
+        toolbox,
     });
     let project_state = Arc::new(ProjectState::new(
         Arc::clone(&db),
@@ -403,47 +415,17 @@ async fn make_user(db: &Db, email: &str, name: &str, role: &str) -> (String, Str
     (id, token)
 }
 
-async fn make_group(db: &Db, name: &str) -> String {
-    let id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    db.query(
-        "INSERT INTO groups (id, name, description, created_at) VALUES ($id, $name, '', $now)",
-        json!({"id":id,"name":name,"now":now}),
-    )
-    .await
-    .unwrap();
-    id
-}
-
-async fn join_group(db: &Db, user_id: &str, group_id: &str) {
-    db.query(
-        "INSERT INTO user_groups (user_id, group_id) VALUES ($uid, $gid) ON CONFLICT DO NOTHING",
-        json!({"uid":user_id,"gid":group_id}),
-    )
-    .await
-    .unwrap();
-}
-
-async fn seed_project(app: &Router, token: &str, group_id: &str, name: &str) -> String {
+async fn seed_project(app: &Router, token: &str, name: &str) -> String {
     let (_, body) = send(
         app.clone(),
-        req_post(
-            "/projects",
-            token,
-            json!({"name": name, "group_id": group_id}),
-        ),
+        req_post("/projects", token, json!({"name": name})),
     )
     .await;
     body["id"].as_str().unwrap().to_string()
 }
 
-async fn seed_project_without_deployment(
-    app: &Router,
-    token: &str,
-    group_id: &str,
-    name: &str,
-) -> String {
-    let project_id = seed_project(app, token, group_id, name).await;
+async fn seed_project_without_deployment(app: &Router, token: &str, name: &str) -> String {
+    let project_id = seed_project(app, token, name).await;
     let (status, deployment) = send(
         app.clone(),
         req_get(&format!("/projects/{project_id}/deployment"), token),
@@ -668,7 +650,7 @@ fn spawn_dag_fake_agent(
 async fn seed_terraform_artifact(db: &Db, project_id: &str, content: &str) -> String {
     let created = create_artifact(
         db,
-        project_id,
+        &Owner::Project(project_id.to_string()),
         ArtifactKind::Terraform,
         "Infra",
         content,
@@ -682,7 +664,7 @@ async fn seed_terraform_artifact(db: &Db, project_id: &str, content: &str) -> St
 async fn seed_bash_artifact(db: &Db, project_id: &str, content: &str) -> String {
     let created = create_artifact(
         db,
-        project_id,
+        &Owner::Project(project_id.to_string()),
         ArtifactKind::Bash,
         "Script",
         content,
@@ -699,9 +681,16 @@ async fn seed_bash_artifact_titled(
     title: &str,
     content: &str,
 ) -> String {
-    let created = create_artifact(db, project_id, ArtifactKind::Bash, title, content, "system")
-        .await
-        .unwrap();
+    let created = create_artifact(
+        db,
+        &Owner::Project(project_id.to_string()),
+        ArtifactKind::Bash,
+        title,
+        content,
+        "system",
+    )
+    .await
+    .unwrap();
     created["id"].as_str().unwrap().to_string()
 }
 
@@ -733,7 +722,7 @@ async fn link_terraform_bundle(db: &Db, deployment_id: &str, artifact_id: &str) 
 async fn seed_design_doc(db: &Db, project_id: &str, deployment_id: &str, content: &str) -> String {
     let created = create_artifact(
         db,
-        project_id,
+        &Owner::Project(project_id.to_string()),
         ArtifactKind::Markdown,
         "Design",
         content,
@@ -777,9 +766,7 @@ async fn create_deployment_raw(app: &Router, token: &str, project_id: &str, name
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_template_returns_201_and_is_listed() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
 
     let (status, body) = send(
@@ -799,15 +786,13 @@ async fn create_template_returns_201_and_is_listed() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn template_visible_from_two_different_projects_in_the_same_group() {
+async fn template_visible_from_two_different_projects() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
 
-    let pid1 = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
-    let pid2 = seed_project_without_deployment(&app, &tok, &gid, "Customer B").await;
+    let pid1 = seed_project_without_deployment(&app, &tok, "Customer A").await;
+    let pid2 = seed_project_without_deployment(&app, &tok, "Customer B").await;
 
     let (_, created) = send(
         app.clone(),
@@ -873,9 +858,7 @@ async fn template_visible_from_two_different_projects_in_the_same_group() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn update_template_replaces_content() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
 
     let (_, created) = send(
@@ -910,9 +893,7 @@ async fn update_template_replaces_content() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn delete_template_removes_it() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
 
     let (_, created) = send(
@@ -939,11 +920,9 @@ async fn delete_template_removes_it() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_deployment_without_template_creates_deployment() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, "Customer A").await;
 
     let (status, body) = send(
         app.clone(),
@@ -969,11 +948,9 @@ async fn create_deployment_without_template_creates_deployment() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_deployment_with_template_links_uses_template_edge() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, "Customer A").await;
 
     let (_, created_template) = send(
         app.clone(),
@@ -1017,11 +994,9 @@ async fn create_deployment_with_template_links_uses_template_edge() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_deployment_rejects_empty_name() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, "Customer A").await;
 
     let (status, _) = send(
         app,
@@ -1043,11 +1018,9 @@ async fn create_deployment_rejects_empty_name() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn a_project_lists_its_single_deployment() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, "Customer A").await;
 
     let (_, first) = send(
         app.clone(),
@@ -1088,11 +1061,9 @@ async fn a_project_lists_its_single_deployment() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn update_deployment_changes_environment_description() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, "Customer A").await;
 
     let (_, created) = send(
         app.clone(),
@@ -1125,11 +1096,9 @@ async fn update_deployment_changes_environment_description() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn delete_deployment_removes_deployment() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, "Customer A").await;
 
     let (_, created) = send(
         app.clone(),
@@ -1158,14 +1127,12 @@ async fn delete_deployment_removes_deployment() {
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
-async fn get_deployment_rejected_for_user_outside_the_project_group() {
+async fn get_deployment_rejected_for_user_outside_the_project() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, other_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project_without_deployment(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project_without_deployment(&app, &tok, "Customer A").await;
 
     let (_, created) = send(
         app.clone(),
@@ -1189,11 +1156,9 @@ async fn get_deployment_rejected_for_user_outside_the_project_group() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn record_run_and_update_state_no_ops_for_artifact_not_linked_to_a_deployment() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
 
     let new_state = record_run_and_update_state(
@@ -1218,11 +1183,9 @@ async fn record_run_and_update_state_no_ops_for_artifact_not_linked_to_a_deploym
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn record_run_and_update_state_covers_all_action_success_combinations() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -1263,11 +1226,9 @@ async fn record_run_and_update_state_covers_all_action_success_combinations() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn record_run_and_update_state_only_sets_last_applied_on_successful_apply() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -1328,11 +1289,9 @@ async fn record_run_and_update_state_only_sets_last_applied_on_successful_apply(
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn deploy_runs_apply_and_marks_infra_up() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -1364,11 +1323,9 @@ async fn deploy_runs_apply_and_marks_infra_up() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn redeploy_applies_directly_when_infra_is_already_clean() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -1410,11 +1367,9 @@ async fn redeploy_applies_directly_when_infra_is_already_clean() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn redeploy_destroys_first_when_infra_is_broken() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -1461,11 +1416,9 @@ async fn redeploy_destroys_first_when_infra_is_broken() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn redeploy_resets_to_none_when_broken_and_never_applied() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -1519,11 +1472,9 @@ async fn redeploy_resets_to_none_when_broken_and_never_applied() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn destroy_resets_to_none_when_broken_and_never_applied() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -1575,11 +1526,9 @@ async fn destroy_resets_to_none_when_broken_and_never_applied() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn destroy_rejected_when_nothing_was_ever_applied() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -1601,11 +1550,9 @@ async fn destroy_rejected_when_nothing_was_ever_applied() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn destroy_targets_the_last_applied_snapshot_not_unapplied_edits() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"content-A"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -1658,11 +1605,9 @@ async fn destroy_targets_the_last_applied_snapshot_not_unapplied_edits() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_deployment_runs_returns_runs_ordered_newest_first() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"v1"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -1707,14 +1652,12 @@ async fn list_deployment_runs_returns_runs_ordered_newest_first() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_environment_questions_returns_parsed_questions() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let llm = ScriptedLlm::new(vec![text_response(
         "Here are some questions:\n```json\n[{\"id\":\"racks\",\"text\":\"How many racks?\"}]\n```",
     )]);
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, body) = send(
@@ -1737,14 +1680,12 @@ async fn generate_environment_questions_returns_parsed_questions() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_environment_questions_returns_422_when_unparseable() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let llm = ScriptedLlm::new(vec![text_response(
         "Sorry, I don't understand the request.",
     )]);
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, _) = send(
@@ -1776,11 +1717,9 @@ fn design_generation_llm() -> Arc<ClosureLlm> {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_saves_the_document_deterministically() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, body) = send(
@@ -1801,11 +1740,9 @@ async fn generate_design_saves_the_document_deterministically() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_stream_returns_event_stream_content_type() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, ct, _body) = send_sse(
@@ -1825,13 +1762,11 @@ async fn generate_design_stream_returns_event_stream_content_type() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_stream_emits_text_delta_and_done_and_saves_document() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "s@x.com", "Sue", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "s@x.com", "Sue", "regular").await;
     let design_doc = DESIGN_DOC;
     let llm = ClosureLlm::new(move |_messages| text_response(design_doc));
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
-    let pid = seed_project(&app, &tok, &gid, "Customer S").await;
+    let pid = seed_project(&app, &tok, "Customer S").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, _ct, body) = send_sse(
@@ -1876,9 +1811,7 @@ async fn generate_design_stream_emits_text_delta_and_done_and_saves_document() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_stream_persists_synthesis_not_narration_when_max_iterations_hit() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "m@x.com", "Max", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "m@x.com", "Max", "regular").await;
     let synthesis_doc = "# Design\nFinal clean synthesis.";
     let llm = ClosureLlm::new(move |messages| {
         let rounds = tool_result_contents(messages).len();
@@ -1898,7 +1831,7 @@ async fn generate_design_stream_persists_synthesis_not_narration_when_max_iterat
         }
     });
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
-    let pid = seed_project(&app, &tok, &gid, "Customer M").await;
+    let pid = seed_project(&app, &tok, "Customer M").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, _ct, body) = send_sse(
@@ -1943,9 +1876,7 @@ async fn generate_design_stream_persists_synthesis_not_narration_when_max_iterat
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_stream_does_not_persist_generic_fallback_as_design_doc() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "z@x.com", "Zoe", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "z@x.com", "Zoe", "regular").await;
     let llm = ClosureLlm::new(move |_messages| LlmResponse::ToolCalls {
         calls: vec![ToolCall {
             id: Uuid::new_v4().to_string(),
@@ -1957,7 +1888,7 @@ async fn generate_design_stream_does_not_persist_generic_fallback_as_design_doc(
         usage: Usage::default(),
     });
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
-    let pid = seed_project(&app, &tok, &gid, "Customer Z").await;
+    let pid = seed_project(&app, &tok, "Customer Z").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, _ct, body) = send_sse(
@@ -1991,17 +1922,15 @@ async fn generate_design_stream_does_not_persist_generic_fallback_as_design_doc(
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_includes_selected_artifacts_and_links_template() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
     let setup_app = deployments_app(Arc::clone(&db)).0;
-    let pid = seed_project(&setup_app, &tok, &gid, "Customer B").await;
+    let pid = seed_project(&setup_app, &tok, "Customer B").await;
     let did = create_deployment_raw(&setup_app, &tok, &pid, "Rollout").await;
 
     let (tpl_status, tpl_body) = send(
         setup_app.clone(),
         req_post(
-            &format!("/groups/{gid}/templates"),
+            "/templates",
             &tok,
             json!({
                 "name": "Gateway", "description": "baseline rollout",
@@ -2015,7 +1944,7 @@ async fn generate_design_includes_selected_artifacts_and_links_template() {
 
     let a1 = create_artifact(
         &db,
-        &pid,
+        &Owner::Project(pid.clone()),
         ArtifactKind::Markdown,
         "Requirements",
         "We need 3 VMs across two zones",
@@ -2026,7 +1955,7 @@ async fn generate_design_includes_selected_artifacts_and_links_template() {
     let a1_id = a1["id"].as_str().unwrap().to_string();
     let a2 = create_artifact(
         &db,
-        &pid,
+        &Owner::Project(pid.clone()),
         ArtifactKind::Markdown,
         "Constraints",
         "No public IPs are allowed",
@@ -2079,17 +2008,15 @@ async fn generate_design_includes_selected_artifacts_and_links_template() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_ignores_artifacts_belonging_to_other_projects() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "c@x.com", "Carol", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "c@x.com", "Carol", "regular").await;
     let setup_app = deployments_app(Arc::clone(&db)).0;
-    let pid = seed_project(&setup_app, &tok, &gid, "Customer C").await;
+    let pid = seed_project(&setup_app, &tok, "Customer C").await;
     let did = create_deployment_raw(&setup_app, &tok, &pid, "Rollout").await;
-    let other_pid = seed_project(&setup_app, &tok, &gid, "Customer D").await;
+    let other_pid = seed_project(&setup_app, &tok, "Customer D").await;
 
     let own = create_artifact(
         &db,
-        &pid,
+        &Owner::Project(pid.clone()),
         ArtifactKind::Markdown,
         "Own",
         "OWN-MARKER-keep",
@@ -2100,7 +2027,7 @@ async fn generate_design_ignores_artifacts_belonging_to_other_projects() {
     let own_id = own["id"].as_str().unwrap().to_string();
     let foreign = create_artifact(
         &db,
-        &other_pid,
+        &Owner::Project(other_pid.clone()),
         ArtifactKind::Markdown,
         "Foreign",
         "FOREIGN-MARKER-leak",
@@ -2143,11 +2070,9 @@ async fn generate_design_ignores_artifacts_belonging_to_other_projects() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_decisions_requires_existing_design_doc() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, _) = send(
@@ -2166,11 +2091,9 @@ async fn generate_design_decisions_requires_existing_design_doc() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_design_decisions_returns_parsed_decisions() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     send(
         app.clone(),
@@ -2204,11 +2127,9 @@ async fn generate_design_decisions_returns_parsed_decisions() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn revise_design_requires_decisions_or_instructions() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, _) = send(
@@ -2227,11 +2148,9 @@ async fn revise_design_requires_decisions_or_instructions() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn revise_design_updates_existing_design_doc_in_place() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let (_, created) = send(
         app.clone(),
@@ -2309,11 +2228,9 @@ async fn get_artifact_updated_at(db: &Db, artifact_id: &str) -> String {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_design_pdf_returns_bad_request_without_design_doc() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let resp = app
@@ -2331,11 +2248,9 @@ async fn get_design_pdf_returns_bad_request_without_design_doc() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_design_pdf_serves_seeded_ready_cache_without_rerendering() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let design_id = seed_design_doc(&db, &pid, &did, "# Design\nContent.").await;
     let updated_at = get_artifact_updated_at(&db, &design_id).await;
@@ -2372,11 +2287,9 @@ async fn get_design_pdf_serves_seeded_ready_cache_without_rerendering() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn update_design_content_persists_new_content_and_marks_cache_stale() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let design_id = seed_design_doc(&db, &pid, &did, "# Design v1").await;
     let old_version = design_cache::DesignVersion {
@@ -2421,11 +2334,9 @@ async fn update_design_content_persists_new_content_and_marks_cache_stale() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_design_pdf_generates_and_caches_on_first_request() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), design_generation_llm());
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let design_id = seed_design_doc(&db, &pid, &did, "# Design\n\nSome content.").await;
 
@@ -2478,11 +2389,9 @@ fn provision_generation_llm() -> Arc<ClosureLlm> {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_provision_requires_existing_design_doc() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, _) = send(
@@ -2501,11 +2410,9 @@ async fn generate_provision_requires_existing_design_doc() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_provision_creates_and_links_terraform_bundle() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), provision_generation_llm());
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     seed_design_doc(&db, &pid, &did, "# Design\nSingle VM.").await;
 
@@ -2527,11 +2434,9 @@ async fn generate_provision_creates_and_links_terraform_bundle() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_provision_stream_requires_existing_design_doc() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "ps@x.com", "Pete", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "ps@x.com", "Pete", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, _ct, _body) = send_sse(
@@ -2550,11 +2455,9 @@ async fn generate_provision_stream_requires_existing_design_doc() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_provision_stream_returns_event_stream_content_type() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "ps@x.com", "Pam", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "ps@x.com", "Pam", "regular").await;
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), provision_generation_llm());
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     seed_design_doc(&db, &pid, &did, "# Design\nSingle VM.").await;
 
@@ -2575,11 +2478,9 @@ async fn generate_provision_stream_returns_event_stream_content_type() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn generate_provision_stream_emits_text_delta_tool_events_and_done() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "ps2@x.com", "Pria", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "ps2@x.com", "Pria", "regular").await;
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), provision_generation_llm());
-    let pid = seed_project(&app, &tok, &gid, "Customer S").await;
+    let pid = seed_project(&app, &tok, "Customer S").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     seed_design_doc(&db, &pid, &did, "# Design\nSingle VM.").await;
 
@@ -2625,11 +2526,9 @@ async fn generate_provision_stream_emits_text_delta_tool_events_and_done() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_provision_change_requires_instructions_or_error_context() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, _) = send(
@@ -2648,11 +2547,9 @@ async fn propose_provision_change_requires_instructions_or_error_context() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_provision_change_requires_existing_bundle() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, _) = send(
@@ -2673,14 +2570,12 @@ async fn propose_provision_change_requires_existing_bundle() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_provision_change_does_not_modify_the_artifact() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let llm = ScriptedLlm::new(vec![text_response(
         "Here's a proposal:\n```json\n{\"main.tf\":\"resource \\\"y\\\" {}\"}\n```",
     )]);
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -2711,12 +2606,10 @@ async fn propose_provision_change_does_not_modify_the_artifact() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_provision_change_returns_422_when_unparseable() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let llm = ScriptedLlm::new(vec![text_response("I couldn't figure out a fix.")]);
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -2739,11 +2632,9 @@ async fn propose_provision_change_returns_422_when_unparseable() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn apply_provision_change_updates_the_artifact_content() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -2771,11 +2662,9 @@ async fn apply_provision_change_updates_the_artifact_content() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn apply_provision_change_rejects_unsafe_paths() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"resource \"x\" {}"}"#).await;
     link_terraform_bundle(&db, &did, &aid).await;
@@ -2798,14 +2687,12 @@ async fn apply_provision_change_rejects_unsafe_paths() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_provision_change_for_bash_loads_both_deploy_and_destroy() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let llm = ScriptedLlm::new(vec![text_response(
         "Here's the updated pair:\n```json\n{\"deploy-prep.sh\":\"#!/bin/bash\\necho new deploy\",\"destroy-prep.sh\":\"#!/bin/bash\\necho new destroy\"}\n```",
     )]);
     let (app, _registry) = deployments_app_with_llm(Arc::clone(&db), llm);
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let deploy_aid =
@@ -2847,11 +2734,9 @@ async fn propose_provision_change_for_bash_loads_both_deploy_and_destroy() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn apply_provision_change_for_bash_updates_both_scripts() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let deploy_aid =
@@ -2894,11 +2779,9 @@ async fn apply_provision_change_for_bash_updates_both_scripts() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn apply_provision_change_for_bash_creates_missing_destroy_script() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let deploy_aid =
@@ -2939,11 +2822,9 @@ async fn apply_provision_change_for_bash_creates_missing_destroy_script() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn run_dag_executes_steps_in_topological_order_and_sets_infra_up() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let bash_aid = seed_bash_artifact(&db, &pid, "echo prep").await;
     let bash_destroy_aid = seed_bash_artifact(&db, &pid, "echo teardown").await;
@@ -2997,11 +2878,9 @@ async fn run_dag_executes_steps_in_topological_order_and_sets_infra_up() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn run_dag_halts_downstream_on_failure_and_sets_infra_broken() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let bash_aid = seed_bash_artifact(&db, &pid, "echo prep").await;
     let bash_destroy_aid = seed_bash_artifact(&db, &pid, "echo teardown").await;
@@ -3054,11 +2933,9 @@ async fn run_dag_halts_downstream_on_failure_and_sets_infra_broken() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn run_dag_400_when_no_plan_set() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let agent_id = "agent-1";
@@ -3083,11 +2960,9 @@ async fn run_dag_400_when_no_plan_set() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn run_dag_404_when_agent_not_in_project() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let bash_aid = seed_bash_artifact(&db, &pid, "echo hi").await;
     let bash_destroy_aid = seed_bash_artifact(&db, &pid, "echo bye").await;
@@ -3120,11 +2995,9 @@ async fn run_dag_404_when_agent_not_in_project() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn run_destroy_dag_executes_destroy_steps_and_sets_infra_destroyed() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let bash_deploy_aid = seed_bash_artifact(&db, &pid, "echo deploy").await;
     let bash_destroy_aid = seed_bash_artifact(&db, &pid, "echo destroy").await;
@@ -3190,11 +3063,9 @@ async fn run_destroy_dag_executes_destroy_steps_and_sets_infra_destroyed() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn run_destroy_dag_400_when_no_destroy_steps() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let _bash_aid = seed_bash_artifact(&db, &pid, "echo hi").await;
 
@@ -3220,11 +3091,9 @@ async fn run_destroy_dag_400_when_no_destroy_steps() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn deploy_destroy_deploy_cycle_is_idempotent() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let bash_deploy_aid = seed_bash_artifact(&db, &pid, "echo deploy").await;
     let bash_destroy_aid = seed_bash_artifact(&db, &pid, "echo destroy").await;
@@ -3292,11 +3161,9 @@ async fn deploy_destroy_deploy_cycle_is_idempotent() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_rejects_bash_run_without_destroy() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let bash_aid = seed_bash_artifact(&db, &pid, "echo hi").await;
 
@@ -3320,11 +3187,9 @@ async fn set_execution_plan_rejects_bash_run_without_destroy() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_accepts_bash_run_with_bash_destroy() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let bash_deploy_aid = seed_bash_artifact(&db, &pid, "echo deploy").await;
     let bash_destroy_aid = seed_bash_artifact(&db, &pid, "echo destroy").await;
@@ -3354,11 +3219,9 @@ async fn set_execution_plan_accepts_bash_run_with_bash_destroy() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn add_context_artifact_creates_and_links_and_lists_in_deployment() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, body) = send(
@@ -3384,11 +3247,9 @@ async fn add_context_artifact_creates_and_links_and_lists_in_deployment() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn add_context_artifact_rejects_empty_title() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, body) = send(
@@ -3410,11 +3271,9 @@ async fn add_context_artifact_rejects_empty_title() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn add_context_artifact_rejects_unknown_kind() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, body) = send(
@@ -3436,11 +3295,9 @@ async fn add_context_artifact_rejects_unknown_kind() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn add_context_artifact_accepts_bash_kind() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, body) = send(
@@ -3462,11 +3319,9 @@ async fn add_context_artifact_accepts_bash_kind() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn link_context_artifact_links_existing_project_artifact() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"..."}"#).await;
 
@@ -3490,12 +3345,10 @@ async fn link_context_artifact_links_existing_project_artifact() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn link_context_artifact_rejects_artifact_from_other_project() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
-    let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
+    let pid_a = seed_project(&app, &tok, "Project A").await;
+    let pid_b = seed_project(&app, &tok, "Project B").await;
     let did_b = create_deployment_raw(&app, &tok, &pid_b, "Rollout B").await;
     let aid = seed_terraform_artifact(&db, &pid_a, r#"{"main.tf":"..."}"#).await;
 
@@ -3517,11 +3370,9 @@ async fn link_context_artifact_rejects_artifact_from_other_project() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn remove_context_artifact_unlinks_and_drops_from_list() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (_, body) = send(
@@ -3564,11 +3415,9 @@ async fn remove_context_artifact_unlinks_and_drops_from_list() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn remove_context_artifact_404_when_not_linked() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, _body) = send(
@@ -3588,11 +3437,9 @@ async fn remove_context_artifact_404_when_not_linked() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_artifact_change_creates_pending_proposal_targeting_artifact() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"old"}"#).await;
 
@@ -3615,11 +3462,9 @@ async fn propose_artifact_change_creates_pending_proposal_targeting_artifact() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_artifact_change_rejects_missing_explanation() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, body) = send(
@@ -3642,12 +3487,10 @@ async fn propose_artifact_change_rejects_missing_explanation() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn propose_artifact_change_rejects_artifact_from_other_project() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
-    let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
+    let pid_a = seed_project(&app, &tok, "Project A").await;
+    let pid_b = seed_project(&app, &tok, "Project B").await;
     let did_b = create_deployment_raw(&app, &tok, &pid_b, "Rollout B").await;
     let aid = seed_terraform_artifact(&db, &pid_a, r#"{"main.tf":"..."}"#).await;
 
@@ -3670,11 +3513,9 @@ async fn propose_artifact_change_rejects_artifact_from_other_project() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_proposals_returns_all_proposals_newest_first() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"old"}"#).await;
 
@@ -3706,11 +3547,9 @@ async fn list_proposals_returns_all_proposals_newest_first() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn approve_proposal_applies_content_to_target_artifact_and_sets_approved() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"old"}"#).await;
 
@@ -3746,11 +3585,9 @@ async fn approve_proposal_applies_content_to_target_artifact_and_sets_approved()
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn approve_proposal_allows_editing_content_before_applying() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"old"}"#).await;
 
@@ -3787,11 +3624,9 @@ async fn approve_proposal_allows_editing_content_before_applying() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn approve_proposal_rejects_already_approved_proposal() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"old"}"#).await;
 
@@ -3832,11 +3667,9 @@ async fn approve_proposal_rejects_already_approved_proposal() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn discard_proposal_sets_status_discarded_without_applying() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"old"}"#).await;
 
@@ -3884,11 +3717,9 @@ async fn discard_proposal_sets_status_discarded_without_applying() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn discard_proposal_404_for_nonexistent() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, _body) = send(
@@ -3909,11 +3740,9 @@ async fn discard_proposal_404_for_nonexistent() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_creates_deploy_and_destroy_steps_with_dependencies() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let bash_aid = seed_bash_artifact(&db, &pid, "#!/usr/bin/env bash\necho prep").await;
     let tf_aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"..."}"#).await;
@@ -3951,11 +3780,9 @@ async fn set_execution_plan_creates_deploy_and_destroy_steps_with_dependencies()
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_execution_plan_returns_stored_plan() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let bash_aid = seed_bash_artifact(&db, &pid, "echo hi").await;
     let tf_aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"..."}"#).await;
@@ -3999,12 +3826,10 @@ async fn get_execution_plan_returns_stored_plan() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn creating_a_project_auto_creates_a_deployment() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "p1@x.com", "Admin", "admin").await;
-    let gid = make_group(&db, "G1").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "p1@x.com", "Admin", "admin").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
 
-    let pid = seed_project(&app, &tok, &gid, "ProjectOne").await;
+    let pid = seed_project(&app, &tok, "ProjectOne").await;
 
     assert_eq!(count_rows(&db, "deployments").await, 1);
     let _ = pid;
@@ -4014,12 +3839,10 @@ async fn creating_a_project_auto_creates_a_deployment() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_project_deployment_returns_the_auto_created_deployment() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "p2@x.com", "Admin", "admin").await;
-    let gid = make_group(&db, "G2").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "p2@x.com", "Admin", "admin").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
 
-    let pid = seed_project(&app, &tok, &gid, "ProjectTwo").await;
+    let pid = seed_project(&app, &tok, "ProjectTwo").await;
 
     let (status, body) = send(
         app.clone(),
@@ -4035,12 +3858,10 @@ async fn get_project_deployment_returns_the_auto_created_deployment() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_deployment_is_rejected_when_one_already_exists() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "p3@x.com", "Admin", "admin").await;
-    let gid = make_group(&db, "G3").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "p3@x.com", "Admin", "admin").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
 
-    let pid = seed_project(&app, &tok, &gid, "ProjectThree").await;
+    let pid = seed_project(&app, &tok, "ProjectThree").await;
 
     let (status, _body) = send(
         app.clone(),
@@ -4059,12 +3880,10 @@ async fn create_deployment_is_rejected_when_one_already_exists() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_deployments_returns_exactly_one_for_a_project() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "p4@x.com", "Admin", "admin").await;
-    let gid = make_group(&db, "G4").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "p4@x.com", "Admin", "admin").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
 
-    let pid = seed_project(&app, &tok, &gid, "ProjectFour").await;
+    let pid = seed_project(&app, &tok, "ProjectFour").await;
 
     let (status, body) = send(
         app.clone(),
@@ -4081,11 +3900,9 @@ async fn list_deployments_returns_exactly_one_for_a_project() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_execution_plan_returns_empty_plan_when_none_set() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
 
     let (status, body) = send(
@@ -4105,11 +3922,9 @@ async fn get_execution_plan_returns_empty_plan_when_none_set() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_rejects_invalid_action_for_artifact_kind() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let bash_aid = seed_bash_artifact(&db, &pid, "echo hi").await;
 
@@ -4133,11 +3948,9 @@ async fn set_execution_plan_rejects_invalid_action_for_artifact_kind() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_rejects_cycle_in_deploy_steps() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid_a = seed_bash_artifact(&db, &pid, "echo a").await;
     let aid_b = seed_bash_artifact(&db, &pid, "echo b").await;
@@ -4165,11 +3978,9 @@ async fn set_execution_plan_rejects_cycle_in_deploy_steps() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_rejects_apply_without_destroy_coverage() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let tf_aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"..."}"#).await;
 
@@ -4196,11 +4007,9 @@ async fn set_execution_plan_rejects_apply_without_destroy_coverage() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_accepts_apply_with_matching_destroy() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let tf_aid = seed_terraform_artifact(&db, &pid, r#"{"main.tf":"..."}"#).await;
 
@@ -4222,12 +4031,10 @@ async fn set_execution_plan_accepts_apply_with_matching_destroy() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_rejects_artifact_from_other_project() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
-    let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
+    let pid_a = seed_project(&app, &tok, "Project A").await;
+    let pid_b = seed_project(&app, &tok, "Project B").await;
     let did_b = create_deployment_raw(&app, &tok, &pid_b, "Rollout B").await;
     let aid = seed_bash_artifact(&db, &pid_a, "echo hi").await;
 
@@ -4250,11 +4057,9 @@ async fn set_execution_plan_rejects_artifact_from_other_project() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn set_execution_plan_overwrites_previous_plan() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (app, _registry) = deployments_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Customer A").await;
+    let pid = seed_project(&app, &tok, "Customer A").await;
     let did = create_deployment_raw(&app, &tok, &pid, "Rollout").await;
     let aid = seed_bash_artifact(&db, &pid, "echo hi").await;
     let destroy_aid = seed_bash_artifact(&db, &pid, "echo bye").await;

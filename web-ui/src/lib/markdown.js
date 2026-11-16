@@ -130,6 +130,12 @@ export function buildCitationIndex(sources) {
   return index;
 }
 
+const OPEN_BRACKET_AT_END_RE = /\[[^\[\]\n]*$/;
+
+export function withoutOpenBracket(text) {
+  return text.replace(OPEN_BRACKET_AT_END_RE, '');
+}
+
 export function parseCitations(text) {
   const seen = new Set();
   const results = [];
@@ -141,7 +147,7 @@ export function parseCitations(text) {
       const [full, repo, version, file, lineStr] = m;
       if (seen.has(full)) continue;
       seen.add(full);
-      results.push({ repo, version, file, line: parseInt(lineStr, 10) });
+      results.push({ repo, version, file, line: lineStr ? parseInt(lineStr, 10) : 0 });
     }
   }
 

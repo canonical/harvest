@@ -282,7 +282,6 @@ impl Tool for LinkDeploymentArtifactTool {
 
 pub struct UpdateProductTemplateTool {
     pub db: Arc<Db>,
-    pub group_id: String,
     pub deployment_id: String,
 }
 

@@ -38,6 +38,8 @@ pub enum InFlightEvent {
     ToolResult {
         name: String,
         preview: String,
+        #[serde(default)]
+        view: Option<Value>,
     },
 }
 
@@ -87,10 +89,15 @@ pub fn record_in_flight(
                 hostname,
             });
         }
-        AgentEvent::ToolResult { name, preview } => {
+        AgentEvent::ToolResult {
+            name,
+            preview,
+            view,
+        } => {
             state.events.push(InFlightEvent::ToolResult {
                 name: name.clone(),
                 preview: preview.clone(),
+                view: view.clone(),
             });
         }
         _ => {}
@@ -126,9 +133,13 @@ pub fn build_catchup_events(cid: &str, state: &InFlightState) -> Vec<Value> {
                 }
                 v
             }
-            InFlightEvent::ToolResult { name, preview } => json!({
+            InFlightEvent::ToolResult {
+                name,
+                preview,
+                view,
+            } => json!({
                 "type": "tool_result", "conv_id": cid,
-                "name": name, "preview": preview,
+                "name": name, "preview": preview, "view": view,
             }),
         })
         .collect()
@@ -547,6 +558,7 @@ impl ProjectLive {
                     query: text("query"),
                     attachments: row["attachments"].as_array().map_or(&[], Vec::as_slice),
                     partial_answer: String::new(),
+                    chain: Vec::new(),
                 })
                 .await;
             }
@@ -597,6 +609,7 @@ impl ProjectLive {
                     query: &turn.state.query,
                     attachments: &turn.state.attachments,
                     partial_answer: partial_answer(&turn.state),
+                    chain: crate::projects::interruption::chain_of(&turn.state),
                 })
                 .await;
             }

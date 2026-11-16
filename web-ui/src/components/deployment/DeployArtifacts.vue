@@ -119,42 +119,40 @@
       />
     </template>
 
-    <div v-if="proposeModalOpen" class="modal" @click.self="closeProposeModal">
-      <div class="modal-content" data-testid="propose-change-modal">
-        <button class="modal-close" type="button" @click="closeProposeModal">✕</button>
-        <h3>Propose a change</h3>
-        <p class="modal-lede">Describe the changes you'd like to make to the deployment artifacts. Any artifact can be modified or created.</p>
-        <div class="form-group">
-          <label for="propose-change-prompt">Change description</label>
-          <textarea
-            id="propose-change-prompt"
-            v-model="proposePrompt"
-            rows="8"
-            data-testid="propose-change-prompt"
-            placeholder="Describe what you'd like to change"
-          />
-        </div>
-        <div v-if="proposeError" class="p-notification--negative">
-          <div class="p-notification__content">
-            <p class="p-notification__message">{{ proposeError }}</p>
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="closeProposeModal">Cancel</button>
-          <button
-            class="p-button--positive is-dense"
-            type="button"
-            data-testid="submit-propose-change-btn"
-            :disabled="!proposePrompt.trim() || proposalProposing"
-            @click="submitProposal"
-          >{{ proposalProposing ? 'Proposing…' : 'Propose' }}</button>
+    <AppModal v-if="proposeModalOpen" data-testid="propose-change-modal" @close="closeProposeModal">
+      <h2>Propose a change</h2>
+      <p class="modal-lede">Describe the changes you'd like to make to the deployment artifacts. Any artifact can be modified or created.</p>
+      <div class="form-group">
+        <label for="propose-change-prompt">Change description</label>
+        <textarea
+          id="propose-change-prompt"
+          v-model="proposePrompt"
+          rows="8"
+          data-testid="propose-change-prompt"
+          placeholder="Describe what you'd like to change"
+        />
+      </div>
+      <div v-if="proposeError" class="p-notification--negative">
+        <div class="p-notification__content">
+          <p class="p-notification__message">{{ proposeError }}</p>
         </div>
       </div>
-    </div>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="closeProposeModal">Cancel</button>
+        <button
+          class="p-button--positive is-dense"
+          type="button"
+          data-testid="submit-propose-change-btn"
+          :disabled="!proposePrompt.trim() || proposalProposing"
+          @click="submitProposal"
+        >{{ proposalProposing ? 'Proposing…' : 'Propose' }}</button>
+      </div>
+    </AppModal>
   </div>
 </template>
 
 <script setup>
+import AppModal from '../ui/AppModal.vue';
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import ArtifactEditor from './ArtifactEditor.vue';
 import AddArtifactModal from './AddArtifactModal.vue';

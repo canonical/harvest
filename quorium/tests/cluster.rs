@@ -55,6 +55,10 @@ fn member(id: &str) -> MemberRecord {
         version: "test".into(),
         draining: false,
         joined_at_ms: 0,
+        features: quorium::state::FEATURES
+            .iter()
+            .map(|f| f.to_string())
+            .collect(),
     }
 }
 
@@ -385,4 +389,74 @@ async fn a_voter_whose_server_goes_away_is_replaced_by_a_learner() {
     for server in servers {
         server.stop().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leases_are_granted_once_and_replicate_to_every_server() {
+    let servers = three_voters().await;
+    for id in ["a", "b"] {
+        servers[0]
+            .quorium
+            .write(Command::Register { member: member(id) })
+            .await
+            .unwrap();
+    }
+    let follower = servers
+        .iter()
+        .find(|s| !s.quorium.is_leader())
+        .expect("a follower");
+    let token = follower
+        .quorium
+        .try_acquire_lease("job:x", "a")
+        .await
+        .unwrap()
+        .expect("granted through the leader");
+    assert_eq!(
+        servers[0]
+            .quorium
+            .try_acquire_lease("job:x", "b")
+            .await
+            .unwrap(),
+        None
+    );
+    eventually("lease replication", Duration::from_secs(5), || {
+        servers
+            .iter()
+            .all(|s| s.quorium.lease("job:x").is_some_and(|l| l.token == token))
+    })
+    .await;
+    follower
+        .quorium
+        .release_lease("job:x", "a", token)
+        .await
+        .unwrap();
+    let next = servers[0]
+        .quorium
+        .try_acquire_lease("job:x", "b")
+        .await
+        .unwrap()
+        .expect("free again after release");
+    assert!(next > token);
+    for server in servers {
+        server.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn leases_wait_until_every_member_supports_them() {
+    let server = Server::start().await;
+    server.quorium.initialize().await.unwrap();
+    let mut old = member("old");
+    old.features.clear();
+    server
+        .quorium
+        .write(Command::Register { member: old })
+        .await
+        .unwrap();
+    assert!(server
+        .quorium
+        .try_acquire_lease("job:x", "old")
+        .await
+        .is_err());
+    server.stop().await;
 }

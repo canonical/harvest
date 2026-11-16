@@ -137,6 +137,10 @@ impl ToSql for JsonParam<'_> {
             Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN => {
                 as_text(v).to_sql(ty, out)
             }
+            ref other if other.name() == "vector" => {
+                write_vector(&as_vector(v)?, out)?;
+                Ok(IsNull::No)
+            }
             ref other => Err(format!("unsupported parameter type {other}").into()),
         }
     }
@@ -200,6 +204,31 @@ fn as_array(v: &Value) -> Result<&Vec<Value>, BoxError> {
         .ok_or_else(|| format!("expected an array, got {v}").into())
 }
 
+pub fn as_vector(v: &Value) -> Result<Vec<f32>, BoxError> {
+    match v {
+        Value::Array(items) => items.iter().map(|x| Ok(as_f64(x)? as f32)).collect(),
+        Value::String(s) => s
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .filter(|part| !part.trim().is_empty())
+            .map(|part| Ok(part.trim().parse::<f32>()?))
+            .collect(),
+        other => Err(format!("expected a vector, got {other}").into()),
+    }
+}
+
+fn write_vector(values: &[f32], out: &mut BytesMut) -> Result<(), BoxError> {
+    let dimensions = i16::try_from(values.len())?;
+    out.extend_from_slice(&dimensions.to_be_bytes());
+    out.extend_from_slice(&0i16.to_be_bytes());
+    for value in values {
+        out.extend_from_slice(&value.to_be_bytes());
+    }
+    Ok(())
+}
+
 fn as_text_vec(v: &Value) -> Result<Vec<String>, BoxError> {
     Ok(as_array(v)?.iter().map(as_text).collect())
 }
@@ -239,6 +268,24 @@ mod tests {
         let (sql, values) = bind_named("SELECT $1", &json!({})).unwrap();
         assert_eq!(sql, "SELECT $1");
         assert!(values.is_empty());
+    }
+
+    #[test]
+    fn vectors_parse_from_arrays_and_pgvector_text() {
+        assert_eq!(super::as_vector(&json!([1, 0.5])).unwrap(), vec![1.0, 0.5]);
+        assert_eq!(
+            super::as_vector(&json!("[1, 0.5]")).unwrap(),
+            vec![1.0, 0.5]
+        );
+        assert!(super::as_vector(&json!("[]")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn vectors_encode_in_pgvector_binary_format() {
+        let mut out = bytes::BytesMut::new();
+        super::write_vector(&[1.0, 2.0], &mut out).unwrap();
+        assert_eq!(&out[..4], &[0, 2, 0, 0]);
+        assert_eq!(&out[4..8], &1.0f32.to_be_bytes());
     }
 
     #[test]

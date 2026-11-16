@@ -406,3 +406,41 @@ sudo snap restart harvest.ui
 ```
 
 For HTTPS, place a reverse proxy (nginx, Caddy, Traefik) in front of port 3000. Set `agents.public-url` to the public HTTPS address so that remote agent install scripts use the correct callback URL.
+
+## Web previews of coding sessions
+
+Code mode serves each web preview at its own address, `p-<preview id>.<preview domain>`, so previewed apps run at `/` exactly as they do locally and their code cannot reach Harvest with the viewer's login. Web previews stay off until a preview domain is set; API and command-line previews work without one.
+
+```toml
+[code]
+preview_domain = "preview.harvest.example.com"
+preview_scheme = "https"
+```
+
+1. Point a wildcard DNS record, `*.preview.harvest.example.com`, at the reverse proxy, and give it a wildcard certificate.
+2. Proxy every request for those hosts to the Harvest server unchanged, keeping the `Host` header and forwarding websocket upgrades (live reload in dev servers uses them). With nginx:
+
+```nginx
+map $http_upgrade $harvest_preview_connection {
+    default upgrade;
+    ''      '';
+}
+
+server {
+    listen 443 ssl;
+    server_name "~^p-[0-9a-f]{32}\.preview\.";
+    client_max_body_size 64m;
+
+    location / {
+        proxy_pass         http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header   Host       $host;
+        proxy_set_header   Upgrade    $http_upgrade;
+        proxy_set_header   Connection $harvest_preview_connection;
+        proxy_buffering    off;
+        proxy_read_timeout 3600s;
+    }
+}
+```
+
+Without a domain of your own, a wildcard DNS service such as sslip.io works for testing: `preview_domain = "preview.10-1-2-3.sslip.io"` resolves every preview host to `10.1.2.3`. Preview host names are then looked up through that public service.

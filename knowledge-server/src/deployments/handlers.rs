@@ -1,3 +1,5 @@
+use crate::modes::Space;
+use crate::toolsets::TurnContext;
 use axum::{
     body::Body,
     extract::{Extension, Path, Query, State},
@@ -45,28 +47,6 @@ pub(crate) type ApiError = (StatusCode, Json<Value>);
 
 pub(crate) fn err(status: StatusCode, msg: &str) -> ApiError {
     (status, Json(json!({ "error": msg })))
-}
-
-pub async fn require_group_access(
-    db: &Db,
-    user_id: &str,
-    user_role: &str,
-    group_id: &str,
-) -> Result<Value, ApiError> {
-    let rows = db
-        .query(
-            "SELECT g.id, g.name FROM groups g
-         WHERE g.id = $gid
-           AND ($role = 'admin' OR EXISTS (
-                 SELECT 1 FROM user_groups ug WHERE ug.user_id = $uid AND ug.group_id = g.id))",
-            json!({ "gid": group_id, "uid": user_id, "role": user_role }),
-        )
-        .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-
-    rows.into_iter()
-        .next()
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))
 }
 
 pub async fn list_templates(
@@ -1102,7 +1082,6 @@ pub async fn list_deployment_runs(
 async fn build_deployment_agent(
     state: &ProjectState,
     project_id: &str,
-    group_id: &str,
     deployment_id: &str,
     user_sub: &str,
 ) -> Result<Arc<Agent>, ApiError> {
@@ -1117,22 +1096,15 @@ async fn build_deployment_agent(
         user_sub,
     )
     .await;
-    Ok(
-        if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-            state.agent_builder.build_for_deployment(
-                project_id.to_string(),
-                group_id.to_string(),
-                &ctx,
-            )
-        } else {
-            state.agent_builder.build_for_deployment_with_llm(
-                project_id.to_string(),
-                group_id.to_string(),
-                &ctx,
-                user_llm,
-            )
-        },
+    let turn = TurnContext::load(
+        &state.db,
+        user_sub,
+        Space::deploy_project(project_id),
+        String::new(),
+        user_llm,
     )
+    .await;
+    Ok(state.agent_builder.deployment_agent(&turn, &ctx))
 }
 
 async fn build_deployment_agent_text_only(
@@ -1152,15 +1124,7 @@ async fn build_deployment_agent_text_only(
         user_sub,
     )
     .await;
-    Ok(
-        if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-            state.agent_builder.build_for_deployment_text_only(&ctx)
-        } else {
-            state
-                .agent_builder
-                .build_for_deployment_text_only_with_llm(&ctx, user_llm)
-        },
-    )
+    Ok(state.agent_builder.deployment_text_agent(user_llm, &ctx))
 }
 
 async fn build_deployment_agent_design(
@@ -1180,19 +1144,15 @@ async fn build_deployment_agent_design(
         user_sub,
     )
     .await;
-    Ok(
-        if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-            state
-                .agent_builder
-                .build_for_deployment_design(project_id.to_string(), &ctx)
-        } else {
-            state.agent_builder.build_for_deployment_design_with_llm(
-                project_id.to_string(),
-                &ctx,
-                user_llm,
-            )
-        },
+    let turn = TurnContext::load(
+        &state.db,
+        user_sub,
+        Space::deploy_project(project_id),
+        String::new(),
+        user_llm,
     )
+    .await;
+    Ok(state.agent_builder.deployment_design_agent(&turn, &ctx))
 }
 
 fn generation_failed(response_text: &str) -> ApiError {
@@ -1210,10 +1170,8 @@ pub async fn generate_environment_questions(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent =
-        build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let agent = build_deployment_agent(&state, &project_id, &deployment_id, &user.sub).await?;
 
     let prompt = "List 4 to 8 short, concrete questions a field engineer should answer about the \
                   customer's environment before designing this deployment, based on the product \
@@ -1526,7 +1484,7 @@ async fn save_design_doc(
 
     let created = create_artifact(
         db,
-        project_id,
+        &crate::modes::Owner::Project(project_id.to_string()),
         ArtifactKind::Markdown,
         &title,
         &content,
@@ -1569,10 +1527,8 @@ pub async fn generate_design_decisions(
     State(state): State<Arc<ProjectState>>,
     Path((project_id, deployment_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent =
-        build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let agent = build_deployment_agent(&state, &project_id, &deployment_id, &user.sub).await?;
 
     let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     let design_doc_id = deployment["design_doc"]["id"].as_str().ok_or_else(|| {
@@ -1633,10 +1589,8 @@ pub async fn revise_design(
             "decisions or instructions are required",
         ));
     }
-    let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent =
-        build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let agent = build_deployment_agent(&state, &project_id, &deployment_id, &user.sub).await?;
 
     let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     let design_doc_id = deployment["design_doc"]["id"]
@@ -2055,10 +2009,8 @@ async fn prepare_provision_generation(
     project_id: &str,
     deployment_id: &str,
 ) -> Result<(Arc<Agent>, String), ApiError> {
-    let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent =
-        build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let agent = build_deployment_agent(&state, &project_id, &deployment_id, &user.sub).await?;
 
     let deployment = fetch_deployment_detail(&state.db, &project_id, &deployment_id).await?;
     let design_doc_id = deployment["design_doc"]["id"].as_str().ok_or_else(|| {
@@ -2313,10 +2265,8 @@ async fn prepare_provision_proposal(
         ));
     }
 
-    let project = require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let group_id = project["group_id"].as_str().unwrap_or_default();
-    let agent =
-        build_deployment_agent(&state, &project_id, group_id, &deployment_id, &user.sub).await?;
+    require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
+    let agent = build_deployment_agent(&state, &project_id, &deployment_id, &user.sub).await?;
 
     let error_section = if error_context.is_empty() {
         String::new()
@@ -2594,7 +2544,7 @@ pub async fn apply_provision_change(
                 if destroy_artifact_id.is_empty() {
                     let created = create_artifact(
                         &state.db,
-                        &project_id,
+                        &crate::modes::Owner::Project(project_id.to_string()),
                         ArtifactKind::Bash,
                         &destroy_title,
                         content,
@@ -2686,7 +2636,7 @@ pub async fn apply_provision_change(
         if existing_id.is_empty() {
             let created = create_artifact(
                 &state.db,
-                &project_id,
+                &crate::modes::Owner::Project(project_id.to_string()),
                 ArtifactKind::Bash,
                 title,
                 content,
@@ -2778,9 +2728,16 @@ pub(crate) async fn add_context_artifact_core(
     kind: ArtifactKind,
     content: &str,
 ) -> Result<Value, ApiError> {
-    let created = create_artifact(db, project_id, kind, title, content, "user")
-        .await
-        .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
+    let created = create_artifact(
+        db,
+        &crate::modes::Owner::Project(project_id.to_string()),
+        kind,
+        title,
+        content,
+        "user",
+    )
+    .await
+    .map_err(|e| err(StatusCode::BAD_REQUEST, &e.to_string()))?;
     let artifact_id = created["id"].as_str().unwrap_or_default().to_string();
     db.query(
         "INSERT INTO deployment_context_artifacts (deployment_id, artifact_id)

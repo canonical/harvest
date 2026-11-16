@@ -1,11 +1,11 @@
 <template>
-  <template v-if="!auth.isLoggedIn && isAuthRoute">
+  <template v-if="route.meta.bare || (!auth.isLoggedIn && isAuthRoute)">
     <router-view />
   </template>
 
   <template v-else-if="auth.isLoggedIn">
     <div class="l-application">
-      <div class="l-navigation-bar">
+      <div class="l-navigation-bar" role="banner">
         <div class="p-panel is-dark nav-panel">
           <div class="p-panel__header">
             <a class="p-panel__logo nav-logo" href="#">
@@ -53,108 +53,50 @@
             </div>
 
             <div class="p-panel__content">
-              <div class="project-selector-section">
-                <span class="project-selector__label is-fading-when-collapsed">Project</span>
-                <button
-                  class="project-selector__toggle"
-                  type="button"
-                  :aria-expanded="projectDropdownOpen"
-                  @click="toggleProjectDropdown"
-                >
-                  <svg class="project-selector__folder-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-                  <span class="project-selector__name is-fading-when-collapsed">{{ project.selectedProject?.name ?? 'Select project' }}</span>
-                  <svg class="project-selector__chevron is-fading-when-collapsed" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 6 8 10 12 6"/></svg>
-                </button>
-                <div v-if="projectDropdownOpen" class="project-selector__dropdown">
-                  <input
-                    v-model="projectSearch"
-                    type="search"
-                    class="project-selector__search-input"
-                    placeholder="Search projects…"
-                    autocomplete="off"
-                    @click.stop
-                  />
-                  <div class="project-selector__list">
-                    <button
-                      v-for="p in filteredProjects"
-                      :key="p.id"
-                      type="button"
-                      class="project-selector__item"
-                      :class="{ 'is-selected': p.id === project.selectedProjectId }"
-                      @click="chooseProject(p)"
-                    >
-                      <span class="project-item__name">{{ p.name }}</span>
-                      <span v-if="p.group_name" class="p-chip project-item__group-badge">{{ p.group_name }}</span>
-                    </button>
-                    <p v-if="!filteredProjects.length" class="project-selector__empty"></p>
-                  </div>
-                  <div class="project-selector__footer">
-                    <button type="button" class="project-selector__new-btn" @click="openCreateProject">+ New project</button>
+              <ModeNavigation :mode="space.mode" @navigate="closeNavMobile">
+                <div v-if="usesProjects(space.mode)" class="project-selector-section">
+                  <span class="project-selector__label is-fading-when-collapsed">Project</span>
+                  <button
+                    class="project-selector__toggle"
+                    type="button"
+                    :aria-expanded="projectDropdownOpen"
+                    @click="toggleProjectDropdown"
+                  >
+                    <svg class="project-selector__folder-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    <span class="project-selector__name is-fading-when-collapsed">{{ project.selectedProject?.name ?? 'Select project' }}</span>
+                    <svg class="project-selector__chevron is-fading-when-collapsed" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 6 8 10 12 6"/></svg>
+                  </button>
+                  <div v-if="projectDropdownOpen" class="project-selector__dropdown">
+                    <input
+                      v-model="projectSearch"
+                      type="search"
+                      class="project-selector__search-input"
+                      placeholder="Search projects…"
+                      autocomplete="off"
+                      @click.stop
+                    />
+                    <div class="project-selector__list">
+                      <button
+                        v-for="p in filteredProjects"
+                        :key="p.id"
+                        type="button"
+                        class="project-selector__item"
+                        :class="{ 'is-selected': p.id === project.selectedProjectId }"
+                        @click="chooseProject(p)"
+                      >
+                        <span class="project-item__name">{{ p.name }}</span>
+                        <span v-if="p.role && p.role !== 'owner'" class="p-chip project-item__group-badge">{{ p.role }}</span>
+                      </button>
+                      <p v-if="!filteredProjects.length" class="project-selector__empty"></p>
+                    </div>
+                    <div class="project-selector__footer">
+                      <button type="button" class="project-selector__new-btn" @click="openCreateProject">+ New project</button>
+                    </div>
                   </div>
                 </div>
-              </div>
+              </ModeNavigation>
 
-              <div class="p-side-navigation--icons sidenav-top-container">
-                <ul class="p-side-navigation__list">
-                  <li class="p-side-navigation__item">
-                    <router-link to="/" exact-active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
-                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                      <span class="p-side-navigation__label">Chat</span>
-                    </router-link>
-                  </li>
-                  <li class="p-side-navigation__item">
-                    <router-link to="/design" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
-                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-                      <span class="p-side-navigation__label">Design</span>
-                    </router-link>
-                  </li>
-                  <li class="p-side-navigation__item">
-                    <router-link to="/deploy" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
-                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-                      <span class="p-side-navigation__label">Deploy</span>
-                    </router-link>
-                  </li>
-                  <li class="p-side-navigation__item">
-                    <router-link to="/artifacts" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
-                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg>
-                      <span class="p-side-navigation__label">Artifacts</span>
-                    </router-link>
-                  </li>
-                  <li class="p-side-navigation__item">
-                    <router-link to="/agents" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
-                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
-                      <span class="p-side-navigation__label">Agents</span>
-                    </router-link>
-                  </li>
-                  <li class="p-side-navigation__item">
-                    <router-link to="/skills" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
-                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.09 14c.18-.98.65-1.74 1.41-2.5A6 6 0 1 0 6 9c0 1.5.4 2.6 1.5 3.5A5.4 5.4 0 0 1 9 14"/></svg>
-                      <span class="p-side-navigation__label">Skills</span>
-                    </router-link>
-                  </li>
-                  <li class="sidenav-separator" role="separator" aria-hidden="true"></li>
-                  <li class="p-side-navigation__item">
-                    <router-link to="/repositories" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
-                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-                      <span class="p-side-navigation__label">Code repositories</span>
-                    </router-link>
-                  </li>
-                  <li class="p-side-navigation__item">
-                    <router-link to="/product-templates" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
-                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
-                      <span class="p-side-navigation__label">Product templates</span>
-                    </router-link>
-                  </li>
-                  <li v-if="auth.features.docs" class="p-side-navigation__item">
-                    <router-link to="/docs" active-class="is-active" class="p-side-navigation__link" @click="closeNavMobile">
-                      <svg class="p-side-navigation__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-                      <span class="p-side-navigation__label">Document</span>
-                    </router-link>
-                  </li>
-                </ul>
-              </div>
-
-              <div v-if="projectCostLabel" class="nav-cost-block is-fading-when-collapsed">
+              <div v-if="usesProjects(space.mode) && projectCostLabel" class="nav-cost-block is-fading-when-collapsed">
                 <div class="nav-cost-block__row">
                   <span class="nav-cost-block__label">Chat spend</span>
                   <span class="nav-cost-block__value">{{ chatCostLabel }}</span>
@@ -221,74 +163,70 @@
 
       <main class="l-main">
         <router-view v-slot="{ Component }" :key="routeViewKey">
-          <component :is="Component" :project-id="project.selectedProjectId ?? null" />
+          <component :is="Component" :project-id="space.projectId" :personal="space.isPersonal" />
         </router-view>
       </main>
     </div>
 
-    <div v-if="showCreateProject" class="modal" @click.self="showCreateProject = false">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="showCreateProject = false">✕</button>
-        <h3>New project</h3>
-        <div class="form-group">
-          <label for="new-proj-name">Name</label>
-          <input id="new-proj-name" v-model="newProjectName" type="text" placeholder="Project name" />
-        </div>
-        <div class="form-group">
-          <label>Description</label>
-          <input v-model="newProjectDesc" type="text" placeholder="Optional description" />
-        </div>
-        <div class="form-group">
-          <label>Group</label>
-          <select v-model="newProjectGroupId" :disabled="availableGroups.length === 0">
-            <option v-if="availableGroups.length === 0" value="" disabled>You are not a member of any group</option>
-            <option v-for="g in availableGroups" :key="g.id" :value="g.id">{{ g.name }}</option>
-          </select>
-        </div>
-        <p v-if="createProjectError" class="auth-error">{{ createProjectError }}</p>
-        <button
-          class="p-button--positive is-dense"
-          type="button"
-          :disabled="!newProjectName || !newProjectGroupId || creatingProject"
-          @click="submitCreateProject"
-        >Create</button>
+    <AppModal v-if="showCreateProject" @close="showCreateProject = false">
+      <h2>New project</h2>
+      <div class="form-group">
+        <label for="new-proj-name">Name</label>
+        <input id="new-proj-name" v-model="newProjectName" type="text" placeholder="Project name" />
       </div>
-    </div>
+      <div class="form-group">
+        <label>Description</label>
+        <input v-model="newProjectDesc" type="text" placeholder="Optional description" />
+      </div>
+      <p v-if="createProjectError" class="auth-error">{{ createProjectError }}</p>
+      <button
+        class="p-button--positive is-dense"
+        type="button"
+        :disabled="!newProjectName || creatingProject"
+        @click="submitCreateProject"
+      >Create</button>
+    </AppModal>
 
-    <div v-if="auth.apiKeyRequired && !auth.apiKeyDismissed && route.path !== '/settings'" class="modal">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="auth.apiKeyDismissed = true" style="display:none"></button>
-        <h3>API key required</h3>
-        <p class="modal-lede">
-          <template v-if="auth.apiKeyProviderName">An API key is required for <strong>{{ auth.apiKeyProviderName }}</strong>.</template>
-          <template v-else>An API key is required.</template>
-          Please go to <strong>Settings</strong> to add your API key.
-        </p>
-        <div class="modal-actions">
-          <button class="p-button--positive is-dense" type="button" @click="goToSettings">Go to Settings</button>
-        </div>
+    <AppModal v-if="auth.apiKeyRequired && !auth.apiKeyDismissed && route.path !== '/settings'" :dismissible="false">
+      <h2>API key required</h2>
+      <p class="modal-lede">
+        <template v-if="auth.apiKeyProviderName">An API key is required for <strong>{{ auth.apiKeyProviderName }}</strong>.</template>
+        <template v-else>An API key is required.</template>
+        Please go to <strong>Settings</strong> to add your API key.
+      </p>
+      <div class="modal-actions">
+        <button class="p-button--positive is-dense" type="button" @click="goToSettings">Go to Settings</button>
       </div>
-    </div>
+    </AppModal>
   </template>
 
   <template v-else>
     <router-view />
   </template>
+  <ConfirmHost />
+  <ToastHost />
 </template>
 
 <script setup>
+import AppModal from './components/ui/AppModal.vue';
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore }    from './stores/auth.js';
 import { useThemeStore }   from './stores/theme.js';
 import { useProjectStore } from './stores/project.js';
 import { useLlmStore }    from './stores/llm.js';
+import { useSpaceStore }  from './stores/space.js';
+import ModeNavigation from './components/nav/ModeNavigation.vue';
+import ConfirmHost from './components/ui/ConfirmHost.vue';
+import ToastHost from './components/ui/ToastHost.vue';
+import { usesProjects } from './lib/modes.js';
 import { fetchLlmProviders, fetchLlmUserKeys, fetchProjectCost } from './lib/api.js';
 
 const auth    = useAuthStore();
 const theme   = useThemeStore();
 const project = useProjectStore();
 const llm     = useLlmStore();
+const space   = useSpaceStore();
 const route   = useRoute();
 const router  = useRouter();
 
@@ -298,10 +236,8 @@ const projectSearch        = ref('');
 const showCreateProject    = ref(false);
 const newProjectName       = ref('');
 const newProjectDesc       = ref('');
-const newProjectGroupId    = ref('');
 const createProjectError   = ref('');
 const creatingProject      = ref(false);
-const availableGroups      = ref([]);
 const projectCostMicrousd  = ref(0);
 const chatCostMicrousd     = ref(0);
 const designCostMicrousd   = ref(0);
@@ -354,8 +290,10 @@ const isAuthRoute = computed(() =>
 );
 
 const routeViewKey = computed(() =>
-  route.meta.stableAcrossProjects ? route.path : (project.selectedProjectId ?? 'no-project')
+  route.meta.stableAcrossProjects ? route.path : (space.projectId ?? space.mode)
 );
+
+watch(() => route.meta.mode, (mode) => space.enter(mode), { immediate: true });
 
 const filteredProjects = computed(() => {
   const q = projectSearch.value.trim().toLowerCase();
@@ -363,7 +301,7 @@ const filteredProjects = computed(() => {
   return project.projects.filter(p =>
     p.name.toLowerCase().includes(q) ||
     (p.description ?? '').toLowerCase().includes(q) ||
-    (p.group_name  ?? '').toLowerCase().includes(q)
+    (p.role ?? '').toLowerCase().includes(q)
   );
 });
 
@@ -395,26 +333,22 @@ async function handleLogout() {
   router.push('/login');
 }
 
-async function openCreateProject() {
+function openCreateProject() {
   projectDropdownOpen.value = false;
   newProjectName.value  = '';
   newProjectDesc.value  = '';
-  newProjectGroupId.value = '';
   createProjectError.value = '';
-  availableGroups.value = await project.fetchGroups();
-  if (availableGroups.value.length === 1) newProjectGroupId.value = availableGroups.value[0].id;
   showCreateProject.value = true;
 }
 
 async function submitCreateProject() {
-  if (!newProjectName.value || !newProjectGroupId.value) return;
+  if (!newProjectName.value) return;
   creatingProject.value    = true;
   createProjectError.value = '';
   try {
     const created = await project.createProject({
       name:        newProjectName.value,
       description: newProjectDesc.value,
-      group_id:    newProjectGroupId.value,
     });
     showCreateProject.value = false;
     project.selectProjectById(created.id);
@@ -430,7 +364,7 @@ onMounted(async () => {
     auth.fetchConfig();
     if (!auth.isLoggedIn) {
       const user = await auth.fetchMe();
-      if (!user && !isAuthRoute.value) {
+      if (!user && !route.meta.public) {
         router.push('/login');
         return;
       }

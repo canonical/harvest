@@ -15,6 +15,7 @@ pub struct Interruption<'a> {
     pub query: &'a str,
     pub attachments: &'a [Value],
     pub partial_answer: String,
+    pub chain: Vec<Value>,
 }
 
 impl Interruption<'_> {
@@ -31,7 +32,7 @@ impl Interruption<'_> {
                 "text": self.partial_answer,
                 "status": STATUS,
                 "sources": [],
-                "chain": [],
+                "chain": self.chain,
             }),
         ]
     }
@@ -50,14 +51,45 @@ impl Interruption<'_> {
 }
 
 pub fn partial_answer(state: &InFlightState) -> String {
-    state
-        .events
+    let mut segments: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for event in &state.events {
+        match event {
+            InFlightEvent::TextDelta { text } => current.push_str(text),
+            _ if !current.trim().is_empty() => segments.push(std::mem::take(&mut current)),
+            _ => current.clear(),
+        }
+    }
+    if !current.trim().is_empty() {
+        segments.push(current);
+    }
+    segments
         .iter()
-        .filter_map(|event| match event {
-            InFlightEvent::TextDelta { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect()
+        .map(|s| s.trim())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+pub fn chain_of(state: &InFlightState) -> Vec<Value> {
+    let mut chain = crate::agent::chain::ChainBuilder::new();
+    for event in &state.events {
+        match event {
+            InFlightEvent::Thinking { text } => chain.thinking(text),
+            InFlightEvent::TextDelta { .. } => {}
+            InFlightEvent::ToolCall {
+                name,
+                input,
+                description,
+                hostname,
+            } => chain.tool_call(name, input, description.as_deref(), hostname.as_deref()),
+            InFlightEvent::ToolResult {
+                name,
+                preview,
+                view,
+            } => chain.tool_result(name, preview, view.as_ref()),
+        }
+    }
+    chain.finish()
 }
 
 #[cfg(test)]
@@ -75,6 +107,7 @@ mod tests {
                 InFlightEvent::ToolResult {
                     name: "t".into(),
                     preview: "p".into(),
+                    view: None,
                 },
                 InFlightEvent::TextDelta {
                     text: "world".into(),
@@ -82,7 +115,9 @@ mod tests {
             ],
             ..InFlightState::default()
         };
-        assert_eq!(partial_answer(&state), "Hello world");
+        assert_eq!(partial_answer(&state), "Hello\n\nworld");
+        let chain = chain_of(&state);
+        assert_eq!(chain[0]["type"], "thinking");
     }
 
     #[test]
@@ -95,6 +130,7 @@ mod tests {
             query: "q",
             attachments: &[],
             partial_answer: "half".into(),
+            chain: vec![serde_json::json!({"type": "tool_call", "name": "search_code"})],
         };
         let [user, assistant] = interruption.messages();
         assert_eq!(user["text"], "q");

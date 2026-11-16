@@ -9,7 +9,6 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::agent::Agent;
 use crate::api::{resolve_user_llm, QueryState};
 use crate::auth::api_keys::ApiKeyPrincipal;
 use crate::conversations::handlers::{append_user_turn, load_conversation_context};
@@ -306,25 +305,15 @@ async fn answer_chat(
         &principal.user_id,
     )
     .await;
-    let agent = if Arc::ptr_eq(&user_llm, &state.qs.llm) {
-        Arc::clone(&state.qs.agent)
-    } else {
-        Arc::new(
-            Agent::new(
-                user_llm,
-                crate::agent::graph_tools::all_tools_with_semantic(
-                    Arc::clone(db),
-                    state.qs.semantic.clone(),
-                ),
-                state.qs.max_iterations,
-            )
-            .with_compaction(
-                state.qs.compaction_threshold_chars,
-                state.qs.compaction_keep_last,
-            )
-            .with_parallel_research(true),
+    let agent = state
+        .qs
+        .agent_in(
+            crate::modes::Space::personal(&principal.user_id),
+            &principal.user_id,
+            Some(conv_id.as_str()),
+            user_llm,
         )
-    };
+        .await;
 
     let message = with_diagram_instruction(&req.message, diagrams_mode);
 

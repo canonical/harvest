@@ -1,3 +1,8 @@
+use crate::access::{Action, Authorizer, Caller, Denied};
+use crate::modes::{Owner as ResourceOwner, Space};
+use crate::skills::http::skill_error;
+use crate::skills::owned::{NewSkill, OwnedSkills, SkillChanges};
+use crate::toolsets::TurnContext;
 use axum::{
     extract::{Extension, Path, Query, State},
     http::{HeaderName, HeaderValue, StatusCode},
@@ -169,22 +174,22 @@ pub async fn require_project_access(
     user_role: &str,
     project_id: &str,
 ) -> Result<Value, ApiError> {
-    let rows = db
-        .query(
-            "SELECT p.id, p.name, p.description, p.group_id, g.name AS group_name,
-                p.created_by, p.created_at
-         FROM projects p JOIN groups g ON g.id = p.group_id
-         WHERE p.id = $pid
-           AND ($role = 'admin' OR EXISTS (
-                 SELECT 1 FROM user_groups ug WHERE ug.user_id = $uid AND ug.group_id = g.id))",
-            json!({ "pid": project_id, "uid": user_id, "role": user_role }),
-        )
+    let caller = Caller {
+        user_id,
+        role: user_role,
+    };
+    Authorizer::new(db)
+        .deploy_project(caller, project_id, Action::Read)
         .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        .map_err(denied)
+}
 
-    rows.into_iter()
-        .next()
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))
+pub(crate) fn denied(reason: Denied) -> ApiError {
+    match reason {
+        Denied::NotFound => err(StatusCode::NOT_FOUND, "not found"),
+        Denied::Forbidden => err(StatusCode::FORBIDDEN, "forbidden"),
+        Denied::Unavailable => err(StatusCode::INTERNAL_SERVER_ERROR, "server error"),
+    }
 }
 
 pub async fn project_events(
@@ -512,24 +517,6 @@ async fn start_project_turn(
     Json(json!({ "ok": true, "turn_id": turn_id_for_response })).into_response()
 }
 
-pub async fn list_my_groups(
-    Extension(user): Extension<Claims>,
-    State(state): State<Arc<ProjectState>>,
-) -> Result<impl IntoResponse, ApiError> {
-    let rows = state
-        .db
-        .query(
-            "SELECT g.id, g.name, g.description
-         FROM user_groups ug JOIN groups g ON g.id = ug.group_id
-         WHERE ug.user_id = $uid
-         ORDER BY g.name",
-            json!({ "uid": user.sub }),
-        )
-        .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    Ok(Json(rows))
-}
-
 pub async fn list_projects(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
@@ -537,13 +524,11 @@ pub async fn list_projects(
     let rows = state
         .db
         .query(
-            "SELECT p.id, p.name, p.description, p.group_id, g.name AS group_name,
-                p.created_by, p.created_at
-         FROM user_groups ug
-         JOIN groups g   ON g.id = ug.group_id
-         JOIN projects p ON p.group_id = g.id
-         WHERE ug.user_id = $uid
-         ORDER BY p.created_at DESC",
+            "SELECT p.id, p.name, p.description, p.created_by, p.created_at, m.role
+             FROM deploy_projects p
+             LEFT JOIN deploy_project_members m ON m.project_id = p.id AND m.user_id = $uid
+             WHERE m.user_id IS NOT NULL
+             ORDER BY p.created_at DESC",
             json!({ "uid": user.sub }),
         )
         .await
@@ -556,7 +541,6 @@ pub struct CreateProjectBody {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    pub group_id: String,
 }
 
 pub async fn create_project(
@@ -575,51 +559,27 @@ pub async fn create_project(
         ));
     }
 
-    let group_rows = state
-        .db
-        .query(
-            "SELECT id FROM groups WHERE id = $gid",
-            json!({ "gid": body.group_id }),
-        )
-        .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    if group_rows.is_empty() {
-        return Err(err(StatusCode::NOT_FOUND, "group not found"));
-    }
-
-    if user.role != "admin" {
-        let member = state
-            .db
-            .query(
-                "SELECT 1 AS ok FROM user_groups WHERE user_id = $uid AND group_id = $gid",
-                json!({ "uid": user.sub, "gid": body.group_id }),
-            )
-            .await
-            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-        if member.is_empty() {
-            return Err(err(StatusCode::FORBIDDEN, "not a member of this group"));
-        }
-    }
-
     let id = Uuid::new_v4().to_string();
     let install_token = Uuid::new_v4().to_string();
     let deployment_id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
     let rows = state.db.query(
         "WITH p AS (
-             INSERT INTO projects (id, name, description, group_id, created_by, created_at, install_token)
-             VALUES ($id, $name, $description, $gid, $uid, $now, $install_token)
+             INSERT INTO deploy_projects (id, name, description, created_by, created_at, install_token)
+             VALUES ($id, $name, $description, $uid, $now, $install_token)
              RETURNING *
+         ), m AS (
+             INSERT INTO deploy_project_members (project_id, user_id, role, added_by)
+             SELECT p.id, $uid, 'owner', $uid FROM p
          ), d AS (
              INSERT INTO deployments (id, project_id, name, environment_description, infra_state,
                                       created_by, created_at, updated_at)
              SELECT $deployment_id, p.id, p.name, '', 'none', p.created_by, p.created_at, p.created_at
              FROM p
          )
-         SELECT p.id, p.name, p.description, p.group_id, g.name AS group_name, p.created_by, p.created_at
-         FROM p JOIN groups g ON g.id = p.group_id",
+         SELECT p.id, p.name, p.description, p.created_by, p.created_at, 'owner' AS role FROM p",
         json!({
-            "gid": body.group_id, "id": id, "name": name,
+            "id": id, "name": name,
             "description": body.description, "uid": user.sub, "now": now,
             "install_token": install_token,
             "deployment_id": deployment_id,
@@ -665,7 +625,7 @@ pub async fn update_project(
     state
         .db
         .query(
-            "UPDATE projects SET
+            "UPDATE deploy_projects SET
              name        = COALESCE($name::text, name),
              description = COALESCE($description::text, description)
          WHERE id = $pid
@@ -690,7 +650,7 @@ pub async fn delete_project(
     state
         .db
         .query(
-            "DELETE FROM projects WHERE id = $pid",
+            "DELETE FROM deploy_projects WHERE id = $pid",
             json!({ "pid": project_id }),
         )
         .await
@@ -1115,6 +1075,7 @@ mod in_flight_tests {
             &AgentEvent::ToolResult {
                 name: "t1".into(),
                 preview: "r1".into(),
+                view: None,
             },
             None,
             None,
@@ -1139,6 +1100,7 @@ mod in_flight_tests {
             &AgentEvent::ToolResult {
                 name: "t2".into(),
                 preview: "r2".into(),
+                view: None,
             },
             None,
             None,
@@ -1376,6 +1338,7 @@ mod drive_turn_broadcast_tests {
             .send(AgentEvent::ToolResult {
                 name: "t1".into(),
                 preview: "r1".into(),
+                view: None,
             })
             .await
             .unwrap();
@@ -1506,7 +1469,7 @@ pub async fn create_artifact_route(
         .map_err(|e| err(StatusCode::BAD_REQUEST, &e))?;
     let result = crate::artifacts::handlers::create_artifact(
         &state.db,
-        &project_id,
+        &crate::modes::Owner::Project(project_id.clone()),
         kind,
         &body.title,
         &body.content,
@@ -1523,35 +1486,12 @@ pub async fn list_project_skills(
     Path(project_id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let rows = state
-        .db
-        .query(
-            "SELECT id, name, description, created_at, updated_at, created_by
-         FROM skills WHERE project_id = $pid
-         ORDER BY created_at DESC",
-            json!({ "pid": project_id }),
-        )
+    let owner = ResourceOwner::Project(project_id);
+    let rows = OwnedSkills::new(&state.db, &owner)
+        .list()
         .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        .map_err(skill_error)?;
     Ok(Json(rows))
-}
-
-async fn project_skill_name_taken(
-    db: &Db,
-    project_id: &str,
-    name: &str,
-    exclude_id: &str,
-) -> Result<bool, ApiError> {
-    let rows = db
-        .query(
-            "SELECT id FROM skills
-         WHERE name = $name AND (project_id IS NULL OR project_id = $pid) AND id <> $exclude_id
-         LIMIT 1",
-            json!({ "pid": project_id, "name": name, "exclude_id": exclude_id }),
-        )
-        .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    Ok(!rows.is_empty())
 }
 
 #[derive(serde::Deserialize)]
@@ -1568,31 +1508,17 @@ pub async fn create_project_skill(
     Json(body): Json<CreateSkillBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let name = body.name.trim().to_string();
-    if name.is_empty() {
-        return Err(err(StatusCode::BAD_REQUEST, "name is required"));
-    }
-    if project_skill_name_taken(&state.db, &project_id, &name, "").await? {
-        return Err(err(
-            StatusCode::CONFLICT,
-            "a skill with this name already exists",
-        ));
-    }
-    let id = Uuid::new_v4().to_string();
-    let now = harvest_db::now_rfc3339();
-    state.db.query(
-        "INSERT INTO skills (id, project_id, name, description, content, created_by, created_at, updated_at)
-         VALUES ($id, $pid, $name, $description, $content, $uid, $now, $now)
-         RETURNING id",
-        json!({
-            "pid": project_id, "id": id, "name": name, "description": body.description,
-            "content": body.content, "uid": user.sub, "now": now,
-        }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({ "id": id, "name": name, "created_at": now })),
-    ))
+    let owner = ResourceOwner::Project(project_id);
+    let skill = NewSkill {
+        name: &body.name,
+        description: &body.description,
+        content: &body.content,
+    };
+    let created = OwnedSkills::new(&state.db, &owner)
+        .create(skill, &user.sub)
+        .await
+        .map_err(skill_error)?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 pub async fn get_project_skill(
@@ -1601,19 +1527,11 @@ pub async fn get_project_skill(
     Path((project_id, skill_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    let rows = state
-        .db
-        .query(
-            "SELECT id, name, description, content, created_by, created_at, updated_at
-         FROM skills WHERE id = $sid AND project_id = $pid",
-            json!({ "pid": project_id, "sid": skill_id }),
-        )
+    let owner = ResourceOwner::Project(project_id);
+    let row = OwnedSkills::new(&state.db, &owner)
+        .get(&skill_id)
         .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    let row = rows
-        .into_iter()
-        .next()
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))?;
+        .map_err(skill_error)?;
     Ok(Json(row))
 }
 
@@ -1631,47 +1549,16 @@ pub async fn update_project_skill(
     Json(body): Json<UpdateSkillBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    if let Some(ref name) = body.name {
-        if name.trim().is_empty() {
-            return Err(err(StatusCode::BAD_REQUEST, "name cannot be empty"));
-        }
-        if project_skill_name_taken(&state.db, &project_id, name.trim(), &skill_id).await? {
-            return Err(err(
-                StatusCode::CONFLICT,
-                "a skill with this name already exists",
-            ));
-        }
-    }
-    let exists = state
-        .db
-        .query(
-            "SELECT 1 AS ok FROM skills WHERE id = $sid AND project_id = $pid",
-            json!({ "pid": project_id, "sid": skill_id }),
-        )
+    let owner = ResourceOwner::Project(project_id);
+    let changes = SkillChanges {
+        name: body.name.as_deref(),
+        description: body.description.as_deref(),
+        content: body.content.as_deref(),
+    };
+    OwnedSkills::new(&state.db, &owner)
+        .update(&skill_id, changes)
         .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    if exists.is_empty() {
-        return Err(err(StatusCode::NOT_FOUND, "not found"));
-    }
-    let now = harvest_db::now_rfc3339();
-    let params = json!({
-        "pid": project_id, "sid": skill_id, "now": now,
-        "name": body.name.as_deref().map(str::trim),
-        "description": body.description,
-        "content": body.content,
-    });
-    let sql = "UPDATE skills SET
-                   name        = COALESCE($name::text, name),
-                   description = COALESCE($description::text, description),
-                   content     = COALESCE($content::text, content),
-                   updated_at  = $now
-               WHERE id = $sid AND project_id = $pid
-               RETURNING id";
-    state
-        .db
-        .query(sql, params)
-        .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        .map_err(skill_error)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1681,14 +1568,11 @@ pub async fn delete_project_skill(
     Path((project_id, skill_id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, ApiError> {
     require_project_access(&state.db, &user.sub, &user.role, &project_id).await?;
-    state
-        .db
-        .query(
-            "DELETE FROM skills WHERE id = $sid AND project_id = $pid",
-            json!({ "pid": project_id, "sid": skill_id }),
-        )
+    let owner = ResourceOwner::Project(project_id);
+    OwnedSkills::new(&state.db, &owner)
+        .delete(&skill_id)
         .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        .map_err(skill_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1708,18 +1592,17 @@ pub async fn project_query(
         &user.sub,
     )
     .await;
-    let agent = if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-        state.agent_builder.build_for_conversation(
-            project_id.clone(),
-            body.conversation_id.clone().unwrap_or_default(),
-        )
-    } else {
-        state.agent_builder.build_for_conversation_with_llm(
-            project_id.clone(),
-            body.conversation_id.clone().unwrap_or_default(),
-            user_llm.clone(),
-        )
-    };
+    let turn = TurnContext::load(
+        &state.db,
+        &user.sub,
+        Space::deploy_project(project_id.clone()),
+        body.conversation_id.clone().unwrap_or_default(),
+        user_llm.clone(),
+    )
+    .await;
+    let agent = state
+        .agent_builder
+        .conversation_agent(&turn, state.agent_builder.system_one.clone());
     let history = match &body.conversation_id {
         Some(conv_id) => load_project_context(&state.db, &project_id, conv_id)
             .await

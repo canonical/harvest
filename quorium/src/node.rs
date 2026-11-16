@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
 use crate::network::HttpNetwork;
-use crate::state::{Command, MemberRecord, Response};
+use crate::state::{Command, Lease, MemberRecord, Response, FEATURE_LEASES};
 use crate::store::{StateMachineStore, Storage};
 use crate::token::JoinToken;
 use crate::types::{Metrics, Node, Raft, ServerId};
@@ -455,6 +455,66 @@ impl Quorium {
                 .state
                 .read(|a| a.cluster.tokens.values().copied().collect()),
         }
+    }
+
+    pub fn supports(&self, feature: &str) -> bool {
+        self.state.read(|a| {
+            !a.cluster.members.is_empty() && a.cluster.members.values().all(|m| m.supports(feature))
+        })
+    }
+
+    pub async fn try_acquire_lease(&self, key: &str, holder: &str) -> Result<Option<u64>> {
+        if !self.supports(FEATURE_LEASES) {
+            bail!("leases are unavailable until every cluster member supports them");
+        }
+        let command = Command::AcquireLease {
+            key: key.to_string(),
+            holder: holder.to_string(),
+            at_ms: now_ms(),
+        };
+        match self.write(command).await? {
+            Response::Lease(token) => Ok(token),
+            other => bail!("unexpected response to a lease request: {other:?}"),
+        }
+    }
+
+    pub async fn release_lease(&self, key: &str, holder: &str, token: u64) -> Result<()> {
+        self.write(Command::ReleaseLease {
+            key: key.to_string(),
+            holder: holder.to_string(),
+            token,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    pub fn lease(&self, key: &str) -> Option<Lease> {
+        self.state.read(|a| a.cluster.leases.get(key).cloned())
+    }
+
+    pub fn leases(&self) -> BTreeMap<String, Lease> {
+        self.state.read(|a| a.cluster.leases.clone())
+    }
+
+    pub async fn lease_linearizable(&self, key: &str) -> Result<Option<Lease>> {
+        self.retrying(|| async {
+            if self.is_leader() {
+                self.raft
+                    .ensure_linearizable()
+                    .await
+                    .map_err(|e| anyhow!("confirming leadership: {e}"))?;
+                return Ok(self.lease(key));
+            }
+            let leader = self.known_leader_url()?;
+            let leases: BTreeMap<String, Lease> =
+                self.get(&leader, "/internal/quorium/leases").await?;
+            Ok(leases.get(key).cloned())
+        })
+        .await
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.state.subscribe()
     }
 
     pub async fn write(&self, command: Command) -> Result<Response> {

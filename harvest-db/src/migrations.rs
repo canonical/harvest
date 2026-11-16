@@ -21,8 +21,55 @@ const MIGRATIONS: &[(i32, &str)] = &[
         include_str!("../migrations/0009_conversation_messages.sql"),
     ),
     (10, include_str!("../migrations/0010_turn_requests.sql")),
-    (11, include_str!("../migrations/0011_turn_continuations.sql")),
+    (
+        11,
+        include_str!("../migrations/0011_turn_continuations.sql"),
+    ),
     (12, include_str!("../migrations/0012_summary_leases.sql")),
+    (13, include_str!("../migrations/0013_source_trigram.sql")),
+    (14, include_str!("../migrations/0014_cluster_leases.sql")),
+    (15, include_str!("../migrations/0015_search_traces.sql")),
+    (16, include_str!("../migrations/0016_units_and_edges.sql")),
+    (
+        17,
+        include_str!("../migrations/0017_work_queue_enrichment_cache.sql"),
+    ),
+    (
+        18,
+        include_str!("../migrations/0018_origin_and_calibration.sql"),
+    ),
+    (
+        19,
+        include_str!("../migrations/0019_repository_access.sql"),
+    ),
+    (
+        20,
+        include_str!("../migrations/0020_personal_ownership.sql"),
+    ),
+    (
+        21,
+        include_str!("../migrations/0021_deploy_projects.sql"),
+    ),
+    (
+        22,
+        include_str!("../migrations/0022_code_sessions.sql"),
+    ),
+    (
+        23,
+        include_str!("../migrations/0023_code_previews.sql"),
+    ),
+    (
+        24,
+        include_str!("../migrations/0024_change_requests.sql"),
+    ),
+    (
+        25,
+        include_str!("../migrations/0025_code_index_refresh.sql"),
+    ),
+    (
+        26,
+        include_str!("../migrations/0026_session_workspaces.sql"),
+    ),
 ];
 
 pub fn fingerprint() -> u64 {

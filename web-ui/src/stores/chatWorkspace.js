@@ -1,10 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, watch, computed } from 'vue';
-import {
-  createTree, createTab, findPane, findTab, allTabIds,
-  splitPane as splitPaneTree, removeTabFromPane as removeTabFromPaneTree,
-  removePane as removePaneTree, moveTab as moveTabTree, setSizes,
-} from '../lib/pane-layout.js';
+import { createTree, allTabIds } from '../lib/pane-layout.js';
+import { createLayoutOperations } from '../lib/layout-workspace.js';
 import {
   getCurrentChatLayout, saveCurrentChatLayout, CHAT_LAYOUTS_URL,
   listChatLayouts as apiListChatLayouts, createChatLayout, getChatLayout,
@@ -12,11 +9,13 @@ import {
 } from '../lib/api.js';
 import { disposeChatInstance } from '../composables/useChatInstance.js';
 import { useProjectStore } from './project.js';
+import { useSpaceStore } from './space.js';
 
 const AUTOSAVE_DEBOUNCE_MS = 1000;
 
 export const useChatWorkspaceStore = defineStore('chatWorkspace', () => {
   const project = useProjectStore();
+  const space = useSpaceStore();
 
   const tree = ref(createTree());
   const namedLayouts = ref([]);
@@ -48,11 +47,11 @@ export const useChatWorkspaceStore = defineStore('chatWorkspace', () => {
     if (autosaveTimer) clearTimeout(autosaveTimer);
     autosaveTimer = setTimeout(() => {
       autosaveTimer = null;
-      saveCurrentChatLayout(tree.value, project.selectedProjectId).catch(() => {});
+      saveCurrentChatLayout(tree.value, space.projectId).catch(() => {});
     }, AUTOSAVE_DEBOUNCE_MS);
   }
 
-  function flushAutosaveNow(projectId = project.selectedProjectId) {
+  function flushAutosaveNow(projectId = space.projectId) {
     if (autosaveTimer) {
       clearTimeout(autosaveTimer);
       autosaveTimer = null;
@@ -74,14 +73,14 @@ export const useChatWorkspaceStore = defineStore('chatWorkspace', () => {
 
   async function initFromServer() {
     await project.whenReady();
-    tree.value = createTree({ projectId: project.selectedProjectId });
+    tree.value = createTree({ projectId: space.projectId });
     try {
-      const data = await getCurrentChatLayout(project.selectedProjectId);
+      const data = await getCurrentChatLayout(space.projectId);
       if (data?.tree) tree.value = data.tree;
     } catch {}
   }
 
-  watch(() => project.selectedProjectId, async (newId, oldId) => {
+  watch(() => space.projectId, async (newId, oldId) => {
     if (newId === oldId) return;
     flushAutosaveNow(oldId);
     disposeAllInstances();
@@ -90,75 +89,16 @@ export const useChatWorkspaceStore = defineStore('chatWorkspace', () => {
     await initFromServer();
   });
 
-  function splitPaneWithTab(paneId, direction, tab) {
-    tree.value = splitPaneTree(tree.value, paneId, direction, tab);
-    _scheduleAutosave();
-  }
-
-  function moveTab(fromPaneId, tabId, toPaneId, index = -1) {
-    tree.value = moveTabTree(tree.value, fromPaneId, tabId, toPaneId, index);
-    _scheduleAutosave();
-  }
-
-  function moveTabToNewSplit(fromPaneId, tabId, toPaneId, edge) {
-    const fromLoc = findPane(tree.value.root, fromPaneId);
-    if (!fromLoc || fromLoc.node.type !== 'leaf') return;
-    if (fromPaneId === toPaneId && fromLoc.node.tabs.length <= 1) return;
-    const tabEntry = fromLoc.node.tabs.find(t => t.tabId === tabId);
-    if (!tabEntry) return;
-    tree.value = removeTabFromPaneTree(tree.value, fromPaneId, tabId);
-    tree.value = splitPaneTree(tree.value, toPaneId, edge, tabEntry);
-    _scheduleAutosave();
-  }
-
-  function closeTab(paneId, tabId) {
-    tree.value = removeTabFromPaneTree(tree.value, paneId, tabId, { projectId: project.selectedProjectId });
-    disposeChatInstance(tabId);
-    _scheduleAutosave();
-  }
-
-  function closePane(paneId) {
-    const loc = findPane(tree.value.root, paneId);
-    if (loc?.node?.type === 'leaf') {
-      for (const t of loc.node.tabs) disposeChatInstance(t.tabId);
-    }
-    tree.value = removePaneTree(tree.value, paneId, { projectId: project.selectedProjectId });
-    _scheduleAutosave();
-  }
-
-  function setActiveTab(paneId, tabId) {
-    const loc = findPane(tree.value.root, paneId);
-    if (loc?.node?.type === 'leaf') {
-      loc.node.activeTabId = tabId;
-      _scheduleAutosave();
-    }
-  }
-
-  function resizeSplit(splitId, sizes) {
-    setSizes(tree.value, splitId, sizes);
-    _scheduleAutosave();
-  }
-
-  function openTabInPane(paneId, { conversationId = null, projectId = null, title = 'New chat' } = {}) {
-    const loc = findPane(tree.value.root, paneId);
-    if (!loc || loc.node.type !== 'leaf') return null;
-    const tab = createTab({ conversationId, projectId, title });
-    loc.node.tabs.push(tab);
-    loc.node.activeTabId = tab.tabId;
-    _scheduleAutosave();
-    return tab.tabId;
-  }
-
-  function updateTab(tabId, patch) {
-    const found = findTab(tree.value.root, tabId);
-    if (!found) return;
-    Object.assign(found.tab, patch);
-    _scheduleAutosave();
-  }
+  const operations = createLayoutOperations({
+    tree,
+    changed: _scheduleAutosave,
+    emptyTab: () => ({ projectId: space.projectId }),
+    disposeTab: (tab) => disposeChatInstance(tab.tabId),
+  });
 
   async function listNamedLayouts() {
     try {
-      namedLayouts.value = await apiListChatLayouts(project.selectedProjectId);
+      namedLayouts.value = await apiListChatLayouts(space.projectId);
     } catch {
       namedLayouts.value = [];
     }
@@ -169,7 +109,7 @@ export const useChatWorkspaceStore = defineStore('chatWorkspace', () => {
     if (currentNamedLayoutId.value) {
       await updateChatLayout(currentNamedLayoutId.value, { name, tree: tree.value });
     } else {
-      const created = await createChatLayout(name, tree.value, project.selectedProjectId);
+      const created = await createChatLayout(name, tree.value, space.projectId);
       currentNamedLayoutId.value = created.id;
     }
     _snapshotTree();
@@ -189,7 +129,7 @@ export const useChatWorkspaceStore = defineStore('chatWorkspace', () => {
 
   function newLayout() {
     disposeAllInstances();
-    tree.value = createTree({ projectId: project.selectedProjectId });
+    tree.value = createTree({ projectId: space.projectId });
     currentNamedLayoutId.value = null;
     _snapshotTree();
     _scheduleAutosave();
@@ -204,8 +144,7 @@ export const useChatWorkspaceStore = defineStore('chatWorkspace', () => {
   return {
     tree, namedLayouts, currentNamedLayoutId, isLayoutSaved,
     initFromServer, flushAutosaveNow,
-    splitPaneWithTab, moveTab, moveTabToNewSplit, closeTab, closePane, setActiveTab, resizeSplit,
-    openTabInPane, updateTab,
+    ...operations,
     listNamedLayouts, saveNamedLayout, loadNamedLayout, deleteNamedLayout, newLayout,
   };
 });

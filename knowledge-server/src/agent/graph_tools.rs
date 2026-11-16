@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::tool::Tool;
+use crate::access::repos::RepoScope;
 use crate::llm::types::ToolDefinition;
 use harvest_db::{Db, GRAPH_READER_ROLE};
 
@@ -29,15 +30,21 @@ impl Tool for ListRepositoriesTool {
         }
     }
 
-    async fn execute(&self, _params: Value) -> Result<String> {
+    async fn execute(&self, params: Value) -> Result<String> {
+        let (scope_all, scope_repos) = RepoScope::read_from(&params);
         let rows = self.0.query(
             "SELECT r.name AS repo, count(*) AS version_count,
                     (array_agg(v.tag ORDER BY v.timestamp DESC))[1:10] AS versions,
                     coalesce(array_agg(v.tag ORDER BY v.timestamp DESC)
                              FILTER (WHERE v.parser_version < $parser_version), '{}') AS stale_versions
              FROM repositories r JOIN versions v ON v.repository_id = r.id AND v.ingested
+             WHERE $scope_all::bool OR r.name = ANY($scope_repos::text[])
              GROUP BY r.name ORDER BY r.name",
-            json!({ "parser_version": knowledge_harvester::parser::PARSER_VERSION }),
+            json!({
+                "parser_version": knowledge_harvester::parser::PARSER_VERSION,
+                "scope_all": scope_all,
+                "scope_repos": scope_repos,
+            }),
         ).await?;
         let rows: Vec<Value> = rows
             .into_iter()
@@ -206,6 +213,10 @@ impl Tool for ReadSourcesTool {
         read_sources_definition()
     }
 
+    fn reads_code(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, params: Value) -> Result<String> {
         let repo = params["repo"].as_str().unwrap_or("").trim().to_string();
         let version = params["version"].as_str().unwrap_or("").trim().to_string();
@@ -228,7 +239,32 @@ impl Tool for ReadSourcesTool {
             json!({ "repo": repo, "version": version, "files": targets.files, "names": targets.names }),
         ).await?;
 
-        if rows.is_empty() {
+        let files_with_symbols: std::collections::HashSet<&str> =
+            rows.iter().filter_map(|r| r["file"].as_str()).collect();
+        let other_files: Vec<&String> = targets
+            .files
+            .iter()
+            .filter(|f| !files_with_symbols.contains(f.as_str()))
+            .collect();
+        let units = if other_files.is_empty() {
+            Vec::new()
+        } else {
+            self.0
+                .query(
+                    "SELECT u.path AS file, u.name, u.kind, u.start_line, u.end_line, u.text AS source
+                     FROM code_units u
+                     JOIN versions v ON v.id = u.version_id
+                     JOIN repositories r ON r.id = v.repository_id
+                     WHERE r.name = $repo AND v.tag = $version AND u.path = ANY($files)
+                       AND u.kind <> 'module'
+                     ORDER BY u.path, u.start_line",
+                    json!({ "repo": repo, "version": version, "files": other_files }),
+                )
+                .await
+                .unwrap_or_default()
+        };
+
+        if rows.is_empty() && units.is_empty() {
             let mut missing = Vec::new();
             for f in &targets.files {
                 missing.push(format!("file {f}"));
@@ -236,15 +272,16 @@ impl Tool for ReadSourcesTool {
             for n in &targets.names {
                 missing.push(format!("symbol {n}"));
             }
-            return Ok(format!(
-                "No symbols found for {} in {repo}:{version}. Use search_symbols to find the exact file path or name.",
+            anyhow::bail!(
+                "nothing is indexed for {} in {repo}:{version}; check the exact path or name",
                 missing.join(", ")
-            ));
+            );
         }
 
         let limit = clamp_limit(&params).min(READ_SOURCES_MAX_SYMBOLS);
         let results: Vec<Value> = rows
             .iter()
+            .chain(units.iter())
             .take(limit)
             .map(|row| {
                 json!({
@@ -264,60 +301,7 @@ impl Tool for ReadSourcesTool {
     }
 }
 
-const SEARCH_SQL: &str = r#"
-WITH signals AS (
-    SELECT cs.*,
-           regexp_replace(lower($query), '([.^$*+?()\[\]{}|\\-])', '\\\1', 'g') AS q_literal,
-           lower(cs.name) % lower($query) AS name_trgm,
-           strpos(lower(cs.name), lower($query)) > 0 AS name_sub,
-           lower(coalesce(cs.signature, '')) % lower($query) AS sig_trgm,
-           strpos(lower(coalesce(cs.signature, '')), lower($query)) > 0 AS sig_sub,
-           lower(cs.file) % lower($query) AS path_trgm,
-           strpos(lower(cs.file), lower($query)) > 0 AS path_sub,
-           lower(coalesce(cs.docstring, '')) % lower($query) AS doc_trgm,
-           strpos(lower(coalesce(cs.docstring, '')), lower($query)) > 0 AS doc_sub
-    FROM code_symbols cs
-    WHERE ($repo = '' OR cs.repo = $repo)
-      AND ($version = '' OR cs.version = $version)
-      AND ($kind = 'any' OR lower(cs.label) = $kind)
-      AND ($path_prefix = '' OR starts_with(cs.file, $path_prefix))
-      AND ($decorator = '' OR EXISTS (
-            SELECT 1 FROM unnest(cs.decorators) d
-            WHERE d = $decorator OR right(d, length($decorator) + 1) = '.' || $decorator))
-), matched AS (
-    SELECT s.*,
-           lower(s.label) = 'class'
-           AND s.source ~* ('(^|[^A-Za-z0-9_])' || s.q_literal || '([^A-Za-z0-9_]|$)') AS cap_match
-    FROM signals s
-)
-SELECT repo, version, file, name, start_line, lower(label) AS kind,
-       signature, source, docstring, coalesce(decorators, '{}') AS decorators,
-       array_remove(ARRAY[
-           CASE WHEN name = $query                 THEN 'exact_name' END,
-           CASE WHEN name_sub                      THEN 'name' END,
-           CASE WHEN cap_match                     THEN 'capability' END,
-           CASE WHEN sig_sub OR sig_trgm           THEN 'signature' END,
-           CASE WHEN path_trgm OR path_sub         THEN 'path' END,
-           CASE WHEN doc_sub OR doc_trgm           THEN 'docstring' END
-       ], NULL) AS matched_on,
-       GREATEST(
-           CASE WHEN name = $query THEN 1000 ELSE 0 END,
-           CASE WHEN lower(name) = lower($query) THEN 900 ELSE 0 END,
-           CASE WHEN name_sub THEN 600 ELSE 0 END,
-           CASE WHEN cap_match THEN 550 ELSE 0 END,
-           CASE WHEN name_trgm THEN 500 ELSE 0 END,
-           CASE WHEN sig_sub THEN 320 ELSE 0 END,
-           CASE WHEN sig_trgm THEN 300 ELSE 0 END,
-           CASE WHEN path_trgm OR path_sub THEN 200 ELSE 0 END,
-           CASE WHEN doc_sub THEN 170 ELSE 0 END,
-           CASE WHEN doc_trgm THEN 150 ELSE 0 END
-       )::float8 AS score
-FROM matched
-WHERE name_trgm OR name_sub OR cap_match OR sig_trgm OR sig_sub
-   OR path_trgm OR path_sub OR doc_trgm OR doc_sub
-ORDER BY score DESC, file, name
-LIMIT $limit OFFSET $offset
-"#;
+use harvest_search::fallback::SEARCH_SQL;
 
 pub struct SearchSymbolsTool(pub Arc<Db>, pub Option<Arc<SemanticHandle>>);
 
@@ -357,76 +341,7 @@ impl SearchSymbolsTool {
     }
 }
 
-pub const HYBRID_SEARCH_SQL: &str = r#"
-WITH lexical AS (
-    SELECT cs.*,
-           regexp_replace(lower($query), '([.^$*+?()\[\]{}|\\-])', '\\\1', 'g') AS q_literal,
-           lower(cs.name) % lower($query) AS name_trgm,
-           strpos(lower(cs.name), lower($query)) > 0 AS name_sub,
-           lower(coalesce(cs.signature, '')) % lower($query) AS sig_trgm,
-           strpos(lower(coalesce(cs.signature, '')), lower($query)) > 0 AS sig_sub,
-           lower(cs.file) % lower($query) AS path_trgm,
-           strpos(lower(cs.file), lower($query)) > 0 AS path_sub,
-           lower(coalesce(cs.docstring, '')) % lower($query) AS doc_trgm,
-           strpos(lower(coalesce(cs.docstring, '')), lower($query)) > 0 AS doc_sub
-    FROM code_symbols cs
-    WHERE ($repo = '' OR cs.repo = $repo)
-      AND ($version = '' OR cs.version = $version)
-      AND ($kind = 'any' OR lower(cs.label) = $kind)
-      AND ($path_prefix = '' OR starts_with(cs.file, $path_prefix))
-      AND ($decorator = '' OR EXISTS (
-            SELECT 1 FROM unnest(cs.decorators) d
-            WHERE d = $decorator OR right(d, length($decorator) + 1) = '.' || $decorator))
-), lexical_matched AS (
-    SELECT l.*,
-           lower(l.label) = 'class'
-           AND l.source ~* ('(^|[^A-Za-z0-9_])' || l.q_literal || '([^A-Za-z0-9_]|$)') AS cap_match
-    FROM lexical l
-), lexical_scored AS (
-    SELECT m.*,
-           GREATEST(
-               CASE WHEN m.name = $query THEN 1000 ELSE 0 END,
-               CASE WHEN lower(m.name) = lower($query) THEN 900 ELSE 0 END,
-               CASE WHEN m.name_sub THEN 600 ELSE 0 END,
-               CASE WHEN m.cap_match THEN 550 ELSE 0 END,
-               CASE WHEN m.name_trgm THEN 500 ELSE 0 END,
-               CASE WHEN m.sig_sub THEN 320 ELSE 0 END,
-               CASE WHEN m.sig_trgm THEN 300 ELSE 0 END,
-               CASE WHEN m.path_trgm OR m.path_sub THEN 200 ELSE 0 END,
-               CASE WHEN m.doc_sub THEN 170 ELSE 0 END,
-               CASE WHEN m.doc_trgm THEN 150 ELSE 0 END
-           )::float8 AS lexical_score
-    FROM lexical_matched m
-), semantic_scored AS (
-    SELECT s.id,
-           (1 - (s.embedding <=> $qvec::vector))::float8 AS semantic_score
-    FROM symbols s
-    WHERE s.embedding IS NOT NULL
-      AND s.embedding_model = $qmodel
-      AND ($repo = '' OR s.repo = $repo)
-      AND ($version = '' OR s.version = $version)
-)
-SELECT ls.repo, ls.version, ls.file, ls.name, ls.start_line, lower(ls.label) AS kind,
-       ls.signature, ls.source, ls.docstring, coalesce(ls.decorators, '{}') AS decorators,
-       array_remove(ARRAY[
-           CASE WHEN ls.name = $query                 THEN 'exact_name' END,
-           CASE WHEN ls.name_sub                      THEN 'name' END,
-           CASE WHEN ls.cap_match                     THEN 'capability' END,
-           CASE WHEN ls.sig_sub OR ls.sig_trgm         THEN 'signature' END,
-           CASE WHEN ls.path_trgm OR ls.path_sub       THEN 'path' END,
-           CASE WHEN ls.doc_sub OR ls.doc_trgm         THEN 'docstring' END,
-           CASE WHEN ss.semantic_score IS NOT NULL      THEN 'semantic' END
-       ], NULL) AS matched_on,
-       round((
-           $lexical::float8 * (coalesce(ls.lexical_score, 0) / 1000.0)
-         + $semantic::float8 * coalesce(ss.semantic_score, 0)
-       )::numeric, 6)::float8 AS score
-FROM lexical_scored ls
-LEFT JOIN semantic_scored ss ON ss.id = ls.id
-WHERE ls.lexical_score > 0 OR ss.semantic_score IS NOT NULL
-ORDER BY score DESC, ls.file, ls.name
-LIMIT $limit OFFSET $offset
-"#;
+pub use harvest_search::fallback::{HYBRID_SEARCH_SQL, SEMANTIC_CANDIDATES};
 
 #[derive(Clone)]
 pub struct SemanticHandle {
@@ -515,6 +430,7 @@ impl Tool for SearchSymbolsTool {
         let limit = clamp_limit(&params);
         let offset = params["offset"].as_i64().unwrap_or(0).max(0);
 
+        let (scope_all, scope_repos) = RepoScope::read_from(&params);
         let mut params = json!({
             "query": q,
             "repo": repo,
@@ -524,6 +440,8 @@ impl Tool for SearchSymbolsTool {
             "decorator": decorator,
             "limit": limit as i64 + 1,
             "offset": offset,
+            "_scope_all": scope_all,
+            "_scope_repos": scope_repos,
         });
 
         let embed = if q.is_empty() {
@@ -537,6 +455,7 @@ impl Tool for SearchSymbolsTool {
                 params["qmodel"] = json!(self.1.as_ref().unwrap().model);
                 params["lexical"] = json!(self.1.as_ref().unwrap().lexical_weight);
                 params["semantic"] = json!(self.1.as_ref().unwrap().semantic_weight);
+                params["semantic_k"] = json!(SEMANTIC_CANDIDATES);
                 Some(HYBRID_SEARCH_SQL)
             }
             None => None,
@@ -780,6 +699,10 @@ pub struct CompareSymbolAcrossVersionsTool(pub Arc<Db>);
 
 #[async_trait]
 impl Tool for CompareSymbolAcrossVersionsTool {
+    fn reads_code(&self) -> bool {
+        true
+    }
+
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "compare_symbol_across_versions".into(),
@@ -2707,6 +2630,14 @@ mod search_tests {
             "the capability score must read the CTE column"
         );
         assert!(HYBRID_SEARCH_SQL.contains("1 - (s.embedding <=> $qvec::vector)"));
+    }
+
+    #[test]
+    fn hybrid_sql_scopes_vectors_through_versions_and_limits_them_for_the_index() {
+        assert!(!HYBRID_SEARCH_SQL.contains("OR s.repo"));
+        assert!(!HYBRID_SEARCH_SQL.contains("OR s.version"));
+        assert!(HYBRID_SEARCH_SQL
+            .contains("ORDER BY s.embedding <=> $qvec::vector\n    LIMIT $semantic_k"));
     }
 
     #[test]

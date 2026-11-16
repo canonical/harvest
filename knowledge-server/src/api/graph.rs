@@ -1,3 +1,6 @@
+use crate::api::repositories::require_repo;
+use crate::auth::jwt::Claims;
+use axum::Extension;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -358,9 +361,13 @@ pub async fn warm_graph_cache(db: Arc<Db>, cache: Arc<GraphCache>) {
 }
 
 pub async fn handle_get_graph(
+    Extension(user): Extension<Claims>,
     State(state): State<Arc<GraphState>>,
     Path((repo, version)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if let Err(response) = require_repo(&state, &user, &repo).await {
+        return response;
+    }
     let key = format!("{}:{}", repo, version);
 
     if let Some(cached) = state.cache.read().await.get(&key) {
@@ -387,10 +394,14 @@ pub async fn handle_get_graph(
 }
 
 pub async fn handle_get_symbol_source(
+    Extension(user): Extension<Claims>,
     State(state): State<Arc<GraphState>>,
     Path((repo, version)): Path<(String, String)>,
     Query(params): Query<SourceParams>,
 ) -> impl IntoResponse {
+    if let Err(response) = require_repo(&state, &user, &repo).await {
+        return response;
+    }
     let rows = match state
         .db
         .query(

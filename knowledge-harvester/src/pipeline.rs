@@ -11,6 +11,8 @@ use crate::git::GitClient;
 use crate::graph::writer::{GraphWriter, IngestionStatus};
 use crate::parser::{ParserRegistry, PARSER_VERSION};
 
+const HISTORY_COMMITS: usize = 2_000;
+
 pub struct Pipeline {
     repositories: Vec<RepoConfig>,
     git: GitClient,
@@ -59,6 +61,10 @@ impl Pipeline {
         self.process_repo(repo, force).await
     }
 
+    pub fn set_credentials(&mut self, credentials: crate::git::GitCredentials) {
+        self.git = self.git.clone().with_credentials(credentials);
+    }
+
     pub async fn list_remote_refs(&self, url: &str) -> Result<Vec<crate::git::TagInfo>> {
         let git = self.git.clone();
         let url = url.to_string();
@@ -72,7 +78,11 @@ impl Pipeline {
     pub async fn run(&self, force: bool) -> Result<()> {
         for repo in &self.repositories {
             if let Err(e) = self.process_repo(repo, force).await {
-                tracing::error!(repo = repo.name, error = %e, "repository failed");
+                tracing::error!(
+                    repo = repo.name,
+                    error = format!("{e:#}"),
+                    "repository failed"
+                );
             }
         }
         Ok(())
@@ -153,8 +163,7 @@ impl Pipeline {
                 }
                 _ => {}
             }
-            self.process_version(&repo_path, &repo.name, &tag.name, tag.timestamp)
-                .await?;
+            self.process_version(&repo_path, &repo.name, &tag).await?;
         }
 
         self.emit("Cleaning up temporary clone…");
@@ -169,14 +178,14 @@ impl Pipeline {
         &self,
         repo_path: &Path,
         repo: &str,
-        tag: &str,
-        timestamp: i64,
+        version: &crate::git::TagInfo,
     ) -> Result<()> {
+        let tag = version.name.as_str();
         self.emit(format!("Processing ref '{}'…", tag));
         tracing::info!(repo, tag, "ingesting version");
 
         self.writer
-            .upsert_version(repo, tag, timestamp, false)
+            .upsert_version(repo, tag, version.timestamp, false)
             .await?;
 
         self.emit(format!("Checking out '{}'…", tag));
@@ -186,12 +195,33 @@ impl Pipeline {
         let files = self.git.walk_source_files(repo_path)?;
         self.emit(format!("Found {} source files to parse.", files.len()));
 
+        let history = match self.git.history(repo_path, tag, HISTORY_COMMITS) {
+            Ok(history) => history,
+            Err(e) => {
+                tracing::warn!(repo, tag, error = %e, "could not read git history; skipping co-change edges");
+                crate::git::History::default()
+            }
+        };
+        let attribute_files: Vec<std::path::PathBuf> = files
+            .iter()
+            .filter(|f| f.file_name().is_some_and(|n| n == ".gitattributes"))
+            .cloned()
+            .collect();
+        let classifier = Arc::new(crate::origin::Classifier::load(
+            repo_path,
+            &attribute_files,
+            &history.files,
+            history.total_commits,
+        ));
+
         let parsers = Arc::clone(&self.parsers);
         let repo_owned = repo.to_owned();
         let tag_owned = tag.to_owned();
+        let commit_sha = version.commit_sha.clone();
         let repo_clone = repo_owned.clone();
         let tag_clone = tag_owned.clone();
         let repo_root = repo_path.to_path_buf();
+        let classifier_for_parse = Arc::clone(&classifier);
 
         let parsed = tokio::task::spawn_blocking(move || {
             let mut out = Vec::new();
@@ -200,12 +230,55 @@ impl Pipeline {
                     .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("");
-                if let Some(parser) = parsers.get(ext) {
-                    let relative = file_path.strip_prefix(&repo_root).unwrap_or(file_path);
-                    match std::fs::read_to_string(file_path) {
-                        Ok(source) => out.push(parser.parse(&source, relative, &repo_clone, &tag_clone)),
-                        Err(e) => tracing::warn!(path = %file_path.display(), error = %e, "skipping unreadable file"),
+                let relative = file_path.strip_prefix(&repo_root).unwrap_or(file_path);
+                let parser = parsers.get(ext);
+                let source = match std::fs::read_to_string(file_path) {
+                    Ok(source) => source,
+                    Err(e) => {
+                        tracing::debug!(path = %file_path.display(), error = %e, "skipping unreadable file");
+                        continue;
                     }
+                };
+                let path = relative.to_string_lossy().replace('\\', "/");
+                let origin = classifier_for_parse.classify(&path, &source);
+                let parsed = match parser {
+                    Some(parser) => {
+                        let mut parsed = parser.parse(&source, relative, &repo_clone, &tag_clone);
+                        if parsed.functions.is_empty() && parsed.classes.is_empty() {
+                            parsed.units = crate::units::window_units(relative, &source);
+                        } else {
+                            crate::units::add_code_units(&mut parsed);
+                        }
+                        Some(parsed)
+                    }
+                    None if crate::units::is_unit_file(relative) => {
+                        let units = crate::units::file_units(relative, &source);
+                        (!units.is_empty()).then(|| crate::graph::model::ParsedFile {
+                            path: path.clone(),
+                            language: "text".into(),
+                            units,
+                            ..Default::default()
+                        })
+                    }
+                    None if crate::units::is_source_like(relative, &source)
+                        && matches!(origin, crate::origin::Origin::Source | crate::origin::Origin::Test) =>
+                    {
+                        Some(crate::graph::model::ParsedFile {
+                            path: path.clone(),
+                            language: ext.to_ascii_lowercase(),
+                            units: crate::units::window_units(relative, &source),
+                            ..Default::default()
+                        })
+                    }
+                    None => None,
+                };
+                if let Some(mut parsed) = parsed {
+                    parsed.origin = origin;
+                    if origin == crate::origin::Origin::Test {
+                        parsed.functions.iter_mut().for_each(|f| f.is_test = true);
+                        parsed.classes.iter_mut().for_each(|c| c.is_test = true);
+                    }
+                    out.push(parsed);
                 }
             }
             out
@@ -219,7 +292,7 @@ impl Pipeline {
         ));
 
         self.writer
-            .write_version(&repo_owned, &tag_owned, &parsed)
+            .write_version_with_history(&repo_owned, &tag_owned, Some(&commit_sha), &parsed, &history)
             .await?;
         self.emit(format!(
             "Ref '{}' ingested successfully ({} files).",

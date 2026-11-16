@@ -17,9 +17,10 @@ use crate::agent::{graph_tools, Agent};
 use crate::api::{AppState, GraphCache, ProjectAgentBuilder};
 use crate::auth::{api_keys::ApiKeyStore, user_keys::UserKeyStore};
 use crate::cluster::bus::ClusterBus;
+use crate::cluster::lease::{self, Leases};
 use crate::cluster::node::{ClusterNode, NodeStanding};
 use crate::cluster::peer::{require_secret, ClusterSecrets, PeerClient};
-use crate::cluster::{singleton, Shutdown};
+use crate::cluster::Shutdown;
 use crate::config::Config;
 use crate::crypto::Crypto;
 use crate::machines::directory::AgentDirectory;
@@ -177,7 +178,90 @@ fn spawn_fence_guard(node: Arc<ClusterNode>, live: Arc<ProjectLive>, evicted: Sh
     });
 }
 
+fn build_search(
+    config: &crate::config::SearchConfig,
+    db: &Arc<Db>,
+    llm: &Arc<dyn crate::llm::LlmProvider>,
+    node_id: &str,
+    stored_embeddings: Option<Arc<dyn crate::agent::semantic::Embedder>>,
+) -> Result<Option<Arc<crate::search::SearchService>>> {
+    if config.engine == crate::config::SearchMode::Loop {
+        return Ok(None);
+    }
+    let service = crate::search::wiring::build_with_embeddings(
+        config,
+        Arc::clone(db),
+        Some(Arc::clone(llm)),
+        crate::search::record::Recorder::new(Arc::clone(db), node_id),
+        stored_embeddings,
+    )?;
+    tracing::info!(mode = ?config.engine, "tiered code search enabled");
+    Ok(Some(service))
+}
+
+fn spawn_enrichment(
+    config: &Config,
+    db: &Arc<Db>,
+    llm: &Arc<dyn crate::llm::LlmProvider>,
+    node: &Arc<crate::cluster::node::ClusterNode>,
+    leases: &Arc<dyn Leases>,
+    admission: &Arc<crate::turns::admission::TurnAdmission>,
+    shutdown: Shutdown,
+) {
+    let selection =
+        config
+            .search
+            .fast_model
+            .as_ref()
+            .map(|m| crate::llm::types::ProviderSelection {
+                provider_id: m.provider_id.clone(),
+                model: m.model.clone(),
+                cache_breakpoint_index: None,
+            });
+    let model_name = selection
+        .as_ref()
+        .map(|s| format!("{}:{}", s.provider_id, s.model.clone().unwrap_or_default()))
+        .unwrap_or_else(|| llm.default_model().to_string());
+    let model = crate::search::llm_adapter::ProviderModel::new(Arc::clone(llm), selection);
+    let job = crate::jobs::kinds::enrich::EnrichJob::new(Arc::clone(db), model, model_name);
+    let busy_admission = Arc::clone(admission);
+    let busy_limit = (config.agent.max_active_turns / 2).max(1);
+    crate::jobs::JobRunner::new(
+        crate::jobs::queue::WorkQueue::new(Arc::clone(db)),
+        Arc::clone(leases),
+        Arc::clone(node),
+        vec![Arc::new(job)],
+        Arc::new(move || busy_admission.active() >= busy_limit),
+    )
+    .spawn(shutdown);
+    tracing::info!("background enrichment enabled");
+}
+
+fn spawn_calibration(
+    db: &Arc<Db>,
+    service: &Arc<crate::search::SearchService>,
+    node: &Arc<crate::cluster::node::ClusterNode>,
+    leases: &Arc<dyn Leases>,
+    admission: &Arc<crate::turns::admission::TurnAdmission>,
+    config: &Config,
+    shutdown: Shutdown,
+) {
+    let job = crate::jobs::kinds::calibrate::CalibrateJob::new(Arc::clone(db), Arc::clone(service));
+    let busy_admission = Arc::clone(admission);
+    let busy_limit = (config.agent.max_active_turns / 2).max(1);
+    crate::jobs::JobRunner::new(
+        crate::jobs::queue::WorkQueue::new(Arc::clone(db)),
+        Arc::clone(leases),
+        Arc::clone(node),
+        vec![Arc::new(job)],
+        Arc::new(move || busy_admission.active() >= busy_limit),
+    )
+    .spawn(shutdown);
+    tracing::info!("per-repository search calibration enabled");
+}
+
 fn spawn_reaper(
+    leases: Arc<dyn Leases>,
     db: Arc<Db>,
     live: Arc<ProjectLive>,
     directory: Arc<AgentDirectory>,
@@ -189,7 +273,7 @@ fn spawn_reaper(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             ticker.tick().await;
-            let result = singleton::run_exclusive(&db, "reaper", || async {
+            let result = lease::run_exclusive(leases.as_ref(), "reaper", || async {
                 reap(&db, &live, &directory).await;
                 if let Ok(alive) = live.node().live_node_ids().await {
                     collocate.reap_dead_nodes(&alive).await;
@@ -290,6 +374,7 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     let node = Arc::clone(&cluster.node);
     let bus = Arc::clone(&cluster.bus);
     let quorium = cluster.quorium.clone();
+    let leases = lease::for_node(&node, quorium.as_ref());
     let peers = match (cluster_config.effective_shared_secret(), internal_addr) {
         (Some(secret), Some(_)) => Some(PeerClient::secured(
             node.node_id(),
@@ -305,6 +390,17 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         peers.clone(),
         shutdown.clone(),
     );
+
+    let credentials = match config.security.user_key_encryption_key.as_ref() {
+        Some(key_hex) => {
+            let crypto = Crypto::from_hex(key_hex).context("invalid user_key_encryption_key")?;
+            Some(Arc::new(crate::credentials::CredentialStore::new(
+                Arc::clone(&db),
+                Arc::new(crypto),
+            )))
+        }
+        None => None,
+    };
 
     let has_user_key_providers = config.llm.iter().any(|c| c.user_provided_key());
     let user_key_store = if has_user_key_providers {
@@ -347,24 +443,28 @@ pub async fn start(config: Config) -> Result<RunningServer> {
             if let Some(embedder) = handle.embedder.clone() {
                 let db = Arc::clone(&db);
                 let semantic_cfg = config.semantic.clone();
+                let leases = Arc::clone(&leases);
                 tokio::spawn(async move {
-                    let ran = singleton::run_exclusive(&db, "semantic-backfill", || async {
-                        match crate::agent::semantic::run_backfill_if_configured(
-                            db.as_ref(),
-                            embedder.as_ref(),
-                            &semantic_cfg,
-                        )
-                        .await
-                        {
-                            Ok(stats) => tracing::info!(
-                                scanned = stats.scanned,
-                                embedded = stats.embedded,
-                                "semantic backfill finished"
-                            ),
-                            Err(err) => tracing::warn!(error = %err, "semantic backfill failed"),
-                        }
-                    })
-                    .await;
+                    let ran =
+                        lease::run_exclusive(leases.as_ref(), "semantic-backfill", || async {
+                            match crate::agent::semantic::run_backfill_if_configured(
+                                db.as_ref(),
+                                embedder.as_ref(),
+                                &semantic_cfg,
+                            )
+                            .await
+                            {
+                                Ok(stats) => tracing::info!(
+                                    scanned = stats.scanned,
+                                    embedded = stats.embedded,
+                                    "semantic backfill finished"
+                                ),
+                                Err(err) => {
+                                    tracing::warn!(error = %err, "semantic backfill failed")
+                                }
+                            }
+                        })
+                        .await;
                     if matches!(ran, Ok(false)) {
                         tracing::info!("semantic backfill already running on another node");
                     }
@@ -374,8 +474,27 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     }
 
     graph_tools::set_run_sql_available(graph_tools::probe_run_sql(&db).await);
-    let global_tools =
-        graph_tools::all_tools_with_semantic(Arc::clone(&db), semantic_handle.clone());
+    let search = build_search(
+        &config.search,
+        &db,
+        &llm_provider,
+        node.node_id(),
+        semantic_handle.as_ref().and_then(|h| h.embedder.clone()),
+    )?;
+    if let Some(service) = &search {
+        crate::search::index_sync::spawn(
+            Arc::clone(service),
+            Arc::clone(&db),
+            Arc::clone(&bus),
+            shutdown.clone(),
+        );
+    }
+    let global_tools = crate::api::code_tools(
+        &db,
+        semantic_handle.clone(),
+        search.as_ref(),
+        crate::search::code_tool::SearchToolContext::default(),
+    );
     let thresholds = crate::api::Thresholds::from_system_one(config.system_one.as_ref());
 
     let agent = Arc::new(
@@ -423,21 +542,39 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         collocate.clone().map(Arc::new),
     );
 
+    let code = lxd.clone().map(|lxd| crate::code::CodeEnv {
+        db: Arc::clone(&db),
+        lxd,
+        credentials: credentials.clone(),
+        settings: crate::code::CodeSettings::from(&config.code),
+        drift: Default::default(),
+    });
+
+    let toolbox = Arc::new(crate::toolsets::build_toolbox(
+        crate::toolsets::ToolboxDeps {
+            db: Arc::clone(&db),
+            semantic: semantic_handle.clone(),
+            search: search.clone(),
+            skills: Arc::clone(&skill_registry),
+            registry: Arc::clone(&machine_registry),
+            lxd: lxd.clone(),
+            collocate: collocate.clone(),
+            collocate_registry: Arc::clone(&collocate_registry),
+            server_url: server_url.clone(),
+            code: code.clone(),
+        },
+    ));
     let agent_builder = Arc::new(ProjectAgentBuilder {
         llm: Arc::clone(&llm_provider),
         system_one: system_one_client.clone(),
         db: Arc::clone(&db),
         registry: Arc::clone(&machine_registry),
-        skills: Arc::clone(&skill_registry),
-        lxd: lxd.clone(),
-        collocate,
-        collocate_registry: Arc::clone(&collocate_registry),
-        server_url: server_url.clone(),
         max_iterations,
         compaction_threshold_chars,
         compaction_keep_last,
         thresholds: Some(thresholds),
-        semantic: semantic_handle.clone(),
+        search: search.clone(),
+        toolbox,
     });
 
     let pricing = Arc::new(crate::cost::PricingTable::from_configs(&config.llm));
@@ -451,6 +588,32 @@ pub async fn start(config: Config) -> Result<RunningServer> {
     );
 
     let collocate_reaper = Arc::clone(&collocate_registry);
+    let admission = crate::turns::admission::TurnAdmission::new(
+        config.agent.max_active_turns,
+        config.agent.max_active_turns_per_user,
+    );
+    if let Some(service) = search.as_ref().filter(|_| config.search.calibrate) {
+        spawn_calibration(
+            &db,
+            service,
+            &node,
+            &leases,
+            &admission,
+            &config,
+            shutdown.clone(),
+        );
+    }
+    if config.search.enrich && search.is_some() {
+        spawn_enrichment(
+            &config,
+            &db,
+            &llm_provider,
+            &node,
+            &leases,
+            &admission,
+            shutdown.clone(),
+        );
+    }
     let state = AppState {
         agent,
         db: Arc::clone(&db),
@@ -471,11 +634,18 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         pricing,
         semantic: semantic_handle,
         live: Arc::clone(&live),
-        admission: crate::turns::admission::TurnAdmission::new(
-            config.agent.max_active_turns,
-            config.agent.max_active_turns_per_user,
-        ),
+        admission: Arc::clone(&admission),
+        credentials,
+        code,
     };
+
+    if let Some(credentials) = &state.credentials {
+        crate::access::recheck::spawn(
+            Arc::clone(&leases),
+            Arc::clone(&db),
+            Arc::clone(credentials),
+        );
+    }
 
     let cache: Arc<GraphCache> = Arc::new(RwLock::new(HashMap::new()));
     tokio::spawn({
@@ -486,7 +656,18 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         }
     });
     spawn_graph_cache_invalidation(Arc::clone(&bus), Arc::clone(&cache));
+    if let Some(code) = &state.code {
+        let graph = Arc::new(crate::api::GraphState {
+            db: Arc::clone(&db),
+            credentials: state.credentials.clone(),
+            cache: Arc::clone(&cache),
+            ingestion: state.ingestion.clone(),
+            bus: Arc::clone(&bus),
+        });
+        crate::code::keeper::spawn(Arc::clone(&leases), code.clone(), graph);
+    }
     spawn_reaper(
+        Arc::clone(&leases),
         Arc::clone(&db),
         Arc::clone(&live),
         Arc::clone(&directory),

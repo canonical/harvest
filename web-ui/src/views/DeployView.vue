@@ -9,7 +9,7 @@
         <h2>Generate a design first</h2>
         <p>
           A deployment design document is required before you can generate deployment artifacts.
-          <router-link to="/design" data-testid="deploy-go-to-design">Go to the Design page →</router-link>
+          <router-link to="/deploy/design" data-testid="deploy-go-to-design">Go to the Design page →</router-link>
         </p>
       </div>
 

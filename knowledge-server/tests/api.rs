@@ -96,7 +96,8 @@ impl LlmProvider for ErrorLlm {
 fn query_app(agent: Arc<Agent>) -> Router {
     let llm = Arc::clone(agent.llm());
     let qs = Arc::new(QueryState {
-        agent,
+        thresholds: None,
+        system_one: None,
         db: None,
         llm,
         llm_configs: Arc::new(vec![]),
@@ -105,8 +106,9 @@ fn query_app(agent: Arc<Agent>) -> Router {
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last: 6,
         pricing: Arc::new(knowledge_server::cost::PricingTable::default()),
-        semantic: None,
+        toolbox: Arc::new(knowledge_server::toolsets::Toolbox::default()),
         admission: knowledge_server::turns::admission::TurnAdmission::unlimited(),
+        code: None,
     });
     Router::new()
         .route("/query", post(handle_query))
@@ -129,6 +131,7 @@ fn test_claims() -> Claims {
 
 fn repos_app(db: Arc<Db>) -> Router {
     let state = Arc::new(GraphState {
+        credentials: None,
         ingestion: knowledge_server::ingestion::IngestionJobs::standalone(Arc::clone(&db)),
         db,
         cache: Arc::new(RwLock::new(HashMap::new())),
@@ -137,6 +140,7 @@ fn repos_app(db: Arc<Db>) -> Router {
     Router::new()
         .route("/repositories", get(handle_list_repositories))
         .with_state(state)
+        .layer(axum::Extension(test_claims()))
 }
 
 fn make_agent(text: &str) -> Arc<Agent> {
@@ -436,7 +440,8 @@ use knowledge_server::conversations::handlers as conv_handlers;
 fn query_app_with_db(agent: Arc<Agent>, db: Arc<Db>) -> Router {
     let llm = Arc::clone(agent.llm());
     let qs = Arc::new(QueryState {
-        agent,
+        thresholds: None,
+        system_one: None,
         db: Some(Arc::clone(&db)),
         llm,
         llm_configs: Arc::new(vec![]),
@@ -445,8 +450,9 @@ fn query_app_with_db(agent: Arc<Agent>, db: Arc<Db>) -> Router {
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last: 6,
         pricing: Arc::new(knowledge_server::cost::PricingTable::default()),
-        semantic: None,
+        toolbox: Arc::new(knowledge_server::toolsets::Toolbox::default()),
         admission: knowledge_server::turns::admission::TurnAdmission::unlimited(),
+        code: None,
     });
     let query_router = Router::new()
         .route("/query/stream", post(handle_query_stream))
@@ -527,6 +533,37 @@ async fn repositories_returns_versions_for_repo() {
         versions.iter().any(|v| v.as_str() == Some("v1.0")),
         "versions: {versions:?}"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn a_private_repository_is_listed_only_for_users_granted_access() {
+    let test_db = TestDb::new().await;
+    let db = Arc::new(test_db.db.clone());
+    seed_one_repo(&db).await;
+    db.execute(
+        "INSERT INTO users (id, email, provider) VALUES ('test-user-id', 'test@example.com', 'local')",
+        json!({}),
+    )
+    .await
+    .unwrap();
+    db.execute(
+        "UPDATE repositories SET visibility = 'private' WHERE name = 'testrepo'",
+        json!({}),
+    )
+    .await
+    .unwrap();
+
+    let (_, hidden) = body_status_json(repos_app(Arc::clone(&db)), get_req("/repositories")).await;
+    assert_eq!(hidden.as_array().unwrap().len(), 0);
+
+    knowledge_server::access::repos::RepoAccess::new(&db)
+        .grant("testrepo", "test-user-id")
+        .await
+        .unwrap();
+    let (_, shown) = body_status_json(repos_app(db), get_req("/repositories")).await;
+    assert_eq!(shown[0]["name"], "testrepo");
+    assert_eq!(shown[0]["visibility"], "private");
 }
 
 fn docs_app(docs_dir: PathBuf) -> Router {

@@ -440,6 +440,7 @@ mod tests {
                 version: String::new(),
                 draining: false,
                 joined_at_ms: 0,
+                features: Vec::new(),
             },
         }
     }

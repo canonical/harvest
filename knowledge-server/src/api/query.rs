@@ -15,9 +15,10 @@ use serde_json::{json, Value};
 use std::{convert::Infallible, sync::Arc};
 use tokio::sync::mpsc;
 
-use crate::agent::{chain::ChainBuilder, Agent, AgentEvent, Attachment};
+use crate::agent::{chain::ChainBuilder, AgentEvent, Attachment};
 use crate::api::{resolve_user_llm, QueryState};
 use crate::auth::jwt::Claims;
+use crate::modes::Space;
 use crate::conversations::handlers::{append_user_turn, load_conversation_context};
 use crate::conversations::store::ConversationContext;
 use crate::conversations::summary::spawn_refresh as spawn_summary_refresh;
@@ -90,22 +91,9 @@ async fn answer_query(user: Claims, qs: Arc<QueryState>, req: QueryRequest) -> R
     let history = context.history();
     let selection = selection_from(&req);
     let user_llm = resolve_user_llm(&qs.llm, &qs.llm_configs, &qs.user_key_store, &user.sub).await;
-    let agent = if Arc::ptr_eq(&user_llm, &qs.llm) {
-        Arc::clone(&qs.agent)
-    } else {
-        let db = qs.db.clone().unwrap_or_else(|| {
-            panic!("db must be available when user key providers are configured")
-        });
-        Arc::new(
-            Agent::new(
-                user_llm,
-                crate::agent::graph_tools::all_tools_with_semantic(db, qs.semantic.clone()),
-                qs.max_iterations,
-            )
-            .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
-            .with_parallel_research(true),
-        )
-    };
+    let agent = qs
+        .agent_in(Space::personal(&user.sub), &user.sub, req.conversation_id.as_deref(), user_llm)
+        .await;
     match agent
         .query(&req.query, &history, attachments, selection.as_ref())
         .await
@@ -184,7 +172,18 @@ pub async fn handle_query_stream(
     State(qs): State<Arc<QueryState>>,
     headers: HeaderMap,
     Json(req): Json<QueryRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    let space = Space::personal(&user.sub);
+    stream_turn(user, qs, headers, req, space).await
+}
+
+pub async fn stream_turn(
+    user: Claims,
+    qs: Arc<QueryState>,
+    headers: HeaderMap,
+    req: QueryRequest,
+    space: Space,
+) -> Response {
     let claim = match claim_request(&qs, &user.sub, &headers, req.conversation_id.as_deref()).await
     {
         Ok(claim) => claim,
@@ -204,22 +203,9 @@ pub async fn handle_query_stream(
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
     let user_llm = resolve_user_llm(&qs.llm, &qs.llm_configs, &qs.user_key_store, &user.sub).await;
-    let agent = if Arc::ptr_eq(&user_llm, &qs.llm) {
-        Arc::clone(&qs.agent)
-    } else {
-        let db = qs.db.clone().unwrap_or_else(|| {
-            panic!("db must be available when user key providers are configured")
-        });
-        Arc::new(
-            Agent::new(
-                user_llm.clone(),
-                crate::agent::graph_tools::all_tools_with_semantic(db, qs.semantic.clone()),
-                qs.max_iterations,
-            )
-            .with_compaction(qs.compaction_threshold_chars, qs.compaction_keep_last)
-            .with_parallel_research(true),
-        )
-    };
+    let agent = qs
+        .agent_in(space, &user.sub, req.conversation_id.as_deref(), user_llm)
+        .await;
     let llm = Arc::clone(agent.llm());
     let qs_ctx = Arc::clone(&qs);
     let db = qs.db.clone();
@@ -265,9 +251,11 @@ pub async fn handle_query_stream(
                 AgentEvent::ToolCall { name, input } => {
                     chain_builder.tool_call(name, input, None, None)
                 }
-                AgentEvent::ToolResult { name, preview } => {
-                    chain_builder.tool_result(name, preview)
-                }
+                AgentEvent::ToolResult {
+                    name,
+                    preview,
+                    view,
+                } => chain_builder.tool_result(name, preview, view.as_ref()),
                 AgentEvent::Enumeration {
                     tool,
                     input,

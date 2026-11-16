@@ -23,12 +23,8 @@
               :disabled="loadingEarlier"
               @click="loadEarlier"
             >{{ loadingEarlier ? 'Loading…' : 'Load earlier messages' }}</button>
-            <div v-if="!projectId && !chat.messages.length" class="no-project-state chat-empty-state">
-              <p>Select a project to start chatting, or use the global query below.</p>
-            </div>
-
-            <div v-else-if="projectId && !chat.messages.length" class="chat-empty-state">
-              <p>Ask anything about codebases or control agents</p>
+            <div v-if="!chat.messages.length" class="chat-empty-state">
+              <p>{{ emptyStateText }}</p>
             </div>
 
             <ChatMessage
@@ -66,7 +62,7 @@
                 ref="inputEl"
                 v-model="query"
                 class="p-search-box__input"
-                placeholder="Ask anything…"
+                :placeholder="readOnly ? 'You can read this project but not chat in it' : 'Ask anything…'"
                 rows="1"
                 :disabled="inputDisabled"
                 @keydown.enter.exact.prevent="sendQuery"
@@ -93,6 +89,8 @@
               <button
                 type="submit"
                 class="p-search-box__button send-btn"
+                aria-label="Send"
+                title="Send (Enter)"
                 :disabled="inputDisabled || !query.trim() && !pendingAttachments.length"
                 @click="sendQuery"
               >
@@ -102,7 +100,7 @@
           </div>
           <LlmModelPicker />
           <button
-            v-if="projectId"
+            v-if="!codeSessionId"
             class="chat-history-toggle-btn"
             type="button"
             aria-label="Toggle conversation history"
@@ -113,7 +111,7 @@
         </div>
       </div>
 
-      <div v-if="projectId" class="chat-history-panel" :class="{ 'is-open': historyOpen }">
+      <div v-if="!codeSessionId" class="chat-history-panel" :class="{ 'is-open': historyOpen }">
         <div class="chat-history-panel__header">
           <button class="chat-new-btn" data-testid="new-chat" type="button" @click="newChat">+ New chat</button>
           <button class="chat-history-close-btn" type="button" aria-label="Close history" @click="historyOpen = false">✕</button>
@@ -126,21 +124,19 @@
               :key="conv.id"
               class="conv-item"
               :class="{ 'conv-item--active': conv.id === activeConvId }"
-              role="button"
-              tabindex="0"
               @click="loadConversation(conv.id)"
-              @keydown.enter.prevent="loadConversation(conv.id)"
             >
-              <div class="conv-item__body">
+              <button class="conv-item__body" type="button" :aria-current="conv.id === activeConvId ? 'true' : undefined" @click.stop="loadConversation(conv.id)">
                 <span class="conv-item__title">{{ conv.title }}</span>
                 <span v-if="conv.origin_type === 'api'" class="conv-item__meta">
                   API · {{ conv.origin_api_key_name || 'Unknown key' }}<template v-if="conv.origin_api_key_revoked_at"> (revoked)</template>
                 </span>
                 <span v-if="conv.origin_type === 'api' && conv.origin_tracking_id" class="conv-item__tracking">tracking: {{ conv.origin_tracking_id }}</span>
-              </div>
+              </button>
               <button
                 v-if="canDeleteConv(conv)"
                 class="conv-item__delete"
+                :aria-label="`Delete ${conv.title}`"
                 title="Delete"
                 @click.stop="confirmDeleteConversation(conv)"
               >✕</button>
@@ -151,35 +147,28 @@
       </div>
     </div>
 
-    <div v-if="projectId && historyOpen" class="chat-history-backdrop" @click="historyOpen = false" />
+    <div v-if="historyOpen" class="chat-history-backdrop" @click="historyOpen = false" />
   </div>
 
-  <div
-    v-if="deletingConv"
-    class="modal"
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="delete-conv-title"
-    @click.self="deletingConv = null"
-  >
-    <div class="modal-content">
-      <button class="modal-close" type="button" aria-label="Close" @click="deletingConv = null">✕</button>
-      <h3 id="delete-conv-title">Delete conversation</h3>
-      <p>Delete <strong>{{ deletingConv.title || 'this conversation' }}</strong>? This cannot be undone.</p>
-      <div class="modal-actions">
-        <button class="p-button--base is-dense" type="button" @click="deletingConv = null">Cancel</button>
-        <button class="p-button--negative is-dense" type="button" @click="submitDeleteConversation">Delete</button>
-      </div>
+  <AppModal v-if="deletingConv" @close="deletingConv = null">
+    <h3 id="delete-conv-title">Delete conversation</h3>
+    <p>Delete <strong>{{ deletingConv.title || 'this conversation' }}</strong>? This cannot be undone.</p>
+    <div class="modal-actions">
+      <button class="p-button--base is-dense" type="button" @click="deletingConv = null">Cancel</button>
+      <button class="p-button--negative is-dense" type="button" @click="submitDeleteConversation">Delete</button>
     </div>
-  </div>
+  </AppModal>
 </template>
 
 <script setup>
+import AppModal from '../ui/AppModal.vue';
+import { sessionQueryStream } from '../../lib/code-api.js';
 import { INTERRUPTED_MESSAGE } from '../../lib/conversation-thread.js';
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useAuthStore }    from '../../stores/auth.js';
 import { useLlmStore }     from '../../stores/llm.js';
-import { useChatInstance } from '../../composables/useChatInstance.js';
+import { useProjectStore } from '../../stores/project.js';
+import { useChatInstance, takeChatDraft } from '../../composables/useChatInstance.js';
 import { useStickyScroll } from '../../composables/useStickyScroll.js';
 import ChatMessage         from './ChatMessage.vue';
 import LlmModelPicker      from './LlmModelPicker.vue';
@@ -205,6 +194,7 @@ const props = defineProps({
   tabId:          { type: String, required: true },
   conversationId: { type: String, default: null },
   projectId:      { type: String, default: null },
+  codeSessionId:  { type: String, default: null },
 });
 
 const emit = defineEmits(['update:conversationId', 'title-updated']);
@@ -213,8 +203,13 @@ const auth  = useAuthStore();
 const chat  = useChatInstance(props.tabId);
 const llm   = useLlmStore();
 
-const query          = ref('');
+const query          = ref(takeChatDraft(props.tabId));
 const historyOpen    = ref(false);
+const emptyStateText = computed(() => {
+  if (props.codeSessionId) return 'Describe the change you want; Harvest plans it, implements it and runs the tests';
+  if (props.projectId) return 'Ask anything about codebases or control agents';
+  return 'Ask anything about the repositories you can access';
+});
 const conversations  = ref([]);
 const activeConvId   = ref(props.conversationId ?? null);
 const deletingConv   = ref(null);
@@ -226,6 +221,8 @@ const messagesEl     = ref(null);
 const { stuck, handleScroll, follow, jumpToLatest } = useStickyScroll();
 
 const remoteLocked   = ref(false);
+const projectStore   = useProjectStore();
+const readOnly       = computed(() => Boolean(props.projectId) && projectStore.selectedProject?.role === 'viewer');
 const lockedBy       = ref('');
 const presence       = ref([]);
 let   projectEs      = null;
@@ -233,7 +230,7 @@ let   projectEs      = null;
 const pendingAttachments = computed(() => chat.pendingAttachments);
 
 const inputDisabled = computed(() =>
-  chat.loading || remoteLocked.value
+  chat.loading || remoteLocked.value || readOnly.value
 );
 
 const presenceOthers = computed(() => {
@@ -380,6 +377,7 @@ function handleProjectEvent(event) {
 }
 
 async function loadConversationList() {
+  if (props.codeSessionId) return;
   try {
     const list = props.projectId
       ? await listProjectConversations(props.projectId)
@@ -535,7 +533,7 @@ async function sendQuery() {
   await nextTick(); jumpToLatest(messagesEl.value);
 
   try {
-    if (!activeConvId.value) {
+    if (!activeConvId.value && !props.codeSessionId) {
       const title = text.length > 60 ? text.slice(0, 57) + '…' : text;
       const conv = await createConversation(title);
       setActiveConvId(conv.id);
@@ -544,11 +542,18 @@ async function sendQuery() {
         conversations.value = [conv, ...conversations.value];
       }
     }
-    await queryStream(text, activeConvId.value, attachments, (event) => {
+    const onEvent = (event) => {
       handleStreamEvent(event);
       if (event.type === 'done') { if (stuck.value) scrollToLastMessage(); }
       else nextTick(() => follow(messagesEl.value));
-    }, llm.selection);
+    };
+    if (props.codeSessionId) {
+      await sessionQueryStream(props.codeSessionId, {
+        query: text, conversationId: activeConvId.value, attachments, providerSelection: llm.selection,
+      }, onEvent);
+    } else {
+      await queryStream(text, activeConvId.value, attachments, onEvent, llm.selection);
+    }
   } catch (err) {
     chat.setError(err.message);
   }
@@ -615,7 +620,7 @@ function handleChatEvent(event) {
     case 'thinking_delta': chat.addThinkingDelta(event.text); break;
     case 'text_delta':     chat.addTextDelta(event.text); break;
     case 'tool_call':      chat.addToolCall(event.name, event.input, event.description ?? describeToolCall(event.name, event.input ?? {}, { hostname: event.hostname })); break;
-    case 'tool_result':    chat.completeToolCall(event.name, event.preview); break;
+    case 'tool_result':    chat.completeToolCall(event.name, event.preview, event.view); break;
     case 'question':       chat.setQuestion(event.question, event.choices); break;
     case 'confirm_action': chat.addConfirmAction(event.id, event.name, event.input, event.description); break;
     case 'intent':         chat.setIntent(event.mode); break;
@@ -693,6 +698,7 @@ function autoResizeInput() {
 watch(query, () => nextTick(autoResizeInput));
 
 onMounted(async () => {
+  if (query.value) inputEl.value?.focus();
   if (props.conversationId && chat.messages.length) {
     if (props.projectId) openEventStream();
   } else if (props.conversationId) {

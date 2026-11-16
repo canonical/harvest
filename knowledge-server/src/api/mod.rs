@@ -19,10 +19,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-use crate::agent::{
-    artifact_tools, deployment_tools, graph_tools, lxd_tools, machine_tools, port_forward_tools,
-    prompt, skill_tools, terraform_tools, tool, Agent,
-};
+use crate::agent::{deployment_tools, graph_tools, prompt, tool, Agent};
 use crate::artifacts::handlers::{self as artifact_handlers, ArtifactState};
 use crate::auth::api_keys::ApiKeyStore;
 use crate::auth::user_keys::UserKeyStore;
@@ -31,6 +28,7 @@ use crate::chat_layouts::handlers::{self as chat_layout_handlers, ChatLayoutStat
 use crate::config::AuthConfig;
 use crate::config::{LlmProviderConfig, UiConfig};
 use crate::conversations::handlers::{self as conv_handlers, ConvState};
+use crate::credentials::{handlers as credential_handlers, CredentialStore};
 use crate::deployments::{self, handlers as deployment_handlers};
 use crate::ingestion::IngestionRegistry;
 use crate::llm::LlmProvider;
@@ -39,8 +37,10 @@ use crate::machines::{
     handlers::{machines_protected_router, machines_router, MachineState},
     MachineRegistry,
 };
+use crate::modes::Space;
 use crate::projects::handlers::{self as proj_handlers, ProjectState};
 use crate::skills::{handlers as skill_handlers, SkillStore};
+use crate::toolsets::{Toolbox, ToolsetId, TurnContext};
 use harvest_db::Db;
 
 pub type GraphCache = RwLock<HashMap<String, Arc<String>>>;
@@ -86,6 +86,7 @@ pub async fn resolve_user_system_one(
 #[derive(Clone)]
 pub struct GraphState {
     pub db: Arc<Db>,
+    pub credentials: Option<Arc<CredentialStore>>,
     pub cache: Arc<GraphCache>,
     pub ingestion: IngestionRegistry,
     pub bus: Arc<crate::cluster::bus::ClusterBus>,
@@ -93,7 +94,8 @@ pub struct GraphState {
 
 #[derive(Clone)]
 pub struct QueryState {
-    pub agent: Arc<Agent>,
+    pub thresholds: Option<Thresholds>,
+    pub system_one: Option<Arc<crate::llm::system_one::SystemOneClient>>,
     pub db: Option<Arc<Db>>,
     pub llm: Arc<dyn LlmProvider>,
     pub llm_configs: Arc<Vec<LlmProviderConfig>>,
@@ -102,8 +104,53 @@ pub struct QueryState {
     pub compaction_threshold_chars: usize,
     pub compaction_keep_last: usize,
     pub pricing: Arc<crate::cost::PricingTable>,
-    pub semantic: Option<Arc<graph_tools::SemanticHandle>>,
+    pub toolbox: Arc<Toolbox>,
     pub admission: Arc<crate::turns::admission::TurnAdmission>,
+    pub code: Option<crate::code::CodeEnv>,
+}
+
+impl QueryState {
+    async fn briefing_for(&self, space: &crate::modes::Space) -> Option<crate::code::briefing::Briefing> {
+        if space.mode() != crate::modes::Mode::Code {
+            return None;
+        }
+        Some(match (&self.code, space.code_session_id()) {
+            (Some(env), Some(session_id)) => crate::code::briefing::for_session(env, session_id).await,
+            _ => crate::code::briefing::Briefing {
+                appendix: prompt::CODE_SESSION_GUIDE.to_string(),
+                focus: None,
+            },
+        })
+    }
+
+    pub async fn agent_in(
+        &self,
+        space: Space,
+        user_id: &str,
+        conversation_id: Option<&str>,
+        llm: Arc<dyn LlmProvider>,
+    ) -> Arc<Agent> {
+        let conversation_id = conversation_id.unwrap_or_default();
+        let briefing = self.briefing_for(&space).await;
+        let turn = match &self.db {
+            Some(db) => TurnContext::load(db, user_id, space, conversation_id, llm).await,
+            None => TurnContext::unrestricted(user_id, space, conversation_id, llm),
+        }
+        .focused_on(briefing.as_ref().and_then(|b| b.focus.clone()));
+        let agent = Agent::new(
+            Arc::clone(&turn.llm),
+            self.toolbox.tools(&turn),
+            self.max_iterations,
+        )
+        .with_system_one(self.system_one.clone())
+        .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+        .with_parallel_research(true)
+        .with_prompt_appendix(briefing.as_ref().map(|b| b.appendix.as_str()));
+        Arc::new(match self.thresholds {
+            Some(t) => t.apply(agent),
+            None => agent,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -128,6 +175,8 @@ pub struct AppState {
     pub semantic: Option<Arc<graph_tools::SemanticHandle>>,
     pub live: Arc<crate::projects::live::ProjectLive>,
     pub admission: Arc<crate::turns::admission::TurnAdmission>,
+    pub credentials: Option<Arc<CredentialStore>>,
+    pub code: Option<crate::code::CodeEnv>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -198,199 +247,64 @@ pub struct ProjectAgentBuilder {
     pub system_one: Option<Arc<crate::llm::system_one::SystemOneClient>>,
     pub db: Arc<Db>,
     pub registry: Arc<MachineRegistry>,
-    pub skills: Arc<SkillStore>,
-    pub lxd: Option<Arc<LxdClient>>,
-    pub collocate: Option<crate::collocate::client::CollocateHandle>,
-    pub collocate_registry: Arc<crate::collocate::sessions::SessionContainerRegistry>,
-    pub server_url: String,
     pub max_iterations: usize,
     pub compaction_threshold_chars: usize,
     pub compaction_keep_last: usize,
     pub thresholds: Option<Thresholds>,
-    pub semantic: Option<Arc<graph_tools::SemanticHandle>>,
+    pub search: Option<Arc<crate::search::SearchService>>,
+    pub toolbox: Arc<Toolbox>,
+}
+
+pub fn code_tools(
+    db: &Arc<Db>,
+    semantic: Option<Arc<graph_tools::SemanticHandle>>,
+    search: Option<&Arc<crate::search::SearchService>>,
+    context: crate::search::code_tool::SearchToolContext,
+) -> Vec<Box<dyn tool::Tool>> {
+    match search {
+        Some(service) if service.mode() == crate::config::SearchMode::Tiered => {
+            crate::search::code_tool::tiered_tools(Arc::clone(db), Arc::clone(service), context)
+        }
+        _ => graph_tools::all_tools_with_semantic(Arc::clone(db), semantic),
+    }
 }
 
 impl ProjectAgentBuilder {
-    fn base_tools(&self, project_id: String, conversation_id: String) -> Vec<Box<dyn tool::Tool>> {
-        let mut tools =
-            graph_tools::all_tools_with_semantic(Arc::clone(&self.db), self.semantic.clone());
-        tools.push(Box::new(machine_tools::ListAgentsTool {
-            registry: Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(machine_tools::RunCommandTool {
-            registry: Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(skill_tools::ListSkillsTool {
-            store: Arc::clone(&self.skills),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(skill_tools::LoadSkillTool {
-            store: Arc::clone(&self.skills),
-            project_id: project_id.clone(),
-        }));
-        if let Some(lxd) = &self.lxd {
-            tools.push(Box::new(lxd_tools::CreateLxdAgentTool {
-                db: Arc::clone(&self.db),
-                lxd: Arc::clone(lxd),
-                server_url: self.server_url.clone(),
-                project_id: project_id.clone(),
-            }));
-        }
-        tools.push(Box::new(lxd_tools::DeleteAgentTool {
-            db: Arc::clone(&self.db),
-            lxd: self.lxd.clone(),
-            registry: Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(port_forward_tools::ListPortForwardsTool {
-            db: Arc::clone(&self.db),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(port_forward_tools::CreatePortForwardTool {
-            db: Arc::clone(&self.db),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(port_forward_tools::UpdatePortForwardTool {
-            db: Arc::clone(&self.db),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(port_forward_tools::DeletePortForwardTool {
-            db: Arc::clone(&self.db),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(artifact_tools::GenerateArtifactTool {
-            db: Arc::clone(&self.db),
-            project_id: project_id.clone(),
-            server_url: self.server_url.clone(),
-        }));
-        tools.push(Box::new(terraform_tools::RunTerraformPlanTool {
-            db: Arc::clone(&self.db),
-            registry: Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(terraform_tools::RunTerraformApplyTool {
-            db: Arc::clone(&self.db),
-            registry: Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(terraform_tools::RunTerraformDestroyTool {
-            db: Arc::clone(&self.db),
-            registry: Arc::clone(&self.registry),
-            project_id: project_id.clone(),
-        }));
-        if let Some(handle) = &self.collocate {
-            tools.push(Box::new(crate::collocate::tools::CollocateRunTool {
-                handle: handle.clone(),
-                project_id: project_id.clone(),
-            }));
-            tools.push(Box::new(
-                crate::collocate::tools::CollocateCreateSessionTool {
-                    handle: handle.clone(),
-                    registry: Arc::clone(&self.collocate_registry),
-                    project_id: project_id.clone(),
-                    conversation_id: conversation_id.clone(),
-                },
-            ));
-            tools.push(Box::new(crate::collocate::tools::CollocateExecTool {
-                handle: handle.clone(),
-                registry: Arc::clone(&self.collocate_registry),
-                project_id: project_id.clone(),
-                conversation_id: conversation_id.clone(),
-            }));
-            tools.push(Box::new(
-                crate::collocate::tools::CollocateDeleteSessionTool {
-                    handle: handle.clone(),
-                    registry: Arc::clone(&self.collocate_registry),
-                    project_id: project_id.clone(),
-                    conversation_id: conversation_id.clone(),
-                },
-            ));
-            tools.push(Box::new(
-                crate::collocate::tools::CollocateListContainersTool {
-                    registry: Arc::clone(&self.collocate_registry),
-                    project_id: project_id.clone(),
-                    conversation_id: conversation_id.clone(),
-                },
-            ));
-            tools.push(Box::new(
-                crate::collocate::tools::CollocateTransferFileTool {
-                    handle: handle.clone(),
-                    registry: Arc::clone(&self.collocate_registry),
-                    project_id: project_id.clone(),
-                    conversation_id: conversation_id.clone(),
-                },
-            ));
-        }
-        tools
-    }
-
-    pub fn build(&self, project_id: String) -> Arc<Agent> {
-        self.build_with_llm(project_id, Arc::clone(&self.llm))
-    }
-
-    pub fn build_with_llm(&self, project_id: String, llm: Arc<dyn LlmProvider>) -> Arc<Agent> {
-        self.build_for_conversation_with_llm(project_id, String::new(), llm)
-    }
-
-    pub fn build_for_conversation(
-        &self,
-        project_id: String,
-        conversation_id: String,
-    ) -> Arc<Agent> {
-        self.build_for_conversation_with_llm(project_id, conversation_id, Arc::clone(&self.llm))
-    }
-
-    pub fn build_for_conversation_with_llm(
-        &self,
-        project_id: String,
-        conversation_id: String,
-        llm: Arc<dyn LlmProvider>,
-    ) -> Arc<Agent> {
-        self.build_for_conversation_with_llm_and_system_one(
-            project_id,
-            conversation_id,
-            llm,
-            self.system_one.clone(),
-        )
-    }
-
-    pub fn build_for_conversation_with_llm_and_system_one(
-        &self,
-        project_id: String,
-        conversation_id: String,
-        llm: Arc<dyn LlmProvider>,
-        system_one: Option<Arc<crate::llm::system_one::SystemOneClient>>,
-    ) -> Arc<Agent> {
-        let tools = self.base_tools(project_id, conversation_id);
-        let agent = Agent::new(llm, tools, self.max_iterations)
-            .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
-            .with_system_one(system_one)
-            .with_parallel_research(true);
+    fn finish(&self, agent: Agent) -> Arc<Agent> {
+        let agent =
+            agent.with_compaction(self.compaction_threshold_chars, self.compaction_keep_last);
         match self.thresholds {
             Some(t) => Arc::new(t.apply(agent)),
             None => Arc::new(agent),
         }
     }
 
-    pub fn build_for_deployment(
+    pub fn conversation_agent(
         &self,
-        project_id: String,
-        group_id: String,
-        ctx: &deployments::DeploymentContext,
+        turn: &TurnContext,
+        system_one: Option<Arc<crate::llm::system_one::SystemOneClient>>,
     ) -> Arc<Agent> {
-        self.build_for_deployment_with_llm(project_id, group_id, ctx, Arc::clone(&self.llm))
+        let agent = Agent::new(
+            Arc::clone(&turn.llm),
+            self.toolbox.tools(turn),
+            self.max_iterations,
+        )
+        .with_system_one(system_one)
+        .with_parallel_research(true);
+        self.finish(agent)
     }
 
-    pub fn build_for_deployment_with_llm(
+    pub fn deployment_agent(
         &self,
-        project_id: String,
-        group_id: String,
+        turn: &TurnContext,
         ctx: &deployments::DeploymentContext,
-        llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        let mut tools = self.base_tools(project_id.clone(), String::new());
+        let project_id = turn
+            .space
+            .deploy_project_id()
+            .unwrap_or_default()
+            .to_string();
+        let mut tools = self.toolbox.tools(turn);
         tools.push(Box::new(deployment_tools::LinkDeploymentArtifactTool {
             db: Arc::clone(&self.db),
             project_id: project_id.clone(),
@@ -398,81 +312,46 @@ impl ProjectAgentBuilder {
         }));
         tools.push(Box::new(deployment_tools::UpdateProductTemplateTool {
             db: Arc::clone(&self.db),
-            group_id,
             deployment_id: ctx.deployment_id.clone(),
         }));
         tools.push(Box::new(deployment_tools::SetExecutionPlanTool {
             db: Arc::clone(&self.db),
-            project_id: project_id.clone(),
+            project_id,
             deployment_id: ctx.deployment_id.clone(),
         }));
-        let agent = Agent::new(llm, tools, self.max_iterations)
-            .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+        let agent = Agent::new(Arc::clone(&turn.llm), tools, self.max_iterations)
             .with_system_prompt(prompt::deployment_system_prompt(ctx));
-        match self.thresholds {
-            Some(t) => Arc::new(t.apply(agent)),
-            None => Arc::new(agent),
-        }
+        self.finish(agent)
     }
 
-    pub fn build_for_deployment_text_only(
+    pub fn deployment_text_agent(
         &self,
-        ctx: &deployments::DeploymentContext,
-    ) -> Arc<Agent> {
-        self.build_for_deployment_text_only_with_llm(ctx, Arc::clone(&self.llm))
-    }
-
-    pub fn build_for_deployment_text_only_with_llm(
-        &self,
-        ctx: &deployments::DeploymentContext,
         llm: Arc<dyn LlmProvider>,
+        ctx: &deployments::DeploymentContext,
     ) -> Arc<Agent> {
         let agent = Agent::new(llm, Vec::new(), self.max_iterations)
-            .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
             .with_system_prompt(prompt::deployment_system_prompt(ctx));
-        match self.thresholds {
-            Some(t) => Arc::new(t.apply(agent)),
-            None => Arc::new(agent),
-        }
+        self.finish(agent)
     }
 
-    pub fn build_for_deployment_design(
+    pub fn deployment_design_agent(
         &self,
-        project_id: String,
+        turn: &TurnContext,
         ctx: &deployments::DeploymentContext,
     ) -> Arc<Agent> {
-        self.build_for_deployment_design_with_llm(project_id, ctx, Arc::clone(&self.llm))
-    }
-
-    pub fn build_for_deployment_design_with_llm(
-        &self,
-        project_id: String,
-        ctx: &deployments::DeploymentContext,
-        llm: Arc<dyn LlmProvider>,
-    ) -> Arc<Agent> {
-        let mut tools =
-            graph_tools::all_tools_with_semantic(Arc::clone(&self.db), self.semantic.clone());
-        tools.push(Box::new(skill_tools::ListSkillsTool {
-            store: Arc::clone(&self.skills),
-            project_id: project_id.clone(),
-        }));
-        tools.push(Box::new(skill_tools::LoadSkillTool {
-            store: Arc::clone(&self.skills),
-            project_id,
-        }));
-        let agent = Agent::new(llm, tools, self.max_iterations)
-            .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
+        let tools = self
+            .toolbox
+            .tools_from(&[ToolsetId::Knowledge, ToolsetId::Skills], turn);
+        let agent = Agent::new(Arc::clone(&turn.llm), tools, self.max_iterations)
             .with_system_prompt(prompt::deployment_system_prompt(ctx));
-        match self.thresholds {
-            Some(t) => Arc::new(t.apply(agent)),
-            None => Arc::new(agent),
-        }
+        self.finish(agent)
     }
 }
 
 pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String) -> Router {
     let graph_state = Arc::new(GraphState {
         db: Arc::clone(&state.db),
+        credentials: state.credentials.clone(),
         cache,
         ingestion: state.ingestion.clone(),
         bus: Arc::clone(state.live.bus()),
@@ -549,7 +428,8 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .with_state(Arc::clone(&auth_state));
 
     let query_state = Arc::new(QueryState {
-        agent: Arc::clone(&state.agent),
+        thresholds: state.agent_builder.thresholds,
+        system_one: state.agent_builder.system_one.clone(),
         db: Some(Arc::clone(&state.db)),
         llm: Arc::clone(&state.llm),
         llm_configs: Arc::clone(&state.llm_configs),
@@ -558,8 +438,9 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         compaction_threshold_chars: state.agent_builder.compaction_threshold_chars,
         compaction_keep_last: state.agent_builder.compaction_keep_last,
         pricing: Arc::clone(&state.pricing),
-        semantic: state.semantic.clone(),
+        toolbox: Arc::clone(&state.agent_builder.toolbox),
         admission: Arc::clone(&state.admission),
+        code: state.code.clone(),
     });
     let agent_router = Router::new()
         .route("/query", post(query::handle_query))
@@ -632,6 +513,105 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         )
         .with_state(Arc::clone(&auth_state));
 
+    let credential_router = Router::new()
+        .route("/me/credentials", get(credential_handlers::get_credentials))
+        .route(
+            "/me/ssh-key",
+            put(credential_handlers::put_ssh_key).delete(credential_handlers::delete_ssh_key),
+        )
+        .route("/me/accounts", put(credential_handlers::put_account))
+        .route(
+            "/me/accounts/:host",
+            delete(credential_handlers::delete_account),
+        )
+        .with_state(state.credentials.clone());
+
+    let code_state = Arc::new(crate::code::handlers::CodeState {
+        env: state.code.clone(),
+        graph: Arc::clone(&graph_state),
+        query: Arc::clone(&query_state),
+    });
+    let code_router = {
+        use crate::code::chat_handlers as chat;
+        use crate::code::handlers as code;
+        use crate::code::previews::owner;
+        Router::new()
+            .route("/code/projects", get(code::list_projects).post(code::open_project))
+            .route("/code/projects/:id", get(code::get_project))
+            .route("/code/projects/:id/setup", put(code::set_setup))
+            .route("/code/projects/:id/sessions", post(code::open_session))
+            .route(
+                "/code/sessions/:id",
+                get(code::get_session).delete(code::close_session),
+            )
+            .route("/code/sessions/:id/changes", get(code::session_changes))
+            .route("/code/sessions/:id/change-request", post(code::propose_change))
+            .route("/code/sessions/:id/chats", get(chat::list).post(chat::create))
+            .route("/code/sessions/:id/chats/:chat", delete(chat::delete).patch(chat::rename))
+            .route("/code/sessions/:id/layout", get(chat::layout).put(chat::save_layout))
+            .route("/code/sessions/:id/previews", get(owner::list).post(owner::create))
+            .route("/code/previews/:id", delete(owner::delete))
+            .route("/code/previews/:id/share", put(owner::share))
+            .route("/code/previews/:id/restart", post(owner::restart))
+            .route("/code/previews/:id/log", get(owner::log))
+            .route("/code/previews/:id/keep", post(owner::keep))
+            .route("/code/sessions/:id/query/stream", post(code::session_query_stream))
+            .with_state(code_state)
+    };
+
+    let preview_passes = Arc::new(crate::code::previews::pass::Passes::new(&jwt_secret));
+    let preview_origin = state.code.as_ref().and_then(|env| env.settings.preview_origin.clone());
+    let preview_site = state.code.clone().zip(preview_origin.clone()).map(|(env, origin)| {
+        let site = crate::code::previews::site::Site::new(env, origin.clone(), Arc::clone(&preview_passes), server_url.clone());
+        (crate::code::previews::site::router(Arc::new(site)), origin)
+    });
+    let preview_router = {
+        use crate::code::previews::handlers as preview;
+        Router::new()
+            .route("/previews/:id", get(preview::info))
+            .route("/previews/:id/reset", post(preview::reset))
+            .route("/previews/:id/request", post(preview::send_request))
+            .route("/previews/:id/exec", post(preview::exec))
+            .route("/previews/:id/enter", post(preview::enter))
+            .route("/previews/:id/web", get(preview::moved))
+            .route("/previews/:id/web/*path", get(preview::moved))
+            .with_state(Arc::new(preview::PreviewState::new(
+                state.code.clone(),
+                Arc::clone(&jwt_secret),
+                Arc::clone(&preview_passes),
+                preview_origin.clone(),
+            )))
+    };
+
+    let members_router = Router::new()
+        .route(
+            "/projects/:pid/members",
+            get(crate::projects::members::list_members).put(crate::projects::members::add_member),
+        )
+        .route(
+            "/projects/:pid/members/:uid",
+            put(crate::projects::members::set_member_role)
+                .delete(crate::projects::members::remove_member),
+        )
+        .with_state(Arc::clone(&state.db));
+
+    let personal_router = Router::new()
+        .route(
+            "/me/artifacts",
+            get(crate::personal::list_artifacts).post(crate::personal::create_personal_artifact),
+        )
+        .route(
+            "/me/skills",
+            get(crate::personal::list_skills).post(crate::personal::create_skill),
+        )
+        .route(
+            "/me/skills/:id",
+            get(crate::personal::get_skill)
+                .put(crate::personal::update_skill)
+                .delete(crate::personal::delete_skill),
+        )
+        .with_state(Arc::clone(&state.db));
+
     let api_key_state = Arc::new(api_keys::ApiKeyState {
         store: Arc::clone(&state.api_key_store),
     });
@@ -695,7 +675,6 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let skill_store = Arc::new(SkillStore::new(Arc::clone(&state.db)));
 
     let project_router = Router::new()
-        .route("/groups", get(proj_handlers::list_my_groups))
         .route(
             "/projects",
             get(proj_handlers::list_projects).post(proj_handlers::create_project),
@@ -935,6 +914,10 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
 
     let mut protected_router = Router::new()
         .merge(me_router)
+        .merge(credential_router)
+        .merge(personal_router)
+        .merge(members_router)
+        .merge(code_router)
         .merge(api_key_router)
         .merge(conv_router)
         .merge(chat_layout_router)
@@ -957,32 +940,26 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         protected_router = protected_router.merge(docs_router);
     }
 
-    let protected_router = protected_router.layer(from_fn_with_state(
-        Arc::clone(&jwt_secret),
-        auth::require_auth,
-    ));
+    let protected_router = protected_router
+        .layer(from_fn_with_state(
+            Arc::clone(&state.db),
+            crate::access::guard::project_guard,
+        ))
+        .layer(from_fn_with_state(
+            Arc::clone(&jwt_secret),
+            auth::require_auth,
+        ));
 
     let admin_auth_routes = Router::new()
         .route("/admin/users", get(crate::admin::handlers::list_users))
         .route(
+            "/admin/conversation-moves",
+            get(crate::admin::handlers::list_conversation_moves)
+                .post(crate::admin::handlers::move_conversations),
+        )
+        .route(
             "/admin/users/:id/role",
             put(crate::admin::handlers::set_user_role),
-        )
-        .route(
-            "/admin/users/:id/groups",
-            put(crate::admin::handlers::set_user_groups),
-        )
-        .route(
-            "/admin/groups",
-            get(crate::admin::handlers::list_groups).post(crate::admin::handlers::create_group),
-        )
-        .route(
-            "/admin/groups/:id",
-            delete(crate::admin::handlers::delete_group),
-        )
-        .route(
-            "/admin/groups/:id/default",
-            put(crate::admin::handlers::set_group_default),
         )
         .with_state(Arc::clone(&auth_state));
 
@@ -1022,15 +999,20 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
             auth::api_keys::require_api_key,
         ));
 
-    Router::new()
+    let harvest = Router::new()
         .merge(public_router)
         .merge(external_router)
+        .merge(preview_router)
         .merge(machines_public)
         .merge(protected_router)
         .merge(admin_router)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::permissive());
+    match preview_site {
+        Some((site, origin)) => crate::code::previews::site::by_host(harvest, site, origin),
+        None => harvest,
+    }
 }
 
 #[cfg(test)]

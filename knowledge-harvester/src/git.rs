@@ -11,11 +11,31 @@ pub struct TagInfo {
     pub timestamp: i64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteListing {
+    pub default_branch: Option<String>,
+    pub branches: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum GitCredentials {
+    #[default]
+    Anonymous,
+    SshKey {
+        private_key: String,
+    },
+    Basic {
+        username: String,
+        password: String,
+    },
+}
+
 #[derive(Clone)]
 pub struct GitClient {
     clone_root: PathBuf,
     ssh_key_path: Option<PathBuf>,
     ssh_passphrase: Option<String>,
+    credentials: GitCredentials,
 }
 
 impl GitClient {
@@ -24,7 +44,13 @@ impl GitClient {
             clone_root,
             ssh_key_path: None,
             ssh_passphrase: None,
+            credentials: GitCredentials::Anonymous,
         }
+    }
+
+    pub fn with_credentials(mut self, credentials: GitCredentials) -> Self {
+        self.credentials = credentials;
+        self
     }
 
     pub fn with_ssh_key(mut self, key_path: PathBuf, passphrase: Option<String>) -> Self {
@@ -35,20 +61,67 @@ impl GitClient {
 
     fn make_fetch_options(&self) -> FetchOptions<'static> {
         let mut fo = FetchOptions::new();
-        if let Some(key_path) = self.ssh_key_path.clone() {
-            let passphrase = self.ssh_passphrase.clone();
-            let mut callbacks = RemoteCallbacks::new();
-            callbacks.credentials(move |_url, username, _allowed| {
-                git2::Cred::ssh_key(
-                    username.unwrap_or("git"),
-                    None,
-                    &key_path,
-                    passphrase.as_deref(),
-                )
-            });
+        if let Some(callbacks) = self.callbacks() {
             fo.remote_callbacks(callbacks);
         }
         fo
+    }
+
+    fn callbacks(&self) -> Option<RemoteCallbacks<'static>> {
+        let source = match (&self.credentials, &self.ssh_key_path) {
+            (GitCredentials::Anonymous, None) => return None,
+            (GitCredentials::Anonymous, Some(path)) => CredentialSource::KeyFile {
+                path: path.clone(),
+                passphrase: self.ssh_passphrase.clone(),
+            },
+            (credentials, _) => CredentialSource::Given(credentials.clone()),
+        };
+        let mut attempts = 0;
+        let mut callbacks = RemoteCallbacks::new();
+        callbacks.credentials(move |_url, username, _allowed| {
+            attempts += 1;
+            if attempts > 1 {
+                return Err(git2::Error::from_str("authentication failed"));
+            }
+            source.credential(username.unwrap_or("git"))
+        });
+        Some(callbacks)
+    }
+
+    pub fn push(&self, repo_path: &Path, url: &str, refspec: &str) -> Result<String> {
+        let repo = Repository::open(repo_path)?;
+        let mut remote = repo.remote_anonymous(url)?;
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let rejection = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let mut callbacks = self.callbacks().unwrap_or_default();
+        {
+            let messages = std::sync::Arc::clone(&messages);
+            callbacks.sideband_progress(move |data| {
+                if let Ok(mut text) = messages.lock() {
+                    text.push_str(&String::from_utf8_lossy(data));
+                }
+                true
+            });
+        }
+        {
+            let rejection = std::sync::Arc::clone(&rejection);
+            callbacks.push_update_reference(move |reference, status| {
+                if let (Some(reason), Ok(mut slot)) = (status, rejection.lock()) {
+                    *slot = Some(format!("{reference}: {reason}"));
+                }
+                Ok(())
+            });
+        }
+        let mut options = git2::PushOptions::new();
+        options.remote_callbacks(callbacks);
+        remote
+            .push(&[refspec], Some(&mut options))
+            .with_context(|| format!("pushing to {url}"))?;
+        if let Some(reason) = rejection.lock().ok().and_then(|r| r.clone()) {
+            anyhow::bail!("the remote rejected the push: {reason}");
+        }
+        let text = messages.lock().map(|m| m.clone()).unwrap_or_default();
+        Ok(text)
     }
 
     pub fn repo_path(&self, repo_name: &str) -> PathBuf {
@@ -82,6 +155,30 @@ impl GitClient {
         Ok(())
     }
 
+    pub fn list_remote(&self, url: &str) -> Result<RemoteListing> {
+        let tmp_dir = tempfile::TempDir::new()?;
+        let repo = Repository::init_opts(
+            tmp_dir.path(),
+            &git2::RepositoryInitOptions::new().external_template(false),
+        )?;
+        let mut remote = repo.remote("origin", url)?;
+        remote.connect_auth(git2::Direction::Fetch, self.callbacks(), None)?;
+        let default_branch = remote
+            .default_branch()
+            .ok()
+            .and_then(|b| b.as_str().map(|s| s.trim_start_matches("refs/heads/").to_string()));
+        let branches = remote
+            .list()?
+            .iter()
+            .filter_map(|h| h.name().strip_prefix("refs/heads/").map(String::from))
+            .collect();
+        remote.disconnect()?;
+        Ok(RemoteListing {
+            default_branch,
+            branches,
+        })
+    }
+
     pub fn list_remote_refs(&self, url: &str) -> Result<Vec<TagInfo>> {
         let tmp_dir = tempfile::TempDir::new()?;
         let repo = Repository::init_opts(
@@ -90,7 +187,7 @@ impl GitClient {
         )?;
         let mut remote = repo.remote("origin", url)?;
 
-        remote.connect(git2::Direction::Fetch)?;
+        remote.connect_auth(git2::Direction::Fetch, self.callbacks(), None)?;
         let refs: Vec<(String, String)> = remote
             .list()?
             .iter()
@@ -167,6 +264,101 @@ impl GitClient {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct History {
+    pub co_changes: Vec<(String, String, u32)>,
+    pub subjects: std::collections::HashMap<String, Vec<String>>,
+    pub files: std::collections::HashMap<String, crate::origin::FileHistory>,
+    pub total_commits: usize,
+}
+
+const MAX_FILES_PER_COMMIT: usize = 20;
+const MIN_CO_CHANGES: u32 = 3;
+const PARTNERS_PER_FILE: usize = 10;
+const SUBJECTS_PER_FILE: usize = 5;
+
+impl GitClient {
+    pub fn history(&self, repo_path: &Path, refname: &str, max_commits: usize) -> Result<History> {
+        use std::collections::HashMap;
+        let repo = Repository::open(repo_path)?;
+        let commit = resolve_one(&repo, refname)?.peel_to_commit()?;
+        let mut walk = repo.revwalk()?;
+        walk.push(commit.id())?;
+        walk.set_sorting(git2::Sort::TIME)?;
+        let mut pairs: HashMap<(String, String), u32> = HashMap::new();
+        let mut subjects: HashMap<String, Vec<String>> = HashMap::new();
+        let mut file_stats: HashMap<String, crate::origin::FileHistory> = HashMap::new();
+        let mut total_commits = 0usize;
+        for oid in walk.take(max_commits) {
+            let commit = repo.find_commit(oid?)?;
+            if commit.parent_count() != 1 {
+                continue;
+            }
+            let diff = repo.diff_tree_to_tree(
+                Some(&commit.parent(0)?.tree()?),
+                Some(&commit.tree()?),
+                None,
+            )?;
+            let mut files: Vec<String> = diff
+                .deltas()
+                .filter_map(|d| {
+                    d.new_file()
+                        .path()
+                        .map(|p| p.to_string_lossy().replace('\\', "/"))
+                })
+                .collect();
+            files.sort();
+            files.dedup();
+            total_commits += 1;
+            let subject = commit.summary().unwrap_or_default().to_string();
+            let sync = crate::origin::is_sync_subject(&subject);
+            for file in &files {
+                let stats = file_stats.entry(file.clone()).or_default();
+                stats.commits += 1;
+                if sync {
+                    stats.sync_commits += 1;
+                }
+            }
+            if files.is_empty() || files.len() > MAX_FILES_PER_COMMIT {
+                continue;
+            }
+            for file in &files {
+                let list = subjects.entry(file.clone()).or_default();
+                if list.len() < SUBJECTS_PER_FILE && !subject.is_empty() {
+                    list.push(subject.clone());
+                }
+            }
+            for (i, a) in files.iter().enumerate() {
+                for b in &files[i + 1..] {
+                    *pairs.entry((a.clone(), b.clone())).or_default() += 1;
+                }
+            }
+        }
+        let mut frequent: Vec<(String, String, u32)> = pairs
+            .into_iter()
+            .filter(|(_, n)| *n >= MIN_CO_CHANGES)
+            .map(|((a, b), n)| (a, b, n))
+            .collect();
+        frequent.sort_by(|x, y| y.2.cmp(&x.2).then_with(|| (&x.0, &x.1).cmp(&(&y.0, &y.1))));
+        let mut partners: HashMap<String, usize> = HashMap::new();
+        frequent.retain(|(a, b, _)| {
+            let keep = partners.get(a).copied().unwrap_or(0) < PARTNERS_PER_FILE
+                && partners.get(b).copied().unwrap_or(0) < PARTNERS_PER_FILE;
+            if keep {
+                *partners.entry(a.clone()).or_default() += 1;
+                *partners.entry(b.clone()).or_default() += 1;
+            }
+            keep
+        });
+        Ok(History {
+            co_changes: frequent,
+            subjects,
+            files: file_stats,
+            total_commits,
+        })
+    }
+}
+
 fn resolve_one<'r>(repo: &'r Repository, refname: &str) -> Result<git2::Object<'r>> {
     if let Ok(obj) = repo.revparse_single(refname) {
         return Ok(obj);
@@ -174,6 +366,31 @@ fn resolve_one<'r>(repo: &'r Repository, refname: &str) -> Result<git2::Object<'
     let origin_ref = format!("refs/remotes/origin/{refname}");
     repo.revparse_single(&origin_ref)
         .with_context(|| format!("resolving ref '{refname}'"))
+}
+
+enum CredentialSource {
+    KeyFile {
+        path: PathBuf,
+        passphrase: Option<String>,
+    },
+    Given(GitCredentials),
+}
+
+impl CredentialSource {
+    fn credential(&self, username: &str) -> std::result::Result<git2::Cred, git2::Error> {
+        match self {
+            Self::KeyFile { path, passphrase } => {
+                git2::Cred::ssh_key(username, None, path, passphrase.as_deref())
+            }
+            Self::Given(GitCredentials::SshKey { private_key }) => {
+                git2::Cred::ssh_key_from_memory(username, None, private_key, None)
+            }
+            Self::Given(GitCredentials::Basic { username, password }) => {
+                git2::Cred::userpass_plaintext(username, password)
+            }
+            Self::Given(GitCredentials::Anonymous) => git2::Cred::default(),
+        }
+    }
 }
 
 fn parse_refs(refs: Vec<(String, String)>) -> Vec<TagInfo> {
@@ -200,6 +417,32 @@ fn parse_refs(refs: Vec<(String, String)>) -> Vec<TagInfo> {
 
 #[cfg(test)]
 mod tests {
+
+    fn sh(dir: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git").arg("-C").arg(dir).args(args).status().unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn push_sends_a_ref_and_reports_rejections() {
+        let root = tempfile::TempDir::new().unwrap();
+        let remote = root.path().join("remote.git");
+        let work = root.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        sh(root.path(), &["init", "-q", "--bare", remote.to_str().unwrap()]);
+        sh(&work, &["init", "-q", "-b", "main"]);
+        sh(&work, &["-c", "user.name=a", "-c", "user.email=a@b", "commit", "-q", "--allow-empty", "-m", "one"]);
+        let client = GitClient::new(root.path().to_path_buf());
+        let url = remote.to_str().unwrap();
+        client.push(&work, url, "refs/heads/main:refs/heads/feature").unwrap();
+        let pushed = Repository::open(&remote).unwrap();
+        assert!(pushed.find_reference("refs/heads/feature").is_ok());
+
+        sh(&work, &["-c", "user.name=a", "-c", "user.email=a@b", "commit", "-q", "--amend", "--allow-empty", "-m", "rewritten"]);
+        let refused = client.push(&work, url, "refs/heads/main:refs/heads/feature");
+        assert!(refused.is_err());
+    }
+
     use super::*;
     use git2::{Repository, Signature, Time};
     use tempfile::TempDir;

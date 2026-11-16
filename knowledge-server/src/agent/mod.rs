@@ -31,7 +31,7 @@ use crate::llm::{
     },
     LlmProvider,
 };
-use tool::Tool;
+use tool::{Tool, ToolOutput};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attachment {
@@ -185,6 +185,7 @@ pub enum AgentEvent {
     ToolResult {
         name: String,
         preview: String,
+        view: Option<serde_json::Value>,
     },
     Done {
         answer: String,
@@ -285,6 +286,117 @@ pub struct ToolResumeResult {
     pub is_error: bool,
 }
 
+const PREFETCH_HEADER: &str = "[Harvest ran a code search for this question automatically before your turn. The results below come from the search engine, not from the user; the user has not seen them. Start from them and do not repeat this search.]";
+
+const EARLIER_CONTEXT_CHARS: usize = 2_000;
+
+fn message_text(message: &Message) -> String {
+    match &message.content {
+        MessageContent::Text(text) => text.clone(),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+fn earlier_conversation_text(messages: &[Message]) -> String {
+    let mut text = String::new();
+    let last_user = messages
+        .iter()
+        .rposition(|m| matches!(m.role, crate::llm::types::Role::User))
+        .unwrap_or(messages.len());
+    for message in messages[..last_user].iter().rev() {
+        if matches!(message.role, crate::llm::types::Role::System) {
+            continue;
+        }
+        let part = message_text(message);
+        if text.len() + part.len() > EARLIER_CONTEXT_CHARS {
+            break;
+        }
+        text = format!("{part}\n{text}");
+    }
+    text
+}
+
+const READ_BUDGET_SPENT: &str = "error: the follow-up reads for this question are used up. Answer now from the evidence you already have, and say what is still missing.";
+
+async fn record_tool_result(
+    call: &ToolCall,
+    result: ToolOutput,
+    tool_map: &HashMap<String, &dyn Tool>,
+    event_sender: &mpsc::Sender<AgentEvent>,
+    messages: &mut Vec<Message>,
+) {
+    let failed = result.is_error();
+    let preview = tool_map
+        .get(call.name.as_str())
+        .map(|t| t.preview(&result.text))
+        .unwrap_or_else(|| {
+            result
+                .text
+                .chars()
+                .take(tool::DEFAULT_PREVIEW_CHARS)
+                .collect()
+        });
+    let _ = event_sender
+        .send(AgentEvent::ToolResult {
+            name: call.name.clone(),
+            preview,
+            view: result.view,
+        })
+        .await;
+    if is_enumeration_call(&call.name, &call.input) && !failed {
+        let _ = event_sender
+            .send(AgentEvent::Enumeration {
+                tool: call.name.clone(),
+                input: call.input.clone(),
+                result: result
+                    .text
+                    .chars()
+                    .take(ENUMERATION_RESULT_MAX_CHARS)
+                    .collect(),
+            })
+            .await;
+    }
+    messages.push(Message {
+        role: crate::llm::types::Role::User,
+        content: MessageContent::Parts(vec![ContentPart::ToolResult {
+            tool_use_id: call.id.clone(),
+            content: cap_tool_result(result.text),
+            is_error: false,
+        }]),
+    });
+}
+
+fn append_to_last_user_message(messages: &mut [Message], text: &str) {
+    let Some(last) = messages
+        .iter_mut()
+        .rev()
+        .find(|m| matches!(m.role, crate::llm::types::Role::User))
+    else {
+        return;
+    };
+    let addition = ContentPart::Text {
+        text: text.to_string(),
+        thought_signature: None,
+    };
+    match &mut last.content {
+        MessageContent::Text(existing) => {
+            let original = ContentPart::Text {
+                text: std::mem::take(existing),
+                thought_signature: None,
+            };
+            last.content = MessageContent::Parts(vec![original, addition]);
+        }
+        MessageContent::Parts(parts) => parts.push(addition),
+    }
+}
+
 pub struct Agent {
     llm: Arc<dyn LlmProvider>,
     system_one: Option<Arc<SystemOneClient>>,
@@ -293,6 +405,7 @@ pub struct Agent {
     compaction_threshold_chars: usize,
     compaction_keep_last: usize,
     system_prompt_override: Option<String>,
+    prompt_appendix: Option<String>,
     enable_parallel_research: bool,
     llm_concurrency: Arc<Semaphore>,
     fast_path_threshold: f64,
@@ -321,6 +434,7 @@ impl Agent {
             compaction_threshold_chars: usize::MAX,
             compaction_keep_last: 6,
             system_prompt_override: None,
+            prompt_appendix: None,
             enable_parallel_research: false,
             llm_concurrency: Arc::new(Semaphore::new(20)),
             fast_path_threshold: 0.7,
@@ -406,20 +520,49 @@ impl Agent {
         self
     }
 
+    pub fn with_prompt_appendix(mut self, appendix: Option<&str>) -> Self {
+        self.prompt_appendix = appendix.map(String::from);
+        self
+    }
+
+    fn with_appendix(&self, prompt: String) -> String {
+        match &self.prompt_appendix {
+            Some(appendix) => format!("{prompt}\n\n{appendix}"),
+            None => prompt,
+        }
+    }
+
+    fn uses_tiered_search(&self) -> bool {
+        self.tools
+            .iter()
+            .any(|t| t.definition().name == "search_code")
+    }
+
     fn effective_system_prompt(&self) -> String {
         let collocate_enabled = self
             .tools
             .iter()
             .any(|t| t.definition().name.starts_with("collocate_"));
-        self.system_prompt_override
-            .clone()
-            .unwrap_or_else(|| prompt::system_prompt(collocate_enabled))
+        match &self.system_prompt_override {
+            Some(prompt) => prompt.clone(),
+            None if self.uses_tiered_search() => prompt::tiered_system_prompt(
+                collocate_enabled,
+                crate::llm::system_one::PromptSectionFlags::default(),
+            ),
+            None => prompt::system_prompt(collocate_enabled),
+        }
     }
 
     async fn effective_system_prompt_for_query(&self, user_query: &str) -> String {
+        let prompt = self.base_system_prompt_for_query(user_query).await;
+        self.with_appendix(prompt)
+    }
+
+    async fn base_system_prompt_for_query(&self, user_query: &str) -> String {
         if self.system_prompt_override.is_some() {
             return self.effective_system_prompt();
         }
+        let tiered = self.uses_tiered_search();
         let collocate_enabled = self
             .tools
             .iter()
@@ -429,14 +572,15 @@ impl Agent {
                 .select_prompt_sections(user_query, collocate_enabled)
                 .await
             {
+                Ok(flags) if tiered => prompt::tiered_system_prompt(collocate_enabled, flags),
                 Ok(flags) => prompt::system_prompt_with_sections(collocate_enabled, flags),
                 Err(e) => {
                     tracing::warn!(error = %e, "system-one prompt section selection failed — using full prompt");
-                    prompt::system_prompt(collocate_enabled)
+                    self.effective_system_prompt()
                 }
             }
         } else {
-            prompt::system_prompt(collocate_enabled)
+            self.effective_system_prompt()
         }
     }
 
@@ -1084,6 +1228,63 @@ impl Agent {
         }
     }
 
+    async fn tools_for_turn(
+        &self,
+        goal: &str,
+        tool_defs: &[ToolDefinition],
+    ) -> Vec<ToolDefinition> {
+        let Some(so) = &self.system_one else {
+            return tool_defs.to_vec();
+        };
+        let all_tool_names: Vec<String> = tool_defs.iter().map(|t| t.name.clone()).collect();
+        match so.select_tools(goal, &all_tool_names).await {
+            Ok(selected) => tool_defs
+                .iter()
+                .filter(|t| selected.contains(&t.name) || t.name == "ask_user")
+                .cloned()
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "system-one tool selection failed — using full tool set");
+                tool_defs.to_vec()
+            }
+        }
+    }
+
+    async fn route_turn(&self, goal: &str, messages: &[Message]) -> Option<ProviderSelection> {
+        let so = self.system_one.as_ref()?;
+        let history_summary: String = messages
+            .iter()
+            .take(messages.len().saturating_sub(1))
+            .filter(|m| {
+                matches!(
+                    m.role,
+                    crate::llm::types::Role::User | crate::llm::types::Role::Assistant
+                )
+            })
+            .map(|m| match &m.content {
+                MessageContent::Text(t) => t.clone(),
+                MessageContent::Parts(_) => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        match so.route_model_enhanced(goal, &history_summary).await {
+            Ok((tier, confidence, _needs_deep)) if confidence >= self.fast_path_threshold => {
+                self.resolve_tier_selection(&tier)
+            }
+            Ok((_, low_conf, _)) => {
+                tracing::debug!(
+                    confidence = low_conf,
+                    "system-one model routing low confidence — using default"
+                );
+                None
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "system-one model routing failed — using default provider");
+                None
+            }
+        }
+    }
+
     async fn run_loop(
         &self,
         mut messages: Vec<Message>,
@@ -1105,7 +1306,44 @@ impl Agent {
         let mut llm_call_count: usize = 0;
         let protected_prefix_len = messages.len();
         let goal = latest_user_text(&messages);
+        let mut prefetched = false;
+        if depth == 0 && iterations == 0 {
+            if let Some(tool) = tool_map.get("search_code") {
+                let earlier = earlier_conversation_text(&messages);
+                if let Some((input, result)) = tool.prefetch(&goal, &earlier).await {
+                    let _ = event_sender
+                        .send(AgentEvent::ToolCall {
+                            name: "search_code".into(),
+                            input,
+                        })
+                        .await;
+                    let _ = event_sender
+                        .send(AgentEvent::ToolResult {
+                            name: "search_code".into(),
+                            preview: tool.preview(&result.text),
+                            view: result.view,
+                        })
+                        .await;
+                    append_to_last_user_message(
+                        &mut messages,
+                        &format!("{PREFETCH_HEADER}\n{}", cap_tool_result(result.text)),
+                    );
+                    prefetched = true;
+                }
+            }
+        }
+        let read_budget = tool_map
+            .values()
+            .filter_map(|t| t.read_budget())
+            .min()
+            .map(|b| b + usize::from(!prefetched));
+        let mut reads_used = 0usize;
         let mut scored_tool_results: HashSet<u64> = HashSet::new();
+        let tools_for_turn = self.tools_for_turn(&goal, tool_defs).await;
+        let routed_selection = match selection {
+            Some(_) => None,
+            None => self.route_turn(&goal, &messages).await,
+        };
         loop {
             if event_sender.is_closed() {
                 tracing::info!(iterations, "turn abandoned: stopping the agent loop");
@@ -1181,59 +1419,9 @@ impl Agent {
                 sel.cache_breakpoint_index = Some(protected_prefix_len);
             }
 
-            let history_summary: String = messages
-                .iter()
-                .take(messages.len().saturating_sub(1))
-                .filter(|m| {
-                    matches!(
-                        m.role,
-                        crate::llm::types::Role::User | crate::llm::types::Role::Assistant
-                    )
-                })
-                .map(|m| match &m.content {
-                    MessageContent::Text(t) => t.clone(),
-                    MessageContent::Parts(_) => String::new(),
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            let tools_snapshot = if let Some(so) = &self.system_one {
-                let all_tool_names: Vec<String> =
-                    tool_defs.iter().map(|t| t.name.clone()).collect();
-                match so.select_tools(&goal, &all_tool_names).await {
-                    Ok(selected) => tool_defs
-                        .iter()
-                        .filter(|t| selected.contains(&t.name) || t.name == "ask_user")
-                        .cloned()
-                        .collect(),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "system-one tool selection failed — using full tool set");
-                        tool_defs.to_vec()
-                    }
-                }
-            } else {
-                tool_defs.to_vec()
-            };
-
-            if let Some(so) = &self.system_one {
-                if selection_owned.is_none() {
-                    match so.route_model_enhanced(&goal, &history_summary).await {
-                        Ok((tier, confidence, _needs_deep))
-                            if confidence >= self.fast_path_threshold =>
-                        {
-                            selection_owned = self.resolve_tier_selection(&tier);
-                        }
-                        Ok((_, low_conf, _)) => {
-                            tracing::debug!(
-                                confidence = low_conf,
-                                "system-one model routing low confidence — using default"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "system-one model routing failed — using default provider");
-                        }
-                    }
-                }
+            let tools_snapshot = tools_for_turn.clone();
+            if selection_owned.is_none() {
+                selection_owned = routed_selection.clone();
             }
 
             let permit = self.llm_concurrency.clone().acquire_owned().await;
@@ -1514,32 +1702,43 @@ impl Agent {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    let call_infos: Vec<(String, String)> = tool_calls
+                    let (side_effecting, read_only): (Vec<ToolCall>, Vec<ToolCall>) =
+                        tool_calls.into_iter().partition(|c| {
+                            tool_map
+                                .get(&c.name)
+                                .is_some_and(|t| t.requires_confirmation())
+                        });
+                    let call_infos: Vec<(String, String)> = side_effecting
                         .iter()
                         .map(|c| (c.name.clone(), c.input.to_string()))
                         .collect();
-                    match so.filter_tool_calls(&call_infos, &history_text).await {
-                        Ok(keep) => {
-                            let filtered: Vec<ToolCall> = tool_calls
-                                .into_iter()
-                                .zip(keep.iter())
-                                .filter(|(_, k)| **k)
-                                .map(|(c, _)| c)
-                                .collect();
-                            if filtered.len() < call_infos.len() {
-                                tracing::info!(
-                                    total = call_infos.len(),
-                                    kept = filtered.len(),
-                                    "system-one filtered unnecessary tool calls"
-                                );
+                    let kept = if call_infos.is_empty() {
+                        side_effecting
+                    } else {
+                        match so.filter_tool_calls(&call_infos, &history_text).await {
+                            Ok(keep) => {
+                                let filtered: Vec<ToolCall> = side_effecting
+                                    .into_iter()
+                                    .zip(keep.iter())
+                                    .filter(|(_, k)| **k)
+                                    .map(|(c, _)| c)
+                                    .collect();
+                                if filtered.len() < call_infos.len() {
+                                    tracing::info!(
+                                        total = call_infos.len(),
+                                        kept = filtered.len(),
+                                        "system-one filtered unnecessary tool calls"
+                                    );
+                                }
+                                filtered
                             }
-                            filtered
+                            Err(e) => {
+                                tracing::warn!(error = %e, "system-one tool call filtering failed — executing all");
+                                side_effecting
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "system-one tool call filtering failed — executing all");
-                            tool_calls
-                        }
-                    }
+                    };
+                    read_only.into_iter().chain(kept).collect()
                 }
             } else {
                 tool_calls
@@ -1627,47 +1826,17 @@ impl Agent {
                             llm_call_count,
                         );
                     }
-                    let results = join_all(
-                        automatic
-                            .iter()
-                            .map(|c| self.execute_tool_call(c, tool_map)),
-                    )
-                    .await;
+                    let results = self
+                        .execute_with_budget(
+                            automatic.iter().copied().collect(),
+                            tool_map,
+                            read_budget,
+                            &mut reads_used,
+                        )
+                        .await;
                     for (call, result) in automatic.iter().zip(results) {
-                        let preview = tool_map
-                            .get(call.name.as_str())
-                            .map(|t| t.preview(&result))
-                            .unwrap_or_else(|| {
-                                result.chars().take(tool::DEFAULT_PREVIEW_CHARS).collect()
-                            });
-                        let _ = event_sender
-                            .send(AgentEvent::ToolResult {
-                                name: call.name.clone(),
-                                preview,
-                            })
+                        record_tool_result(call, result, tool_map, event_sender, &mut messages)
                             .await;
-                        if is_enumeration_call(&call.name, &call.input)
-                            && !result.starts_with("error:")
-                        {
-                            let _ = event_sender
-                                .send(AgentEvent::Enumeration {
-                                    tool: call.name.clone(),
-                                    input: call.input.clone(),
-                                    result: result
-                                        .chars()
-                                        .take(ENUMERATION_RESULT_MAX_CHARS)
-                                        .collect(),
-                                })
-                                .await;
-                        }
-                        messages.push(Message {
-                            role: crate::llm::types::Role::User,
-                            content: MessageContent::Parts(vec![ContentPart::ToolResult {
-                                tool_use_id: call.id.clone(),
-                                content: cap_tool_result(result),
-                                is_error: false,
-                            }]),
-                        });
                     }
                 }
 
@@ -1728,41 +1897,17 @@ impl Agent {
                     llm_call_count,
                 );
             }
-            let results = join_all(
-                tool_calls
-                    .iter()
-                    .map(|c| self.execute_tool_call(c, tool_map)),
-            )
-            .await;
+            let results = self
+                .execute_with_budget(
+                    tool_calls.iter().collect(),
+                    tool_map,
+                    read_budget,
+                    &mut reads_used,
+                )
+                .await;
 
             for (call, result) in tool_calls.iter().zip(results) {
-                let preview = tool_map
-                    .get(call.name.as_str())
-                    .map(|t| t.preview(&result))
-                    .unwrap_or_else(|| result.chars().take(tool::DEFAULT_PREVIEW_CHARS).collect());
-                let _ = event_sender
-                    .send(AgentEvent::ToolResult {
-                        name: call.name.clone(),
-                        preview,
-                    })
-                    .await;
-                if is_enumeration_call(&call.name, &call.input) && !result.starts_with("error:") {
-                    let _ = event_sender
-                        .send(AgentEvent::Enumeration {
-                            tool: call.name.clone(),
-                            input: call.input.clone(),
-                            result: result.chars().take(ENUMERATION_RESULT_MAX_CHARS).collect(),
-                        })
-                        .await;
-                }
-                messages.push(Message {
-                    role: crate::llm::types::Role::User,
-                    content: MessageContent::Parts(vec![ContentPart::ToolResult {
-                        tool_use_id: call.id.clone(),
-                        content: cap_tool_result(result),
-                        is_error: false,
-                    }]),
-                });
+                record_tool_result(call, result, tool_map, event_sender, &mut messages).await;
             }
             if nudge_after_results {
                 append_to_last_tool_result(&mut messages, SEARCH_NUDGE);
@@ -2226,19 +2371,69 @@ impl Agent {
         }
     }
 
+    async fn execute_with_budget(
+        &self,
+        calls: Vec<&ToolCall>,
+        tool_map: &HashMap<String, &dyn Tool>,
+        budget: Option<usize>,
+        used: &mut usize,
+    ) -> Vec<ToolOutput> {
+        let mut allowed = Vec::with_capacity(calls.len());
+        for call in &calls {
+            let reads = tool_map
+                .get(call.name.as_str())
+                .is_some_and(|t| t.reads_code());
+            let ok = match budget {
+                Some(limit) if reads => {
+                    let within = *used < limit;
+                    if within {
+                        *used += 1;
+                    }
+                    within
+                }
+                _ => true,
+            };
+            allowed.push(ok);
+        }
+        let counted: Vec<bool> = calls
+            .iter()
+            .zip(&allowed)
+            .map(|(call, ok)| {
+                *ok && budget.is_some()
+                    && tool_map
+                        .get(call.name.as_str())
+                        .is_some_and(|t| t.reads_code())
+            })
+            .collect();
+        let results = join_all(calls.iter().zip(allowed).map(|(call, ok)| async move {
+            if ok {
+                self.execute_tool_call(call, tool_map).await
+            } else {
+                ToolOutput::text(READ_BUDGET_SPENT)
+            }
+        }))
+        .await;
+        for (result, counted) in results.iter().zip(counted) {
+            if counted && result.is_error() {
+                *used = used.saturating_sub(1);
+            }
+        }
+        results
+    }
+
     async fn execute_tool_call(
         &self,
         call: &ToolCall,
         tool_map: &HashMap<String, &dyn Tool>,
-    ) -> String {
+    ) -> ToolOutput {
         tracing::info!(tool = call.name, "executing tool call");
         match tool_map.get(call.name.as_str()) {
-            None => format!("error: unknown tool '{}'", call.name),
-            Some(tool) => match tool.execute(call.input.clone()).await {
+            None => ToolOutput::text(format!("error: unknown tool '{}'", call.name)),
+            Some(tool) => match tool.run(call.input.clone()).await {
                 Ok(output) => output,
                 Err(e) => {
                     tracing::error!(tool = call.name, error = %e, "tool execution failed");
-                    format!("error: {e}")
+                    ToolOutput::text(format!("error: {e}"))
                 }
             },
         }
@@ -5098,6 +5293,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn agents_with_search_code_get_the_tiered_search_section() {
+        let llm = MockLlm::new(vec![text("done")]);
+        let plain = Agent::new(
+            Arc::clone(&llm) as Arc<dyn LlmProvider>,
+            vec![MockTool::new("read_sources", "x")],
+            5,
+        );
+        assert!(!plain
+            .effective_system_prompt()
+            .contains("## How to research"));
+        let tiered = Agent::new(llm, vec![MockTool::new("search_code", "x")], 5);
+        let prompt = tiered.effective_system_prompt();
+        assert!(prompt.contains("call `search_code` once"));
+        assert!(prompt.contains("## Citation Rules"));
+        assert!(!prompt.contains("find_subclasses"));
+        assert!(!prompt.contains("get_evidence_pack"));
+        assert!(!prompt.contains("Knowledge Graph Schema"));
+        assert!(prompt.contains("The Code part is authoritative"));
+        assert!(prompt.contains("Do not state anything from documentation as fact"));
+    }
+
     #[tokio::test]
     async fn without_override_uses_prompt_system_prompt() {
         let llm = CapturingLlm::new(vec![text("done")]);
@@ -6170,6 +6387,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn system_one_routes_once_per_turn_and_skips_filtering_read_only_calls() {
+        let server = httpmock::prelude::MockServer::start();
+        let routing = server.mock(|when, then| {
+            when.method("POST").path("/").body_includes("model_tier");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": { "model_tier": { "type": "choice", "choice": "large", "confidence": 0.1 } },
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let filtering = server.mock(|when, then| {
+            when.method("POST").path("/").body_includes("_necessary");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {},
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        server.mock(|when, then| {
+            when.method("POST").path("/");
+            then.status(200).json_body(serde_json::json!({
+                "model": "test-model",
+                "answers": {},
+                "usage": { "input_tokens": 0, "output_tokens": 0 }
+            }));
+        });
+        let so = mock_system_one_client(&server.base_url());
+        let llm = MockLlm::new(vec![
+            tool_call("t1"),
+            tool_call("t2"),
+            tool_call("t3"),
+            text("final answer"),
+        ]);
+        let agent = agent_with_system_one(
+            llm,
+            vec![
+                MockTool::new("t1", "r1"),
+                MockTool::new("t2", "r2"),
+                MockTool::new("t3", "r3"),
+            ],
+            10,
+            so,
+        );
+        let resp = agent.query("what is t1?", &[], &[], None).await.unwrap();
+        assert_eq!(resp.tool_calls_made, 3);
+        assert_eq!(routing.calls(), 1);
+        assert_eq!(filtering.calls(), 0);
+    }
+
+    #[tokio::test]
     async fn early_synthesis_skipped_on_first_turn_research_before_min_iterations() {
         let server = httpmock::prelude::MockServer::start();
         server.mock(|when, then| {
@@ -6557,6 +6824,141 @@ mod tests {
                 .iter()
                 .any(|r| r.contains("provide a complete answer")),
             "early synthesis must not fire before the capability gate is located"
+        );
+    }
+
+    struct ResearchTool {
+        name: &'static str,
+        budget: Option<usize>,
+        prefetch: Option<&'static str>,
+        executed: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for ResearchTool {
+        fn definition(&self) -> crate::llm::types::ToolDefinition {
+            crate::llm::types::ToolDefinition {
+                name: self.name.into(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            }
+        }
+        async fn execute(&self, _params: serde_json::Value) -> Result<String> {
+            self.executed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok("evidence".into())
+        }
+        fn reads_code(&self) -> bool {
+            true
+        }
+        fn read_budget(&self) -> Option<usize> {
+            self.budget
+        }
+        async fn prefetch(
+            &self,
+            _question: &str,
+            _earlier: &str,
+        ) -> Option<(serde_json::Value, ToolOutput)> {
+            self.prefetch
+                .map(|text| (serde_json::json!({ "query": "q" }), ToolOutput::text(text)))
+        }
+    }
+
+    fn research_tool(
+        budget: Option<usize>,
+        prefetch: Option<&'static str>,
+    ) -> (Box<ResearchTool>, Arc<std::sync::atomic::AtomicUsize>) {
+        let executed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            Box::new(ResearchTool {
+                name: "search_code",
+                budget,
+                prefetch,
+                executed: Arc::clone(&executed),
+            }),
+            executed,
+        )
+    }
+
+    #[tokio::test]
+    async fn the_first_code_search_runs_before_the_model_and_rides_on_the_question() {
+        let llm = RecordingLlm::new(vec![text("answer")]);
+        let (tool, executed) = research_tool(Some(3), Some("EVIDENCE-FROM-PREFETCH"));
+        let agent = Agent::new(llm.clone(), vec![tool], 10);
+        let (tx, mut rx) = mpsc::channel(64);
+        agent
+            .query_streaming("How does Fence::commit work?", &[], &[], None, tx)
+            .await;
+        assert!(llm.requests()[0].contains("EVIDENCE-FROM-PREFETCH"));
+        assert!(llm.requests()[0].contains("How does Fence::commit work?"));
+        assert_eq!(executed.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let mut saw_call = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, AgentEvent::ToolCall { ref name, .. } if name == "search_code") {
+                saw_call = true;
+            }
+        }
+        assert!(saw_call, "the prefetched search is shown as a tool call");
+    }
+
+    struct FailingRead(Arc<std::sync::atomic::AtomicUsize>);
+
+    #[async_trait]
+    impl Tool for FailingRead {
+        fn definition(&self) -> crate::llm::types::ToolDefinition {
+            crate::llm::types::ToolDefinition {
+                name: "read_sources".into(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            }
+        }
+        async fn execute(&self, _params: serde_json::Value) -> Result<String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            anyhow::bail!("nothing is indexed for that path")
+        }
+        fn reads_code(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_code_reads_do_not_use_up_the_budget() {
+        let llm = RecordingLlm::new(vec![
+            tool_call("read_sources"),
+            tool_call("read_sources"),
+            tool_call("read_sources"),
+            tool_call("search_code"),
+            text("done"),
+        ]);
+        let (tool, executed) = research_tool(Some(0), None);
+        let failed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let agent = Agent::new(
+            llm.clone(),
+            vec![tool, Box::new(FailingRead(Arc::clone(&failed)))],
+            10,
+        );
+        agent.query("q", &[], &[], None).await.unwrap();
+        assert_eq!(failed.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(executed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn code_reads_beyond_the_follow_up_budget_are_refused() {
+        let llm = RecordingLlm::new(vec![
+            tool_call("search_code"),
+            tool_call("search_code"),
+            tool_call("search_code"),
+            tool_call("search_code"),
+            text("done"),
+        ]);
+        let (tool, executed) = research_tool(Some(1), None);
+        let agent = Agent::new(llm.clone(), vec![tool, MockTool::new("other", "fine")], 10);
+        let response = agent.query("q", &[], &[], None).await.unwrap();
+        assert_eq!(response.answer, "done");
+        assert_eq!(
+            executed.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one search plus one follow-up"
         );
     }
 

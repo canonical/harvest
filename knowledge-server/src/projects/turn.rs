@@ -1,3 +1,5 @@
+use crate::modes::Space;
+use crate::toolsets::TurnContext;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -139,13 +141,16 @@ pub(super) async fn agent_for(
     )
     .await;
     let builder = &state.agent_builder;
-    if Arc::ptr_eq(&user_llm, &builder.llm) && user_system_one.is_none() {
-        return builder.build_for_conversation(project_id.to_string(), conv_id.to_string());
-    }
-    builder.build_for_conversation_with_llm_and_system_one(
-        project_id.to_string(),
-        conv_id.to_string(),
+    let turn = TurnContext::load(
+        &state.db,
+        user_id,
+        Space::deploy_project(project_id),
+        conv_id,
         user_llm,
+    )
+    .await;
+    builder.conversation_agent(
+        &turn,
         user_system_one.or_else(|| builder.system_one.clone()),
     )
 }
@@ -158,6 +163,11 @@ impl TurnLaunch {
         let registry = Arc::clone(&state.agent_builder.registry);
         let collocate_registry = Arc::clone(&state.collocate_registry);
         let pricing = Arc::clone(&state.pricing);
+        let shadow = state
+            .agent_builder
+            .search
+            .clone()
+            .filter(|s| s.mode() == crate::config::SearchMode::Shadow);
         let conv_id = self.conv_id.clone();
         let span = tracing::info_span!(
             "turn",
@@ -190,6 +200,16 @@ impl TurnLaunch {
                     })
                 };
                 let _worker = CancelOnDrop(worker.abort_handle());
+                let agent_rx = match shadow {
+                    Some(service) => crate::search::shadow::tap(
+                        agent_rx,
+                        service,
+                        self.query.clone(),
+                        self.turn_id.clone(),
+                        self.conv_id.clone(),
+                    ),
+                    None => agent_rx,
+                };
                 drive_turn(
                     live,
                     Arc::clone(&db),
@@ -465,7 +485,11 @@ pub(super) async fn drive_turn(
             AgentEvent::ToolCall { name, input } => {
                 chain_builder.tool_call(name, input, description.as_deref(), hostname.as_deref());
             }
-            AgentEvent::ToolResult { name, preview } => chain_builder.tool_result(name, preview),
+            AgentEvent::ToolResult {
+                name,
+                preview,
+                view,
+            } => chain_builder.tool_result(name, preview, view.as_ref()),
             AgentEvent::Enumeration {
                 tool,
                 input,
@@ -688,9 +712,13 @@ fn turn_event_json(
             }
             Some(v)
         }
-        AgentEvent::ToolResult { name, preview } => Some(json!({
+        AgentEvent::ToolResult {
+            name,
+            preview,
+            view,
+        } => Some(json!({
             "type": "tool_result", "conv_id": conv_id,
-            "name": name, "preview": preview,
+            "name": name, "preview": preview, "view": view,
         })),
         AgentEvent::Phase { label } => Some(json!({
             "type": "phase", "conv_id": conv_id, "label": label,
