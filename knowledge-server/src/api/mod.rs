@@ -12,7 +12,7 @@ pub mod tool_description;
 use axum::{
     extract::DefaultBodyLimit,
     middleware::from_fn_with_state,
-    routing::{any, delete, get, patch, post, put},
+    routing::{delete, get, patch, post, put},
     Json, Router,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
@@ -550,6 +550,12 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
             .with_state(code_state)
     };
 
+    let preview_passes = Arc::new(crate::code::previews::pass::Passes::new(&jwt_secret));
+    let preview_origin = state.code.as_ref().and_then(|env| env.settings.preview_origin.clone());
+    let preview_site = state.code.clone().zip(preview_origin.clone()).map(|(env, origin)| {
+        let site = crate::code::previews::site::Site::new(env, origin.clone(), Arc::clone(&preview_passes), server_url.clone());
+        (crate::code::previews::site::router(Arc::new(site)), origin)
+    });
     let preview_router = {
         use crate::code::previews::handlers as preview;
         Router::new()
@@ -557,12 +563,14 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
             .route("/previews/:id/reset", post(preview::reset))
             .route("/previews/:id/request", post(preview::send_request))
             .route("/previews/:id/exec", post(preview::exec))
-            .route("/previews/:id/web", get(preview::web_root))
-            .route("/previews/:id/web/", any(preview::web))
-            .route("/previews/:id/web/*path", any(preview::web))
+            .route("/previews/:id/enter", post(preview::enter))
+            .route("/previews/:id/web", get(preview::moved))
+            .route("/previews/:id/web/*path", get(preview::moved))
             .with_state(Arc::new(preview::PreviewState::new(
                 state.code.clone(),
                 Arc::clone(&jwt_secret),
+                Arc::clone(&preview_passes),
+                preview_origin.clone(),
             )))
     };
 
@@ -982,7 +990,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
             auth::api_keys::require_api_key,
         ));
 
-    Router::new()
+    let harvest = Router::new()
         .merge(public_router)
         .merge(external_router)
         .merge(preview_router)
@@ -991,7 +999,11 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         .merge(admin_router)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::permissive());
+    match preview_site {
+        Some((site, origin)) => crate::code::previews::site::by_host(harvest, site, origin),
+        None => harvest,
+    }
 }
 
 #[cfg(test)]

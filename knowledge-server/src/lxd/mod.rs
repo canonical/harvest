@@ -10,6 +10,11 @@ use crate::config::LxdConfig;
 use harvest_db::Db;
 
 const DEFAULT_OPERATION_WAIT_SECS: u64 = 120;
+const OPERATION_WAIT_MARGIN_SECS: u64 = 30;
+
+fn operation_wait_limit(timeout_secs: u64) -> Duration {
+    Duration::from_secs(timeout_secs + OPERATION_WAIT_MARGIN_SECS)
+}
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const IDENTITY_NAME: &str = "harvest";
 
@@ -245,6 +250,7 @@ impl LxdClient {
         let resp = self
             .http
             .get(&url)
+            .timeout(operation_wait_limit(timeout_secs))
             .send()
             .await
             .context("waiting for LXD operation")?;
@@ -500,6 +506,12 @@ impl LxdClient {
 mod tests {
     use super::*;
     use httpmock::prelude::*;
+
+    #[test]
+    fn waiting_for_an_operation_outlasts_the_operation_itself() {
+        assert_eq!(operation_wait_limit(1_200), Duration::from_secs(1_230));
+        assert!(operation_wait_limit(1_800) > Duration::from_secs(DEFAULT_OPERATION_WAIT_SECS + 60));
+    }
 
     const TEST_CERT: &str = "-----BEGIN CERTIFICATE-----\nMIIDFzCCAf+gAwIBAgIUfa1whA4eLVBTEndTkfzURCCkn1gwDQYJKoZIhvcNAQEL\nBQAwGzEZMBcGA1UEAwwQaGFydmVzdC1seGQtdGVzdDAeFw0yNjA3MDMyMDA1MzVa\nFw0zNjA2MzAyMDA1MzVaMBsxGTAXBgNVBAMMEGhhcnZlc3QtbHhkLXRlc3QwggEi\nMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC6adiI5Nwy9MDlzR92GgFc7b2L\n/ka6ccF3I6RyUxfUveDyY7WzkFOjWS6gWrM0mg+zTkP0EyEWdLaKZsZokum1gDIl\nNtd3A96d8Kz4MYxf7s+d7P+5NOyS0XaqwZmqRxkq+Ps/xrULcuBydLnkDse43+DU\n1AoueIiHZL2lDgGU0LhTUi8COln/daye2zjGv7dzaOzJCRq4YWc+D45ha8ii3GAr\natzLR8OjS9eMFrVivT5PLvGArp7qzVGvgQZ4AhTw9DELACt6gF85y4NOZ3+QhQb6\nVKza5MkNmBC6piEmOgBxOEzVwBwTw0PoQfESgGi6i2sWf5+jysCtLZAdHsSvAgMB\nAAGjUzBRMB0GA1UdDgQWBBQKFOj0BLCTRijKht/LnCciyhht1TAfBgNVHSMEGDAW\ngBQKFOj0BLCTRijKht/LnCciyhht1TAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3\nDQEBCwUAA4IBAQBTpVu67w2AzGjw2rWk32ZQp05ldBsc1PR3l/E0gxOhip4zpc3l\nOEg9KZtwtn9zkIwbRE8xDsKMY2acy1AroqcR0IUA/XXZQOXWjqKlQJRYePcIju6v\ngy636poDLDVWT09GzFEdh7adOll24i2ghRKxX+1gP6yoK7VKbh3u1K7SAPX4Cw+V\nUsTKgdy0ott1Calzr1rgLRDYxy2sAjtT98HQs+06J+JioHfkVowVBBsf8QV9Qq/d\nZCdcQ+Ej+sDvw5h5ynKUvm+LKHk6d6aKyh8cNL67Lz14znBoX/RElz/UnhSgvlc1\nklOERsYlhYR8s0qCGY8QIJfCCdOlvsuLMS5+\n-----END CERTIFICATE-----\n";
     const TEST_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC6adiI5Nwy9MDl\nzR92GgFc7b2L/ka6ccF3I6RyUxfUveDyY7WzkFOjWS6gWrM0mg+zTkP0EyEWdLaK\nZsZokum1gDIlNtd3A96d8Kz4MYxf7s+d7P+5NOyS0XaqwZmqRxkq+Ps/xrULcuBy\ndLnkDse43+DU1AoueIiHZL2lDgGU0LhTUi8COln/daye2zjGv7dzaOzJCRq4YWc+\nD45ha8ii3GAratzLR8OjS9eMFrVivT5PLvGArp7qzVGvgQZ4AhTw9DELACt6gF85\ny4NOZ3+QhQb6VKza5MkNmBC6piEmOgBxOEzVwBwTw0PoQfESgGi6i2sWf5+jysCt\nLZAdHsSvAgMBAAECggEAMl92zWs2m6hq1c5LoaDeXGu77C/+kdQ6iMS/Y8tTZcAX\noLhT+d1W1I29XUSVJ3I4KuZL05E1wDkyuIyUMd79O3gUVN0QdU884WYPf5P4EFZa\nkRzhb30/Ll9e1z6wlQRYZzXXwwChnKHix9sF/nwF+U26FhjkVXFpx1hwLMFvqPQV\nozsQGU2yxLpK1BU8p6peSYcbNy/klCizHdFrUQfI8YP4Vx6a1S7An1C7S857Xcfz\nH/QA8w7RZrW5zNznIyXM+gPC3nzY45FRBXKP8QVirYJi+DaJPCwfH9Kb7Vm090dr\nAMh9koJa1pY75bv7e6PDw1JRhRfbKBDnkn27gtY8qQKBgQDksHSZAvVJQMvPSXwr\nI+SUwDquE1hH72iRGpk3Fv1KuBqDQXvK+ITY6SL2T0VjRVFZEaX6iaPQJ8nyxBpc\neGYi7Y+UqlCN++O8Kze+yMTsQcbL5xzs2rZnZS3Sc4JMJMgn2f8+9GrPFTuSId0h\nxEGTBiG2HwPZ2J+JXwVglKp/aQKBgQDQrOx4aJwuOHyNjibRX1zjkv1f41yB+lrz\nBxI0phmNNr50Gk9fez0+CIokZbkGmHKj7K0ctR0siqKC7UyK/Zuj1ym0z6aRXhzm\nQ5lORHcA7ODYRSlYiEZUeamZI32gCnPB4NDlpod6Yqtr5b/iNjHy9/vrZnevck9S\n7JA41Yq4VwKBgB3+1wxKywl0qkbiCJtP9edc31V9zBKDYF/H8Vi8dzSZuUCGEkqp\nFiOtUJymAR/oM6dPHUojS4096ssg1aRTVnI2XqLNRAubgl9n+8PWaZ3jcsPD6JNY\njJw7NStpYynBmU9A1K3ZOTk4O7wLHQoUx9UU9M8CemrUcvh9siLc3RAhAoGAGGcg\ngDQ7j2wrpKIrB/EO+84Es2HzP3/3gtQg3OdPtaPhQdKR1aij0M1O2lLLAGpzfZf/\n5ouHjd3og0cc3GQr/0z6I5rk77sBxivBkdWP1Rveb2wnGaNWFirkGnR8DGssfk+8\nHh8LWNSRF10Ww21zCebWHwEsnefQPvJLK1pNjqECgYAHxsOV2AVLz6r3M4tkJjYq\nVIzo2ywbToKjsgX+SRkqxZJBzX43syl6tvhOHmuoYT/LKF/WFN0QvSs9BatpHqwQ\nTcWHxjiUYULgFHxiIXZCD2cMLaweYyUpDtXmXLOT2bv1Qd4glGSm/p+w71oG9Dga\nO1iD+apEEk/2MzDMH7ShKw==\n-----END PRIVATE KEY-----\n";

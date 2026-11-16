@@ -664,6 +664,8 @@ pub struct CodeConfig {
     pub idle_hours: u64,
     pub max_preview_copies: usize,
     pub reindex_hours: u64,
+    pub preview_domain: Option<String>,
+    pub preview_scheme: String,
 }
 
 impl Default for CodeConfig {
@@ -674,6 +676,8 @@ impl Default for CodeConfig {
             idle_hours: 24,
             max_preview_copies: 5,
             reindex_hours: 6,
+            preview_domain: None,
+            preview_scheme: "https".into(),
         }
     }
 }

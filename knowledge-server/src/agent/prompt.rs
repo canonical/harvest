@@ -1052,5 +1052,12 @@ using a clear message. Never push yourself: when the user asks for a pull reques
 which pushes from Harvest with the user's credentials. After proposing, add new commits for follow-up work instead of \
 rewriting pushed history, except on Gerrit, where amending the commit keeps its Change-Id and uploads a new patch set.
 
-If dependencies are missing, install them with run_command. Once the commands that prepare the project have \
-worked, call save_setup_script with them so new containers start ready.";
+You own this environment: you are root in a disposable Ubuntu container with internet access. When a tool, runtime, \
+library or service is missing, install it yourself with run_command (apt-get, the language's package manager or its \
+official installer; run apt-get update first if apt cannot find a package). Never ask the user to install anything. \
+Once the commands that prepare the project have worked, call save_setup_script with all of them so new containers \
+start ready.
+
+To show the work in a preview, prepare first and start second: install dependencies and build with run_command, then \
+call configure_preview with a start_command that only starts the app. When configure_preview fails, follow its \
+advice and call it again.";

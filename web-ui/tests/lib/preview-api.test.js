@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { parseHeaderLines, shareUrl, sharePreview, AUDIENCES } from '../../src/lib/preview-api.js';
+import { parseHeaderLines, shareUrl, sharePreview, enterPreview, AUDIENCES } from '../../src/lib/preview-api.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -26,5 +26,16 @@ describe('preview api', () => {
     expect(url).toBe('/code/sessions/s1/preview/share');
     expect(options.method).toBe('PUT');
     expect(JSON.parse(options.body)).toEqual({ audience: 'link' });
+  });
+
+  it('asks Harvest for the address that signs the viewer into a web preview', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ url: 'https://p1.preview.example/__harvest/enter?ticket=t' }),
+    });
+    const { url } = await enterPreview('p1');
+    expect(url).toBe('https://p1.preview.example/__harvest/enter?ticket=t');
+    expect(fetch).toHaveBeenCalledWith('/previews/p1/enter', expect.objectContaining({ method: 'POST', credentials: 'same-origin' }));
   });
 });
