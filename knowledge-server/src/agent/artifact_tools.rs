@@ -1,3 +1,4 @@
+use crate::modes::Owner;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -5,8 +6,7 @@ use std::sync::Arc;
 
 use super::tool::Tool;
 use crate::artifacts::handlers::{
-    create_artifact, get_artifact_in_project, update_artifact, validate_content_for_kind,
-    ArtifactKind,
+    create_artifact, get_owned_artifact, update_artifact, validate_content_for_kind, ArtifactKind,
 };
 use crate::llm::types::ToolDefinition;
 use harvest_db::Db;
@@ -42,7 +42,7 @@ fn validate_artifact_params(
 
 pub struct GenerateArtifactTool {
     pub db: Arc<Db>,
-    pub project_id: String,
+    pub owner: Owner,
     pub server_url: String,
 }
 
@@ -99,9 +99,9 @@ impl Tool for GenerateArtifactTool {
     async fn execute(&self, params: Value) -> Result<String> {
         let (title, kind, content, artifact_id) = validate_artifact_params(&params)?;
         let created = if let Some(existing_id) = artifact_id {
-            let existing = get_artifact_in_project(&self.db, &self.project_id, &existing_id)
+            let existing = get_owned_artifact(&self.db, &self.owner, &existing_id)
                 .await?
-                .ok_or_else(|| anyhow!("artifact {existing_id} not found in this project"))?;
+                .ok_or_else(|| anyhow!("artifact {existing_id} not found"))?;
             let existing_kind = ArtifactKind::parse(existing["kind"].as_str().unwrap_or(""))
                 .ok_or_else(|| anyhow!("artifact {existing_id} has an unknown kind"))?;
             update_artifact(
@@ -114,21 +114,13 @@ impl Tool for GenerateArtifactTool {
             )
             .await?
         } else {
-            create_artifact(
-                &self.db,
-                &self.project_id,
-                kind,
-                &title,
-                &content,
-                "assistant",
-            )
-            .await?
+            create_artifact(&self.db, &self.owner, kind, &title, &content, "assistant").await?
         };
         let id = created["id"].as_str().unwrap_or_default();
-        if kind == ArtifactKind::Markdown {
+        if let (ArtifactKind::Markdown, Some(project_id)) = (kind, self.owner.project_id()) {
             let _ = crate::deployments::design_cache::on_artifact_changed(
                 self.db.clone(),
-                self.project_id.clone(),
+                project_id.to_string(),
                 id.to_string(),
             )
             .await;

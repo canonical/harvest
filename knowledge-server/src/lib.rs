@@ -20,6 +20,7 @@ pub mod lxd;
 pub mod machines;
 pub mod metrics;
 pub mod modes;
+pub mod personal;
 pub mod projects;
 pub mod search;
 pub mod server;

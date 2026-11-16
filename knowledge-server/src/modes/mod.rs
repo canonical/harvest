@@ -13,6 +13,28 @@ pub enum Space {
     DeployProject { project_id: String },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Owner {
+    User(String),
+    Project(String),
+}
+
+impl Owner {
+    pub fn user_id(&self) -> Option<&str> {
+        match self {
+            Self::User(id) => Some(id),
+            Self::Project(_) => None,
+        }
+    }
+
+    pub fn project_id(&self) -> Option<&str> {
+        match self {
+            Self::Project(id) => Some(id),
+            Self::User(_) => None,
+        }
+    }
+}
+
 const PERSONAL: &str = "personal";
 const DEPLOY: &str = "deploy";
 
@@ -33,6 +55,13 @@ impl Space {
         match self {
             Self::Personal { .. } => Mode::Chat,
             Self::DeployProject { .. } => Mode::Deploy,
+        }
+    }
+
+    pub fn owner(&self) -> Owner {
+        match self {
+            Self::Personal { user_id } => Owner::User(user_id.clone()),
+            Self::DeployProject { project_id } => Owner::Project(project_id.clone()),
         }
     }
 
@@ -84,6 +113,15 @@ mod tests {
     fn each_space_belongs_to_one_mode() {
         assert_eq!(Space::personal("u").mode(), Mode::Chat);
         assert_eq!(Space::deploy_project("p").mode(), Mode::Deploy);
+    }
+
+    #[test]
+    fn personal_work_belongs_to_the_user_and_project_work_to_the_project() {
+        assert_eq!(Space::personal("u").owner(), Owner::User("u".into()));
+        assert_eq!(
+            Space::deploy_project("p").owner(),
+            Owner::Project("p".into())
+        );
     }
 
     #[test]

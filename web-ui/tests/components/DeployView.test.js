@@ -65,7 +65,7 @@ function makeRouter() {
   return createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/design', component: { template: '<div />' } },
+      { path: '/deploy/design', component: { template: '<div />' } },
     ],
   });
 }
@@ -111,7 +111,7 @@ describe('DeployView', () => {
     expect(w.find('[data-testid="deploy-needs-design"]').exists()).toBe(true);
     const link = w.find('[data-testid="deploy-go-to-design"]');
     expect(link.exists()).toBe(true);
-    expect(link.attributes('href')).toBe('/design');
+    expect(link.attributes('href')).toBe('/deploy/design');
   });
 
   it('renders the DeployAgentsPanel when a design exists but no terraform bundle yet', async () => {

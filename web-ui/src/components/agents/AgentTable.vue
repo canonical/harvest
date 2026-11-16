@@ -31,7 +31,7 @@
           <div class="agent-row-actions">
             <router-link
               v-if="showConsole"
-              :to="`/agents/${agent.id}/console`"
+              :to="`/deploy/agents/${agent.id}/console`"
               class="console-icon-btn"
               title="Open console"
               aria-label="Open console"

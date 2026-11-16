@@ -23,7 +23,7 @@ pub async fn list_global_skills(
         .db
         .query(
             "SELECT id, name, description, created_at, updated_at
-         FROM skills WHERE project_id IS NULL
+         FROM skills WHERE is_global
          ORDER BY name",
             json!({}),
         )
@@ -40,7 +40,7 @@ pub async fn get_global_skill(
         .db
         .query(
             "SELECT id, name, description, content, created_at, updated_at
-         FROM skills WHERE id = $id AND project_id IS NULL",
+         FROM skills WHERE id = $id AND is_global",
             json!({ "id": id }),
         )
         .await
@@ -68,7 +68,7 @@ async fn global_name_taken(
         .db
         .query(
             "SELECT id FROM skills
-         WHERE name = $name AND project_id IS NULL AND id <> $exclude_id
+         WHERE name = $name AND is_global AND id <> $exclude_id
          LIMIT 1",
             json!({ "name": name, "exclude_id": exclude_id }),
         )
@@ -133,7 +133,7 @@ pub async fn update_global_skill(
     let exists = state
         .db
         .query(
-            "SELECT 1 AS ok FROM skills WHERE id = $id AND project_id IS NULL",
+            "SELECT 1 AS ok FROM skills WHERE id = $id AND is_global",
             json!({ "id": id }),
         )
         .await
@@ -154,7 +154,7 @@ pub async fn update_global_skill(
                    description = COALESCE($description::text, description),
                    content     = COALESCE($content::text, content),
                    updated_at  = $now
-               WHERE id = $id AND project_id IS NULL
+               WHERE id = $id AND is_global
                RETURNING id";
     state
         .db
@@ -171,7 +171,7 @@ pub async fn delete_global_skill(
     state
         .db
         .query(
-            "DELETE FROM skills WHERE id = $id AND project_id IS NULL",
+            "DELETE FROM skills WHERE id = $id AND is_global",
             json!({ "id": id }),
         )
         .await

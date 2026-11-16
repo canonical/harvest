@@ -1,6 +1,6 @@
 <template>
   <div class="artifacts-page">
-    <div v-if="!projectId && !routeArtifactId" class="no-project-state">
+    <div v-if="!collection && !routeArtifactId" class="no-project-state">
       <p>Select a project to view its artifacts.</p>
     </div>
 
@@ -10,7 +10,7 @@
           <h2>Artifacts</h2>
           <span v-if="artifacts.length" class="artifacts-header__count">{{ artifacts.length }}</span>
         </div>
-        <div v-if="projectId" class="artifacts-header__actions">
+        <div v-if="collection" class="artifacts-header__actions">
           <button class="p-button--positive is-dense" type="button" data-testid="create-artifact-btn" @click="openCreateModal">Create</button>
           <button class="p-button--positive is-dense" type="button" data-testid="upload-artifact-btn" @click="openUploadModal">Upload</button>
         </div>
@@ -260,7 +260,6 @@ import { ref, computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { renderMarkdown } from '../lib/markdown.js';
 import {
-  listProjectArtifacts,
   getArtifact,
   deleteArtifact,
   artifactDownloadUrl,
@@ -268,12 +267,15 @@ import {
   runTerraformArtifact,
   getProjectDeploymentSingle,
   getExecutionPlan,
-  createProjectArtifact,
 } from '../lib/api.js';
+import { artifactCollection } from '../lib/owned-api.js';
 
 const props = defineProps({
   projectId: { type: String, default: null },
+  personal:  { type: Boolean, default: false },
 });
+
+const collection = computed(() => (props.projectId || props.personal ? artifactCollection(props.projectId) : null));
 
 const route  = useRoute();
 const router = useRouter();
@@ -423,12 +425,12 @@ function formatDate(iso) {
 }
 
 async function loadList() {
-  if (!props.projectId) return;
+  if (!collection.value) return;
   loading.value = true;
   try {
     const [list, dep] = await Promise.all([
-      listProjectArtifacts(props.projectId),
-      getProjectDeploymentSingle(props.projectId).catch(() => null),
+      collection.value.list(),
+      props.projectId ? getProjectDeploymentSingle(props.projectId).catch(() => null) : null,
     ]);
     artifacts.value = list;
     if (dep) {
@@ -547,7 +549,7 @@ async function submitCreate() {
   createSubmitting.value = true;
   createError.value = null;
   try {
-    await createProjectArtifact(props.projectId, {
+    await collection.value.create({
       title: createForm.value.title.trim(),
       kind: createForm.value.kind,
       content: createForm.value.content,
@@ -615,7 +617,7 @@ async function submitUpload() {
     const content = (kind === 'terraform' || kind === 'terragrunt')
       ? JSON.stringify({ [uploadFile.value.name]: text })
       : text;
-    await createProjectArtifact(props.projectId, {
+    await collection.value.create({
       title: uploadTitle.value.trim() || uploadFile.value.name,
       kind,
       content,
@@ -629,9 +631,9 @@ async function submitUpload() {
   }
 }
 
-watch(() => props.projectId, () => {
+watch(collection, () => {
   artifacts.value = [];
-  if (props.projectId) loadList();
+  loadList();
 }, { immediate: true });
 
 watch(routeArtifactId, (id) => {

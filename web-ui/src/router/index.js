@@ -1,26 +1,48 @@
 import { createRouter, createWebHashHistory } from 'vue-router';
 import { useAuthStore } from '../stores/auth.js';
 
+const ChatWorkspaceView = () => import('../views/ChatWorkspaceView.vue');
+const ArtifactsView = () => import('../views/ArtifactsView.vue');
+const SkillsView = () => import('../views/SkillsView.vue');
+const AgentConsoleView = () => import('../views/AgentConsoleView.vue');
+
 const routes = [
   { path: '/login',          component: () => import('../views/LoginView.vue'),         meta: { public: true } },
   { path: '/register',       component: () => import('../views/RegisterView.vue'),       meta: { public: true } },
   { path: '/authenticate/:uuid', component: () => import('../views/AuthenticateView.vue'), meta: { public: true } },
-  { path: '/',               component: () => import('../views/ChatWorkspaceView.vue'),  meta: { requiresProject: true, stableAcrossProjects: true, requiresApiKey: true } },
-  { path: '/deployments',     redirect: '/deploy' },
-  { path: '/deployments/:id', redirect: '/deploy' },
-  { path: '/design',          component: () => import('../views/DesignView.vue'),         meta: { requiresProject: true, directEntry: true, requiresApiKey: true } },
-  { path: '/deploy',          component: () => import('../views/DeployView.vue'),          meta: { requiresProject: true, directEntry: true, requiresApiKey: true } },
-  { path: '/agents',         component: () => import('../views/AgentsView.vue'),         meta: { requiresProject: true } },
-  { path: '/agents/:agentId/console', component: () => import('../views/AgentConsoleView.vue'), meta: { requiresProject: true } },
-  { path: '/artifacts',      component: () => import('../views/ArtifactsView.vue'),      meta: { requiresProject: true } },
-  { path: '/artifacts/:id',  component: () => import('../views/ArtifactsView.vue'),      meta: { directEntry: true } },
-  { path: '/skills',         component: () => import('../views/SkillsView.vue'),         meta: { requiresProject: true } },
-  { path: '/docs',           component: () => import('../views/DocumentationView.vue'),  meta: { requiresProject: true, feature: 'docs' } },
-  { path: '/repositories',   component: () => import('../views/RepositoriesView.vue'),   meta: { requiresProject: true } },
-  { path: '/product-templates', component: () => import('../views/ProductTemplatesView.vue'), meta: { directEntry: true } },
+  { path: '/',               redirect: '/chat' },
+
+  { path: '/chat',           component: ChatWorkspaceView, meta: { mode: 'chat', stableAcrossProjects: true, requiresApiKey: true } },
+  { path: '/chat/artifacts', component: ArtifactsView,     meta: { mode: 'chat', directEntry: true } },
+  { path: '/chat/skills',    component: SkillsView,        meta: { mode: 'chat', directEntry: true } },
+
+  { path: '/code',           component: () => import('../views/RepositoriesView.vue'), meta: { mode: 'code', directEntry: true } },
+
+  { path: '/deploy',                   redirect: '/deploy/chat' },
+  { path: '/deploy/chat',              component: ChatWorkspaceView, meta: { mode: 'deploy', requiresProject: true, stableAcrossProjects: true, requiresApiKey: true } },
+  { path: '/deploy/design',            component: () => import('../views/DesignView.vue'), meta: { mode: 'deploy', requiresProject: true, directEntry: true, requiresApiKey: true } },
+  { path: '/deploy/deployments',       component: () => import('../views/DeployView.vue'), meta: { mode: 'deploy', requiresProject: true, directEntry: true, requiresApiKey: true } },
+  { path: '/deploy/agents',            component: () => import('../views/AgentsView.vue'), meta: { mode: 'deploy', requiresProject: true, directEntry: true } },
+  { path: '/deploy/agents/:agentId/console', component: AgentConsoleView, meta: { mode: 'deploy', requiresProject: true } },
+  { path: '/deploy/artifacts',         component: ArtifactsView, meta: { mode: 'deploy', requiresProject: true, directEntry: true } },
+  { path: '/deploy/skills',            component: SkillsView,    meta: { mode: 'deploy', requiresProject: true, directEntry: true } },
+  { path: '/deploy/templates',         component: () => import('../views/ProductTemplatesView.vue'), meta: { mode: 'deploy', directEntry: true } },
+
+  { path: '/artifacts/:id',  component: ArtifactsView, meta: { directEntry: true } },
+  { path: '/docs',           component: () => import('../views/DocumentationView.vue'),  meta: { feature: 'docs' } },
   { path: '/admin',          component: () => import('../views/AdminView.vue'),          meta: { requiresAuth: true } },
   { path: '/settings',       component: () => import('../views/SettingsView.vue'),       meta: { requiresAuth: true, stableAcrossProjects: true } },
-  { path: '/:pathMatch(.*)*', redirect: '/' },
+
+  { path: '/design',            redirect: '/deploy/design' },
+  { path: '/deployments',       redirect: '/deploy/deployments' },
+  { path: '/deployments/:id',   redirect: '/deploy/deployments' },
+  { path: '/agents',            redirect: '/deploy/agents' },
+  { path: '/agents/:agentId/console', redirect: (to) => `/deploy/agents/${to.params.agentId}/console` },
+  { path: '/artifacts',         redirect: '/deploy/artifacts' },
+  { path: '/skills',            redirect: '/deploy/skills' },
+  { path: '/repositories',      redirect: '/code' },
+  { path: '/product-templates', redirect: '/deploy/templates' },
+  { path: '/:pathMatch(.*)*',   redirect: '/chat' },
 ];
 
 const router = createRouter({
@@ -37,11 +59,11 @@ router.beforeEach(async (to, from) => {
     if (!user) return '/login';
   }
 
-  if (to.meta.feature && !auth.features[to.meta.feature]) return '/';
+  if (to.meta.feature && !auth.features[to.meta.feature]) return '/chat';
 
   if (to.meta.requiresApiKey && auth.apiKeyRequired) return '/settings';
 
-  if (!to.meta.directEntry && from.matched.length === 0 && to.path !== '/') return '/';
+  if (!to.meta.directEntry && from.matched.length === 0 && to.path !== '/chat') return '/chat';
 
   return true;
 });

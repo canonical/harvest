@@ -23,12 +23,8 @@
               :disabled="loadingEarlier"
               @click="loadEarlier"
             >{{ loadingEarlier ? 'Loading…' : 'Load earlier messages' }}</button>
-            <div v-if="!projectId && !chat.messages.length" class="no-project-state chat-empty-state">
-              <p>Select a project to start chatting, or use the global query below.</p>
-            </div>
-
-            <div v-else-if="projectId && !chat.messages.length" class="chat-empty-state">
-              <p>Ask anything about codebases or control agents</p>
+            <div v-if="!chat.messages.length" class="chat-empty-state">
+              <p>{{ projectId ? 'Ask anything about codebases or control agents' : 'Ask anything about the repositories you can access' }}</p>
             </div>
 
             <ChatMessage
@@ -102,7 +98,6 @@
           </div>
           <LlmModelPicker />
           <button
-            v-if="projectId"
             class="chat-history-toggle-btn"
             type="button"
             aria-label="Toggle conversation history"
@@ -113,7 +108,7 @@
         </div>
       </div>
 
-      <div v-if="projectId" class="chat-history-panel" :class="{ 'is-open': historyOpen }">
+      <div class="chat-history-panel" :class="{ 'is-open': historyOpen }">
         <div class="chat-history-panel__header">
           <button class="chat-new-btn" data-testid="new-chat" type="button" @click="newChat">+ New chat</button>
           <button class="chat-history-close-btn" type="button" aria-label="Close history" @click="historyOpen = false">✕</button>
@@ -151,7 +146,7 @@
       </div>
     </div>
 
-    <div v-if="projectId && historyOpen" class="chat-history-backdrop" @click="historyOpen = false" />
+    <div v-if="historyOpen" class="chat-history-backdrop" @click="historyOpen = false" />
   </div>
 
   <div
