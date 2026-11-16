@@ -118,22 +118,31 @@ fn projects_app_with_llm(db: Arc<Db>, llm: Arc<dyn knowledge_server::llm::LlmPro
     let secret = Arc::new(JWT_SECRET.to_string());
     let agent = Arc::new(Agent::new(Arc::clone(&llm), vec![], 4));
     let registry = MachineRegistry::new();
+    let toolbox = Arc::new(knowledge_server::toolsets::build_toolbox(
+        knowledge_server::toolsets::ToolboxDeps {
+            db: Arc::clone(&db),
+            semantic: None,
+            search: None,
+            skills: Arc::new(knowledge_server::skills::SkillStore::new(Arc::clone(&db))),
+            registry: Arc::clone(&registry),
+            lxd: None,
+            collocate: None,
+            collocate_registry:
+                knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
+            server_url: "http://localhost".into(),
+        },
+    ));
     let builder = Arc::new(ProjectAgentBuilder {
         llm: Arc::clone(&llm),
         db: Arc::clone(&db),
         registry: Arc::clone(&registry),
-        skills: Arc::new(knowledge_server::skills::SkillStore::new(Arc::clone(&db))),
-        lxd: None,
         system_one: None,
-        collocate: None,
-        collocate_registry: knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
-        server_url: "http://localhost".into(),
         max_iterations: 4,
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last: 6,
         thresholds: None,
-        semantic: None,
         search: None,
+        toolbox,
     });
     let state = Arc::new(ProjectState::new(
         db,

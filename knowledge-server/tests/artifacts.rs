@@ -70,22 +70,31 @@ fn artifacts_app(db: Arc<Db>) -> Router {
     let llm: Arc<dyn LlmProvider> = FixedTextLlm::new("stub");
     let agent = Arc::new(Agent::new(Arc::clone(&llm), vec![], 2));
     let registry = MachineRegistry::new();
+    let toolbox = Arc::new(knowledge_server::toolsets::build_toolbox(
+        knowledge_server::toolsets::ToolboxDeps {
+            db: Arc::clone(&db),
+            semantic: None,
+            search: None,
+            skills: Arc::new(knowledge_server::skills::SkillStore::new(Arc::clone(&db))),
+            registry: Arc::clone(&registry),
+            lxd: None,
+            collocate: None,
+            collocate_registry:
+                knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
+            server_url: "http://localhost".into(),
+        },
+    ));
     let builder = Arc::new(ProjectAgentBuilder {
         llm: Arc::clone(&llm),
         db: Arc::clone(&db),
         registry: Arc::clone(&registry),
-        skills: Arc::new(knowledge_server::skills::SkillStore::new(Arc::clone(&db))),
-        lxd: None,
         system_one: None,
-        collocate: None,
-        collocate_registry: knowledge_server::collocate::sessions::SessionContainerRegistry::new(),
-        server_url: "http://localhost".into(),
         max_iterations: 2,
         compaction_threshold_chars: usize::MAX,
         compaction_keep_last: 6,
         thresholds: None,
-        semantic: None,
         search: None,
+        toolbox,
     });
     let project_state = Arc::new(ProjectState::new(
         Arc::clone(&db),

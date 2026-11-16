@@ -1518,16 +1518,7 @@ pub(super) async fn require_project_access(
     user_role: &str,
     project_id: &str,
 ) -> Result<(), ApiError> {
-    let rows = db.query(
-        "SELECT p.id FROM projects p
-         WHERE p.id = $pid
-           AND ($role = 'admin' OR EXISTS (
-                 SELECT 1 FROM user_groups ug WHERE ug.user_id = $uid AND ug.group_id = p.group_id))",
-        json!({ "pid": project_id, "uid": user_id, "role": user_role }),
-    ).await.map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-
-    if rows.is_empty() {
-        return Err(err(StatusCode::NOT_FOUND, "project not found"));
-    }
-    Ok(())
+    crate::projects::handlers::require_project_access(db, user_id, user_role, project_id)
+        .await
+        .map(|_| ())
 }

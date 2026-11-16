@@ -1,3 +1,4 @@
+use crate::access::{Action, Authorizer, Caller, Denied};
 use axum::{
     extract::{Extension, Path, Query, State},
     http::{HeaderName, HeaderValue, StatusCode},
@@ -169,22 +170,22 @@ pub async fn require_project_access(
     user_role: &str,
     project_id: &str,
 ) -> Result<Value, ApiError> {
-    let rows = db
-        .query(
-            "SELECT p.id, p.name, p.description, p.group_id, g.name AS group_name,
-                p.created_by, p.created_at
-         FROM projects p JOIN groups g ON g.id = p.group_id
-         WHERE p.id = $pid
-           AND ($role = 'admin' OR EXISTS (
-                 SELECT 1 FROM user_groups ug WHERE ug.user_id = $uid AND ug.group_id = g.id))",
-            json!({ "pid": project_id, "uid": user_id, "role": user_role }),
-        )
+    let caller = Caller {
+        user_id,
+        role: user_role,
+    };
+    Authorizer::new(db)
+        .deploy_project(caller, project_id, Action::Read)
         .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
+        .map_err(denied)
+}
 
-    rows.into_iter()
-        .next()
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "not found"))
+pub(crate) fn denied(reason: Denied) -> ApiError {
+    match reason {
+        Denied::NotFound => err(StatusCode::NOT_FOUND, "not found"),
+        Denied::Forbidden => err(StatusCode::FORBIDDEN, "forbidden"),
+        Denied::Unavailable => err(StatusCode::INTERNAL_SERVER_ERROR, "server error"),
+    }
 }
 
 pub async fn project_events(

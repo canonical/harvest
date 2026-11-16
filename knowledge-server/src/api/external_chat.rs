@@ -312,7 +312,9 @@ async fn answer_chat(
         Arc::new(
             Agent::new(
                 Arc::clone(&user_llm),
-                state.qs.code_tools(db, &user_llm, Some(conv_id.as_str())),
+                state
+                    .qs
+                    .personal_tools(&principal.user_id, Some(conv_id.as_str()), &user_llm),
                 state.qs.max_iterations,
             )
             .with_compaction(
