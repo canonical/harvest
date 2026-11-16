@@ -89,6 +89,8 @@
               <button
                 type="submit"
                 class="p-search-box__button send-btn"
+                aria-label="Send"
+                title="Send (Enter)"
                 :disabled="inputDisabled || !query.trim() && !pendingAttachments.length"
                 @click="sendQuery"
               >
@@ -122,21 +124,19 @@
               :key="conv.id"
               class="conv-item"
               :class="{ 'conv-item--active': conv.id === activeConvId }"
-              role="button"
-              tabindex="0"
               @click="loadConversation(conv.id)"
-              @keydown.enter.prevent="loadConversation(conv.id)"
             >
-              <div class="conv-item__body">
+              <button class="conv-item__body" type="button" :aria-current="conv.id === activeConvId ? 'true' : undefined" @click.stop="loadConversation(conv.id)">
                 <span class="conv-item__title">{{ conv.title }}</span>
                 <span v-if="conv.origin_type === 'api'" class="conv-item__meta">
                   API · {{ conv.origin_api_key_name || 'Unknown key' }}<template v-if="conv.origin_api_key_revoked_at"> (revoked)</template>
                 </span>
                 <span v-if="conv.origin_type === 'api' && conv.origin_tracking_id" class="conv-item__tracking">tracking: {{ conv.origin_tracking_id }}</span>
-              </div>
+              </button>
               <button
                 v-if="canDeleteConv(conv)"
                 class="conv-item__delete"
+                :aria-label="`Delete ${conv.title}`"
                 title="Delete"
                 @click.stop="confirmDeleteConversation(conv)"
               >✕</button>
@@ -150,34 +150,25 @@
     <div v-if="historyOpen" class="chat-history-backdrop" @click="historyOpen = false" />
   </div>
 
-  <div
-    v-if="deletingConv"
-    class="modal"
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="delete-conv-title"
-    @click.self="deletingConv = null"
-  >
-    <div class="modal-content">
-      <button class="modal-close" type="button" aria-label="Close" @click="deletingConv = null">✕</button>
-      <h3 id="delete-conv-title">Delete conversation</h3>
-      <p>Delete <strong>{{ deletingConv.title || 'this conversation' }}</strong>? This cannot be undone.</p>
-      <div class="modal-actions">
-        <button class="p-button--base is-dense" type="button" @click="deletingConv = null">Cancel</button>
-        <button class="p-button--negative is-dense" type="button" @click="submitDeleteConversation">Delete</button>
-      </div>
+  <AppModal v-if="deletingConv" @close="deletingConv = null">
+    <h3 id="delete-conv-title">Delete conversation</h3>
+    <p>Delete <strong>{{ deletingConv.title || 'this conversation' }}</strong>? This cannot be undone.</p>
+    <div class="modal-actions">
+      <button class="p-button--base is-dense" type="button" @click="deletingConv = null">Cancel</button>
+      <button class="p-button--negative is-dense" type="button" @click="submitDeleteConversation">Delete</button>
     </div>
-  </div>
+  </AppModal>
 </template>
 
 <script setup>
+import AppModal from '../ui/AppModal.vue';
 import { sessionQueryStream } from '../../lib/code-api.js';
 import { INTERRUPTED_MESSAGE } from '../../lib/conversation-thread.js';
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import { useAuthStore }    from '../../stores/auth.js';
 import { useLlmStore }     from '../../stores/llm.js';
 import { useProjectStore } from '../../stores/project.js';
-import { useChatInstance } from '../../composables/useChatInstance.js';
+import { useChatInstance, takeChatDraft } from '../../composables/useChatInstance.js';
 import { useStickyScroll } from '../../composables/useStickyScroll.js';
 import ChatMessage         from './ChatMessage.vue';
 import LlmModelPicker      from './LlmModelPicker.vue';
@@ -212,7 +203,7 @@ const auth  = useAuthStore();
 const chat  = useChatInstance(props.tabId);
 const llm   = useLlmStore();
 
-const query          = ref('');
+const query          = ref(takeChatDraft(props.tabId));
 const historyOpen    = ref(false);
 const emptyStateText = computed(() => {
   if (props.codeSessionId) return 'Describe the change you want; Harvest plans it, implements it and runs the tests';
@@ -707,6 +698,7 @@ function autoResizeInput() {
 watch(query, () => nextTick(autoResizeInput));
 
 onMounted(async () => {
+  if (query.value) inputEl.value?.focus();
   if (props.conversationId && chat.messages.length) {
     if (props.projectId) openEventStream();
   } else if (props.conversationId) {

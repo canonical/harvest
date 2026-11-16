@@ -63,39 +63,37 @@
 
     <ConversationMoves v-if="activeTab === 'moves'" @done="showToast" @failed="message => showToast(message, 'negative')" />
 
-    <div v-if="editingUser" class="modal" @click.self="editingUser = null">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="editingUser = null">✕</button>
-        <h3>Edit user</h3>
-        <div class="admin-user-cell" style="margin-bottom: 1rem">
-          <div class="admin-avatar" :style="{ background: avatarColor(editingUser.name) }" aria-hidden="true">{{ initials(editingUser.name) }}</div>
-          <div>
-            <div class="admin-user-name">{{ editingUser.name }}</div>
-            <div class="admin-user-email u-text--muted">{{ editingUser.email }}</div>
-          </div>
-        </div>
-        <div class="form-group">
-          <label for="edit-user-role">Role</label>
-          <select id="edit-user-role" v-model="editUserRole">
-            <option value="regular">Regular</option>
-            <option value="admin">Admin</option>
-          </select>
-        </div>
-        <div v-if="editUserError" class="p-notification--negative">
-          <div class="p-notification__content">
-            <p class="p-notification__message">{{ editUserError }}</p>
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button class="p-button--positive is-dense" type="button" :disabled="submitting" @click="submitEditUser">Save</button>
-          <button type="button" @click="editingUser = null">Cancel</button>
+    <AppModal v-if="editingUser" @close="editingUser = null">
+      <h2>Edit user</h2>
+      <div class="admin-user-cell" style="margin-bottom: 1rem">
+        <div class="admin-avatar" :style="{ background: avatarColor(editingUser.name) }" aria-hidden="true">{{ initials(editingUser.name) }}</div>
+        <div>
+          <div class="admin-user-name">{{ editingUser.name }}</div>
+          <div class="admin-user-email u-text--muted">{{ editingUser.email }}</div>
         </div>
       </div>
-    </div>
+      <div class="form-group">
+        <label for="edit-user-role">Role</label>
+        <select id="edit-user-role" v-model="editUserRole">
+          <option value="regular">Regular</option>
+          <option value="admin">Admin</option>
+        </select>
+      </div>
+      <div v-if="editUserError" class="p-notification--negative">
+        <div class="p-notification__content">
+          <p class="p-notification__message">{{ editUserError }}</p>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="p-button--positive is-dense" type="button" :disabled="submitting" @click="submitEditUser">Save</button>
+        <button type="button" @click="editingUser = null">Cancel</button>
+      </div>
+    </AppModal>
   </div>
 </template>
 
 <script setup>
+import AppModal from '../components/ui/AppModal.vue';
 import { ref, onMounted } from 'vue';
 import { avatarColor, initials } from '../lib/utils.js';
 import { listAdminUsers, updateUserRole } from '../lib/api.js';

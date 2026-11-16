@@ -266,6 +266,15 @@ pub async fn apply(env: &CodeEnv, container: &str, preview: &Preview) -> Result<
     Ok(())
 }
 
+pub async fn keep(db: &Db, id: &str) -> Result<()> {
+    db.execute(
+        "UPDATE code_previews SET last_used_at = now() WHERE id = $id",
+        json!({ "id": id }),
+    )
+    .await?;
+    Ok(())
+}
+
 pub async fn touch(db: &Db, id: &str) -> Result<()> {
     db.execute(
         "UPDATE code_previews SET last_used_at = now()

@@ -1,13 +1,5 @@
 <template>
   <div class="session-tab">
-    <div class="session-tab__bar">
-      <select v-if="workspace.chats.length" class="session-tab__picker" :value="chat?.id" aria-label="Chat" @change="switchTo($event.target.value)">
-        <option v-for="entry in workspace.chats" :key="entry.id" :value="entry.id">{{ entry.title }}</option>
-      </select>
-      <button class="p-button--base is-dense" type="button" :disabled="busy" @click="startChat">New chat</button>
-      <button v-if="chat" class="p-button--base is-dense" type="button" :disabled="busy" @click="removeChat">Delete chat</button>
-    </div>
-    <p v-if="error" class="code-error" role="alert">{{ error }}</p>
     <div v-if="chat" class="session-tab__body">
       <ChatPaneContent
         :key="instanceKey"
@@ -17,67 +9,95 @@
         @title-updated="renameLocally"
       />
     </div>
-    <p v-else class="session-tab__empty u-text--muted">This session has no chats. Start one to give the agent a task.</p>
+    <div v-else class="session-tab__empty">
+      <p>This session has no chats yet.</p>
+      <button class="p-button--positive is-dense" type="button" @click="startChat">Start a chat</button>
+    </div>
+
+    <AppModal v-if="renaming" title="Rename chat" @close="renaming = false">
+      <form class="app-form" @submit.prevent="saveTitle">
+      <label :for="`rename-${tab.tabId}`">Title</label>
+      <input :id="`rename-${tab.tabId}`" v-model="title" type="text" maxlength="120" required />
+      </form>
+      <template #actions>
+      <button class="p-button--base is-dense" type="button" @click="renaming = false">Cancel</button>
+      <button class="p-button--positive is-dense" type="button" :disabled="!title.trim()" @click="saveTitle">Rename</button>
+      </template>
+    </AppModal>
   </div>
 </template>
 
 <script setup>
 import { computed, ref, watch } from 'vue';
 import ChatPaneContent from '../chat/ChatPaneContent.vue';
+import AppModal from '../ui/AppModal.vue';
 import { useLayoutWorkspace } from '../../lib/layout-workspace.js';
 import { chatInstanceKey } from '../../composables/useSessionWorkspace.js';
-import { disposeChatInstance } from '../../composables/useChatInstance.js';
+import { disposeChatInstance, peekChatInstance, repliesIn } from '../../composables/useChatInstance.js';
+import { showToast } from '../../composables/useToasts.js';
 
-const props = defineProps({ tab: { type: Object, required: true } });
+const props = defineProps({
+  tab: { type: Object, required: true },
+  paneId: { type: String, required: true },
+});
 
 const workspace = useLayoutWorkspace();
-const busy = ref(false);
-const error = ref('');
+const renaming = ref(false);
+const title = ref('');
 
 const chat = computed(() => workspace.chats.find(c => c.id === props.tab.conversationId) ?? null);
 const instanceKey = computed(() => chatInstanceKey(props.tab));
+const replies = computed(() => repliesIn(peekChatInstance(instanceKey.value)));
 
-function switchTo(chatId) {
+function show(chatId) {
   if (chatId === props.tab.conversationId) return;
   disposeChatInstance(instanceKey.value);
-  workspace.updateTab(props.tab.tabId, { conversationId: chatId });
+  workspace.updateTab(props.tab.tabId, { conversationId: chatId, seenReplies: 0 });
 }
 
 watch(
   () => [props.tab.conversationId, workspace.chats.length],
   () => {
-    if (!chat.value && workspace.chats.length) switchTo(workspace.chats[0].id);
+    if (!chat.value && workspace.chats.length) show(workspace.chats[0].id);
   },
   { immediate: true },
 );
 
-async function run(action) {
-  busy.value = true;
-  error.value = '';
+watch(replies, (count) => {
+  if (count !== props.tab.seenReplies) workspace.updateTab(props.tab.tabId, { seenReplies: count });
+}, { immediate: true });
+
+watch(() => workspace.tabRequest, (request) => {
+  if (request?.tabId !== props.tab.tabId || !chat.value) return;
+  if (request.action === 'rename-chat') {
+    title.value = chat.value.title;
+    renaming.value = true;
+  } else if (request.action === 'delete-chat') {
+    workspace.deleteChat(chat.value.id);
+  }
+});
+
+async function startChat() {
   try {
-    await action();
+    show((await workspace.newChat()).id);
   } catch (e) {
-    error.value = e.message;
-  } finally {
-    busy.value = false;
+    showToast({ message: e.message, kind: 'negative' });
   }
 }
 
-function startChat() {
-  return run(async () => switchTo((await workspace.newChat()).id));
+async function saveTitle() {
+  const text = title.value.trim();
+  if (!text) return;
+  try {
+    await workspace.renameChat(chat.value.id, text);
+    renaming.value = false;
+  } catch (e) {
+    showToast({ message: e.message, kind: 'negative' });
+  }
 }
 
-function removeChat() {
-  if (!window.confirm(`Delete the chat “${chat.value.title}”? Its messages cannot be recovered.`)) return;
-  return run(async () => {
-    const deleted = chat.value.id;
-    disposeChatInstance(instanceKey.value);
-    await workspace.deleteChat(deleted);
-  });
-}
-
-function renameLocally(title) {
+function renameLocally(newTitle) {
   const entry = workspace.chats.find(c => c.id === props.tab.conversationId);
-  if (entry) entry.title = title;
+  if (entry) entry.title = newTitle;
 }
 </script>

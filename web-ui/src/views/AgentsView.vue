@@ -11,26 +11,24 @@
 
     <p v-else class="agents-empty">No agents registered for this project.</p>
 
-    <div v-if="deletingAgent" class="modal" @click.self="deletingAgent = null">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="deletingAgent = null">✕</button>
-        <h3>Delete agent</h3>
-        <p>
-          Delete agent <strong>{{ deletingAgent.hostname || deletingAgent.id }}</strong>?
-          <template v-if="deletingAgent.online"> This agent is currently <strong>online</strong>.</template>
-          <template v-if="deletingAgent.provider === 'lxd'"> The LXD container backing this agent will also be deleted.</template>
-          This cannot be undone.
-        </p>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="deletingAgent = null">Cancel</button>
-          <button class="p-button--negative is-dense" type="button" :disabled="deleting" @click="confirmDelete">Delete</button>
-        </div>
+    <AppModal v-if="deletingAgent" @close="deletingAgent = null">
+      <h2>Delete agent</h2>
+      <p>
+        Delete agent <strong>{{ deletingAgent.hostname || deletingAgent.id }}</strong>?
+        <template v-if="deletingAgent.online"> This agent is currently <strong>online</strong>.</template>
+        <template v-if="deletingAgent.provider === 'lxd'"> The LXD container backing this agent will also be deleted.</template>
+        This cannot be undone.
+      </p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="deletingAgent = null">Cancel</button>
+        <button class="p-button--negative is-dense" type="button" :disabled="deleting" @click="confirmDelete">Delete</button>
       </div>
-    </div>
+    </AppModal>
   </div>
 </template>
 
 <script setup>
+import AppModal from '../components/ui/AppModal.vue';
 import { ref, onMounted, onUnmounted } from 'vue';
 import { listProjectAgents, deleteAgent } from '../lib/api.js';
 import AgentTable from '../components/agents/AgentTable.vue';

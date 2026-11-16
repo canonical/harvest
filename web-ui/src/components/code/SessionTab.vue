@@ -1,5 +1,5 @@
 <template>
-  <component :is="KINDS[tab.kind] ?? SessionChatTab" :tab="tab" />
+  <component :is="KINDS[tab.kind] ?? SessionChatTab" :tab="tab" :pane-id="paneId" />
 </template>
 
 <script setup>

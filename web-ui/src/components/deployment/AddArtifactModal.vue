@@ -1,100 +1,98 @@
 <template>
-  <div v-if="open" class="modal" @click.self="$emit('close')">
-    <div class="modal-content modal-content--wide" data-testid="add-artifact-modal">
-      <button class="modal-close" type="button" @click="$emit('close')">✕</button>
-      <h3>Add artifact</h3>
-      <p class="modal-lede">Create a new artifact and add it to the deployment execution plan.</p>
+  <AppModal v-if="open" data-testid="add-artifact-modal" size="wide" @close="$emit('close')">
+    <h2>Add artifact</h2>
+    <p class="modal-lede">Create a new artifact and add it to the deployment execution plan.</p>
 
-      <div class="deploy-artifacts-modal-tabs" data-testid="add-artifact-tabs">
-        <button
-          class="deploy-artifacts-modal-tab"
-          :class="{ 'deploy-artifacts-modal-tab--active': tab === 'generate' }"
-          data-testid="add-artifact-tab-generate"
-          @click="tab = 'generate'"
-        >Generate</button>
-        <button
-          class="deploy-artifacts-modal-tab"
-          :class="{ 'deploy-artifacts-modal-tab--active': tab === 'content' }"
-          data-testid="add-artifact-tab-content"
-          @click="tab = 'content'"
-        >Write yourself</button>
-      </div>
+    <div class="deploy-artifacts-modal-tabs" data-testid="add-artifact-tabs">
+      <button
+        class="deploy-artifacts-modal-tab"
+        :class="{ 'deploy-artifacts-modal-tab--active': tab === 'generate' }"
+        data-testid="add-artifact-tab-generate"
+        @click="tab = 'generate'"
+      >Generate</button>
+      <button
+        class="deploy-artifacts-modal-tab"
+        :class="{ 'deploy-artifacts-modal-tab--active': tab === 'content' }"
+        data-testid="add-artifact-tab-content"
+        @click="tab = 'content'"
+      >Write yourself</button>
+    </div>
 
-      <div class="form-group">
-        <label for="add-artifact-name">Name</label>
-        <input
-          id="add-artifact-name"
-          v-model="name"
-          type="text"
-          data-testid="add-artifact-name"
-          placeholder="Artifact name"
-        />
-      </div>
+    <div class="form-group">
+      <label for="add-artifact-name">Name</label>
+      <input
+        id="add-artifact-name"
+        v-model="name"
+        type="text"
+        data-testid="add-artifact-name"
+        placeholder="Artifact name"
+      />
+    </div>
 
-      <div class="form-group">
-        <label for="add-artifact-kind">Kind</label>
-        <select id="add-artifact-kind" v-model="kind" data-testid="add-artifact-kind">
-          <option value="bash">Bash</option>
-          <option value="terraform">Terraform</option>
-          <option value="terragrunt">Terragrunt</option>
-          <option value="markdown">Markdown</option>
-        </select>
-      </div>
+    <div class="form-group">
+      <label for="add-artifact-kind">Kind</label>
+      <select id="add-artifact-kind" v-model="kind" data-testid="add-artifact-kind">
+        <option value="bash">Bash</option>
+        <option value="terraform">Terraform</option>
+        <option value="terragrunt">Terragrunt</option>
+        <option value="markdown">Markdown</option>
+      </select>
+    </div>
 
-      <div v-if="tab === 'content'" class="form-group">
-        <label for="add-artifact-content">Content</label>
-        <div
-          ref="editorContainerRef"
-          class="add-artifact-editor"
-          data-testid="add-artifact-content"
-        />
-      </div>
+    <div v-if="tab === 'content'" class="form-group">
+      <label for="add-artifact-content">Content</label>
+      <div
+        ref="editorContainerRef"
+        class="add-artifact-editor"
+        data-testid="add-artifact-content"
+      />
+    </div>
 
-      <div v-if="tab === 'generate'" class="form-group">
-        <label for="add-artifact-prompt">Prompt</label>
-        <textarea
-          id="add-artifact-prompt"
-          v-model="prompt"
-          rows="10"
-          data-testid="add-artifact-prompt"
-          placeholder="Describe what this artifact should do..."
-        />
-      </div>
+    <div v-if="tab === 'generate'" class="form-group">
+      <label for="add-artifact-prompt">Prompt</label>
+      <textarea
+        id="add-artifact-prompt"
+        v-model="prompt"
+        rows="10"
+        data-testid="add-artifact-prompt"
+        placeholder="Describe what this artifact should do..."
+      />
+    </div>
 
-      <div v-if="generating" class="deploy-artifacts-modal-generating" data-testid="add-artifact-generating">
-        <LoadingSpinner text="Generating artifact…" />
-      </div>
+    <div v-if="generating" class="deploy-artifacts-modal-generating" data-testid="add-artifact-generating">
+      <LoadingSpinner text="Generating artifact…" />
+    </div>
 
-      <div v-if="error" class="p-notification--negative">
-        <div class="p-notification__content">
-          <p class="p-notification__message">{{ error }}</p>
-        </div>
-      </div>
-
-      <div class="modal-actions" v-if="!generating">
-        <button class="p-button--base is-dense" type="button" @click="$emit('close')">Cancel</button>
-        <button
-          v-if="tab === 'content'"
-          class="p-button--positive is-dense"
-          type="button"
-          data-testid="add-artifact-submit"
-          :disabled="!name.trim() || submitting"
-          @click="submitContent"
-        >{{ submitting ? 'Adding…' : 'Add' }}</button>
-        <button
-          v-if="tab === 'generate'"
-          class="p-button--positive is-dense"
-          type="button"
-          data-testid="add-artifact-generate-btn"
-          :disabled="!name.trim() || !prompt.trim()"
-          @click="submitGenerate"
-        >Generate</button>
+    <div v-if="error" class="p-notification--negative">
+      <div class="p-notification__content">
+        <p class="p-notification__message">{{ error }}</p>
       </div>
     </div>
-  </div>
+
+    <div class="modal-actions" v-if="!generating">
+      <button class="p-button--base is-dense" type="button" @click="$emit('close')">Cancel</button>
+      <button
+        v-if="tab === 'content'"
+        class="p-button--positive is-dense"
+        type="button"
+        data-testid="add-artifact-submit"
+        :disabled="!name.trim() || submitting"
+        @click="submitContent"
+      >{{ submitting ? 'Adding…' : 'Add' }}</button>
+      <button
+        v-if="tab === 'generate'"
+        class="p-button--positive is-dense"
+        type="button"
+        data-testid="add-artifact-generate-btn"
+        :disabled="!name.trim() || !prompt.trim()"
+        @click="submitGenerate"
+      >Generate</button>
+    </div>
+  </AppModal>
 </template>
 
 <script setup>
+import AppModal from '../ui/AppModal.vue';
 import { ref, watch, nextTick, onBeforeUnmount } from 'vue';
 import {
   createProjectArtifact, proposeProvisionChange,

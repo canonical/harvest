@@ -6,6 +6,7 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::chats::{self, NEW_CHAT_TITLE};
@@ -14,6 +15,7 @@ use super::sessions;
 use crate::auth::jwt::Claims;
 
 const LAYOUT_LIMIT: usize = 64 * 1024;
+const TITLE_LIMIT: usize = 120;
 
 pub async fn list(
     Extension(user): Extension<Claims>,
@@ -47,6 +49,29 @@ pub async fn delete(
     let env = env(&state)?;
     session_for(env, &user, &session_id).await?;
     if !chats::delete(&env.db, &session_id, &chat_id).await.map_err(internal)? {
+        return Err(failure(StatusCode::NOT_FOUND, "not found"));
+    }
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Deserialize)]
+pub struct RenameBody {
+    pub title: String,
+}
+
+pub async fn rename(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<CodeState>>,
+    Path((session_id, chat_id)): Path<(String, String)>,
+    Json(body): Json<RenameBody>,
+) -> Reply {
+    let env = env(&state)?;
+    session_for(env, &user, &session_id).await?;
+    let title = body.title.trim();
+    if title.is_empty() || title.chars().count() > TITLE_LIMIT {
+        return Err(failure(StatusCode::BAD_REQUEST, "a chat title needs 1 to 120 characters"));
+    }
+    if !chats::rename(&env.db, &session_id, &chat_id, title).await.map_err(internal)? {
         return Err(failure(StatusCode::NOT_FOUND, "not found"));
     }
     Ok(StatusCode::NO_CONTENT.into_response())

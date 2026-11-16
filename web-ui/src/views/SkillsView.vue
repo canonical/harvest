@@ -232,58 +232,53 @@
       </section>
     </template>
 
-    <div v-if="deletingSkill" class="modal" @click.self="deletingSkill = null">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="deletingSkill = null">✕</button>
-        <h3>Delete skill</h3>
-        <p>Delete <strong>{{ deletingSkill.name }}</strong>? This cannot be undone.</p>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="deletingSkill = null">Cancel</button>
-          <button
-            class="p-button--negative is-dense"
-            data-testid="confirm-delete"
-            type="button"
-            :disabled="deleting"
-            @click="submitDelete"
-          >Delete</button>
-        </div>
-      </div>
-    </div>
-
-    <div v-if="showCreate" class="modal" @click.self="showCreate = null">
-      <div class="modal-content modal-content--wide">
-        <button class="modal-close" type="button" @click="showCreate = null">✕</button>
-        <h3>New {{ showCreate }} skill</h3>
-        <div class="form-group">
-          <label>Name</label>
-          <input v-model="newName" type="text" data-testid="skill-name-input" placeholder="Name" />
-        </div>
-        <div class="form-group">
-          <label>Description</label>
-          <input v-model="newDescription" type="text" placeholder="Short description" />
-        </div>
-        <div class="form-group">
-          <label>Content</label>
-          <textarea v-model="newContent" class="memories-textarea" rows="8" placeholder="Write in Markdown…" />
-        </div>
-        <div v-if="createError" class="p-notification--negative">
-          <div class="p-notification__content">
-            <p class="p-notification__message">{{ createError }}</p>
-          </div>
-        </div>
+    <AppModal v-if="deletingSkill" @close="deletingSkill = null">
+      <h2>Delete skill</h2>
+      <p>Delete <strong>{{ deletingSkill.name }}</strong>? This cannot be undone.</p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="deletingSkill = null">Cancel</button>
         <button
-          class="p-button--positive is-dense"
-          data-testid="save-create"
+          class="p-button--negative is-dense"
+          data-testid="confirm-delete"
           type="button"
-          :disabled="!newName || submitting"
-          @click="submitCreate"
-        >Save</button>
+          :disabled="deleting"
+          @click="submitDelete"
+        >Delete</button>
       </div>
-    </div>
+    </AppModal>
+
+    <AppModal v-if="showCreate" size="wide" @close="showCreate = null">
+      <h2>New {{ showCreate }} skill</h2>
+      <div class="form-group">
+        <label>Name</label>
+        <input v-model="newName" type="text" data-testid="skill-name-input" placeholder="Name" />
+      </div>
+      <div class="form-group">
+        <label>Description</label>
+        <input v-model="newDescription" type="text" placeholder="Short description" />
+      </div>
+      <div class="form-group">
+        <label>Content</label>
+        <textarea v-model="newContent" class="memories-textarea" rows="8" placeholder="Write in Markdown…" />
+      </div>
+      <div v-if="createError" class="p-notification--negative">
+        <div class="p-notification__content">
+          <p class="p-notification__message">{{ createError }}</p>
+        </div>
+      </div>
+      <button
+        class="p-button--positive is-dense"
+        data-testid="save-create"
+        type="button"
+        :disabled="!newName || submitting"
+        @click="submitCreate"
+      >Save</button>
+    </AppModal>
   </div>
 </template>
 
 <script setup>
+import AppModal from '../components/ui/AppModal.vue';
 import { computed, ref, watch } from 'vue';
 import { renderMarkdown } from '../lib/markdown.js';
 import { useAuthStore } from '../stores/auth.js';

@@ -130,58 +130,53 @@
       </div>
     </div>
 
-    <div v-if="uploadModalOpen" class="modal" @click.self="closeUploadModal">
-      <div class="modal-content" data-testid="upload-template-modal">
-        <button class="modal-close" type="button" @click="closeUploadModal">✕</button>
-        <h3>Upload product template</h3>
-        <p class="modal-lede">Upload a <code>.harvest</code> file — a zip archive containing a <code>metadata.yaml</code> file (template name and description), a <code>design.md</code> design document template, a <code>skills/</code> directory with <code>.md</code> files (with YAML frontmatter), and an <code>artifacts/</code> directory with example Terraform/Terragrunt/Bash files.</p>
-        <label
-          class="upload-dropzone"
-          :class="{ 'upload-dropzone--active': dragActive }"
-          data-testid="template-dropzone"
-          @dragover.prevent="dragActive = true"
-          @dragleave.prevent="dragActive = false"
-          @drop.prevent="onDrop"
-        >
-          <input type="file" class="upload-dropzone__input" data-testid="template-file-input" accept=".harvest" @change="onFileChange" />
-          <template v-if="!uploadFile">
-            <span class="upload-dropzone__hint">Drop a .harvest file here, or click to select one</span>
-          </template>
-          <template v-else>
-            <span class="upload-dropzone__file">{{ uploadFile.name }}</span>
-          </template>
-        </label>
-        <div v-if="uploadError" class="p-notification--negative">
-          <div class="p-notification__content">
-            <p class="p-notification__message">{{ uploadError }}</p>
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="closeUploadModal">Cancel</button>
-          <button class="p-button--positive is-dense" type="button" data-testid="submit-upload-template" :disabled="uploadSubmitting || !uploadFile" @click="submitUpload">
-            {{ uploadSubmitting ? 'Uploading…' : 'Upload' }}
-          </button>
+    <AppModal v-if="uploadModalOpen" data-testid="upload-template-modal" @close="closeUploadModal">
+      <h2>Upload product template</h2>
+      <p class="modal-lede">Upload a <code>.harvest</code> file — a zip archive containing a <code>metadata.yaml</code> file (template name and description), a <code>design.md</code> design document template, a <code>skills/</code> directory with <code>.md</code> files (with YAML frontmatter), and an <code>artifacts/</code> directory with example Terraform/Terragrunt/Bash files.</p>
+      <label
+        class="upload-dropzone"
+        :class="{ 'upload-dropzone--active': dragActive }"
+        data-testid="template-dropzone"
+        @dragover.prevent="dragActive = true"
+        @dragleave.prevent="dragActive = false"
+        @drop.prevent="onDrop"
+      >
+        <input type="file" class="upload-dropzone__input" data-testid="template-file-input" accept=".harvest" @change="onFileChange" />
+        <template v-if="!uploadFile">
+          <span class="upload-dropzone__hint">Drop a .harvest file here, or click to select one</span>
+        </template>
+        <template v-else>
+          <span class="upload-dropzone__file">{{ uploadFile.name }}</span>
+        </template>
+      </label>
+      <div v-if="uploadError" class="p-notification--negative">
+        <div class="p-notification__content">
+          <p class="p-notification__message">{{ uploadError }}</p>
         </div>
       </div>
-    </div>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="closeUploadModal">Cancel</button>
+        <button class="p-button--positive is-dense" type="button" data-testid="submit-upload-template" :disabled="uploadSubmitting || !uploadFile" @click="submitUpload">
+          {{ uploadSubmitting ? 'Uploading…' : 'Upload' }}
+        </button>
+      </div>
+    </AppModal>
 
-    <div v-if="deleteModalOpen" class="modal" @click.self="deleteModalOpen = false">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="deleteModalOpen = false">✕</button>
-        <h3>Delete template</h3>
-        <p>Delete <strong>{{ selectedDetail?.name }}</strong>? This cannot be undone.</p>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="deleteModalOpen = false">Cancel</button>
-          <button class="p-button--negative is-dense" type="button" data-testid="confirm-delete-template" :disabled="deleting" @click="submitDelete">
-            {{ deleting ? 'Deleting…' : 'Delete' }}
-          </button>
-        </div>
+    <AppModal v-if="deleteModalOpen" @close="deleteModalOpen = false">
+      <h2>Delete template</h2>
+      <p>Delete <strong>{{ selectedDetail?.name }}</strong>? This cannot be undone.</p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="deleteModalOpen = false">Cancel</button>
+        <button class="p-button--negative is-dense" type="button" data-testid="confirm-delete-template" :disabled="deleting" @click="submitDelete">
+          {{ deleting ? 'Deleting…' : 'Delete' }}
+        </button>
       </div>
-    </div>
+    </AppModal>
   </div>
 </template>
 
 <script setup>
+import AppModal from '../components/ui/AppModal.vue';
 import { ref, computed, watch } from 'vue';
 import { renderMarkdown } from '../lib/markdown.js';
 import { listTemplates, getTemplate, deleteTemplate, uploadTemplate, templateDownloadUrl } from '../lib/api.js';

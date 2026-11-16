@@ -58,6 +58,16 @@ pub async fn belongs(db: &Db, session_id: &str, chat_id: &str) -> Result<bool> {
     Ok(!rows.is_empty())
 }
 
+pub async fn rename(db: &Db, session_id: &str, chat_id: &str, title: &str) -> Result<bool> {
+    let renamed = db
+        .execute(
+            "UPDATE conversations SET title = $title WHERE id = $cid AND code_session_id = $sid",
+            json!({ "cid": chat_id, "sid": session_id, "title": title }),
+        )
+        .await?;
+    Ok(renamed > 0)
+}
+
 pub async fn delete(db: &Db, session_id: &str, chat_id: &str) -> Result<bool> {
     let deleted = db
         .execute(

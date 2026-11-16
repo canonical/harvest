@@ -115,147 +115,136 @@
       </div>
     </template>
 
-    <div v-if="deletingArtifact" class="modal" @click.self="deletingArtifact = null">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="deletingArtifact = null">✕</button>
-        <h3>Delete artifact</h3>
-        <p>Delete <strong>{{ deletingArtifact.title }}</strong>? This cannot be undone.</p>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="deletingArtifact = null">Cancel</button>
-          <button class="p-button--negative is-dense" type="button" :disabled="submitting" @click="submitDeleteArtifact">Delete</button>
+    <AppModal v-if="deletingArtifact" @close="deletingArtifact = null">
+      <h2>Delete artifact</h2>
+      <p>Delete <strong>{{ deletingArtifact.title }}</strong>? This cannot be undone.</p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="deletingArtifact = null">Cancel</button>
+        <button class="p-button--negative is-dense" type="button" :disabled="submitting" @click="submitDeleteArtifact">Delete</button>
+      </div>
+    </AppModal>
+
+    <AppModal v-if="runModalOpen" @close="closeRunModal">
+      <h2>Run on agent</h2>
+
+      <div class="form-group">
+        <label for="run-agent-select">Agent</label>
+        <select id="run-agent-select" v-model="selectedAgentId">
+          <option value="" disabled>Select an agent</option>
+          <option v-for="a in availableAgents" :key="a.id" :value="a.id">{{ a.hostname }}</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label for="run-action-select">Action</label>
+        <select id="run-action-select" v-model="selectedAction">
+          <option value="plan">Plan</option>
+          <option value="apply">Apply</option>
+          <option value="destroy">Destroy</option>
+        </select>
+      </div>
+
+      <label v-if="selectedAction !== 'plan'" class="run-modal-confirm">
+        <input v-model="confirmDangerous" type="checkbox" />
+        This may create, change, or destroy real infrastructure.
+      </label>
+
+      <div v-if="runError" class="p-notification--negative">
+        <div class="p-notification__content">
+          <p class="p-notification__message">{{ runError }}</p>
         </div>
       </div>
-    </div>
 
-    <div v-if="runModalOpen" class="modal" @click.self="closeRunModal">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="closeRunModal">✕</button>
-        <h3>Run on agent</h3>
+      <pre v-if="runResult" class="run-modal-result">{{ formattedRunResult }}</pre>
 
-        <div class="form-group">
-          <label for="run-agent-select">Agent</label>
-          <select id="run-agent-select" v-model="selectedAgentId">
-            <option value="" disabled>Select an agent</option>
-            <option v-for="a in availableAgents" :key="a.id" :value="a.id">{{ a.hostname }}</option>
-          </select>
-        </div>
-
-        <div class="form-group">
-          <label for="run-action-select">Action</label>
-          <select id="run-action-select" v-model="selectedAction">
-            <option value="plan">Plan</option>
-            <option value="apply">Apply</option>
-            <option value="destroy">Destroy</option>
-          </select>
-        </div>
-
-        <label v-if="selectedAction !== 'plan'" class="run-modal-confirm">
-          <input v-model="confirmDangerous" type="checkbox" />
-          This may create, change, or destroy real infrastructure.
-        </label>
-
-        <div v-if="runError" class="p-notification--negative">
-          <div class="p-notification__content">
-            <p class="p-notification__message">{{ runError }}</p>
-          </div>
-        </div>
-
-        <pre v-if="runResult" class="run-modal-result">{{ formattedRunResult }}</pre>
-
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="closeRunModal">Cancel</button>
-          <button
-            :class="selectedAction === 'plan' ? 'p-button--positive is-dense' : 'p-button--negative is-dense'"
-            type="button"
-            :disabled="!canSubmitRun || running"
-            @click="submitRun"
-          >
-            {{ running ? 'Running…' : 'Run' }}
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <div v-if="createModalOpen" class="modal" @click.self="closeCreateModal">
-      <div class="modal-content modal-content--wide" data-testid="create-artifact-modal">
-        <button class="modal-close" type="button" @click="closeCreateModal">✕</button>
-        <h3>Create artifact</h3>
-        <p class="modal-lede">Choose a type, give the artifact a title, and write its content below. Markdown and PDF artifacts are stored as text; Terraform and Terragrunt content must be a JSON bundle mapping file paths to file contents.</p>
-        <div class="form-group">
-          <label for="create-artifact-title">Title</label>
-          <input id="create-artifact-title" v-model="createForm.title" type="text" data-testid="create-artifact-title" placeholder="Artifact title" />
-        </div>
-        <div class="form-group">
-          <label for="create-artifact-kind">Type</label>
-          <select id="create-artifact-kind" v-model="createForm.kind" data-testid="create-artifact-kind">
-            <option value="markdown">Markdown</option>
-            <option value="pdf">PDF (markdown source)</option>
-            <option value="terraform">Terraform (JSON bundle)</option>
-            <option value="terragrunt">Terragrunt (JSON bundle)</option>
-            <option value="bash">Bash script</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="create-artifact-content">Content</label>
-          <textarea id="create-artifact-content" v-model="createForm.content" rows="10" data-testid="create-artifact-content" class="artifact-modal__content" placeholder="Write the artifact content here"></textarea>
-        </div>
-        <div v-if="createError" class="p-notification--negative">
-          <div class="p-notification__content">
-            <p class="p-notification__message">{{ createError }}</p>
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" data-testid="cancel-create-artifact" @click="closeCreateModal">Cancel</button>
-          <button class="p-button--positive is-dense" type="button" data-testid="submit-create-artifact" :disabled="createSubmitting || !canSubmitCreate" @click="submitCreate">
-            {{ createSubmitting ? 'Creating…' : 'Create' }}
-          </button>
-        </div>
-      </div>
-    </div>
-
-    <div v-if="uploadModalOpen" class="modal" @click.self="closeUploadModal">
-      <div class="modal-content" data-testid="upload-artifact-modal">
-        <button class="modal-close" type="button" @click="closeUploadModal">✕</button>
-        <h3>Upload artifact</h3>
-        <p class="modal-lede">Drag and drop a file or click to browse. Supported types: <code>.md</code>, <code>.pdf</code>, <code>.tf</code>, <code>.tf.json</code>, <code>.tg.hcl</code>, <code>.sh</code>. Terraform and Terragrunt files are uploaded as single-file bundles.</p>
-        <label
-          class="upload-dropzone"
-          :class="{ 'upload-dropzone--active': dragActive }"
-          data-testid="upload-dropzone"
-          @dragover.prevent="dragActive = true"
-          @dragleave.prevent="dragActive = false"
-          @drop.prevent="onDrop"
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="closeRunModal">Cancel</button>
+        <button
+          :class="selectedAction === 'plan' ? 'p-button--positive is-dense' : 'p-button--negative is-dense'"
+          type="button"
+          :disabled="!canSubmitRun || running"
+          @click="submitRun"
         >
-          <input type="file" class="upload-dropzone__input" data-testid="upload-file-input" @change="onFileChange" />
-          <template v-if="!uploadFile">
-            <span class="upload-dropzone__hint">Drop a file here, or click to select one</span>
-          </template>
-          <template v-else>
-            <span class="upload-dropzone__file">{{ uploadFile.name }}</span>
-            <span class="upload-dropzone__kind">{{ kindLabel(inferredKind(uploadFile.name) || '') }}</span>
-          </template>
-        </label>
-        <div v-if="uploadFile" class="form-group">
-          <label for="upload-artifact-title">Title</label>
-          <input id="upload-artifact-title" v-model="uploadTitle" type="text" placeholder="Artifact title" />
-        </div>
-        <div v-if="uploadError" class="p-notification--negative">
-          <div class="p-notification__content">
-            <p class="p-notification__message">{{ uploadError }}</p>
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="closeUploadModal">Cancel</button>
-          <button class="p-button--positive is-dense" type="button" data-testid="submit-upload-artifact" :disabled="uploadSubmitting || !canSubmitUpload" @click="submitUpload">
-            {{ uploadSubmitting ? 'Uploading…' : 'Upload' }}
-          </button>
+          {{ running ? 'Running…' : 'Run' }}
+        </button>
+      </div>
+    </AppModal>
+
+    <AppModal v-if="createModalOpen" data-testid="create-artifact-modal" size="wide" @close="closeCreateModal">
+      <h2>Create artifact</h2>
+      <p class="modal-lede">Choose a type, give the artifact a title, and write its content below. Markdown and PDF artifacts are stored as text; Terraform and Terragrunt content must be a JSON bundle mapping file paths to file contents.</p>
+      <div class="form-group">
+        <label for="create-artifact-title">Title</label>
+        <input id="create-artifact-title" v-model="createForm.title" type="text" data-testid="create-artifact-title" placeholder="Artifact title" />
+      </div>
+      <div class="form-group">
+        <label for="create-artifact-kind">Type</label>
+        <select id="create-artifact-kind" v-model="createForm.kind" data-testid="create-artifact-kind">
+          <option value="markdown">Markdown</option>
+          <option value="pdf">PDF (markdown source)</option>
+          <option value="terraform">Terraform (JSON bundle)</option>
+          <option value="terragrunt">Terragrunt (JSON bundle)</option>
+          <option value="bash">Bash script</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="create-artifact-content">Content</label>
+        <textarea id="create-artifact-content" v-model="createForm.content" rows="10" data-testid="create-artifact-content" class="artifact-modal__content" placeholder="Write the artifact content here"></textarea>
+      </div>
+      <div v-if="createError" class="p-notification--negative">
+        <div class="p-notification__content">
+          <p class="p-notification__message">{{ createError }}</p>
         </div>
       </div>
-    </div>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" data-testid="cancel-create-artifact" @click="closeCreateModal">Cancel</button>
+        <button class="p-button--positive is-dense" type="button" data-testid="submit-create-artifact" :disabled="createSubmitting || !canSubmitCreate" @click="submitCreate">
+          {{ createSubmitting ? 'Creating…' : 'Create' }}
+        </button>
+      </div>
+    </AppModal>
+
+    <AppModal v-if="uploadModalOpen" data-testid="upload-artifact-modal" @close="closeUploadModal">
+      <h2>Upload artifact</h2>
+      <p class="modal-lede">Drag and drop a file or click to browse. Supported types: <code>.md</code>, <code>.pdf</code>, <code>.tf</code>, <code>.tf.json</code>, <code>.tg.hcl</code>, <code>.sh</code>. Terraform and Terragrunt files are uploaded as single-file bundles.</p>
+      <label
+        class="upload-dropzone"
+        :class="{ 'upload-dropzone--active': dragActive }"
+        data-testid="upload-dropzone"
+        @dragover.prevent="dragActive = true"
+        @dragleave.prevent="dragActive = false"
+        @drop.prevent="onDrop"
+      >
+        <input type="file" class="upload-dropzone__input" data-testid="upload-file-input" @change="onFileChange" />
+        <template v-if="!uploadFile">
+          <span class="upload-dropzone__hint">Drop a file here, or click to select one</span>
+        </template>
+        <template v-else>
+          <span class="upload-dropzone__file">{{ uploadFile.name }}</span>
+          <span class="upload-dropzone__kind">{{ kindLabel(inferredKind(uploadFile.name) || '') }}</span>
+        </template>
+      </label>
+      <div v-if="uploadFile" class="form-group">
+        <label for="upload-artifact-title">Title</label>
+        <input id="upload-artifact-title" v-model="uploadTitle" type="text" placeholder="Artifact title" />
+      </div>
+      <div v-if="uploadError" class="p-notification--negative">
+        <div class="p-notification__content">
+          <p class="p-notification__message">{{ uploadError }}</p>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="closeUploadModal">Cancel</button>
+        <button class="p-button--positive is-dense" type="button" data-testid="submit-upload-artifact" :disabled="uploadSubmitting || !canSubmitUpload" @click="submitUpload">
+          {{ uploadSubmitting ? 'Uploading…' : 'Upload' }}
+        </button>
+      </div>
+    </AppModal>
   </div>
 </template>
 
 <script setup>
+import AppModal from '../components/ui/AppModal.vue';
 import { ref, computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { renderMarkdown } from '../lib/markdown.js';

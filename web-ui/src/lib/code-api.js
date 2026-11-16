@@ -27,7 +27,13 @@ export const getCodeSession = (id) => codeFetch(`/code/sessions/${id}`);
 export const closeCodeSession = (id) => codeFetch(`/code/sessions/${id}`, { method: 'DELETE' });
 export const getSessionChanges = (id) => codeFetch(`/code/sessions/${id}/changes`);
 export const createSessionChat = (id) => codeFetch(`/code/sessions/${id}/chats`, { method: 'POST' });
-export const deleteSessionChat = (id, chatId) => codeFetch(`/code/sessions/${id}/chats/${chatId}`, { method: 'DELETE' });
+export const deleteSessionChat = (id, chatId) =>
+  codeFetch(`/code/sessions/${id}/chats/${chatId}`, { method: 'DELETE', keepalive: true });
+export const renameSessionChat = (id, chatId, title) =>
+  codeFetch(`/code/sessions/${id}/chats/${chatId}`, send('PATCH', { title }));
+export const restartPreview = (previewId) => codeFetch(`/code/previews/${previewId}/restart`, { method: 'POST' });
+export const previewLog = (previewId) => codeFetch(`/code/previews/${previewId}/log`);
+export const keepPreview = (previewId) => codeFetch(`/code/previews/${previewId}/keep`, { method: 'POST' });
 export const getSessionLayout = (id) => codeFetch(`/code/sessions/${id}/layout`);
 export const saveSessionLayout = (id, layout) => codeFetch(`/code/sessions/${id}/layout`, send('PUT', { layout }));
 export const listSessionPreviews = (id) => codeFetch(`/code/sessions/${id}/previews`);

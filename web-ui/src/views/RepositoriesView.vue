@@ -186,191 +186,180 @@
       </div>
     </div>
 
-    <div v-if="addModalOpen" class="modal" @click.self="closeAddModal">
-      <div class="modal-content modal-content--wide">
-        <button class="modal-close" type="button" @click="closeAddModal">✕</button>
-        <h3>Add repository</h3>
+    <AppModal v-if="addModalOpen" size="wide" @close="closeAddModal">
+      <h2>Add repository</h2>
+      <div class="form-group">
+        <label for="add-repo-url">Git URL</label>
+        <input id="add-repo-url" v-model="addForm.url" type="text" placeholder="https://github.com/owner/repo.git" @keydown.enter="verifyUrl" :disabled="verifying" />
+        <span v-if="verifyError" class="auth-error">{{ verifyError }}</span>
+        <span v-else-if="verifiedVisibility === 'private'" class="repo-verify-note">Private repository. Only people who can read it with their own credentials will see it in Harvest.</span>
+      </div>
+      <div v-if="verifying" class="repo-verify-loading">
+        <LoadingSpinner text="Connecting to repository…" />
+      </div>
+      <button
+        v-if="!availableRefs.length && !verifying"
+        class="p-button--positive is-dense"
+        type="button"
+        :disabled="!addForm.url.trim()"
+        @click="verifyUrl"
+      >Next</button>
+
+      <template v-if="availableRefs.length">
         <div class="form-group">
-          <label for="add-repo-url">Git URL</label>
-          <input id="add-repo-url" v-model="addForm.url" type="text" placeholder="https://github.com/owner/repo.git" @keydown.enter="verifyUrl" :disabled="verifying" />
-          <span v-if="verifyError" class="auth-error">{{ verifyError }}</span>
-          <span v-else-if="verifiedVisibility === 'private'" class="repo-verify-note">Private repository. Only people who can read it with their own credentials will see it in Harvest.</span>
+          <label for="add-repo-name">Name</label>
+          <input id="add-repo-name" v-model="addForm.name" type="text" placeholder="my-repo" />
         </div>
-        <div v-if="verifying" class="repo-verify-loading">
-          <LoadingSpinner text="Connecting to repository…" />
-        </div>
-        <button
-          v-if="!availableRefs.length && !verifying"
-          class="p-button--positive is-dense"
-          type="button"
-          :disabled="!addForm.url.trim()"
-          @click="verifyUrl"
-        >Next</button>
-
-        <template v-if="availableRefs.length">
-          <div class="form-group">
-            <label for="add-repo-name">Name</label>
-            <input id="add-repo-name" v-model="addForm.name" type="text" placeholder="my-repo" />
-          </div>
-          <div class="form-group">
-            <label>Refs <span class="form-field-hint-inline">(required — select at least one)</span></label>
-            <div class="refs-multiselect">
-              <div class="refs-multiselect__search">
+        <div class="form-group">
+          <label>Refs <span class="form-field-hint-inline">(required — select at least one)</span></label>
+          <div class="refs-multiselect">
+            <div class="refs-multiselect__search">
+              <input
+                v-model="refSearch"
+                type="search"
+                placeholder="Search refs…"
+                autocomplete="off"
+              />
+            </div>
+            <div class="refs-multiselect__list">
+              <label
+                v-for="r in filteredRefs"
+                :key="r.name"
+                class="refs-multiselect__item"
+                :class="{ 'refs-multiselect__item--selected': selectedRefs.has(r.name) }"
+              >
                 <input
-                  v-model="refSearch"
-                  type="search"
-                  placeholder="Search refs…"
-                  autocomplete="off"
+                  type="checkbox"
+                  :value="r.name"
+                  :checked="selectedRefs.has(r.name)"
+                  @change="toggleRef(r.name)"
                 />
-              </div>
-              <div class="refs-multiselect__list">
-                <label
-                  v-for="r in filteredRefs"
-                  :key="r.name"
-                  class="refs-multiselect__item"
-                  :class="{ 'refs-multiselect__item--selected': selectedRefs.has(r.name) }"
-                >
-                  <input
-                    type="checkbox"
-                    :value="r.name"
-                    :checked="selectedRefs.has(r.name)"
-                    @change="toggleRef(r.name)"
-                  />
-                  <span class="refs-multiselect__item-name">{{ r.name }}</span>
-                  <span class="refs-multiselect__item-sha">{{ r.commit_sha.substring(0, 8) }}</span>
-                </label>
-                <p v-if="!filteredRefs.length" class="refs-multiselect__empty">No refs match "{{ refSearch }}"</p>
-              </div>
-              <div class="refs-multiselect__footer">
-                <span class="refs-multiselect__count">{{ selectedRefs.size }} selected</span>
-                <button type="button" class="p-button--base is-dense" @click="clearRefs">Clear</button>
-              </div>
+                <span class="refs-multiselect__item-name">{{ r.name }}</span>
+                <span class="refs-multiselect__item-sha">{{ r.commit_sha.substring(0, 8) }}</span>
+              </label>
+              <p v-if="!filteredRefs.length" class="refs-multiselect__empty">No refs match "{{ refSearch }}"</p>
+            </div>
+            <div class="refs-multiselect__footer">
+              <span class="refs-multiselect__count">{{ selectedRefs.size }} selected</span>
+              <button type="button" class="p-button--base is-dense" @click="clearRefs">Clear</button>
             </div>
           </div>
-          <p v-if="addError" class="auth-error">{{ addError }}</p>
-          <div class="modal-actions">
-            <button class="p-button--base is-dense" type="button" @click="closeAddModal">Cancel</button>
-            <button
-              class="p-button--positive is-dense"
-              type="button"
-              :disabled="!addForm.name.trim() || !addForm.url.trim() || selectedRefs.size === 0 || adding"
-              @click="submitAdd"
-            >{{ adding ? 'Ingesting…' : 'Ingest' }}</button>
-          </div>
-        </template>
-      </div>
-    </div>
-
-    <div v-if="ingestVersionsModalOpen" class="modal" @click.self="closeIngestVersionsModal">
-      <div class="modal-content modal-content--wide">
-        <button class="modal-close" type="button" @click="closeIngestVersionsModal">✕</button>
-        <h3>Ingest new versions — {{ selectedRepo }}</h3>
-        <p class="modal-lede">Harvest will connect to the repository and list all available refs. Select the ones you want to ingest.</p>
-        <div v-if="ingestVerifying" class="repo-verify-loading">
-          <LoadingSpinner text="Connecting to repository…" />
         </div>
-        <button
-          v-if="!ingestAvailableRefs.length && !ingestVerifying"
-          class="p-button--base is-dense"
-          type="button"
-          @click="verifyForIngestVersions"
-        >Connect & list refs</button>
-        <span v-if="ingestVerifyError" class="auth-error">{{ ingestVerifyError }}</span>
+        <p v-if="addError" class="auth-error">{{ addError }}</p>
+        <div class="modal-actions">
+          <button class="p-button--base is-dense" type="button" @click="closeAddModal">Cancel</button>
+          <button
+            class="p-button--positive is-dense"
+            type="button"
+            :disabled="!addForm.name.trim() || !addForm.url.trim() || selectedRefs.size === 0 || adding"
+            @click="submitAdd"
+          >{{ adding ? 'Ingesting…' : 'Ingest' }}</button>
+        </div>
+      </template>
+    </AppModal>
 
-        <template v-if="ingestAvailableRefs.length">
-          <div class="form-group">
-            <label>Refs <span class="form-field-hint-inline">(required — select at least one)</span></label>
-            <div class="refs-multiselect">
-              <div class="refs-multiselect__search">
+    <AppModal v-if="ingestVersionsModalOpen" size="wide" @close="closeIngestVersionsModal">
+      <h2>Ingest new versions — {{ selectedRepo }}</h2>
+      <p class="modal-lede">Harvest will connect to the repository and list all available refs. Select the ones you want to ingest.</p>
+      <div v-if="ingestVerifying" class="repo-verify-loading">
+        <LoadingSpinner text="Connecting to repository…" />
+      </div>
+      <button
+        v-if="!ingestAvailableRefs.length && !ingestVerifying"
+        class="p-button--base is-dense"
+        type="button"
+        @click="verifyForIngestVersions"
+      >Connect & list refs</button>
+      <span v-if="ingestVerifyError" class="auth-error">{{ ingestVerifyError }}</span>
+
+      <template v-if="ingestAvailableRefs.length">
+        <div class="form-group">
+          <label>Refs <span class="form-field-hint-inline">(required — select at least one)</span></label>
+          <div class="refs-multiselect">
+            <div class="refs-multiselect__search">
+              <input
+                v-model="ingestRefSearch"
+                type="search"
+                placeholder="Search refs…"
+                autocomplete="off"
+              />
+            </div>
+            <div class="refs-multiselect__list">
+              <label
+                v-for="r in filteredIngestRefs"
+                :key="r.name"
+                class="refs-multiselect__item"
+                :class="{
+                  'refs-multiselect__item--selected': ingestSelectedRefs.has(r.name),
+                  'refs-multiselect__item--disabled': ingestExistingVersions.has(r.name),
+                }"
+              >
                 <input
-                  v-model="ingestRefSearch"
-                  type="search"
-                  placeholder="Search refs…"
-                  autocomplete="off"
+                  type="checkbox"
+                  :value="r.name"
+                  :checked="ingestSelectedRefs.has(r.name)"
+                  :disabled="ingestExistingVersions.has(r.name)"
+                  @change="toggleIngestRef(r.name)"
                 />
-              </div>
-              <div class="refs-multiselect__list">
-                <label
-                  v-for="r in filteredIngestRefs"
-                  :key="r.name"
-                  class="refs-multiselect__item"
-                  :class="{
-                    'refs-multiselect__item--selected': ingestSelectedRefs.has(r.name),
-                    'refs-multiselect__item--disabled': ingestExistingVersions.has(r.name),
-                  }"
-                >
-                  <input
-                    type="checkbox"
-                    :value="r.name"
-                    :checked="ingestSelectedRefs.has(r.name)"
-                    :disabled="ingestExistingVersions.has(r.name)"
-                    @change="toggleIngestRef(r.name)"
-                  />
-                  <span class="refs-multiselect__item-name">{{ r.name }}</span>
-                  <span v-if="ingestExistingVersions.has(r.name)" class="refs-multiselect__item-badge">already ingested</span>
-                  <span v-else class="refs-multiselect__item-sha">{{ r.commit_sha.substring(0, 8) }}</span>
-                </label>
-                <p v-if="!filteredIngestRefs.length" class="refs-multiselect__empty">No refs match "{{ ingestRefSearch }}"</p>
-              </div>
-              <div class="refs-multiselect__footer">
-                <span class="refs-multiselect__count">{{ ingestSelectedRefs.size }} selected</span>
-                <button type="button" class="p-button--base is-dense" @click="clearIngestRefs">Clear</button>
-              </div>
+                <span class="refs-multiselect__item-name">{{ r.name }}</span>
+                <span v-if="ingestExistingVersions.has(r.name)" class="refs-multiselect__item-badge">already ingested</span>
+                <span v-else class="refs-multiselect__item-sha">{{ r.commit_sha.substring(0, 8) }}</span>
+              </label>
+              <p v-if="!filteredIngestRefs.length" class="refs-multiselect__empty">No refs match "{{ ingestRefSearch }}"</p>
+            </div>
+            <div class="refs-multiselect__footer">
+              <span class="refs-multiselect__count">{{ ingestSelectedRefs.size }} selected</span>
+              <button type="button" class="p-button--base is-dense" @click="clearIngestRefs">Clear</button>
             </div>
           </div>
-          <p v-if="ingestVersionsError" class="auth-error">{{ ingestVersionsError }}</p>
-          <div class="modal-actions">
-            <button class="p-button--base is-dense" type="button" @click="closeIngestVersionsModal">Cancel</button>
-            <button
-              class="p-button--positive is-dense"
-              type="button"
-              :disabled="ingestSelectedRefs.size === 0 || ingestVersionsSubmitting"
-              @click="submitIngestVersions"
-            >{{ ingestVersionsSubmitting ? 'Ingesting…' : 'Ingest' }}</button>
-          </div>
-        </template>
-      </div>
-    </div>
-
-    <div v-if="deleteRepoModalOpen" class="modal" @click.self="closeDeleteRepoModal">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="closeDeleteRepoModal">✕</button>
-        <h3>Delete repository</h3>
-        <p class="modal-lede">Are you sure you want to delete <strong>{{ selectedRepo }}</strong> and all its versions, files, and symbols? This action cannot be undone.</p>
-        <p v-if="deleteError" class="auth-error">{{ deleteError }}</p>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="closeDeleteRepoModal">Cancel</button>
-          <button
-            class="p-button--negative is-dense"
-            type="button"
-            :disabled="deletingRepo"
-            @click="confirmDeleteRepo"
-          >{{ deletingRepo ? 'Deleting…' : 'Delete' }}</button>
         </div>
-      </div>
-    </div>
-
-    <div v-if="deleteVersionModalOpen" class="modal" @click.self="closeDeleteVersionModal">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="closeDeleteVersionModal">✕</button>
-        <h3>Delete version</h3>
-        <p class="modal-lede">Are you sure you want to delete version <strong>{{ selectedVersion }}</strong> from <strong>{{ selectedRepo }}</strong>? This action cannot be undone.</p>
-        <p v-if="deleteVersionError" class="auth-error">{{ deleteVersionError }}</p>
+        <p v-if="ingestVersionsError" class="auth-error">{{ ingestVersionsError }}</p>
         <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="closeDeleteVersionModal">Cancel</button>
+          <button class="p-button--base is-dense" type="button" @click="closeIngestVersionsModal">Cancel</button>
           <button
-            class="p-button--negative is-dense"
+            class="p-button--positive is-dense"
             type="button"
-            :disabled="deletingVersion"
-            @click="confirmDeleteVersion"
-          >{{ deletingVersion ? 'Deleting…' : 'Delete' }}</button>
+            :disabled="ingestSelectedRefs.size === 0 || ingestVersionsSubmitting"
+            @click="submitIngestVersions"
+          >{{ ingestVersionsSubmitting ? 'Ingesting…' : 'Ingest' }}</button>
         </div>
+      </template>
+    </AppModal>
+
+    <AppModal v-if="deleteRepoModalOpen" @close="closeDeleteRepoModal">
+      <h2>Delete repository</h2>
+      <p class="modal-lede">Are you sure you want to delete <strong>{{ selectedRepo }}</strong> and all its versions, files, and symbols? This action cannot be undone.</p>
+      <p v-if="deleteError" class="auth-error">{{ deleteError }}</p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="closeDeleteRepoModal">Cancel</button>
+        <button
+          class="p-button--negative is-dense"
+          type="button"
+          :disabled="deletingRepo"
+          @click="confirmDeleteRepo"
+        >{{ deletingRepo ? 'Deleting…' : 'Delete' }}</button>
       </div>
-    </div>
+    </AppModal>
+
+    <AppModal v-if="deleteVersionModalOpen" @close="closeDeleteVersionModal">
+      <h2>Delete version</h2>
+      <p class="modal-lede">Are you sure you want to delete version <strong>{{ selectedVersion }}</strong> from <strong>{{ selectedRepo }}</strong>? This action cannot be undone.</p>
+      <p v-if="deleteVersionError" class="auth-error">{{ deleteVersionError }}</p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="closeDeleteVersionModal">Cancel</button>
+        <button
+          class="p-button--negative is-dense"
+          type="button"
+          :disabled="deletingVersion"
+          @click="confirmDeleteVersion"
+        >{{ deletingVersion ? 'Deleting…' : 'Delete' }}</button>
+      </div>
+    </AppModal>
   </div>
 </template>
 
 <script setup>
+import AppModal from '../components/ui/AppModal.vue';
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import {
   fetchRepositories, addRepository, verifyRepository, fetchRepositoryStats,
