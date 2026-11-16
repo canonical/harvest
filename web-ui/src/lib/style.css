@@ -10271,7 +10271,8 @@ button.activity-line__row:hover .activity-line__steps {
 .preview-panel__waiting .segment-mark { width: 2rem; height: 2rem; flex-shrink: 0; }
 .preview-panel__toolbar { display: flex; gap: .75rem; align-items: center; justify-content: flex-end; }
 .preview-panel__toolbar .p-button--base { margin: 0; }
-.preview-frame { flex: 1; min-height: 60vh; width: 100%; border: 1px solid var(--border-color); border-radius: 4px; background: #fff; }
+.preview-panel__web { padding: 1.5rem 0; }
+.preview-panel__web .p-button--positive { margin: 0; }
 .preview-runner { display: flex; flex-direction: column; gap: .5rem; }
 .preview-runner__request { display: flex; flex-direction: column; gap: .25rem; }
 .preview-runner__request label { margin: .25rem 0 0; }

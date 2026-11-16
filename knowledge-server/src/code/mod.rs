@@ -33,6 +33,7 @@ pub struct CodeSettings {
     pub session_idle: Duration,
     pub max_preview_copies: usize,
     pub reindex_every: Duration,
+    pub preview_origin: Option<previews::origin::PreviewOrigin>,
 }
 
 impl From<&CodeConfig> for CodeSettings {
@@ -44,6 +45,7 @@ impl From<&CodeConfig> for CodeSettings {
             session_idle: Duration::from_secs(config.idle_hours * HOUR),
             max_preview_copies: config.max_preview_copies,
             reindex_every: Duration::from_secs(config.reindex_hours * HOUR),
+            preview_origin: previews::origin::PreviewOrigin::from_config(config),
         }
     }
 }

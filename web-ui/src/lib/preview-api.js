@@ -23,6 +23,7 @@ export const AUDIENCES = Object.freeze([
 ]);
 
 export const getPreview = (id) => previewFetch(`/previews/${id}`);
+export const enterPreview = (id) => previewFetch(`/previews/${id}/enter`, post());
 export const resetPreview = (id) => previewFetch(`/previews/${id}/reset`, post());
 export const sendPreviewRequest = (id, request) => previewFetch(`/previews/${id}/request`, post(request));
 export const execPreview = (id, command) => previewFetch(`/previews/${id}/exec`, post({ command }));

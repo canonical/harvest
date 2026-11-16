@@ -28,3 +28,4 @@ pub mod server;
 pub mod skills;
 pub mod toolsets;
 pub mod turns;
+pub mod websocket_bridge;

@@ -10,10 +10,15 @@
       <p v-else-if="info.status === 'ended'" class="u-text--muted">This preview ended with its session.</p>
       <template v-else>
         <div class="preview-panel__toolbar">
-          <a v-if="info.kind === 'web'" :href="info.base_path" target="_blank" rel="noopener">Open in a new tab</a>
           <button v-if="!info.is_owner" class="p-button--base is-dense" type="button" :disabled="resetting" @click="freshCopy">Fresh copy</button>
         </div>
-        <iframe v-if="info.kind === 'web'" :key="frameKey" class="preview-frame" :src="info.base_path" title="Preview" />
+        <div v-if="info.kind === 'web'" class="preview-panel__web">
+          <template v-if="info.web_enabled">
+            <p>The app runs at its own address, exactly as it does locally.</p>
+            <button class="p-button--positive" type="button" :disabled="opening" @click="openApp">{{ opening ? 'Opening…' : 'Open the app' }}</button>
+          </template>
+          <p v-else class="u-text--muted">Web previews are turned off on this server. An administrator enables them by setting <code>preview_domain</code> under <code>[code]</code>.</p>
+        </div>
         <ApiRunner v-else-if="info.kind === 'api'" :preview-id="previewId" />
         <CliRunner v-else :preview-id="previewId" />
       </template>
@@ -26,7 +31,7 @@ import { ref, watch, onUnmounted } from 'vue';
 import SegmentMark from '../chat/SegmentMark.vue';
 import ApiRunner from './ApiRunner.vue';
 import CliRunner from './CliRunner.vue';
-import { getPreview, resetPreview } from '../../lib/preview-api.js';
+import { enterPreview, getPreview, resetPreview } from '../../lib/preview-api.js';
 
 const props = defineProps({ previewId: { type: String, required: true } });
 const emit = defineEmits(['loaded']);
@@ -35,7 +40,7 @@ const POLL_MS = 2500;
 const info = ref(null);
 const error = ref('');
 const resetting = ref(false);
-const frameKey = ref(0);
+const opening = ref(false);
 let timer = null;
 
 async function load() {
@@ -50,11 +55,29 @@ async function load() {
   }
 }
 
+async function openApp() {
+  opening.value = true;
+  const tab = window.open('', '_blank');
+  try {
+    const { url } = await enterPreview(props.previewId);
+    if (tab) {
+      tab.opener = null;
+      tab.location.href = url;
+    } else {
+      window.location.href = url;
+    }
+  } catch (e) {
+    tab?.close();
+    error.value = e.message;
+  } finally {
+    opening.value = false;
+  }
+}
+
 async function freshCopy() {
   resetting.value = true;
   try {
     await resetPreview(props.previewId);
-    frameKey.value += 1;
     await load();
   } catch (e) {
     error.value = e.message;

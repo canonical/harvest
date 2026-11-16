@@ -14,6 +14,8 @@ pub const REPO_SETUP_FILE: &str = ".harvest/setup.sh";
 const SETUP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const LOG_TAIL_CHARS: usize = 8_000;
 const STALE_BUILD_SECS: u64 = SETUP_TIMEOUT.as_secs() + 15 * 60;
+const PACKAGE_INDEX_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const RECIPE_VERSION: u32 = 2;
 
 pub fn alias_for(project_id: &str) -> String {
     format!("harvest-code-{}", short_id(project_id))
@@ -25,6 +27,7 @@ fn builder_for(project_id: &str) -> String {
 
 pub fn setup_hash(script: Option<&str>) -> String {
     let mut hasher = DefaultHasher::new();
+    RECIPE_VERSION.hash(&mut hasher);
     script.unwrap_or_default().trim().hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
@@ -143,6 +146,12 @@ async fn build_in(env: &CodeEnv, project: &CodeProject, builder: &str) -> Result
 
     env.lxd.launch(builder, Source::Base, &[("project", &project.id)]).await?;
     env.lxd.wait_for_ipv4(builder, Duration::from_secs(90)).await?;
+    expect_success(
+        env.lxd
+            .run(builder, Command::shell("apt-get update -q").timeout(PACKAGE_INDEX_TIMEOUT))
+            .await?,
+        "refreshing the package index",
+    )?;
     env.lxd.push_file(builder, "/tmp/repo.tgz", archive, 0o600).await?;
     let unpack = format!(
         "mkdir -p {WORKSPACE} && tar --no-same-owner -xzf /tmp/repo.tgz -C {WORKSPACE} && rm /tmp/repo.tgz && \

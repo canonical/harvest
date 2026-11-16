@@ -165,7 +165,7 @@ impl Operation {
             ),
             Self::Preview => (
                 "configure_preview",
-                "Let the user try the work: kind 'web' for a web app shown in the browser, 'api' for an HTTP API they can send requests to, 'cli' for a command-line tool they can run commands with. For web and api, give the port the app listens on and the command that starts it; Harvest starts it in the background when nothing listens yet, with the PORT and HARVEST_BASE_PATH environment variables set. Web apps are served under HARVEST_BASE_PATH, so configure the app's base path with it when the app builds absolute URLs. People the user shares the preview with each get their own copy of this container.",
+                "Let the user try the work: kind 'web' for a web app opened in the browser, 'api' for an HTTP API they can send requests to, 'cli' for a command-line tool they can run commands with. For web and api, give the port the app listens on and the command that starts it. Install dependencies and build with run_command first: start_command must only start the app, because Harvest waits 90 seconds for the port. Harvest runs it in the background from the repository root when nothing listens yet, with PORT set to the port and HOST set to 0.0.0.0; the app must listen on 0.0.0.0. Web apps get their own address and are served from /, as when run locally. People the user shares the preview with each get their own copy of this container.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -235,6 +235,7 @@ impl WorkspaceTool {
             start_command: params["start_command"].as_str(),
         };
         let preview = previews::configure(&self.env.db, &self.session_id, settings).await?;
+        previews::runtime::stop(&self.env, container).await?;
         if kind.needs_port() {
             previews::runtime::address(&self.env, container, &preview).await?;
         }

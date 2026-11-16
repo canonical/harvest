@@ -1,6 +1,12 @@
 pub mod clones;
+pub mod diagnosis;
 pub mod handlers;
+pub mod origin;
+pub mod pass;
+pub mod proxy;
 pub mod runtime;
+pub mod site;
+pub mod visit;
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -95,10 +101,6 @@ pub fn may_view(preview: &Preview, viewer: &Viewer) -> bool {
         Audience::Repository => matches!(viewer, Viewer::User { repo_allowed: true, .. }),
         Audience::Link => true,
     }
-}
-
-pub fn base_path(preview_id: &str) -> String {
-    format!("/previews/{preview_id}/web/")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
