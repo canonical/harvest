@@ -11,7 +11,7 @@ use serde_json::json;
 
 use super::projects::{self, CodeProject};
 use super::sessions::{self, CloseReason, Session};
-use super::{change_requests, images, index, CodeEnv};
+use super::{change_requests, chats, images, index, previews, CodeEnv};
 use crate::access::repos::{check_remote, RepoAccess, RepoScope};
 use crate::api::query::{stream_turn, QueryRequest};
 use crate::api::repositories::{start_ingestion, IngestionSource};
@@ -26,18 +26,18 @@ pub struct CodeState {
     pub query: Arc<QueryState>,
 }
 
-type Reply = Result<Response, Response>;
+pub(crate) type Reply = Result<Response, Response>;
 
-fn failure(status: StatusCode, message: impl Into<String>) -> Response {
+pub(crate) fn failure(status: StatusCode, message: impl Into<String>) -> Response {
     (status, Json(json!({ "error": message.into() }))).into_response()
 }
 
-fn internal(e: anyhow::Error) -> Response {
+pub(crate) fn internal(e: anyhow::Error) -> Response {
     tracing::error!(error = %e, "code request failed");
     failure(StatusCode::INTERNAL_SERVER_ERROR, "server error")
 }
 
-fn env(state: &CodeState) -> Result<&CodeEnv, Response> {
+pub(crate) fn env(state: &CodeState) -> Result<&CodeEnv, Response> {
     state.env.as_ref().ok_or_else(|| {
         failure(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -244,7 +244,19 @@ pub async fn get_session(
     let session = session_for(env, &user, &id).await?;
     let project = projects::get(&env.db, &session.project_id).await.map_err(internal)?;
     let change_request = change_requests::for_session(env, &id).await.map_err(internal)?;
-    Ok(Json(json!({ "session": session, "project": project, "change_request": change_request })).into_response())
+    let chats = chats::list(&env.db, &id).await.map_err(internal)?;
+    let previews = previews::list(&env.db, &id, env.settings.preview_lifetime)
+        .await
+        .map_err(internal)?;
+    Ok(Json(json!({
+        "session": session,
+        "project": project,
+        "change_request": change_request,
+        "chats": chats,
+        "previews": previews,
+        "web_previews": env.settings.preview_origin.is_some(),
+    }))
+    .into_response())
 }
 
 pub async fn close_session(
@@ -307,14 +319,20 @@ pub async fn session_query_stream(
     State(state): State<Arc<CodeState>>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    Json(mut request): Json<QueryRequest>,
+    Json(request): Json<QueryRequest>,
 ) -> Reply {
     let env = env(&state)?;
     let session = session_for(env, &user, &id).await?;
     if session.status != "active" {
         return Err(failure(StatusCode::CONFLICT, format!("the session is {}", session.status)));
     }
-    request.conversation_id = session.conversation_id.clone();
+    let chat_id = request
+        .conversation_id
+        .clone()
+        .ok_or_else(|| failure(StatusCode::BAD_REQUEST, "choose the chat to send this message to"))?;
+    if !chats::belongs(&env.db, &id, &chat_id).await.map_err(internal)? {
+        return Err(failure(StatusCode::NOT_FOUND, "this chat does not belong to the session"));
+    }
     sessions::touch(env, &id).await.map_err(internal)?;
     let space = Space::code_session(&session.id, &user.sub);
     Ok(stream_turn(user, Arc::clone(&state.query), headers, request, space).await)

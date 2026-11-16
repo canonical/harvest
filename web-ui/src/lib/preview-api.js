@@ -23,13 +23,12 @@ export const AUDIENCES = Object.freeze([
 ]);
 
 export const getPreview = (id) => previewFetch(`/previews/${id}`);
-export const enterPreview = (id) => previewFetch(`/previews/${id}/enter`, post());
+export const enterPreview = (id, to) => previewFetch(`/previews/${id}/enter`, post(to ? { to } : {}));
 export const resetPreview = (id) => previewFetch(`/previews/${id}/reset`, post());
 export const sendPreviewRequest = (id, request) => previewFetch(`/previews/${id}/request`, post(request));
 export const execPreview = (id, command) => previewFetch(`/previews/${id}/exec`, post({ command }));
-export const getSessionPreview = (sessionId) => previewFetch(`/code/sessions/${sessionId}/preview`);
-export const sharePreview = (sessionId, audience) =>
-  previewFetch(`/code/sessions/${sessionId}/preview/share`, { method: 'PUT', body: JSON.stringify({ audience }) });
+export const sharePreview = (previewId, audience) =>
+  previewFetch(`/code/previews/${previewId}/share`, { method: 'PUT', body: JSON.stringify({ audience }) });
 
 export function shareUrl(id, origin = window.location.origin) {
   return `${origin}/#/preview/${id}`;

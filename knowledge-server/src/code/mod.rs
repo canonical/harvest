@@ -1,5 +1,7 @@
 pub mod briefing;
 pub mod change_requests;
+pub mod chat_handlers;
+pub mod chats;
 pub mod freshness;
 pub mod handlers;
 pub mod images;
@@ -34,6 +36,7 @@ pub struct CodeSettings {
     pub max_preview_copies: usize,
     pub reindex_every: Duration,
     pub preview_origin: Option<previews::origin::PreviewOrigin>,
+    pub preview_lifetime: Duration,
 }
 
 impl From<&CodeConfig> for CodeSettings {
@@ -46,6 +49,7 @@ impl From<&CodeConfig> for CodeSettings {
             max_preview_copies: config.max_preview_copies,
             reindex_every: Duration::from_secs(config.reindex_hours * HOUR),
             preview_origin: previews::origin::PreviewOrigin::from_config(config),
+            preview_lifetime: Duration::from_secs(config.preview_ttl_hours * HOUR),
         }
     }
 }

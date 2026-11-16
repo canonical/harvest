@@ -165,13 +165,15 @@ impl Operation {
             ),
             Self::Preview => (
                 "configure_preview",
-                "Let the user try the work: kind 'web' for a web app opened in the browser, 'api' for an HTTP API they can send requests to, 'cli' for a command-line tool they can run commands with. For web and api, give the port the app listens on and the command that starts it. Install dependencies and build with run_command first: start_command must only start the app, because Harvest waits 90 seconds for the port. Harvest runs it in the background from the repository root when nothing listens yet, with PORT set to the port and HOST set to 0.0.0.0; the app must listen on 0.0.0.0. Web apps get their own address and are served from /, as when run locally. People the user shares the preview with each get their own copy of this container.",
+                "Let the user try the work: kind 'web' for a web app opened in the browser, 'api' for an HTTP API they can send requests to, 'cli' for a command-line tool they can run commands with. For web and api, give the port the app listens on and the command that starts it. Install dependencies and build with run_command first: start_command must only start the app, because Harvest waits 90 seconds for the port. Harvest runs it in the background from the repository root when nothing listens yet, with PORT set to the port and HOST set to 0.0.0.0; the app must listen on 0.0.0.0. Web apps get their own address and are served from /, as when run locally. People the user shares the preview with each get their own copy of this container. A session can have several previews: by default this updates the latest preview this chat created; pass new to add another one, or preview_id to update a specific one. Each preview needs its own port.",
                 json!({
                     "type": "object",
                     "properties": {
                         "kind": { "type": "string", "enum": ["web", "api", "cli"] },
                         "port": { "type": "integer" },
-                        "start_command": { "type": "string" }
+                        "start_command": { "type": "string" },
+                        "new": { "type": "boolean", "description": "Create another preview instead of updating this chat's latest one" },
+                        "preview_id": { "type": "string", "description": "Update this preview of the session" }
                     },
                     "required": ["kind"]
                 }),
@@ -197,6 +199,7 @@ impl Operation {
 struct WorkspaceTool {
     env: CodeEnv,
     session_id: String,
+    chat_id: String,
     operation: Operation,
 }
 
@@ -234,14 +237,16 @@ impl WorkspaceTool {
             port: params["port"].as_u64().and_then(|p| u16::try_from(p).ok()),
             start_command: params["start_command"].as_str(),
         };
-        let preview = previews::configure(&self.env.db, &self.session_id, settings).await?;
-        previews::runtime::stop(&self.env, container).await?;
-        if kind.needs_port() {
-            previews::runtime::address(&self.env, container, &preview).await?;
-        }
+        let slot = match (params["preview_id"].as_str(), params["new"].as_bool()) {
+            (Some(id), _) => previews::Slot::Existing(id),
+            (None, Some(true)) => previews::Slot::New,
+            _ => previews::Slot::LatestOfChat(&self.chat_id),
+        };
+        let preview = previews::configure(&self.env.db, &self.session_id, Some(&self.chat_id), slot, settings).await?;
+        previews::apply(&self.env, container, &preview).await?;
         Ok(format!(
-            "The preview is ready. The user opens it from the Preview tab of this session and can share it from there (/#/preview/{}).",
-            preview.id
+            "Preview {id} is ready. The user opens it in a Preview tab of this session and can share it from there (/#/preview/{id}).",
+            id = preview.id
         ))
     }
 
@@ -373,6 +378,7 @@ impl Toolset for WorkspaceToolset {
                 Box::new(WorkspaceTool {
                     env: self.env.clone(),
                     session_id: session_id.to_string(),
+                    chat_id: turn.conversation_id.clone(),
                     operation: *operation,
                 }) as Box<dyn Tool>
             })

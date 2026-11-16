@@ -36,6 +36,7 @@ impl Visit {
         if !may_view(&preview, &viewer) {
             return Ok(None);
         }
+        super::touch(&env.db, &preview.id).await?;
         Ok(Some(Self { env: env.clone(), preview, viewer }))
     }
 

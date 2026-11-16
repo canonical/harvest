@@ -119,6 +119,20 @@ pub async fn reset(env: &CodeEnv, preview: &Preview, viewer: &Viewer) -> Result<
     Ok(())
 }
 
+pub async fn release_preview(env: &CodeEnv, preview_id: &str) -> Result<()> {
+    let rows = env
+        .db
+        .query(
+            "SELECT container FROM code_preview_viewers WHERE preview_id = $pid",
+            json!({ "pid": preview_id }),
+        )
+        .await?;
+    for row in &rows {
+        remove(env, row["container"].as_str().unwrap_or_default()).await?;
+    }
+    Ok(())
+}
+
 pub async fn release_session(env: &CodeEnv, session_id: &str) -> Result<()> {
     let rows = env
         .db

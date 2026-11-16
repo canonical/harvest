@@ -26,6 +26,13 @@ export const openCodeSession = (projectId, branch, baseBranch) =>
 export const getCodeSession = (id) => codeFetch(`/code/sessions/${id}`);
 export const closeCodeSession = (id) => codeFetch(`/code/sessions/${id}`, { method: 'DELETE' });
 export const getSessionChanges = (id) => codeFetch(`/code/sessions/${id}/changes`);
+export const createSessionChat = (id) => codeFetch(`/code/sessions/${id}/chats`, { method: 'POST' });
+export const deleteSessionChat = (id, chatId) => codeFetch(`/code/sessions/${id}/chats/${chatId}`, { method: 'DELETE' });
+export const getSessionLayout = (id) => codeFetch(`/code/sessions/${id}/layout`);
+export const saveSessionLayout = (id, layout) => codeFetch(`/code/sessions/${id}/layout`, send('PUT', { layout }));
+export const listSessionPreviews = (id) => codeFetch(`/code/sessions/${id}/previews`);
+export const createSessionPreview = (id, preview) => codeFetch(`/code/sessions/${id}/previews`, send('POST', preview));
+export const deleteSessionPreview = (previewId) => codeFetch(`/code/previews/${previewId}`, { method: 'DELETE' });
 export const proposeChange = (id, title, description) =>
   codeFetch(`/code/sessions/${id}/change-request`, send('POST', { title, description }));
 

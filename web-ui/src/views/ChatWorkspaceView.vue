@@ -101,14 +101,28 @@
 
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue';
-import PaneSplit from '../components/chat/PaneSplit.vue';
+import PaneSplit from '../components/layout/PaneSplit.vue';
+import ChatTab from '../components/chat/ChatTab.vue';
 import LayoutShapeIcon from '../components/chat/LayoutShapeIcon.vue';
 import SourcePanel from '../components/SourcePanel.vue';
 import { useChatWorkspaceStore } from '../stores/chatWorkspace.js';
+import { useProjectStore } from '../stores/project.js';
+import { createTab } from '../lib/pane-layout.js';
+import { operationsOf, provideLayoutWorkspace } from '../lib/layout-workspace.js';
 
 defineProps({ projectId: { type: String, default: null } });
 
 const workspace = useChatWorkspaceStore();
+const project = useProjectStore();
+
+provideLayoutWorkspace({
+  id: 'chat',
+  tabKinds: [{ kind: 'chat', label: 'Chat', icon: 'chat' }],
+  content: ChatTab,
+  titleOf: (tab) => tab.title || 'New chat',
+  createTab: (_kind, { activeTab }) => createTab({ projectId: activeTab?.projectId ?? project.selectedProjectId }),
+  ...operationsOf(workspace),
+});
 
 const layoutsOpen   = ref(false);
 const newLayoutName = ref('');

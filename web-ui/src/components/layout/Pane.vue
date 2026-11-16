@@ -17,9 +17,9 @@
               role="tab"
               type="button"
               :aria-selected="tab.tabId === node.activeTabId"
-              :title="tab.title || 'New chat'"
+              :title="titleOf(tab)"
               @click="activate(tab.tabId)"
-            ><span class="pane__tab-title">{{ tab.title || 'New chat' }}</span></button>
+            ><span class="pane__tab-title">{{ titleOf(tab) }}</span></button>
             <button
               class="pane__tab-close"
               type="button"
@@ -36,9 +36,10 @@
       <button
         class="pane__toolbar-btn p-button--base has-icon is-dense u-no-margin"
         type="button"
-        aria-label="New chat tab"
-        title="New chat tab"
-        @click="newTab"
+        aria-label="New tab"
+        title="New tab"
+        :aria-expanded="choosingFor === 'tab'"
+        @click="request('tab')"
       >
         <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       </button>
@@ -51,7 +52,8 @@
           type="button"
           :aria-label="`Split ${edge}`"
           :title="`Split ${edge}`"
-          @click="splitCurrent(edge)"
+          :aria-expanded="choosingFor === edge"
+          @click="request(edge)"
         >
           <svg
             xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
@@ -70,17 +72,23 @@
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
+
+      <TabKindMenu
+        v-if="choosingFor"
+        :kinds="workspace.tabKinds"
+        :label="choosingFor === 'tab' ? 'Open a new tab' : `Split ${choosingFor}`"
+        @choose="create"
+        @close="choosingFor = null"
+      />
     </div>
 
     <div class="pane__body">
-      <ChatPaneContent
+      <component
+        :is="workspace.content"
         v-if="activeTab"
         :key="activeTab.tabId"
-        :tab-id="activeTab.tabId"
-        :conversation-id="activeTab.conversationId"
-        :project-id="activeTab.projectId"
-        @update:conversation-id="onConversationIdUpdate"
-        @title-updated="onTitleUpdated"
+        :tab="activeTab"
+        :pane-id="node.id"
       />
       <div v-else class="pane__empty">No tabs open</div>
 
@@ -124,26 +132,28 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue';
-import ChatPaneContent from './ChatPaneContent.vue';
-import { useChatWorkspaceStore } from '../../stores/chatWorkspace.js';
-import { useProjectStore } from '../../stores/project.js';
+import TabKindMenu from './TabKindMenu.vue';
+import { useLayoutWorkspace } from '../../lib/layout-workspace.js';
 import { dragState, startTabDrag, endTabDrag } from '../../lib/pane-drag-state.js';
-import { createTab } from '../../lib/pane-layout.js';
 
 const props = defineProps({
   node: { type: Object, required: true },
 });
 
-const workspace = useChatWorkspaceStore();
-const project   = useProjectStore();
+const workspace = useLayoutWorkspace();
 
 const EDGES = ['right', 'bottom'];
 
 const activeTab = computed(() => props.node.tabs.find(t => t.tabId === props.node.activeTabId) ?? null);
-const isDragActive = computed(() => dragState.value.draggingTabId !== null);
+const isDragActive = computed(() => dragState.value.draggingTabId !== null && dragState.value.workspaceId === workspace.id);
 const hoveredEdge = ref(null);
+const choosingFor = ref(null);
 
 watch(isDragActive, (active) => { if (!active) hoveredEdge.value = null; });
+
+function titleOf(tab) {
+  return workspace.titleOf(tab);
+}
 
 function onEdgeDragLeave(edge) {
   if (hoveredEdge.value === edge) hoveredEdge.value = null;
@@ -161,22 +171,26 @@ function closePane() {
   workspace.closePane(props.node.id);
 }
 
-function paneProjectId() {
-  return activeTab.value?.projectId ?? project.selectedProjectId;
+function request(placement) {
+  if (workspace.tabKinds.length === 1) {
+    create(workspace.tabKinds[0].kind, placement);
+    return;
+  }
+  choosingFor.value = choosingFor.value === placement ? null : placement;
 }
 
-function newTab() {
-  workspace.openTabInPane(props.node.id, { projectId: paneProjectId() });
-}
-
-function splitCurrent(edge) {
-  workspace.splitPaneWithTab(props.node.id, edge, createTab({ projectId: paneProjectId() }));
+async function create(kind, placement = choosingFor.value) {
+  choosingFor.value = null;
+  const tab = await workspace.createTab(kind, { paneId: props.node.id, activeTab: activeTab.value });
+  if (!tab) return;
+  if (placement === 'tab') workspace.openTab(props.node.id, tab);
+  else workspace.splitPaneWithTab(props.node.id, placement, tab);
 }
 
 function onTabDragStart(e, tabId) {
   e.dataTransfer.setData('text/plain', tabId);
   e.dataTransfer.effectAllowed = 'move';
-  startTabDrag(tabId, props.node.id);
+  startTabDrag(tabId, props.node.id, workspace.id);
 }
 
 function onTabDragEnd() {
@@ -185,22 +199,14 @@ function onTabDragEnd() {
 
 function onTabstripDrop() {
   const { draggingTabId, sourcePaneId } = dragState.value;
-  if (draggingTabId) workspace.moveTab(sourcePaneId, draggingTabId, props.node.id, -1);
+  if (draggingTabId && isDragActive.value) workspace.moveTab(sourcePaneId, draggingTabId, props.node.id, -1);
   endTabDrag();
 }
 
 function onEdgeDrop(edge) {
   const { draggingTabId, sourcePaneId } = dragState.value;
-  if (draggingTabId) workspace.moveTabToNewSplit(sourcePaneId, draggingTabId, props.node.id, edge);
+  if (draggingTabId && isDragActive.value) workspace.moveTabToNewSplit(sourcePaneId, draggingTabId, props.node.id, edge);
   hoveredEdge.value = null;
   endTabDrag();
-}
-
-function onConversationIdUpdate(conversationId) {
-  if (activeTab.value) workspace.updateTab(activeTab.value.tabId, { conversationId });
-}
-
-function onTitleUpdated(title) {
-  if (activeTab.value) workspace.updateTab(activeTab.value.tabId, { title });
 }
 </script>

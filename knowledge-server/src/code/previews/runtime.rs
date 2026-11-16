@@ -10,39 +10,55 @@ use crate::lxd::containers::Command;
 
 const START_WAIT: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_secs(2);
-const LOG_FILE: &str = "/tmp/harvest-preview.log";
-const PID_FILE: &str = "/tmp/harvest-preview.pid";
 const LOG_CHARS: usize = 4_000;
 const LOOPBACK: &str = "127.0.0.1";
+
+pub struct Files {
+    log: String,
+    pid: String,
+}
+
+impl Files {
+    pub fn of(preview_id: &str) -> Self {
+        Self {
+            log: quote(&format!("/tmp/harvest-preview-{preview_id}.log")),
+            pid: quote(&format!("/tmp/harvest-preview-{preview_id}.pid")),
+        }
+    }
+}
 
 pub fn port_probe(host: &str, port: u16) -> String {
     format!("timeout 1 bash -c 'exec 3<>/dev/tcp/{host}/{port}'")
 }
 
-pub fn start_script(port: u16, command: &str) -> String {
+pub fn start_script(files: &Files, port: u16, command: &str) -> String {
     format!(
-        "HOST=0.0.0.0 PORT={port} setsid nohup bash -lc {command} > {LOG_FILE} 2>&1 < /dev/null & echo $! > {PID_FILE}",
+        "HOST=0.0.0.0 PORT={port} setsid nohup bash -lc {command} > {log} 2>&1 < /dev/null & echo $! > {pid}",
         command = quote(command),
+        log = files.log,
+        pid = files.pid,
     )
 }
 
-pub fn stop_script() -> String {
+pub fn stop_script(files: &Files) -> String {
     format!(
-        "pid=$(cat {PID_FILE} 2>/dev/null) || exit 0; kill -TERM -- -\"$pid\" 2>/dev/null; \
+        "pid=$(cat {pid} 2>/dev/null) || exit 0; kill -TERM -- -\"$pid\" 2>/dev/null; \
          for i in 1 2 3 4 5; do kill -0 -- -\"$pid\" 2>/dev/null || break; sleep 1; done; \
-         kill -KILL -- -\"$pid\" 2>/dev/null; rm -f {PID_FILE}; exit 0"
+         kill -KILL -- -\"$pid\" 2>/dev/null; rm -f {pid}; exit 0",
+        pid = files.pid,
     )
 }
 
-pub async fn stop(env: &CodeEnv, container: &str) -> Result<()> {
+pub fn running_probe(files: &Files) -> String {
+    format!("kill -0 \"$(cat {} 2>/dev/null)\" 2>/dev/null", files.pid)
+}
+
+pub async fn stop(env: &CodeEnv, container: &str, preview_id: &str) -> Result<()> {
+    let script = stop_script(&Files::of(preview_id));
     env.lxd
-        .run(container, Command::shell(&stop_script()).timeout(Duration::from_secs(15)))
+        .run(container, Command::shell(&script).timeout(Duration::from_secs(15)))
         .await?;
     Ok(())
-}
-
-pub fn running_probe() -> String {
-    format!("kill -0 \"$(cat {PID_FILE} 2>/dev/null)\" 2>/dev/null")
 }
 
 async fn succeeds(env: &CodeEnv, container: &str, script: &str) -> Result<bool> {
@@ -63,22 +79,23 @@ pub async fn address(env: &CodeEnv, container: &str, preview: &Preview) -> Resul
     };
     let ip = env.lxd.wait_for_ipv4(container, Duration::from_secs(30)).await?;
     if !listening(env, container, &ip, port).await? {
-        start(env, container, &ip, port, preview.start_command.as_deref()).await?;
+        start(env, container, &ip, port, preview).await?;
     }
     Ok(format!("{ip}:{port}"))
 }
 
-async fn start(env: &CodeEnv, container: &str, ip: &str, port: u16, command: Option<&str>) -> Result<()> {
+async fn start(env: &CodeEnv, container: &str, ip: &str, port: u16, preview: &Preview) -> Result<()> {
+    let files = Files::of(&preview.id);
     if listening(env, container, LOOPBACK, port).await? {
-        bail!(failure(env, container, port).await);
+        bail!(failure(env, container, &files, port).await);
     }
-    let Some(command) = command else {
+    let Some(command) = &preview.start_command else {
         bail!("nothing listens on port {port} and the preview has no start command");
     };
     env.lxd
         .run(
             container,
-            Command::shell(&start_script(port, command)).in_dir(WORKSPACE).timeout(Duration::from_secs(15)),
+            Command::shell(&start_script(&files, port, command)).in_dir(WORKSPACE).timeout(Duration::from_secs(15)),
         )
         .await?;
     let deadline = tokio::time::Instant::now() + START_WAIT;
@@ -87,21 +104,21 @@ async fn start(env: &CodeEnv, container: &str, ip: &str, port: u16, command: Opt
         if listening(env, container, ip, port).await? {
             return Ok(());
         }
-        if !succeeds(env, container, &running_probe()).await? {
+        if !succeeds(env, container, &running_probe(&files)).await? {
             break;
         }
     }
-    bail!(failure(env, container, port).await)
+    bail!(failure(env, container, &files, port).await)
 }
 
-async fn failure(env: &CodeEnv, container: &str, port: u16) -> String {
+async fn failure(env: &CodeEnv, container: &str, files: &Files, port: u16) -> String {
     let log = env
         .lxd
-        .run(container, Command::shell(&format!("tail -c {LOG_CHARS} {LOG_FILE} 2>/dev/null")))
+        .run(container, Command::shell(&format!("tail -c {LOG_CHARS} {} 2>/dev/null", files.log)))
         .await
         .map(|o| tail(&o.stdout, LOG_CHARS))
         .unwrap_or_default();
-    let running = succeeds(env, container, &running_probe()).await.unwrap_or(false);
+    let running = succeeds(env, container, &running_probe(files)).await.unwrap_or(false);
     let local_only = listening(env, container, LOOPBACK, port).await.unwrap_or(false);
     let facts = Facts { log: &log, running, local_only };
     diagnosis::diagnose(&facts).report(port, START_WAIT.as_secs(), &log)
@@ -112,20 +129,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_start_script_runs_detached_with_host_and_port_and_records_its_pid() {
-        let script = start_script(5173, "npm run dev");
+    fn each_preview_keeps_its_own_log_and_pid_files() {
+        let files = Files::of("abc");
+        let script = start_script(&files, 5173, "npm run dev");
         assert!(script.starts_with("HOST=0.0.0.0 PORT=5173 setsid nohup bash -lc 'npm run dev'"));
-        assert!(script.ends_with(&format!("& echo $! > {PID_FILE}")));
-        assert!(!script.contains("HARVEST_BASE_PATH"));
+        assert!(script.contains("> '/tmp/harvest-preview-abc.log' 2>&1"));
+        assert!(script.ends_with("& echo $! > '/tmp/harvest-preview-abc.pid'"));
+        assert!(running_probe(&Files::of("xyz")).contains("/tmp/harvest-preview-xyz.pid"));
+    }
+
+    #[test]
+    fn stopping_ends_the_whole_process_group_of_one_preview() {
+        let stop = stop_script(&Files::of("abc"));
+        assert!(stop.starts_with("pid=$(cat '/tmp/harvest-preview-abc.pid' 2>/dev/null) || exit 0;"));
+        assert!(stop.contains("kill -TERM -- -\"$pid\""));
+        assert!(stop.ends_with("exit 0"));
     }
 
     #[test]
     fn probes_target_the_given_address() {
         assert_eq!(port_probe("10.0.0.5", 80), "timeout 1 bash -c 'exec 3<>/dev/tcp/10.0.0.5/80'");
-        assert!(running_probe().starts_with("kill -0"));
-        let stop = stop_script();
-        assert!(stop.starts_with(&format!("pid=$(cat {PID_FILE} 2>/dev/null) || exit 0;")));
-        assert!(stop.contains("kill -TERM -- -\"$pid\""));
-        assert!(stop.ends_with("exit 0"));
     }
 }
