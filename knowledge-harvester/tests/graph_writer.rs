@@ -347,6 +347,57 @@ async fn reingesting_keeps_the_old_data_visible_until_the_new_data_is_written() 
 
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn reingesting_records_the_commit_and_keeps_summaries_of_unchanged_symbols() {
+    setup!(writer, test_db);
+    let db = &test_db.db;
+    let file = make_file("r", "main", "src/lib.rs");
+    writer
+        .write_version_with_history("r", "main", Some("aaa"), &[file.clone()], &Default::default())
+        .await
+        .unwrap();
+    db.execute(
+        "INSERT INTO symbol_enrichments (symbol_id, source_hash, model, summary)
+         SELECT s.id, md5(s.source), 'm', 'about ' || s.name
+         FROM symbols s JOIN versions v ON v.id = s.version_id WHERE v.tag = 'main'",
+        json!({}),
+    )
+    .await
+    .unwrap();
+
+    let mut changed = file;
+    changed.functions[1].source = "fn beta() { gamma(); }".to_string();
+    writer
+        .write_version_with_history("r", "main", Some("bbb"), &[changed], &Default::default())
+        .await
+        .unwrap();
+
+    let summaries = db
+        .query(
+            "SELECT s.name, e.summary FROM symbols s
+             JOIN versions v ON v.id = s.version_id
+             LEFT JOIN symbol_enrichments e ON e.symbol_id = s.id
+             WHERE v.tag = 'main' ORDER BY s.name",
+            json!({}),
+        )
+        .await
+        .unwrap();
+    let by_name: std::collections::HashMap<_, _> = summaries
+        .iter()
+        .map(|r| (r["name"].as_str().unwrap().to_string(), r["summary"].clone()))
+        .collect();
+    assert_eq!(by_name["alpha"], json!("about alpha"));
+    assert_eq!(by_name["MyStruct"], json!("about MyStruct"));
+    assert_eq!(by_name["beta"], json!(null));
+
+    let versions = db
+        .query("SELECT commit_sha FROM versions WHERE tag = 'main'", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(versions[0]["commit_sha"], json!("bbb"));
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn python_sources_produce_units_and_typed_edges() {
     use knowledge_harvester::parser::LanguageParser;
     use std::path::Path;

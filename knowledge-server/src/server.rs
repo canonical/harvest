@@ -547,6 +547,7 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         lxd,
         credentials: credentials.clone(),
         settings: crate::code::CodeSettings::from(&config.code),
+        drift: Default::default(),
     });
 
     let toolbox = Arc::new(crate::toolsets::build_toolbox(
@@ -638,9 +639,6 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         code,
     };
 
-    if let Some(code) = &state.code {
-        crate::code::keeper::spawn(Arc::clone(&leases), code.clone());
-    }
     if let Some(credentials) = &state.credentials {
         crate::access::recheck::spawn(
             Arc::clone(&leases),
@@ -658,6 +656,16 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         }
     });
     spawn_graph_cache_invalidation(Arc::clone(&bus), Arc::clone(&cache));
+    if let Some(code) = &state.code {
+        let graph = Arc::new(crate::api::GraphState {
+            db: Arc::clone(&db),
+            credentials: state.credentials.clone(),
+            cache: Arc::clone(&cache),
+            ingestion: state.ingestion.clone(),
+            bus: Arc::clone(&bus),
+        });
+        crate::code::keeper::spawn(Arc::clone(&leases), code.clone(), graph);
+    }
     spawn_reaper(
         Arc::clone(&leases),
         Arc::clone(&db),

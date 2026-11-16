@@ -37,6 +37,14 @@ const REQUEST_NAMES = {
   launchpad: 'Merge proposal',
 };
 
+export function indexSummary(index) {
+  if (!index) return 'not indexed';
+  if (!index.ingested) return 'being built';
+  const at = index.commit ? ` at ${index.commit.slice(0, 12)}` : '';
+  const failure = index.error ? `; the last refresh failed: ${index.error}` : '';
+  return `${index.version}${at}${failure}`;
+}
+
 export function changeRequestName(platform) {
   return REQUEST_NAMES[platform] ?? 'Change request';
 }

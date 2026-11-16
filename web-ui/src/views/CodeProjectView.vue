@@ -6,6 +6,7 @@
         <router-link to="/code" class="code-back">Code</router-link>
         <h2>{{ project.name }}</h2>
         <p class="u-text--muted">{{ project.url }}</p>
+        <p class="u-text--muted">Code graph: {{ indexText }}</p>
       </div>
 
       <section class="settings-section">
@@ -62,7 +63,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import { getCodeProject, openCodeSession, saveSetupScript } from '../lib/code-api.js';
+import { getCodeProject, indexSummary, openCodeSession, saveSetupScript } from '../lib/code-api.js';
 
 const props = defineProps({ id: { type: String, required: true } });
 const router = useRouter();
@@ -71,6 +72,7 @@ const project = ref(null);
 const branches = ref([]);
 const sessions = ref([]);
 const image = ref(null);
+const index = ref(null);
 const branch = ref('');
 const baseBranch = ref('');
 const setupScript = ref('');
@@ -83,6 +85,7 @@ const baseChoices = computed(() => {
   if (project.value?.default_branch) names.add(project.value.default_branch);
   return [...names];
 });
+const indexText = computed(() => indexSummary(index.value));
 const setupChanged = computed(() => setupScript.value !== (project.value?.setup_script ?? ''));
 const imageStatus = computed(() => ({
   ready: 'ready',
@@ -98,6 +101,7 @@ async function load() {
     branches.value = data.branches ?? [];
     sessions.value = data.sessions ?? [];
     image.value = data.image;
+    index.value = data.index;
     setupScript.value = data.project.setup_script ?? '';
     baseBranch.value = data.project.default_branch ?? branches.value[0] ?? '';
   } catch (e) {

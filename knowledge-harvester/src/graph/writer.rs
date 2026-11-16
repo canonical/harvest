@@ -107,7 +107,7 @@ impl GraphWriter {
     }
 
     pub async fn write_version(&self, repo: &str, tag: &str, files: &[ParsedFile]) -> Result<()> {
-        self.write_version_with_history(repo, tag, files, &History::default())
+        self.write_version_with_history(repo, tag, None, files, &History::default())
             .await
     }
 
@@ -115,11 +115,13 @@ impl GraphWriter {
         &self,
         repo: &str,
         tag: &str,
+        commit_sha: Option<&str>,
         files: &[ParsedFile],
         history: &History,
     ) -> Result<()> {
         let tx = self.db.begin().await?;
         let version_id = ensure_version(&tx, repo, tag).await?;
+        let carried = super::carry::Carried::keep(&tx, version_id).await?;
         tx.execute(
             "DELETE FROM files WHERE version_id = $vid",
             json!({ "vid": version_id }),
@@ -129,9 +131,12 @@ impl GraphWriter {
             write_file(&tx, version_id, file, history).await?;
         }
         write_edges(&tx, version_id, files, history).await?;
+        carried.restore(&tx, version_id).await?;
         tx.execute(
-            "UPDATE versions SET ingested = true, parser_version = $pv WHERE id = $vid",
-            json!({ "vid": version_id, "pv": PARSER_VERSION }),
+            "UPDATE versions SET ingested = true, parser_version = $pv,
+                 commit_sha = COALESCE($sha, commit_sha)
+             WHERE id = $vid",
+            json!({ "vid": version_id, "pv": PARSER_VERSION, "sha": commit_sha }),
         )
         .await?;
         tx.commit().await

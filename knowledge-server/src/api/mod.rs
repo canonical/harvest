@@ -106,9 +106,23 @@ pub struct QueryState {
     pub pricing: Arc<crate::cost::PricingTable>,
     pub toolbox: Arc<Toolbox>,
     pub admission: Arc<crate::turns::admission::TurnAdmission>,
+    pub code: Option<crate::code::CodeEnv>,
 }
 
 impl QueryState {
+    async fn briefing_for(&self, space: &crate::modes::Space) -> Option<crate::code::briefing::Briefing> {
+        if space.mode() != crate::modes::Mode::Code {
+            return None;
+        }
+        Some(match (&self.code, space.code_session_id()) {
+            (Some(env), Some(session_id)) => crate::code::briefing::for_session(env, session_id).await,
+            _ => crate::code::briefing::Briefing {
+                appendix: prompt::CODE_SESSION_GUIDE.to_string(),
+                focus: None,
+            },
+        })
+    }
+
     pub async fn agent_in(
         &self,
         space: Space,
@@ -117,14 +131,12 @@ impl QueryState {
         llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
         let conversation_id = conversation_id.unwrap_or_default();
-        let appendix = match space.mode() {
-            crate::modes::Mode::Code => Some(prompt::CODE_SESSION_GUIDE),
-            _ => None,
-        };
+        let briefing = self.briefing_for(&space).await;
         let turn = match &self.db {
             Some(db) => TurnContext::load(db, user_id, space, conversation_id, llm).await,
             None => TurnContext::unrestricted(user_id, space, conversation_id, llm),
-        };
+        }
+        .focused_on(briefing.as_ref().and_then(|b| b.focus.clone()));
         let agent = Agent::new(
             Arc::clone(&turn.llm),
             self.toolbox.tools(&turn),
@@ -133,7 +145,7 @@ impl QueryState {
         .with_system_one(self.system_one.clone())
         .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
         .with_parallel_research(true)
-        .with_prompt_appendix(appendix);
+        .with_prompt_appendix(briefing.as_ref().map(|b| b.appendix.as_str()));
         Arc::new(match self.thresholds {
             Some(t) => t.apply(agent),
             None => agent,
@@ -428,6 +440,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         pricing: Arc::clone(&state.pricing),
         toolbox: Arc::clone(&state.agent_builder.toolbox),
         admission: Arc::clone(&state.admission),
+        code: state.code.clone(),
     });
     let agent_router = Router::new()
         .route("/query", post(query::handle_query))

@@ -11,7 +11,7 @@ use serde_json::json;
 
 use super::projects::{self, CodeProject};
 use super::sessions::{self, CloseReason, Session};
-use super::{change_requests, images, CodeEnv};
+use super::{change_requests, images, index, CodeEnv};
 use crate::access::repos::{check_remote, RepoAccess, RepoScope};
 use crate::api::query::{stream_turn, QueryRequest};
 use crate::api::repositories::{start_ingestion, IngestionSource};
@@ -117,6 +117,7 @@ pub async fn open_project(
             browse_url: None,
             refs: vec![default_branch.clone()],
             credentials,
+            force: false,
         };
         let _ = start_ingestion(&state.graph, source).await;
     }
@@ -171,6 +172,7 @@ pub async fn get_project(
     let listing = list_remote(&project.url, credentials).await;
     let image = images::current(env, &id).await.map_err(internal)?;
     let sessions = sessions::list_for(env, &id, &user.sub).await.map_err(internal)?;
+    let index = index::of_project(&env.db, &project).await.map_err(internal)?;
     let image_log = env
         .db
         .query("SELECT log FROM code_images WHERE project_id = $pid", json!({ "pid": id }))
@@ -183,6 +185,7 @@ pub async fn get_project(
         "branches": listing.branches,
         "image": image.map(|i| json!({ "status": i.status, "base_commit": i.base_commit, "log": image_log })),
         "sessions": sessions,
+        "index": index,
     }))
     .into_response())
 }

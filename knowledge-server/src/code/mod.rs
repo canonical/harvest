@@ -1,12 +1,17 @@
+pub mod briefing;
 pub mod change_requests;
+pub mod freshness;
 pub mod handlers;
 pub mod images;
+pub mod index;
 pub mod keeper;
+pub mod overlay;
 pub mod previews;
 pub mod projects;
 pub mod repo_git;
 pub mod sessions;
 pub mod workspace;
+pub mod workspace_search;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +32,7 @@ pub struct CodeSettings {
     pub warm_for: Duration,
     pub session_idle: Duration,
     pub max_preview_copies: usize,
+    pub reindex_every: Duration,
 }
 
 impl From<&CodeConfig> for CodeSettings {
@@ -37,6 +43,7 @@ impl From<&CodeConfig> for CodeSettings {
             warm_for: Duration::from_secs(config.warm_days * 24 * HOUR),
             session_idle: Duration::from_secs(config.idle_hours * HOUR),
             max_preview_copies: config.max_preview_copies,
+            reindex_every: Duration::from_secs(config.reindex_hours * HOUR),
         }
     }
 }
@@ -47,6 +54,7 @@ pub struct CodeEnv {
     pub lxd: Arc<LxdClient>,
     pub credentials: Option<Arc<CredentialStore>>,
     pub settings: CodeSettings,
+    pub drift: Arc<freshness::DriftCache>,
 }
 
 impl CodeEnv {
