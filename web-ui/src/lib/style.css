@@ -10141,8 +10141,9 @@ button.activity-line__row:hover .activity-line__steps {
 }
 
 .mode-switch {
-  display: inline-flex;
-  align-self: flex-start;
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
   margin: 0.5rem 1rem 0.75rem;
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 0.125rem;
@@ -10153,8 +10154,7 @@ button.activity-line__row:hover .activity-line__steps {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 2.5rem;
-  height: 2rem;
+  height: 2.5rem;
   color: rgba(255, 255, 255, 0.7);
   text-decoration: none;
 }
@@ -10165,8 +10165,8 @@ button.activity-line__row:hover .activity-line__steps {
 
 .mode-switch__item .p-side-navigation__icon {
   position: static;
-  width: 1rem;
-  height: 1rem;
+  width: 1.25rem;
+  height: 1.25rem;
   margin: 0;
 }
 
@@ -10192,7 +10192,8 @@ button.activity-line__row:hover .activity-line__steps {
 
 @media (min-width: 620px) and (max-width: 1035px) {
   .l-navigation:not(:hover):not(:focus-within):not(.is-pinned) .mode-switch {
-    margin-left: 0.6875rem;
+    width: 2.75rem;
+    margin-left: 0.625rem;
   }
 
   .l-navigation:not(:hover):not(:focus-within):not(.is-pinned) .mode-switch__item:not(.is-active) {
