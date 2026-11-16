@@ -413,36 +413,6 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.settings-page {
-  flex: 1;
-  overflow-y: auto;
-  padding: 2rem 3rem;
-  max-width: 900px;
-  margin: 0 auto;
-}
-
-.settings-header h2 {
-  margin: 0 0 2rem;
-  font-size: 1.5rem;
-  font-weight: 600;
-}
-
-.settings-section {
-  margin-bottom: 2.5rem;
-}
-
-.settings-section__heading h3 {
-  margin: 0 0 0.25rem;
-  font-size: 1.125rem;
-  font-weight: 600;
-}
-
-.settings-section__description {
-  margin: 0 0 1.25rem;
-  font-size: 0.875rem;
-  color: var(--text-muted);
-}
-
 .settings-account-card {
   display: flex;
   align-items: center;

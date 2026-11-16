@@ -1043,7 +1043,9 @@ and run the project's build and tests with run_command after every meaningful ch
 
 Work in this order: understand the request and the relevant code, explain a short plan, implement it, run the tests \
 and fix what fails, then summarise what changed with show_changes. Commit with git when a coherent step is done, \
-using a clear message. Never push; Harvest pushes when the user asks for a change request.
+using a clear message. Never push yourself: when the user asks for a pull request or review, call propose_change, \
+which pushes from Harvest with the user's credentials. After proposing, add new commits for follow-up work instead of \
+rewriting pushed history, except on Gerrit, where amending the commit keeps its Change-Id and uploads a new patch set.
 
 If dependencies are missing, install them with run_command. Once the commands that prepare the project have \
 worked, call save_setup_script with them so new containers start ready.";

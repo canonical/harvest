@@ -26,6 +26,20 @@ export const openCodeSession = (projectId, branch, baseBranch) =>
 export const getCodeSession = (id) => codeFetch(`/code/sessions/${id}`);
 export const closeCodeSession = (id) => codeFetch(`/code/sessions/${id}`, { method: 'DELETE' });
 export const getSessionChanges = (id) => codeFetch(`/code/sessions/${id}/changes`);
+export const proposeChange = (id, title, description) =>
+  codeFetch(`/code/sessions/${id}/change-request`, send('POST', { title, description }));
+
+const REQUEST_NAMES = {
+  github: 'Pull request',
+  gitea: 'Pull request',
+  gitlab: 'Merge request',
+  gerrit: 'Gerrit change',
+  launchpad: 'Merge proposal',
+};
+
+export function changeRequestName(platform) {
+  return REQUEST_NAMES[platform] ?? 'Change request';
+}
 
 export function sessionQueryStream(sessionId, request, onEvent) {
   return streamQuery(`/code/sessions/${sessionId}/query/stream`, request, onEvent);

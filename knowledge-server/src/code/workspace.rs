@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 use super::images::{quote, tail};
-use super::{previews, projects, sessions, CodeEnv, WORKSPACE};
+use super::{change_requests, previews, projects, sessions, CodeEnv, WORKSPACE};
 use crate::agent::tool::Tool;
 use crate::llm::types::ToolDefinition;
 use crate::lxd::containers::Command;
@@ -58,9 +58,10 @@ enum Operation {
     Changes,
     SaveSetup,
     Preview,
+    Propose,
 }
 
-const OPERATIONS: [Operation; 8] = [
+const OPERATIONS: [Operation; 9] = [
     Operation::Run,
     Operation::Read,
     Operation::Write,
@@ -69,6 +70,7 @@ const OPERATIONS: [Operation; 8] = [
     Operation::Changes,
     Operation::SaveSetup,
     Operation::Preview,
+    Operation::Propose,
 ];
 
 impl Operation {
@@ -157,6 +159,15 @@ impl Operation {
                     "required": ["kind"]
                 }),
             ),
+            Self::Propose => (
+                "propose_change",
+                "Push the session's commits and open a change request (pull request, merge request, Gerrit change or Launchpad merge proposal) against the base branch, or update the existing one. Only call it when the user asks for it. Commit everything first. The session ends by itself once the change request is merged.",
+                json!({
+                    "type": "object",
+                    "properties": { "title": { "type": "string" }, "description": { "type": "string" } },
+                    "required": ["title", "description"]
+                }),
+            ),
         };
         ToolDefinition {
             name: name.into(),
@@ -226,8 +237,14 @@ impl WorkspaceTool {
             return Ok("Saved. New containers for this project will run this script.".into());
         }
         let container = self.container().await?;
-        if let Operation::Preview = self.operation {
-            return self.configure_preview(&container, params).await;
+        match self.operation {
+            Operation::Preview => return self.configure_preview(&container, params).await,
+            Operation::Propose => {
+                let request =
+                    change_requests::submit(&self.env, &self.session_id, text("title"), text("description")).await?;
+                return Ok(format!("The change request is {} at {}", request.state, request.url));
+            }
+            _ => {}
         }
         let lxd = &self.env.lxd;
         match self.operation {
@@ -278,7 +295,7 @@ impl WorkspaceTool {
                 );
                 self.shell(&container, &script, Duration::from_secs(60)).await
             }
-            Operation::SaveSetup | Operation::Preview => unreachable!(),
+            Operation::SaveSetup | Operation::Preview | Operation::Propose => unreachable!(),
         }
     }
 }

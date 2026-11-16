@@ -109,7 +109,7 @@
         </div>
       </div>
 
-      <div class="chat-history-panel" :class="{ 'is-open': historyOpen }">
+      <div v-if="!codeSessionId" class="chat-history-panel" :class="{ 'is-open': historyOpen }">
         <div class="chat-history-panel__header">
           <button class="chat-new-btn" data-testid="new-chat" type="button" @click="newChat">+ New chat</button>
           <button class="chat-history-close-btn" type="button" aria-label="Close history" @click="historyOpen = false">✕</button>

@@ -1,3 +1,4 @@
+pub mod change_requests;
 pub mod handlers;
 pub mod images;
 pub mod keeper;

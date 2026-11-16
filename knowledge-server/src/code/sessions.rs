@@ -290,6 +290,7 @@ async fn checkout(env: &CodeEnv, project: &CodeProject, session: &Session, conta
         email = quote(&author.1),
     );
     run_checked(env, &container.name, &script).await?;
+    super::change_requests::prepare_container(env, session, &project.url, &container.name).await?;
     env.lxd
         .wait_for_ipv4(&container.name, Duration::from_secs(60))
         .await?;

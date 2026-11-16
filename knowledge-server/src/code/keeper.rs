@@ -47,6 +47,7 @@ pub async fn tick(env: &CodeEnv) -> Result<()> {
     }
     cool_down(env, warm_for).await?;
     super::previews::clones::reap(env).await?;
+    super::change_requests::refresh(env).await?;
     for id in sessions::idle_sessions(env).await? {
         sessions::close(env, &id, CloseReason::Idle).await?;
     }
