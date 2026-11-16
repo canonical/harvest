@@ -500,21 +500,10 @@ impl Cluster {
             .trim_start_matches("token=")
             .to_string();
 
-        let group: Value = http
-            .post(nodes[1 % count].url("/admin/groups"))
-            .bearer_auth(&token)
-            .json(&json!({ "name": "team", "description": "" }))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        let group_id = group["id"].as_str().expect("group id").to_string();
         let project: Value = http
             .post(nodes[2 % count].url("/projects"))
             .bearer_auth(&token)
-            .json(&json!({ "name": "ha", "group_id": group_id }))
+            .json(&json!({ "name": "ha" }))
             .send()
             .await
             .unwrap()
@@ -924,7 +913,7 @@ async fn connect_fake_agent(
     let db = cluster.db().await;
     let rows = db
         .query(
-            "SELECT install_token FROM projects WHERE id = $pid",
+            "SELECT install_token FROM deploy_projects WHERE id = $pid",
             json!({ "pid": cluster.project_id }),
         )
         .await

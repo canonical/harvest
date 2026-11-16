@@ -21,14 +21,8 @@ mod db_tests {
     async fn seed_project(db: &Db) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         db.execute(
-            "INSERT INTO groups (id, name) VALUES ($gid, 'g1') ON CONFLICT DO NOTHING",
-            json!({ "gid": "g1" }),
-        )
-        .await
-        .unwrap();
-        db.execute(
-            "INSERT INTO projects (id, name, group_id, created_by, created_at)
-             VALUES ($id, 'test', 'g1', 'u1', '2026-01-01T00:00:00+00:00')",
+            "INSERT INTO deploy_projects (id, name, created_by, created_at)
+             VALUES ($id, 'test', 'u1', '2026-01-01T00:00:00+00:00')",
             json!({ "id": id }),
         )
         .await

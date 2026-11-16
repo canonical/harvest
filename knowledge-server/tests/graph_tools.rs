@@ -1158,7 +1158,7 @@ async fn hybrid_sql_returns_semantic_only_matches_through_the_hnsw_index() {
         "query": "zzzz-no-lexical-match", "repo": "myrepo", "version": "", "kind": "any", "limit": 10,
         "path_prefix": "", "offset": 0, "decorator": "",
         "qvec": zero_vector(), "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
-        "semantic_k": SEMANTIC_CANDIDATES,
+        "semantic_k": SEMANTIC_CANDIDATES, "_scope_all": true, "_scope_repos": [],
     });
     let rows = client
         .query(HYBRID_SEARCH_SQL, params.clone())
@@ -1214,7 +1214,7 @@ async fn hybrid_sql_executes_the_full_lexical_cte_chain() {
         "query": "alpha", "repo": "myrepo", "version": "", "kind": "any", "limit": 10,
         "path_prefix": "", "offset": 0, "decorator": "",
         "qvec": zero_vector(), "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
-        "semantic_k": SEMANTIC_CANDIDATES,
+        "semantic_k": SEMANTIC_CANDIDATES, "_scope_all": true, "_scope_repos": [],
     });
     let rows = client
         .query(&sql, params)
@@ -1232,7 +1232,7 @@ async fn hybrid_sql_reports_capability_matches() {
         "query": "i32", "repo": "myrepo", "version": "", "kind": "any", "limit": 10,
         "path_prefix": "", "offset": 0, "decorator": "",
         "qvec": zero_vector(), "qmodel": "text-embedding-004", "lexical": 0.6, "semantic": 0.4,
-        "semantic_k": SEMANTIC_CANDIDATES,
+        "semantic_k": SEMANTIC_CANDIDATES, "_scope_all": true, "_scope_repos": [],
     });
     let rows = client
         .query(&sql, params)

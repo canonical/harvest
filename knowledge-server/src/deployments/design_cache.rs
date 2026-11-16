@@ -117,7 +117,7 @@ pub async fn load_render_input(
                 a.id AS artifact_id, a.title AS artifact_title, a.content AS artifact_content,
                 a.updated_at AS artifact_updated_at
          FROM deployments d
-         JOIN projects p ON p.id = d.project_id
+         JOIN deploy_projects p ON p.id = d.project_id
          LEFT JOIN product_templates t ON t.id = d.template_id
          LEFT JOIN artifacts a ON a.id = d.design_doc_id
          WHERE p.id = $pid AND d.id = $did",

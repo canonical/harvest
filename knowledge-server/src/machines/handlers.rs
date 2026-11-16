@@ -232,7 +232,7 @@ pub(crate) async fn get_or_create_install_token(
 ) -> anyhow::Result<Option<String>> {
     let rows = db
         .query(
-            "SELECT install_token FROM projects WHERE id = $pid",
+            "SELECT install_token FROM deploy_projects WHERE id = $pid",
             json!({ "pid": project_id }),
         )
         .await?;
@@ -248,7 +248,7 @@ pub(crate) async fn get_or_create_install_token(
     let tok = Uuid::new_v4().to_string();
     let rows = db
         .query(
-            "UPDATE projects SET install_token = COALESCE(install_token, $tok)
+            "UPDATE deploy_projects SET install_token = COALESCE(install_token, $tok)
          WHERE id = $pid
          RETURNING install_token",
             json!({ "pid": project_id, "tok": tok }),
@@ -421,7 +421,7 @@ async fn agent_events_handler(
     } else {
         let project = db
             .query(
-                "SELECT id FROM projects WHERE install_token = $tok",
+                "SELECT id FROM deploy_projects WHERE install_token = $tok",
                 json!({ "tok": token }),
             )
             .await
@@ -1289,7 +1289,7 @@ pub async fn rotate_install_token(
 
     let new_token = Uuid::new_v4().to_string();
     db.query(
-        "UPDATE projects SET install_token = $tok WHERE id = $pid",
+        "UPDATE deploy_projects SET install_token = $tok WHERE id = $pid",
         json!({ "pid": project_id, "tok": new_token }),
     )
     .await

@@ -26,6 +26,7 @@ const routes = [
   { path: '/deploy/agents/:agentId/console', component: AgentConsoleView, meta: { mode: 'deploy', requiresProject: true } },
   { path: '/deploy/artifacts',         component: ArtifactsView, meta: { mode: 'deploy', requiresProject: true, directEntry: true } },
   { path: '/deploy/skills',            component: SkillsView,    meta: { mode: 'deploy', requiresProject: true, directEntry: true } },
+  { path: '/deploy/settings',          component: () => import('../views/ProjectSettingsView.vue'), meta: { mode: 'deploy', requiresProject: true, directEntry: true } },
   { path: '/deploy/templates',         component: () => import('../views/ProductTemplatesView.vue'), meta: { mode: 'deploy', directEntry: true } },
 
   { path: '/artifacts/:id',  component: ArtifactsView, meta: { directEntry: true } },

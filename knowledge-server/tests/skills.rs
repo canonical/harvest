@@ -183,46 +183,29 @@ async fn make_project_raw(db: &Db, name: &str) -> String {
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     db.query(
-        "WITH g AS (
-             INSERT INTO groups (id, name) VALUES ('g', 'g') ON CONFLICT (id) DO UPDATE SET name = groups.name
-             RETURNING id
-         )
-         INSERT INTO projects (id, name, description, group_id, created_by, created_at)
-         SELECT $id, $name, '', g.id, 'system', $now::timestamptz FROM g",
+        "INSERT INTO deploy_projects (id, name, description, created_by, created_at)
+         VALUES ($id, $name, '', 'system', $now::timestamptz)",
         json!({"id": id, "name": name, "now": now}),
-    ).await.unwrap();
-    id
-}
-
-async fn make_group(db: &Db, name: &str) -> String {
-    let id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    db.query(
-        "INSERT INTO groups (id, name, description, created_at) VALUES ($id, $name, '', $now)",
-        json!({"id":id,"name":name,"now":now}),
     )
     .await
     .unwrap();
     id
 }
 
-async fn join_group(db: &Db, user_id: &str, group_id: &str) {
-    db.query(
-        "INSERT INTO user_groups (user_id, group_id) VALUES ($uid, $gid) ON CONFLICT DO NOTHING",
-        json!({"uid":user_id,"gid":group_id}),
+async fn add_member_row(db: &Db, project_id: &str, user_id: &str, role: &str) {
+    db.execute(
+        "INSERT INTO deploy_project_members (project_id, user_id, role) VALUES ($pid, $uid, $role)
+         ON CONFLICT (project_id, user_id) DO UPDATE SET role = EXCLUDED.role",
+        json!({"pid": project_id, "uid": user_id, "role": role}),
     )
     .await
     .unwrap();
 }
 
-async fn seed_project(app: &Router, token: &str, group_id: &str, name: &str) -> String {
+async fn seed_project(app: &Router, token: &str, name: &str) -> String {
     let (_, body) = send(
         app.clone(),
-        req_post(
-            "/projects",
-            token,
-            json!({"name": name, "group_id": group_id}),
-        ),
+        req_post("/projects", token, json!({"name": name})),
     )
     .await;
     body["id"].as_str().unwrap().to_string()
@@ -921,11 +904,9 @@ async fn seed_defaults_if_needed_does_not_reseed_after_deletion() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_project_skills_empty_for_new_project() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = skills_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Test Project").await;
+    let pid = seed_project(&app, &tok, "Test Project").await;
 
     let (status, body) = send(app, req_get(&format!("/projects/{pid}/skills"), &tok)).await;
     assert_eq!(status, StatusCode::OK);
@@ -936,11 +917,9 @@ async fn list_project_skills_empty_for_new_project() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_skill_returns_201_with_fields() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = skills_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Test Project").await;
+    let pid = seed_project(&app, &tok, "Test Project").await;
 
     let (status, body) = send(
         app,
@@ -963,11 +942,9 @@ async fn create_project_skill_returns_201_with_fields() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn get_project_skill_returns_full_content() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = skills_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Test Project").await;
+    let pid = seed_project(&app, &tok, "Test Project").await;
 
     let (_, created) = send(
         app.clone(),
@@ -992,11 +969,9 @@ async fn get_project_skill_returns_full_content() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_project_skills_after_create_returns_summary() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = skills_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Test Project").await;
+    let pid = seed_project(&app, &tok, "Test Project").await;
 
     send(
         app.clone(),
@@ -1025,11 +1000,9 @@ async fn list_project_skills_after_create_returns_summary() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn update_project_skill_changes_fields() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = skills_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Test Project").await;
+    let pid = seed_project(&app, &tok, "Test Project").await;
 
     let (_, created) = send(
         app.clone(),
@@ -1066,11 +1039,9 @@ async fn update_project_skill_changes_fields() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn delete_project_skill_removes_it() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = skills_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Test Project").await;
+    let pid = seed_project(&app, &tok, "Test Project").await;
 
     let (_, created) = send(
         app.clone(),
@@ -1100,12 +1071,10 @@ async fn delete_project_skill_removes_it() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn non_member_cannot_access_project_skills() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, outsider_tok) = make_user(&db, "b@x.com", "Bob", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
     let app = skills_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Test Project").await;
+    let pid = seed_project(&app, &tok, "Test Project").await;
 
     let (status, _) = send(
         app,
@@ -1119,12 +1088,10 @@ async fn non_member_cannot_access_project_skills() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn admin_can_access_any_project_skills() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
     let app = skills_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Test Project").await;
+    let pid = seed_project(&app, &tok, "Test Project").await;
 
     let (status, body) = send(app, req_get(&format!("/projects/{pid}/skills"), &admin_tok)).await;
     assert_eq!(status, StatusCode::OK);
@@ -1135,11 +1102,9 @@ async fn admin_can_access_any_project_skills() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_skill_requires_name() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = skills_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Test Project").await;
+    let pid = seed_project(&app, &tok, "Test Project").await;
 
     let (status, _) = send(
         app,
@@ -1159,11 +1124,9 @@ async fn create_project_skill_requires_name() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_skill_duplicate_name_within_project_returns_409() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = skills_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Test Project").await;
+    let pid = seed_project(&app, &tok, "Test Project").await;
 
     send(
         app.clone(),
@@ -1195,12 +1158,10 @@ async fn create_project_skill_duplicate_name_within_project_returns_409() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_skill_same_name_as_global_returns_409() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let (_, admin_tok) = make_user(&db, "admin@x.com", "Admin", "admin").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
     let app = skills_app(Arc::clone(&db));
-    let pid = seed_project(&app, &tok, &gid, "Test Project").await;
+    let pid = seed_project(&app, &tok, "Test Project").await;
 
     send(
         app.clone(),
@@ -1232,12 +1193,10 @@ async fn create_project_skill_same_name_as_global_returns_409() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn create_project_skill_same_name_in_different_project_is_allowed() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = skills_app(Arc::clone(&db));
-    let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
-    let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
+    let pid_a = seed_project(&app, &tok, "Project A").await;
+    let pid_b = seed_project(&app, &tok, "Project B").await;
 
     let (status_a, _) = send(
         app.clone(),
@@ -1272,12 +1231,10 @@ async fn create_project_skill_same_name_in_different_project_is_allowed() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn project_skill_not_visible_from_other_project() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = skills_app(Arc::clone(&db));
-    let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
-    let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
+    let pid_a = seed_project(&app, &tok, "Project A").await;
+    let pid_b = seed_project(&app, &tok, "Project B").await;
 
     let (_, created) = send(
         app.clone(),
@@ -1319,12 +1276,10 @@ async fn project_skill_not_visible_from_other_project() {
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_project_skills_never_includes_other_projects_skills_even_with_same_name() {
     db!(c, db);
-    let (uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
-    let gid = make_group(&db, "eng").await;
-    join_group(&db, &uid, &gid).await;
+    let (_uid, tok) = make_user(&db, "a@x.com", "Alice", "regular").await;
     let app = skills_app(Arc::clone(&db));
-    let pid_a = seed_project(&app, &tok, &gid, "Project A").await;
-    let pid_b = seed_project(&app, &tok, &gid, "Project B").await;
+    let pid_a = seed_project(&app, &tok, "Project A").await;
+    let pid_b = seed_project(&app, &tok, "Project B").await;
 
     let (_, created_a) = send(
         app.clone(),

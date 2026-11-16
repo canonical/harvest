@@ -517,24 +517,6 @@ async fn start_project_turn(
     Json(json!({ "ok": true, "turn_id": turn_id_for_response })).into_response()
 }
 
-pub async fn list_my_groups(
-    Extension(user): Extension<Claims>,
-    State(state): State<Arc<ProjectState>>,
-) -> Result<impl IntoResponse, ApiError> {
-    let rows = state
-        .db
-        .query(
-            "SELECT g.id, g.name, g.description
-         FROM user_groups ug JOIN groups g ON g.id = ug.group_id
-         WHERE ug.user_id = $uid
-         ORDER BY g.name",
-            json!({ "uid": user.sub }),
-        )
-        .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    Ok(Json(rows))
-}
-
 pub async fn list_projects(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<ProjectState>>,
@@ -542,13 +524,11 @@ pub async fn list_projects(
     let rows = state
         .db
         .query(
-            "SELECT p.id, p.name, p.description, p.group_id, g.name AS group_name,
-                p.created_by, p.created_at
-         FROM user_groups ug
-         JOIN groups g   ON g.id = ug.group_id
-         JOIN projects p ON p.group_id = g.id
-         WHERE ug.user_id = $uid
-         ORDER BY p.created_at DESC",
+            "SELECT p.id, p.name, p.description, p.created_by, p.created_at, m.role
+             FROM deploy_projects p
+             LEFT JOIN deploy_project_members m ON m.project_id = p.id AND m.user_id = $uid
+             WHERE m.user_id IS NOT NULL
+             ORDER BY p.created_at DESC",
             json!({ "uid": user.sub }),
         )
         .await
@@ -561,7 +541,6 @@ pub struct CreateProjectBody {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    pub group_id: String,
 }
 
 pub async fn create_project(
@@ -580,51 +559,27 @@ pub async fn create_project(
         ));
     }
 
-    let group_rows = state
-        .db
-        .query(
-            "SELECT id FROM groups WHERE id = $gid",
-            json!({ "gid": body.group_id }),
-        )
-        .await
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-    if group_rows.is_empty() {
-        return Err(err(StatusCode::NOT_FOUND, "group not found"));
-    }
-
-    if user.role != "admin" {
-        let member = state
-            .db
-            .query(
-                "SELECT 1 AS ok FROM user_groups WHERE user_id = $uid AND group_id = $gid",
-                json!({ "uid": user.sub, "gid": body.group_id }),
-            )
-            .await
-            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "server error"))?;
-        if member.is_empty() {
-            return Err(err(StatusCode::FORBIDDEN, "not a member of this group"));
-        }
-    }
-
     let id = Uuid::new_v4().to_string();
     let install_token = Uuid::new_v4().to_string();
     let deployment_id = Uuid::new_v4().to_string();
     let now = harvest_db::now_rfc3339();
     let rows = state.db.query(
         "WITH p AS (
-             INSERT INTO projects (id, name, description, group_id, created_by, created_at, install_token)
-             VALUES ($id, $name, $description, $gid, $uid, $now, $install_token)
+             INSERT INTO deploy_projects (id, name, description, created_by, created_at, install_token)
+             VALUES ($id, $name, $description, $uid, $now, $install_token)
              RETURNING *
+         ), m AS (
+             INSERT INTO deploy_project_members (project_id, user_id, role, added_by)
+             SELECT p.id, $uid, 'owner', $uid FROM p
          ), d AS (
              INSERT INTO deployments (id, project_id, name, environment_description, infra_state,
                                       created_by, created_at, updated_at)
              SELECT $deployment_id, p.id, p.name, '', 'none', p.created_by, p.created_at, p.created_at
              FROM p
          )
-         SELECT p.id, p.name, p.description, p.group_id, g.name AS group_name, p.created_by, p.created_at
-         FROM p JOIN groups g ON g.id = p.group_id",
+         SELECT p.id, p.name, p.description, p.created_by, p.created_at, 'owner' AS role FROM p",
         json!({
-            "gid": body.group_id, "id": id, "name": name,
+            "id": id, "name": name,
             "description": body.description, "uid": user.sub, "now": now,
             "install_token": install_token,
             "deployment_id": deployment_id,
@@ -670,7 +625,7 @@ pub async fn update_project(
     state
         .db
         .query(
-            "UPDATE projects SET
+            "UPDATE deploy_projects SET
              name        = COALESCE($name::text, name),
              description = COALESCE($description::text, description)
          WHERE id = $pid
@@ -695,7 +650,7 @@ pub async fn delete_project(
     state
         .db
         .query(
-            "DELETE FROM projects WHERE id = $pid",
+            "DELETE FROM deploy_projects WHERE id = $pid",
             json!({ "pid": project_id }),
         )
         .await
