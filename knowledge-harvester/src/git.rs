@@ -11,11 +11,25 @@ pub struct TagInfo {
     pub timestamp: i64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum GitCredentials {
+    #[default]
+    Anonymous,
+    SshKey {
+        private_key: String,
+    },
+    Basic {
+        username: String,
+        password: String,
+    },
+}
+
 #[derive(Clone)]
 pub struct GitClient {
     clone_root: PathBuf,
     ssh_key_path: Option<PathBuf>,
     ssh_passphrase: Option<String>,
+    credentials: GitCredentials,
 }
 
 impl GitClient {
@@ -24,7 +38,13 @@ impl GitClient {
             clone_root,
             ssh_key_path: None,
             ssh_passphrase: None,
+            credentials: GitCredentials::Anonymous,
         }
+    }
+
+    pub fn with_credentials(mut self, credentials: GitCredentials) -> Self {
+        self.credentials = credentials;
+        self
     }
 
     pub fn with_ssh_key(mut self, key_path: PathBuf, passphrase: Option<String>) -> Self {
@@ -35,20 +55,31 @@ impl GitClient {
 
     fn make_fetch_options(&self) -> FetchOptions<'static> {
         let mut fo = FetchOptions::new();
-        if let Some(key_path) = self.ssh_key_path.clone() {
-            let passphrase = self.ssh_passphrase.clone();
-            let mut callbacks = RemoteCallbacks::new();
-            callbacks.credentials(move |_url, username, _allowed| {
-                git2::Cred::ssh_key(
-                    username.unwrap_or("git"),
-                    None,
-                    &key_path,
-                    passphrase.as_deref(),
-                )
-            });
+        if let Some(callbacks) = self.callbacks() {
             fo.remote_callbacks(callbacks);
         }
         fo
+    }
+
+    fn callbacks(&self) -> Option<RemoteCallbacks<'static>> {
+        let source = match (&self.credentials, &self.ssh_key_path) {
+            (GitCredentials::Anonymous, None) => return None,
+            (GitCredentials::Anonymous, Some(path)) => CredentialSource::KeyFile {
+                path: path.clone(),
+                passphrase: self.ssh_passphrase.clone(),
+            },
+            (credentials, _) => CredentialSource::Given(credentials.clone()),
+        };
+        let mut attempts = 0;
+        let mut callbacks = RemoteCallbacks::new();
+        callbacks.credentials(move |_url, username, _allowed| {
+            attempts += 1;
+            if attempts > 1 {
+                return Err(git2::Error::from_str("authentication failed"));
+            }
+            source.credential(username.unwrap_or("git"))
+        });
+        Some(callbacks)
     }
 
     pub fn repo_path(&self, repo_name: &str) -> PathBuf {
@@ -90,7 +121,7 @@ impl GitClient {
         )?;
         let mut remote = repo.remote("origin", url)?;
 
-        remote.connect(git2::Direction::Fetch)?;
+        remote.connect_auth(git2::Direction::Fetch, self.callbacks(), None)?;
         let refs: Vec<(String, String)> = remote
             .list()?
             .iter()
@@ -269,6 +300,31 @@ fn resolve_one<'r>(repo: &'r Repository, refname: &str) -> Result<git2::Object<'
     let origin_ref = format!("refs/remotes/origin/{refname}");
     repo.revparse_single(&origin_ref)
         .with_context(|| format!("resolving ref '{refname}'"))
+}
+
+enum CredentialSource {
+    KeyFile {
+        path: PathBuf,
+        passphrase: Option<String>,
+    },
+    Given(GitCredentials),
+}
+
+impl CredentialSource {
+    fn credential(&self, username: &str) -> std::result::Result<git2::Cred, git2::Error> {
+        match self {
+            Self::KeyFile { path, passphrase } => {
+                git2::Cred::ssh_key(username, None, path, passphrase.as_deref())
+            }
+            Self::Given(GitCredentials::SshKey { private_key }) => {
+                git2::Cred::ssh_key_from_memory(username, None, private_key, None)
+            }
+            Self::Given(GitCredentials::Basic { username, password }) => {
+                git2::Cred::userpass_plaintext(username, password)
+            }
+            Self::Given(GitCredentials::Anonymous) => git2::Cred::default(),
+        }
+    }
 }
 
 fn parse_refs(refs: Vec<(String, String)>) -> Vec<TagInfo> {

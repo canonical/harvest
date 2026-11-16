@@ -1,6 +1,7 @@
 mod artifacts;
 mod deploy_agents;
 mod knowledge;
+mod repo_guard;
 mod sandboxes;
 mod skills;
 mod terraform;
@@ -16,6 +17,7 @@ pub use terraform::TerraformToolset;
 
 use harvest_db::Db;
 
+use crate::access::repos::{RepoAccess, RepoScope};
 use crate::agent::graph_tools::SemanticHandle;
 use crate::agent::tool::Tool;
 use crate::collocate::client::CollocateHandle;
@@ -30,8 +32,49 @@ use crate::skills::SkillStore;
 pub struct TurnContext {
     pub user_id: String,
     pub space: Space,
+    pub repos: RepoScope,
     pub conversation_id: String,
     pub llm: Arc<dyn LlmProvider>,
+}
+
+impl TurnContext {
+    pub async fn load(
+        db: &Db,
+        user_id: &str,
+        space: Space,
+        conversation_id: impl Into<String>,
+        llm: Arc<dyn LlmProvider>,
+    ) -> Self {
+        let repos = RepoAccess::new(db)
+            .scope_for(user_id)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, user_id, "could not load repository access; allowing none");
+                RepoScope::only(Vec::<String>::new())
+            });
+        Self {
+            user_id: user_id.to_string(),
+            space,
+            repos,
+            conversation_id: conversation_id.into(),
+            llm,
+        }
+    }
+
+    pub fn unrestricted(
+        user_id: &str,
+        space: Space,
+        conversation_id: impl Into<String>,
+        llm: Arc<dyn LlmProvider>,
+    ) -> Self {
+        Self {
+            user_id: user_id.to_string(),
+            space,
+            repos: RepoScope::All,
+            conversation_id: conversation_id.into(),
+            llm,
+        }
+    }
 }
 
 pub trait Toolset: Send + Sync {
@@ -186,6 +229,7 @@ mod tests {
         TurnContext {
             user_id: "u".into(),
             space,
+            repos: RepoScope::All,
             conversation_id: "c".into(),
             llm: Arc::new(MockProvider::new(
                 "m".into(),

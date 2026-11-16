@@ -168,6 +168,37 @@ async fn list_repositories_flags_versions_indexed_by_an_older_parser() {
     assert_eq!(myrepo["stale_versions"], json!(["v1.0"]));
 }
 
+fn scoped(mut params: Value, repos: &[&str]) -> Value {
+    knowledge_server::access::repos::RepoScope::only(repos.iter().copied()).write_into(&mut params);
+    params
+}
+
+#[tokio::test]
+#[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
+async fn listing_and_searching_stay_inside_the_callers_repositories() {
+    setup!(client, test_db);
+    let list = ListRepositoriesTool(Arc::clone(&client));
+    let search = SearchSymbolsTool::new(Arc::clone(&client));
+
+    let visible: Vec<Value> =
+        serde_json::from_str(&list.execute(scoped(json!({}), &["myrepo"])).await.unwrap()).unwrap();
+    assert!(repos_from(&visible).contains(&"myrepo".to_string()));
+    let hidden: Vec<Value> =
+        serde_json::from_str(&list.execute(scoped(json!({}), &["other"])).await.unwrap()).unwrap();
+    assert!(hidden.is_empty(), "listed outside the scope: {hidden:?}");
+
+    let found = search
+        .execute(scoped(json!({ "query": "beta" }), &["myrepo"]))
+        .await
+        .unwrap();
+    assert!(found.contains("myrepo"), "{found}");
+    let outside = search
+        .execute(scoped(json!({ "query": "beta" }), &["other"]))
+        .await
+        .unwrap();
+    assert!(!outside.contains("myrepo"), "{outside}");
+}
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL (set HARVEST_TEST_DATABASE_URL)"]
 async fn list_repositories_empty_graph_returns_empty_array() {

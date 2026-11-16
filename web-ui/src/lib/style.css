@@ -10058,3 +10058,78 @@ button.activity-line__row:hover .activity-line__steps {
     border-bottom: 1px solid var(--border-subtle);
   }
 }
+
+.git-access__block {
+  display: grid;
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
+}
+
+.git-access__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.git-access__title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.git-access__key {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.git-access__public {
+  display: block;
+  padding: 0.5rem 0.625rem;
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+  background: var(--bg-surface-alt);
+  border-radius: 2px;
+}
+
+.git-access__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.git-access__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.git-access__actions button {
+  margin: 0;
+}
+
+.git-access__hint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.git-access__import textarea {
+  font-family: 'Ubuntu Mono', 'Courier New', monospace;
+  font-size: 0.78rem;
+}
+
+.repo-status-badge--private {
+  color: var(--text-secondary);
+  background: var(--bg-surface-alt);
+}
+
+.repo-verify-note {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}

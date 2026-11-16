@@ -1,3 +1,5 @@
+use crate::modes::Space;
+use crate::toolsets::TurnContext;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -139,13 +141,16 @@ pub(super) async fn agent_for(
     )
     .await;
     let builder = &state.agent_builder;
-    if Arc::ptr_eq(&user_llm, &builder.llm) && user_system_one.is_none() {
-        return builder.build_for_conversation(project_id.to_string(), conv_id.to_string());
-    }
-    builder.build_for_conversation_with_llm_and_system_one(
-        project_id.to_string(),
-        conv_id.to_string(),
+    let turn = TurnContext::load(
+        &state.db,
+        user_id,
+        Space::deploy_project(project_id),
+        conv_id,
         user_llm,
+    )
+    .await;
+    builder.conversation_agent(
+        &turn,
         user_system_one.or_else(|| builder.system_one.clone()),
     )
 }

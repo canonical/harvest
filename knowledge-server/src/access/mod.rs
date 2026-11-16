@@ -1,3 +1,6 @@
+pub mod recheck;
+pub mod repos;
+
 use serde_json::{json, Value};
 
 use harvest_db::Db;

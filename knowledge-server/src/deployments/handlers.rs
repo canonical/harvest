@@ -1,3 +1,5 @@
+use crate::modes::Space;
+use crate::toolsets::TurnContext;
 use axum::{
     body::Body,
     extract::{Extension, Path, Query, State},
@@ -1117,22 +1119,17 @@ async fn build_deployment_agent(
         user_sub,
     )
     .await;
-    Ok(
-        if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-            state.agent_builder.build_for_deployment(
-                project_id.to_string(),
-                group_id.to_string(),
-                &ctx,
-            )
-        } else {
-            state.agent_builder.build_for_deployment_with_llm(
-                project_id.to_string(),
-                group_id.to_string(),
-                &ctx,
-                user_llm,
-            )
-        },
+    let turn = TurnContext::load(
+        &state.db,
+        user_sub,
+        Space::deploy_project(project_id),
+        String::new(),
+        user_llm,
     )
+    .await;
+    Ok(state
+        .agent_builder
+        .deployment_agent(&turn, group_id.to_string(), &ctx))
 }
 
 async fn build_deployment_agent_text_only(
@@ -1152,15 +1149,7 @@ async fn build_deployment_agent_text_only(
         user_sub,
     )
     .await;
-    Ok(
-        if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-            state.agent_builder.build_for_deployment_text_only(&ctx)
-        } else {
-            state
-                .agent_builder
-                .build_for_deployment_text_only_with_llm(&ctx, user_llm)
-        },
-    )
+    Ok(state.agent_builder.deployment_text_agent(user_llm, &ctx))
 }
 
 async fn build_deployment_agent_design(
@@ -1180,19 +1169,15 @@ async fn build_deployment_agent_design(
         user_sub,
     )
     .await;
-    Ok(
-        if std::sync::Arc::ptr_eq(&user_llm, &state.agent_builder.llm) {
-            state
-                .agent_builder
-                .build_for_deployment_design(project_id.to_string(), &ctx)
-        } else {
-            state.agent_builder.build_for_deployment_design_with_llm(
-                project_id.to_string(),
-                &ctx,
-                user_llm,
-            )
-        },
+    let turn = TurnContext::load(
+        &state.db,
+        user_sub,
+        Space::deploy_project(project_id),
+        String::new(),
+        user_llm,
     )
+    .await;
+    Ok(state.agent_builder.deployment_design_agent(&turn, &ctx))
 }
 
 fn generation_failed(response_text: &str) -> ApiError {

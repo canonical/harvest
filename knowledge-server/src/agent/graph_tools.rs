@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::tool::Tool;
+use crate::access::repos::RepoScope;
 use crate::llm::types::ToolDefinition;
 use harvest_db::{Db, GRAPH_READER_ROLE};
 
@@ -29,15 +30,21 @@ impl Tool for ListRepositoriesTool {
         }
     }
 
-    async fn execute(&self, _params: Value) -> Result<String> {
+    async fn execute(&self, params: Value) -> Result<String> {
+        let (scope_all, scope_repos) = RepoScope::read_from(&params);
         let rows = self.0.query(
             "SELECT r.name AS repo, count(*) AS version_count,
                     (array_agg(v.tag ORDER BY v.timestamp DESC))[1:10] AS versions,
                     coalesce(array_agg(v.tag ORDER BY v.timestamp DESC)
                              FILTER (WHERE v.parser_version < $parser_version), '{}') AS stale_versions
              FROM repositories r JOIN versions v ON v.repository_id = r.id AND v.ingested
+             WHERE $scope_all::bool OR r.name = ANY($scope_repos::text[])
              GROUP BY r.name ORDER BY r.name",
-            json!({ "parser_version": knowledge_harvester::parser::PARSER_VERSION }),
+            json!({
+                "parser_version": knowledge_harvester::parser::PARSER_VERSION,
+                "scope_all": scope_all,
+                "scope_repos": scope_repos,
+            }),
         ).await?;
         let rows: Vec<Value> = rows
             .into_iter()
@@ -423,6 +430,7 @@ impl Tool for SearchSymbolsTool {
         let limit = clamp_limit(&params);
         let offset = params["offset"].as_i64().unwrap_or(0).max(0);
 
+        let (scope_all, scope_repos) = RepoScope::read_from(&params);
         let mut params = json!({
             "query": q,
             "repo": repo,
@@ -432,6 +440,8 @@ impl Tool for SearchSymbolsTool {
             "decorator": decorator,
             "limit": limit as i64 + 1,
             "offset": offset,
+            "_scope_all": scope_all,
+            "_scope_repos": scope_repos,
         });
 
         let embed = if q.is_empty() {

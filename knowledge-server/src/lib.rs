@@ -10,6 +10,7 @@ pub mod collocate;
 pub mod config;
 pub mod conversations;
 pub mod cost;
+pub mod credentials;
 pub mod crypto;
 pub mod deployments;
 pub mod ingestion;

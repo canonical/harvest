@@ -30,6 +30,7 @@ WITH signals AS (
            strpos(lower(coalesce(cs.docstring, '')), lower($query)) > 0 AS doc_sub
     FROM code_symbols cs
     WHERE ($repo = '' OR cs.repo = $repo)
+      AND ($_scope_all::bool OR cs.repo = ANY($_scope_repos::text[]))
       AND ($version = '' OR cs.version = $version)
       AND ($kind = 'any' OR lower(cs.label) = $kind)
       AND ($path_prefix = '' OR starts_with(cs.file, $path_prefix))
@@ -92,6 +93,7 @@ WITH lexical AS (
            strpos(lower(coalesce(cs.docstring, '')), lower($query)) > 0 AS doc_sub
     FROM code_symbols cs
     WHERE ($repo = '' OR cs.repo = $repo)
+      AND ($_scope_all::bool OR cs.repo = ANY($_scope_repos::text[]))
       AND ($version = '' OR cs.version = $version)
       AND ($kind = 'any' OR lower(cs.label) = $kind)
       AND ($path_prefix = '' OR starts_with(cs.file, $path_prefix))
@@ -132,6 +134,7 @@ WITH lexical AS (
     WHERE s.embedding IS NOT NULL
       AND s.embedding_model = $qmodel
       AND ($repo = '' OR r.name = $repo)
+      AND ($_scope_all::bool OR r.name = ANY($_scope_repos::text[]))
       AND ($version = '' OR v.tag = $version)
     ORDER BY s.embedding <=> $qvec::vector
     LIMIT $semantic_k
@@ -230,6 +233,7 @@ impl SearchEngine for PostgresEngine {
                         "query": term, "repo": query.scope.repo, "version": query.scope.version,
                         "kind": "any", "path_prefix": "", "decorator": "",
                         "limit": PER_TERM, "offset": 0,
+                        "_scope_all": true, "_scope_repos": [],
                     }),
                 )
                 .await?;
