@@ -1,126 +1,119 @@
 <template>
   <button id="install-agent-btn" class="p-button--positive is-dense" type="button" @click="handleAddAgentClick">Add agent</button>
 
-  <div v-if="showChoiceModal" id="agent-choice-modal" class="modal" @click.self="showChoiceModal = false">
-    <div class="modal-content">
-      <button class="modal-close" type="button" @click="showChoiceModal = false">✕</button>
-      <h3>Add agent</h3>
-      <div class="agent-choice-options">
-        <button id="choice-manual-btn" type="button" class="agent-choice-option" @click="chooseManualInstall">
-          <svg class="agent-choice-option__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
-          <span class="agent-choice-option__text">
-            <span class="agent-choice-option__title">Install agent on existing machine</span>
-            <span class="agent-choice-option__desc">Run an install command on a machine you already manage.</span>
-          </span>
-        </button>
-        <button id="choice-lxd-btn" type="button" class="agent-choice-option" @click="chooseManagedAgent">
-          <svg class="agent-choice-option__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
-          <span class="agent-choice-option__text">
-            <span class="agent-choice-option__title">Let Harvest create and manage agent</span>
-            <span class="agent-choice-option__desc">Harvest provisions and manages an LXD container for you.</span>
-          </span>
-        </button>
-      </div>
+  <AppModal v-if="showChoiceModal" id="agent-choice-modal" @close="showChoiceModal = false">
+    <h2>Add agent</h2>
+    <div class="agent-choice-options">
+      <button id="choice-manual-btn" type="button" class="agent-choice-option" @click="chooseManualInstall">
+        <svg class="agent-choice-option__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+        <span class="agent-choice-option__text">
+          <span class="agent-choice-option__title">Install agent on existing machine</span>
+          <span class="agent-choice-option__desc">Run an install command on a machine you already manage.</span>
+        </span>
+      </button>
+      <button id="choice-lxd-btn" type="button" class="agent-choice-option" @click="chooseManagedAgent">
+        <svg class="agent-choice-option__icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+        <span class="agent-choice-option__text">
+          <span class="agent-choice-option__title">Let Harvest create and manage agent</span>
+          <span class="agent-choice-option__desc">Harvest provisions and manages an LXD container for you.</span>
+        </span>
+      </button>
     </div>
-  </div>
+  </AppModal>
 
-  <div v-if="showModal" id="install-modal" class="modal" @click.self="closeInstallModal">
-    <div class="modal-content modal-content--wide">
-      <button id="install-modal-close" class="modal-close" type="button" @click="closeInstallModal">✕</button>
-      <h3>Install agent</h3>
-      <p class="install-note">Run this command on the machine you want to add as an agent.</p>
-      <div class="install-cmd-wrap">
-        <code class="install-cmd-code">{{ installCmd }}</code>
-        <button id="copy-install-cmd" class="install-cmd-copy" :class="{ 'is-copied': copied }" type="button" @click="copyCmd">{{ copied ? 'Copied!' : 'Copy' }}</button>
-      </div>
-      <p class="install-note install-note--muted">Port 443 on <strong>{{ serverUrl }}</strong> must be reachable from the agent machine for the connection to work.</p>
+  <AppModal v-if="showModal" id="install-modal" size="wide" @close="closeInstallModal">
+    <button id="install-modal-close" class="modal-close" type="button" @click="closeInstallModal">✕</button>
+    <h3>Install agent</h3>
+    <p class="install-note">Run this command on the machine you want to add as an agent.</p>
+    <div class="install-cmd-wrap">
+      <code class="install-cmd-code">{{ installCmd }}</code>
+      <button id="copy-install-cmd" class="install-cmd-copy" :class="{ 'is-copied': copied }" type="button" @click="copyCmd">{{ copied ? 'Copied!' : 'Copy' }}</button>
     </div>
-  </div>
+    <p class="install-note install-note--muted">Port 443 on <strong>{{ serverUrl }}</strong> must be reachable from the agent machine for the connection to work.</p>
+  </AppModal>
 
-  <div v-if="showManagedModal" id="managed-agent-modal" class="modal" @click.self="closeManagedModal">
-    <div class="modal-content">
-      <button class="modal-close" type="button" @click="closeManagedModal">✕</button>
-      <h3>Let Harvest create and manage agent</h3>
+  <AppModal v-if="showManagedModal" id="managed-agent-modal" @close="closeManagedModal">
+    <h2>Let Harvest create and manage agent</h2>
 
-      <template v-if="provisionSteps.length === 0">
-        <div class="form-field">
-          <label for="managed-agent-name">Name</label>
-          <input id="managed-agent-name" type="text" v-model="managedName" placeholder="e.g. build-runner" />
-        </div>
+    <template v-if="provisionSteps.length === 0">
+      <div class="form-field">
+        <label for="managed-agent-name">Name</label>
+        <input id="managed-agent-name" type="text" v-model="managedName" placeholder="e.g. build-runner" />
+      </div>
 
-        <div class="form-field">
-          <label for="managed-agent-description">Description</label>
-          <textarea id="managed-agent-description" v-model="managedDescription" rows="2" placeholder="Optional"></textarea>
-        </div>
+      <div class="form-field">
+        <label for="managed-agent-description">Description</label>
+        <textarea id="managed-agent-description" v-model="managedDescription" rows="2" placeholder="Optional"></textarea>
+      </div>
 
-        <div class="form-field">
-          <label>Size</label>
-          <div class="flavor-select">
-            <button
-              id="flavor-select-toggle"
-              ref="flavorToggleRef"
-              type="button"
-              class="flavor-select__toggle"
-              :aria-expanded="flavorDropdownOpen"
-              :disabled="flavorsLoading || !flavors.length"
-              @click="toggleFlavorDropdown"
-            >
-              <span>{{ selectedFlavor ? selectedFlavor.label : (flavorsLoading ? 'Loading…' : 'No sizes available') }}</span>
-              <span v-if="selectedFlavor" class="flavor-select__badge">{{ selectedFlavor.cpu }} vCPU · {{ formatMemory(selectedFlavor.memory_mib) }}</span>
-            </button>
-            <Teleport to="body">
-              <div
-                v-if="flavorDropdownOpen"
-                class="flavor-select__dropdown flavor-select__dropdown--teleported"
-                :style="flavorDropdownStyle"
-              >
-                <button
-                  v-for="f in flavors"
-                  :key="f.id"
-                  :id="`flavor-option-${f.id}`"
-                  type="button"
-                  class="flavor-select__item"
-                  @click="selectFlavor(f)"
-                >
-                  <span class="flavor-select__name">{{ f.label }}</span>
-                  <span class="flavor-select__badge">{{ f.cpu }} vCPU · {{ formatMemory(f.memory_mib) }}</span>
-                </button>
-              </div>
-            </Teleport>
-          </div>
-        </div>
-
-        <p v-if="managedError" class="managed-agent-error">{{ managedError }}</p>
-
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="closeManagedModal">Cancel</button>
+      <div class="form-field">
+        <label>Size</label>
+        <div class="flavor-select">
           <button
-            id="create-managed-agent-btn"
-            class="p-button--positive is-dense"
+            id="flavor-select-toggle"
+            ref="flavorToggleRef"
             type="button"
-            :disabled="!managedName.trim() || !selectedFlavor"
-            @click="submitManagedAgent"
+            class="flavor-select__toggle"
+            :aria-expanded="flavorDropdownOpen"
+            :disabled="flavorsLoading || !flavors.length"
+            @click="toggleFlavorDropdown"
           >
-            Create agent
+            <span>{{ selectedFlavor ? selectedFlavor.label : (flavorsLoading ? 'Loading…' : 'No sizes available') }}</span>
+            <span v-if="selectedFlavor" class="flavor-select__badge">{{ selectedFlavor.cpu }} vCPU · {{ formatMemory(selectedFlavor.memory_mib) }}</span>
           </button>
+          <Teleport to="body">
+            <div
+              v-if="flavorDropdownOpen"
+              class="flavor-select__dropdown flavor-select__dropdown--teleported"
+              :style="flavorDropdownStyle"
+            >
+              <button
+                v-for="f in flavors"
+                :key="f.id"
+                :id="`flavor-option-${f.id}`"
+                type="button"
+                class="flavor-select__item"
+                @click="selectFlavor(f)"
+              >
+                <span class="flavor-select__name">{{ f.label }}</span>
+                <span class="flavor-select__badge">{{ f.cpu }} vCPU · {{ formatMemory(f.memory_mib) }}</span>
+              </button>
+            </div>
+          </Teleport>
         </div>
-      </template>
+      </div>
 
-      <template v-else>
-        <ProvisionSteps id="provision-steps" :steps="provisionSteps" />
+      <p v-if="managedError" class="managed-agent-error">{{ managedError }}</p>
 
-        <p v-if="managedError" class="managed-agent-error">{{ managedError }}</p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="closeManagedModal">Cancel</button>
+        <button
+          id="create-managed-agent-btn"
+          class="p-button--positive is-dense"
+          type="button"
+          :disabled="!managedName.trim() || !selectedFlavor"
+          @click="submitManagedAgent"
+        >
+          Create agent
+        </button>
+      </div>
+    </template>
 
-        <div class="modal-actions">
-          <button v-if="managedError" class="p-button--base is-dense" type="button" @click="resetManagedForm">Try again</button>
-          <button class="p-button--base is-dense" type="button" @click="closeManagedModal">{{ provisionDone || managedError ? 'Close' : 'Cancel' }}</button>
-        </div>
-      </template>
-    </div>
-  </div>
+    <template v-else>
+      <ProvisionSteps id="provision-steps" :steps="provisionSteps" />
+
+      <p v-if="managedError" class="managed-agent-error">{{ managedError }}</p>
+
+      <div class="modal-actions">
+        <button v-if="managedError" class="p-button--base is-dense" type="button" @click="resetManagedForm">Try again</button>
+        <button class="p-button--base is-dense" type="button" @click="closeManagedModal">{{ provisionDone || managedError ? 'Close' : 'Cancel' }}</button>
+      </div>
+    </template>
+  </AppModal>
 </template>
 
 <script setup>
+import AppModal from '../ui/AppModal.vue';
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import {
   rotateInstallToken, getAgentFlavors, provisionLxdAgent,

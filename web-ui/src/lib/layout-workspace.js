@@ -1,9 +1,10 @@
-import { inject, provide } from 'vue';
+import { inject, provide, ref } from 'vue';
 import {
   findPane, findTab, splitPane, removeTabFromPane, removePane, moveTab as moveTabInTree, setSizes,
 } from './pane-layout.js';
 
 const LAYOUT_WORKSPACE = Symbol('layoutWorkspace');
+const PANE_FOCUS = Symbol('paneFocus');
 
 const OPERATIONS = [
   'openTab', 'splitPaneWithTab', 'moveTab', 'moveTabToNewSplit', 'closeTab', 'closePane', 'setActiveTab', 'resizeSplit', 'updateTab',
@@ -15,6 +16,11 @@ export function operationsOf(source) {
 
 export function provideLayoutWorkspace(workspace) {
   provide(LAYOUT_WORKSPACE, workspace);
+  provide(PANE_FOCUS, ref(null));
+}
+
+export function usePaneFocus() {
+  return inject(PANE_FOCUS, ref(null));
 }
 
 export function useLayoutWorkspace() {

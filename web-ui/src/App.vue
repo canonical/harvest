@@ -5,7 +5,7 @@
 
   <template v-else-if="auth.isLoggedIn">
     <div class="l-application">
-      <div class="l-navigation-bar">
+      <div class="l-navigation-bar" role="banner">
         <div class="p-panel is-dark nav-panel">
           <div class="p-panel__header">
             <a class="p-panel__logo nav-logo" href="#">
@@ -168,50 +168,47 @@
       </main>
     </div>
 
-    <div v-if="showCreateProject" class="modal" @click.self="showCreateProject = false">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="showCreateProject = false">✕</button>
-        <h3>New project</h3>
-        <div class="form-group">
-          <label for="new-proj-name">Name</label>
-          <input id="new-proj-name" v-model="newProjectName" type="text" placeholder="Project name" />
-        </div>
-        <div class="form-group">
-          <label>Description</label>
-          <input v-model="newProjectDesc" type="text" placeholder="Optional description" />
-        </div>
-        <p v-if="createProjectError" class="auth-error">{{ createProjectError }}</p>
-        <button
-          class="p-button--positive is-dense"
-          type="button"
-          :disabled="!newProjectName || creatingProject"
-          @click="submitCreateProject"
-        >Create</button>
+    <AppModal v-if="showCreateProject" @close="showCreateProject = false">
+      <h2>New project</h2>
+      <div class="form-group">
+        <label for="new-proj-name">Name</label>
+        <input id="new-proj-name" v-model="newProjectName" type="text" placeholder="Project name" />
       </div>
-    </div>
+      <div class="form-group">
+        <label>Description</label>
+        <input v-model="newProjectDesc" type="text" placeholder="Optional description" />
+      </div>
+      <p v-if="createProjectError" class="auth-error">{{ createProjectError }}</p>
+      <button
+        class="p-button--positive is-dense"
+        type="button"
+        :disabled="!newProjectName || creatingProject"
+        @click="submitCreateProject"
+      >Create</button>
+    </AppModal>
 
-    <div v-if="auth.apiKeyRequired && !auth.apiKeyDismissed && route.path !== '/settings'" class="modal">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="auth.apiKeyDismissed = true" style="display:none"></button>
-        <h3>API key required</h3>
-        <p class="modal-lede">
-          <template v-if="auth.apiKeyProviderName">An API key is required for <strong>{{ auth.apiKeyProviderName }}</strong>.</template>
-          <template v-else>An API key is required.</template>
-          Please go to <strong>Settings</strong> to add your API key.
-        </p>
-        <div class="modal-actions">
-          <button class="p-button--positive is-dense" type="button" @click="goToSettings">Go to Settings</button>
-        </div>
+    <AppModal v-if="auth.apiKeyRequired && !auth.apiKeyDismissed && route.path !== '/settings'" :dismissible="false">
+      <h2>API key required</h2>
+      <p class="modal-lede">
+        <template v-if="auth.apiKeyProviderName">An API key is required for <strong>{{ auth.apiKeyProviderName }}</strong>.</template>
+        <template v-else>An API key is required.</template>
+        Please go to <strong>Settings</strong> to add your API key.
+      </p>
+      <div class="modal-actions">
+        <button class="p-button--positive is-dense" type="button" @click="goToSettings">Go to Settings</button>
       </div>
-    </div>
+    </AppModal>
   </template>
 
   <template v-else>
     <router-view />
   </template>
+  <ConfirmHost />
+  <ToastHost />
 </template>
 
 <script setup>
+import AppModal from './components/ui/AppModal.vue';
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useAuthStore }    from './stores/auth.js';
@@ -220,6 +217,8 @@ import { useProjectStore } from './stores/project.js';
 import { useLlmStore }    from './stores/llm.js';
 import { useSpaceStore }  from './stores/space.js';
 import ModeNavigation from './components/nav/ModeNavigation.vue';
+import ConfirmHost from './components/ui/ConfirmHost.vue';
+import ToastHost from './components/ui/ToastHost.vue';
 import { usesProjects } from './lib/modes.js';
 import { fetchLlmProviders, fetchLlmUserKeys, fetchProjectCost } from './lib/api.js';
 

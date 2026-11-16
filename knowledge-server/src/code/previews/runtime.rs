@@ -61,6 +61,18 @@ pub async fn stop(env: &CodeEnv, container: &str, preview_id: &str) -> Result<()
     Ok(())
 }
 
+pub async fn log(env: &CodeEnv, container: &str, preview_id: &str) -> Result<String> {
+    read_log(env, container, &Files::of(preview_id)).await
+}
+
+async fn read_log(env: &CodeEnv, container: &str, files: &Files) -> Result<String> {
+    let output = env
+        .lxd
+        .run(container, Command::shell(&format!("tail -c {LOG_CHARS} {} 2>/dev/null", files.log)))
+        .await?;
+    Ok(tail(&output.stdout, LOG_CHARS))
+}
+
 async fn succeeds(env: &CodeEnv, container: &str, script: &str) -> Result<bool> {
     let output = env
         .lxd
@@ -112,12 +124,7 @@ async fn start(env: &CodeEnv, container: &str, ip: &str, port: u16, preview: &Pr
 }
 
 async fn failure(env: &CodeEnv, container: &str, files: &Files, port: u16) -> String {
-    let log = env
-        .lxd
-        .run(container, Command::shell(&format!("tail -c {LOG_CHARS} {} 2>/dev/null", files.log)))
-        .await
-        .map(|o| tail(&o.stdout, LOG_CHARS))
-        .unwrap_or_default();
+    let log = read_log(env, container, files).await.unwrap_or_default();
     let running = succeeds(env, container, &running_probe(files)).await.unwrap_or(false);
     let local_only = listening(env, container, LOOPBACK, port).await.unwrap_or(false);
     let facts = Facts { log: &log, running, local_only };

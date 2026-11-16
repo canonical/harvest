@@ -68,79 +68,74 @@
       <div ref="terminalContainer" class="console-terminal__inner"></div>
     </div>
 
-    <div v-if="showDeleteConfirm" id="console-delete-modal" class="modal" @click.self="showDeleteConfirm = false">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="showDeleteConfirm = false">✕</button>
-        <h3>Delete agent</h3>
-        <p>
-          Delete agent <strong>{{ agent?.hostname || agentId }}</strong>?
-          <template v-if="isLxd"> The LXD container backing this agent will also be deleted.</template>
-          This cannot be undone.
-        </p>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="showDeleteConfirm = false">Cancel</button>
-          <button id="console-delete-confirm-btn" class="p-button--negative is-dense" type="button" :disabled="deleting" @click="confirmDelete">Delete</button>
+    <AppModal v-if="showDeleteConfirm" id="console-delete-modal" @close="showDeleteConfirm = false">
+      <h2>Delete agent</h2>
+      <p>
+        Delete agent <strong>{{ agent?.hostname || agentId }}</strong>?
+        <template v-if="isLxd"> The LXD container backing this agent will also be deleted.</template>
+        This cannot be undone.
+      </p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="showDeleteConfirm = false">Cancel</button>
+        <button id="console-delete-confirm-btn" class="p-button--negative is-dense" type="button" :disabled="deleting" @click="confirmDelete">Delete</button>
+      </div>
+    </AppModal>
+
+    <AppModal v-if="showForwardsManager" id="portforward-manager-modal" size="wide" @close="closeForwardsManager">
+
+      <template v-if="!forwardFormOpen">
+        <div class="page-header portforward-manager-header">
+          <h3>Port Forwards</h3>
+          <button id="portforward-add-btn" class="p-button--positive is-dense" type="button" @click="openAddForwardModal">Add</button>
         </div>
-      </div>
-    </div>
+        <p v-if="portForwardsError" class="console-action-error">{{ portForwardsError }}</p>
+        <table v-if="portForwards.length" class="p-table">
+          <thead>
+            <tr><th>Port</th><th>Route</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="f in portForwards" :key="f.id">
+              <td>{{ f.port }}</td>
+              <td><a :href="f.url" :title="f.url" target="_blank" rel="noopener">/{{ f.route_name }}</a></td>
+              <td class="portforward-row-actions">
+                <template v-if="confirmingDeleteId === f.id">
+                  <span class="portforward-confirm-text">Delete?</span>
+                  <button class="portforward-delete-confirm-btn" type="button" :disabled="deletingForward" @click="performDeleteForward(f)">Yes</button>
+                  <button class="portforward-delete-cancel-btn" type="button" @click="confirmingDeleteId = null">No</button>
+                </template>
+                <template v-else>
+                  <button class="portforward-edit-btn" type="button" @click="openEditForwardModal(f)">Edit</button>
+                  <button class="portforward-delete-btn" type="button" @click="confirmingDeleteId = f.id">Delete</button>
+                </template>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-else class="portforward-empty">No port forwards yet.</p>
+      </template>
 
-    <div v-if="showForwardsManager" id="portforward-manager-modal" class="modal" @click.self="closeForwardsManager">
-      <div class="modal-content modal-content--wide">
-        <button class="modal-close" type="button" @click="closeForwardsManager">✕</button>
-
-        <template v-if="!forwardFormOpen">
-          <div class="page-header portforward-manager-header">
-            <h3>Port Forwards</h3>
-            <button id="portforward-add-btn" class="p-button--positive is-dense" type="button" @click="openAddForwardModal">Add</button>
-          </div>
-          <p v-if="portForwardsError" class="console-action-error">{{ portForwardsError }}</p>
-          <table v-if="portForwards.length" class="p-table">
-            <thead>
-              <tr><th>Port</th><th>Route</th><th></th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="f in portForwards" :key="f.id">
-                <td>{{ f.port }}</td>
-                <td><a :href="f.url" :title="f.url" target="_blank" rel="noopener">/{{ f.route_name }}</a></td>
-                <td class="portforward-row-actions">
-                  <template v-if="confirmingDeleteId === f.id">
-                    <span class="portforward-confirm-text">Delete?</span>
-                    <button class="portforward-delete-confirm-btn" type="button" :disabled="deletingForward" @click="performDeleteForward(f)">Yes</button>
-                    <button class="portforward-delete-cancel-btn" type="button" @click="confirmingDeleteId = null">No</button>
-                  </template>
-                  <template v-else>
-                    <button class="portforward-edit-btn" type="button" @click="openEditForwardModal(f)">Edit</button>
-                    <button class="portforward-delete-btn" type="button" @click="confirmingDeleteId = f.id">Delete</button>
-                  </template>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-else class="portforward-empty">No port forwards yet.</p>
-        </template>
-
-        <template v-else>
-          <h3>{{ editingForward ? 'Edit port forward' : 'Add port forward' }}</h3>
-          <label>
-            Route name
-            <input id="portforward-route-name-input" v-model="forwardForm.routeName" type="text" />
-          </label>
-          <label>
-            Port
-            <input id="portforward-port-input" v-model.number="forwardForm.port" type="number" min="1" max="65535" />
-          </label>
-          <p v-if="forwardFormError" class="console-action-error">{{ forwardFormError }}</p>
-          <div class="modal-actions">
-            <button class="p-button--base is-dense" type="button" @click="forwardFormOpen = false">Cancel</button>
-            <button id="portforward-save-btn" class="p-button--positive is-dense" type="button" :disabled="savingForward" @click="saveForward">Save</button>
-          </div>
-        </template>
-      </div>
-    </div>
+      <template v-else>
+        <h3>{{ editingForward ? 'Edit port forward' : 'Add port forward' }}</h3>
+        <label>
+          Route name
+          <input id="portforward-route-name-input" v-model="forwardForm.routeName" type="text" />
+        </label>
+        <label>
+          Port
+          <input id="portforward-port-input" v-model.number="forwardForm.port" type="number" min="1" max="65535" />
+        </label>
+        <p v-if="forwardFormError" class="console-action-error">{{ forwardFormError }}</p>
+        <div class="modal-actions">
+          <button class="p-button--base is-dense" type="button" @click="forwardFormOpen = false">Cancel</button>
+          <button id="portforward-save-btn" class="p-button--positive is-dense" type="button" :disabled="savingForward" @click="saveForward">Save</button>
+        </div>
+      </template>
+    </AppModal>
   </div>
 </template>
 
 <script setup>
+import AppModal from '../components/ui/AppModal.vue';
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { Terminal } from '@xterm/xterm';

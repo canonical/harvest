@@ -77,6 +77,50 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+async fn session_container(env: &CodeEnv, preview: &Preview) -> Result<String, Response> {
+    sessions::active_container(env, &preview.session_id)
+        .await
+        .map_err(|e| failure(StatusCode::CONFLICT, e.to_string()))
+}
+
+pub async fn restart(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<CodeState>>,
+    Path(preview_id): Path<String>,
+) -> Reply {
+    let env = env(&state)?;
+    let preview = owned_preview(env, &user, &preview_id).await?;
+    let container = session_container(env, &preview).await?;
+    super::apply(env, &container, &preview)
+        .await
+        .map_err(|e| failure(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
+    super::keep(&env.db, &preview_id).await.map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub async fn log(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<CodeState>>,
+    Path(preview_id): Path<String>,
+) -> Reply {
+    let env = env(&state)?;
+    let preview = owned_preview(env, &user, &preview_id).await?;
+    let container = session_container(env, &preview).await?;
+    let log = super::runtime::log(env, &container, &preview_id).await.map_err(internal)?;
+    Ok(Json(json!({ "log": log })).into_response())
+}
+
+pub async fn keep(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<CodeState>>,
+    Path(preview_id): Path<String>,
+) -> Reply {
+    let env = env(&state)?;
+    owned_preview(env, &user, &preview_id).await?;
+    super::keep(&env.db, &preview_id).await.map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
 #[derive(Deserialize)]
 pub struct ShareBody {
     pub audience: String,

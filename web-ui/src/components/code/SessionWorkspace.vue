@@ -9,6 +9,7 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue';
 import PaneSplit from '../layout/PaneSplit.vue';
 import SessionTab from './SessionTab.vue';
+import SessionTabMenu from './SessionTabMenu.vue';
 import { provideLayoutWorkspace } from '../../lib/layout-workspace.js';
 import { useSessionWorkspace } from '../../composables/useSessionWorkspace.js';
 
@@ -17,7 +18,7 @@ const props = defineProps({
   details: { type: Object, required: true },
 });
 
-const workspace = useSessionWorkspace(props.sessionId, SessionTab);
+const workspace = useSessionWorkspace(props.sessionId, { content: SessionTab, tabMenu: SessionTabMenu });
 const error = ref('');
 provideLayoutWorkspace(workspace);
 

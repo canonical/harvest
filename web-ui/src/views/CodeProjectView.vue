@@ -4,14 +4,17 @@
     <template v-if="project">
       <div class="settings-header">
         <router-link to="/code" class="code-back">Code</router-link>
-        <h2>{{ project.name }}</h2>
+        <h1>{{ project.name }}</h1>
         <p class="u-text--muted">{{ project.url }}</p>
-        <p class="u-text--muted">Code graph: {{ indexText }}</p>
+        <span class="p-chip project-index" :title="`Code graph: ${indexText}`">
+          <span class="p-chip__lead">Code graph</span>
+          <span class="p-chip__value">{{ indexText }}</span>
+        </span>
       </div>
 
       <section class="settings-section">
         <div class="settings-section__heading">
-          <h3>Start a session</h3>
+          <h2>Start a session</h2>
           <p class="settings-section__description">Each session gets its own container and branch. Opening a branch you already work on brings you back to that session.</p>
         </div>
         <form class="code-session-form" @submit.prevent="start">
@@ -30,7 +33,7 @@
 
       <section class="settings-section">
         <div class="settings-section__heading">
-          <h3>Your sessions</h3>
+          <h2>Your sessions</h2>
         </div>
         <p v-if="!sessions.length" class="u-text--muted">No sessions yet.</p>
         <ul class="code-projects">
@@ -46,16 +49,24 @@
         </ul>
       </section>
 
-      <section class="settings-section">
-        <div class="settings-section__heading">
-          <h3>Setup script</h3>
-          <p class="settings-section__description">Runs from the repository root when Harvest prepares containers. A <code>.harvest/setup.sh</code> in the repository takes precedence. Leave it empty and the agent drafts one during your first session.</p>
+      <details class="settings-section container-setup" :open="image?.status === 'failed'">
+        <summary>
+          <span class="container-setup__title">Container setup</span>
+          <span class="container-setup__status" :class="`container-setup__status--${image?.status ?? 'none'}`">{{ imageStatus }}</span>
+        </summary>
+        <p class="settings-section__description">Runs from the repository root when Harvest prepares containers. A <code>.harvest/setup.sh</code> in the repository takes precedence. Leave it empty and the agent drafts one during your first session.</p>
+        <div v-if="image?.status === 'failed' && image.log" class="p-notification--negative">
+          <div class="p-notification__content">
+            <p class="p-notification__message">The last setup failed.</p>
+          </div>
+          <div class="p-notification__actions">
+            <button class="p-button--base is-dense u-no-margin--bottom" type="button" @click="showLog = !showLog">{{ showLog ? 'Hide log' : 'Show log' }}</button>
+          </div>
+          <pre v-if="showLog" class="code-log">{{ image.log }}</pre>
         </div>
-        <p class="u-text--muted">Containers: {{ imageStatus }}</p>
-        <pre v-if="image?.status === 'failed' && image.log" class="code-log">{{ image.log }}</pre>
         <textarea v-model="setupScript" class="code-setup" rows="8" spellcheck="false" aria-label="Setup script" placeholder="apt-get install -y …&#10;npm ci" />
-        <button class="p-button--positive is-dense" type="button" :disabled="!setupChanged || saving" @click="saveSetup">Save</button>
-      </section>
+        <button class="p-button--positive is-dense" type="button" :disabled="!setupChanged || saving" @click="saveSetup">{{ saving ? 'Saving…' : 'Save' }}</button>
+      </details>
     </template>
   </div>
 </template>
@@ -64,6 +75,7 @@
 import { ref, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { getCodeProject, indexSummary, openCodeSession, saveSetupScript } from '../lib/code-api.js';
+import { showToast } from '../composables/useToasts.js';
 
 const props = defineProps({ id: { type: String, required: true } });
 const router = useRouter();
@@ -78,6 +90,7 @@ const baseBranch = ref('');
 const setupScript = ref('');
 const starting = ref(false);
 const saving = ref(false);
+const showLog = ref(false);
 const error = ref('');
 
 const baseChoices = computed(() => {
@@ -88,10 +101,10 @@ const baseChoices = computed(() => {
 const indexText = computed(() => indexSummary(index.value));
 const setupChanged = computed(() => setupScript.value !== (project.value?.setup_script ?? ''));
 const imageStatus = computed(() => ({
-  ready: 'ready',
-  building: 'being prepared',
-  failed: 'the last setup failed',
-}[image.value?.status] ?? 'not prepared yet'));
+  ready: 'Ready',
+  building: 'Being prepared…',
+  failed: 'Setup failed',
+}[image.value?.status] ?? 'Not prepared yet'));
 
 async function load() {
   error.value = '';
@@ -128,6 +141,7 @@ async function saveSetup() {
     await saveSetupScript(props.id, setupScript.value);
     project.value = { ...project.value, setup_script: setupScript.value.trim() || null };
     setupScript.value = project.value.setup_script ?? '';
+    showToast({ message: 'Setup script saved; new containers will use it' });
   } catch (e) {
     error.value = e.message;
   } finally {

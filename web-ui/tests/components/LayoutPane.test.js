@@ -51,13 +51,13 @@ describe('layout pane', () => {
     await flushPromises();
     expect(createTabFor).toHaveBeenCalledWith('chat', expect.objectContaining({ paneId: tree.value.root.id }));
     expect(tree.value.root.tabs).toHaveLength(2);
-    expect(wrapper.find('.tab-kind-menu').exists()).toBe(false);
+    expect(wrapper.find('.app-menu').exists()).toBe(false);
   });
 
   it('asks which kind of tab to open when there are several', async () => {
     const { wrapper, tree } = mountWith(THREE_KINDS);
     await wrapper.find('[aria-label="New tab"]').trigger('click');
-    const options = wrapper.findAll('.tab-kind-menu__item');
+    const options = wrapper.findAll('.app-menu__item');
     expect(options.map(o => o.text())).toEqual(['Chat', 'Changes', 'Preview']);
     await options[2].trigger('click');
     await flushPromises();
@@ -67,7 +67,7 @@ describe('layout pane', () => {
   it('splits with the chosen kind of tab', async () => {
     const { wrapper, tree } = mountWith(THREE_KINDS);
     await wrapper.find('[aria-label="Split right"]').trigger('click');
-    await wrapper.findAll('.tab-kind-menu__item')[1].trigger('click');
+    await wrapper.findAll('.app-menu__item')[1].trigger('click');
     await flushPromises();
     expect(tree.value.root.type).toBe('split');
     expect(tree.value.root.children[1].tabs[0].kind).toBe('changes');

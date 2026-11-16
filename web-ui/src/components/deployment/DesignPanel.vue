@@ -131,78 +131,76 @@
       </div>
     </template>
 
-    <div v-if="proposeOpen" class="modal" @click.self="closePropose">
-      <div class="modal-content modal-content--xwide" data-testid="design-prompt-panel">
-        <button class="modal-close" type="button" @click="closePropose">✕</button>
-        <h3>Propose a change</h3>
-        <p class="modal-lede">Describe the change you'd like to propose for this design document.</p>
+    <AppModal v-if="proposeOpen" data-testid="design-prompt-panel" size="xwide" @close="closePropose">
+      <h2>Propose a change</h2>
+      <p class="modal-lede">Describe the change you'd like to propose for this design document.</p>
 
-        <div class="design-panel__propose-grid">
-          <div class="form-group">
-            <label for="design-prompt">Change description</label>
-            <textarea
-              id="design-prompt"
-              v-model="promptText"
-              rows="10"
-              data-testid="design-prompt"
-              placeholder="Describe what you'd like to change"
-            />
-          </div>
-
-          <div class="form-group">
-            <label>Context artifacts</label>
-            <p class="p-text--small u-text--muted">
-              Artifacts already used to generate this design are pre-selected and locked.
-              Select additional artifacts to add as context for this change.
-            </p>
-            <div v-if="artifactsLoading" class="design-setup__loading">
-              <LoadingSpinner text="Loading artifacts…" />
-            </div>
-            <div v-else-if="!userProvidedArtifacts.length" class="design-setup__empty">
-              <p class="u-text--muted">This project has no user-provided artifacts yet.</p>
-            </div>
-            <ul v-else class="p-list--divided design-setup__list design-setup__list--modal">
-              <li v-for="a in userProvidedArtifacts" :key="a.id" class="p-list__item design-setup__item">
-                <div class="p-checkbox design-setup__item-checkbox">
-                  <input
-                    type="checkbox"
-                    class="p-checkbox__input"
-                    :id="`propose-artifact-checkbox-${a.id}`"
-                    :value="a.id"
-                    v-model="selectedArtifactIds"
-                    :data-testid="`propose-artifact-checkbox-${a.id}`"
-                    :disabled="usedArtifactIds.has(a.id)"
-                  />
-                  <label class="p-checkbox__label" :for="`propose-artifact-checkbox-${a.id}`"></label>
-                </div>
-                <label class="design-setup__item-title" :for="`propose-artifact-checkbox-${a.id}`">{{ a.title }}</label>
-                <span class="artifact-kind-badge" :class="kindBadgeClass(a.kind)">{{ kindLabel(a.kind) }}</span>
-              </li>
-            </ul>
-          </div>
+      <div class="design-panel__propose-grid">
+        <div class="form-group">
+          <label for="design-prompt">Change description</label>
+          <textarea
+            id="design-prompt"
+            v-model="promptText"
+            rows="10"
+            data-testid="design-prompt"
+            placeholder="Describe what you'd like to change"
+          />
         </div>
 
-        <div v-if="error" class="p-notification--negative">
-          <div class="p-notification__content">
-            <p class="p-notification__message">{{ error }}</p>
+        <div class="form-group">
+          <label>Context artifacts</label>
+          <p class="p-text--small u-text--muted">
+            Artifacts already used to generate this design are pre-selected and locked.
+            Select additional artifacts to add as context for this change.
+          </p>
+          <div v-if="artifactsLoading" class="design-setup__loading">
+            <LoadingSpinner text="Loading artifacts…" />
           </div>
-        </div>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="closePropose">Cancel</button>
-          <button
-            class="p-button--positive is-dense"
-            type="button"
-            data-testid="propose-design-btn"
-            :disabled="!promptText.trim() || proposing"
-            @click="propose"
-          >{{ proposing ? 'Proposing…' : 'Propose' }}</button>
+          <div v-else-if="!userProvidedArtifacts.length" class="design-setup__empty">
+            <p class="u-text--muted">This project has no user-provided artifacts yet.</p>
+          </div>
+          <ul v-else class="p-list--divided design-setup__list design-setup__list--modal">
+            <li v-for="a in userProvidedArtifacts" :key="a.id" class="p-list__item design-setup__item">
+              <div class="p-checkbox design-setup__item-checkbox">
+                <input
+                  type="checkbox"
+                  class="p-checkbox__input"
+                  :id="`propose-artifact-checkbox-${a.id}`"
+                  :value="a.id"
+                  v-model="selectedArtifactIds"
+                  :data-testid="`propose-artifact-checkbox-${a.id}`"
+                  :disabled="usedArtifactIds.has(a.id)"
+                />
+                <label class="p-checkbox__label" :for="`propose-artifact-checkbox-${a.id}`"></label>
+              </div>
+              <label class="design-setup__item-title" :for="`propose-artifact-checkbox-${a.id}`">{{ a.title }}</label>
+              <span class="artifact-kind-badge" :class="kindBadgeClass(a.kind)">{{ kindLabel(a.kind) }}</span>
+            </li>
+          </ul>
         </div>
       </div>
-    </div>
+
+      <div v-if="error" class="p-notification--negative">
+        <div class="p-notification__content">
+          <p class="p-notification__message">{{ error }}</p>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="closePropose">Cancel</button>
+        <button
+          class="p-button--positive is-dense"
+          type="button"
+          data-testid="propose-design-btn"
+          :disabled="!promptText.trim() || proposing"
+          @click="propose"
+        >{{ proposing ? 'Proposing…' : 'Propose' }}</button>
+      </div>
+    </AppModal>
   </div>
 </template>
 
 <script setup>
+import AppModal from '../ui/AppModal.vue';
 import { ref, computed, watch, onBeforeUnmount, nextTick } from 'vue';
 import {
   getArtifact, updateDesignContent, proposeDesignChangeStream, artifactDownloadUrl, designPdfUrl,

@@ -33,22 +33,19 @@
       </div>
     </section>
 
-    <div v-if="deletingAgent" class="modal" @click.self="cancelDelete">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="cancelDelete">✕</button>
-        <h3>Delete agent</h3>
-        <p>
-          Delete agent <strong>{{ deletingAgent.hostname || deletingAgent.id }}</strong>?
-          <template v-if="deletingAgent.online"> This agent is currently <strong>online</strong>.</template>
-          <template v-if="deletingAgent.provider === 'lxd'"> The LXD container backing this agent will also be deleted.</template>
-          This cannot be undone.
-        </p>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="cancelDelete">Cancel</button>
-          <button class="p-button--negative is-dense" type="button" :disabled="deleting" @click="confirmDelete">Delete</button>
-        </div>
+    <AppModal v-if="deletingAgent" @close="cancelDelete">
+      <h2>Delete agent</h2>
+      <p>
+        Delete agent <strong>{{ deletingAgent.hostname || deletingAgent.id }}</strong>?
+        <template v-if="deletingAgent.online"> This agent is currently <strong>online</strong>.</template>
+        <template v-if="deletingAgent.provider === 'lxd'"> The LXD container backing this agent will also be deleted.</template>
+        This cannot be undone.
+      </p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="cancelDelete">Cancel</button>
+        <button class="p-button--negative is-dense" type="button" :disabled="deleting" @click="confirmDelete">Delete</button>
       </div>
-    </div>
+    </AppModal>
 
     <footer class="deploy-setup__footer">
       <p class="deploy-setup__footer-hint">You can always add agents on the Agents page.</p>
@@ -63,6 +60,7 @@
 </template>
 
 <script setup>
+import AppModal from '../ui/AppModal.vue';
 import { ref } from 'vue';
 import AgentTable from '../agents/AgentTable.vue';
 import AddAgentButton from '../agents/AddAgentButton.vue';

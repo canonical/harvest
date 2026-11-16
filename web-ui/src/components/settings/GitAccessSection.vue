@@ -68,39 +68,37 @@
       <p v-if="actionError" class="auth-error">{{ actionError }}</p>
     </template>
 
-    <div v-if="accountForm" class="modal" @click.self="accountForm = null">
-      <div class="modal-content">
-        <button class="modal-close" type="button" @click="accountForm = null">✕</button>
-        <h3>{{ accountForm.existing ? 'Update' : 'Add' }} platform account</h3>
-        <div class="form-group">
-          <label for="account-platform">Platform</label>
-          <select id="account-platform" v-model="accountForm.platform" :disabled="accountForm.existing" @change="applyDefaultHost">
-            <option v-for="p in platforms" :key="p.id" :value="p.id">{{ p.label }}</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label for="account-host">Host</label>
-          <input id="account-host" v-model="accountForm.host" type="text" :disabled="accountForm.existing" placeholder="git.example.org" />
-        </div>
-        <div v-if="selectedPlatform?.needs_username" class="form-group">
-          <label for="account-username">Username</label>
-          <input id="account-username" v-model="accountForm.username" type="text" autocomplete="off" />
-        </div>
-        <div class="form-group">
-          <label for="account-secret">{{ secretLabel }}</label>
-          <input id="account-secret" v-model="accountForm.secret" type="password" autocomplete="off" />
-        </div>
-        <p v-if="accountError" class="auth-error">{{ accountError }}</p>
-        <div class="modal-actions">
-          <button class="p-button--base is-dense" type="button" @click="accountForm = null">Cancel</button>
-          <button class="p-button--positive is-dense" type="button" :disabled="!canSaveAccount || busy" @click="submitAccount">Save</button>
-        </div>
+    <AppModal v-if="accountForm" @close="accountForm = null">
+      <h2>{{ accountForm.existing ? 'Update' : 'Add' }} platform account</h2>
+      <div class="form-group">
+        <label for="account-platform">Platform</label>
+        <select id="account-platform" v-model="accountForm.platform" :disabled="accountForm.existing" @change="applyDefaultHost">
+          <option v-for="p in platforms" :key="p.id" :value="p.id">{{ p.label }}</option>
+        </select>
       </div>
-    </div>
+      <div class="form-group">
+        <label for="account-host">Host</label>
+        <input id="account-host" v-model="accountForm.host" type="text" :disabled="accountForm.existing" placeholder="git.example.org" />
+      </div>
+      <div v-if="selectedPlatform?.needs_username" class="form-group">
+        <label for="account-username">Username</label>
+        <input id="account-username" v-model="accountForm.username" type="text" autocomplete="off" />
+      </div>
+      <div class="form-group">
+        <label for="account-secret">{{ secretLabel }}</label>
+        <input id="account-secret" v-model="accountForm.secret" type="password" autocomplete="off" />
+      </div>
+      <p v-if="accountError" class="auth-error">{{ accountError }}</p>
+      <div class="modal-actions">
+        <button class="p-button--base is-dense" type="button" @click="accountForm = null">Cancel</button>
+        <button class="p-button--positive is-dense" type="button" :disabled="!canSaveAccount || busy" @click="submitAccount">Save</button>
+      </div>
+    </AppModal>
   </section>
 </template>
 
 <script setup>
+import AppModal from '../ui/AppModal.vue';
 import { computed, onMounted, ref } from 'vue';
 import LoadingSpinner from '../deployment/LoadingSpinner.vue';
 import {
