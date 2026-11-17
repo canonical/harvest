@@ -19,6 +19,15 @@ const send = (method, body) => ({ method, body: JSON.stringify(body) });
 
 export const listCodeProjects = () => codeFetch('/code/projects');
 export const listCodeSessions = () => codeFetch('/code/sessions');
+
+const repositoryUrl = (name, resource, params = {}) => {
+  const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value));
+  return `/code/repositories/${encodeURIComponent(name)}/${resource}${query.size ? `?${query}` : ''}`;
+};
+export const listRepositoryVersions = (name) => codeFetch(repositoryUrl(name, 'versions'));
+export const listRepositoryTree = (name, version, path) => codeFetch(repositoryUrl(name, 'tree', { version, path }));
+export const getRepositoryFile = (name, version, path) => codeFetch(repositoryUrl(name, 'file', { version, path }));
+export const repositoryRawUrl = (name, version, path) => repositoryUrl(name, 'raw', { version, path });
 export const openCodeProject = (url) => codeFetch('/code/projects', send('POST', { url }));
 export const getCodeProject = (id) => codeFetch(`/code/projects/${id}`);
 export const saveSetupScript = (id, script) => codeFetch(`/code/projects/${id}/setup`, send('PUT', { script }));

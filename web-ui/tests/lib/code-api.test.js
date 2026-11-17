@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { listCodeSessions, openCodeSession, closeCodeSession, isOpen, suggestBranch, proposeChange, changeRequestName, indexSummary } from '../../src/lib/code-api.js';
+import { listCodeSessions, listRepositoryTree, getRepositoryFile, repositoryRawUrl, listRepositoryVersions, openCodeSession, closeCodeSession, isOpen, suggestBranch, proposeChange, changeRequestName, indexSummary } from '../../src/lib/code-api.js';
 import { classifyDiffLines } from '../../src/lib/diff-lines.js';
 
 function respond(status, body) {
@@ -22,6 +22,19 @@ describe('code api', () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockReturnValue(respond(200, [{ id: 's1' }]));
     expect(await listCodeSessions()).toEqual([{ id: 's1' }]);
     expect(fetch.mock.calls[0][0]).toBe('/code/sessions');
+  });
+
+  it('addresses repository resources by name, version and path', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockReturnValue(respond(200, []));
+    await listRepositoryVersions('my repo');
+    await listRepositoryTree('flask', 'main', '');
+    await getRepositoryFile('flask', '2.0/x', 'src/a b.py');
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      '/code/repositories/my%20repo/versions',
+      '/code/repositories/flask/tree?version=main',
+      '/code/repositories/flask/file?version=2.0%2Fx&path=src%2Fa+b.py',
+    ]);
+    expect(repositoryRawUrl('flask', 'main', 'logo.png')).toBe('/code/repositories/flask/raw?version=main&path=logo.png');
   });
 
   it('surfaces the server error message', async () => {
