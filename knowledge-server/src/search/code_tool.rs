@@ -81,6 +81,15 @@ impl SearchCodeTool {
         scope: &Scope,
         budget: Option<u64>,
     ) -> Result<ToolOutput> {
+        Ok(self.search_with_evidence(question, scope, budget).await?.1)
+    }
+
+    async fn search_with_evidence(
+        &self,
+        question: &str,
+        scope: &Scope,
+        budget: Option<u64>,
+    ) -> Result<(usize, ToolOutput)> {
         let mut query = self.service.query(question, &scope.repo, &scope.version);
         if let Some(budget) = budget {
             query.budget = harvest_search::TokenBudget((budget as usize).clamp(1_000, 32_000));
@@ -91,7 +100,10 @@ impl SearchCodeTool {
             .await?;
         let index = self.service.registry.get(scope);
         let view = search_view(index.as_deref(), &query, &result);
-        Ok(Self::with_view(render(&query, &result), view))
+        Ok((
+            result.evidence.len(),
+            Self::with_view(render(&query, &result), view),
+        ))
     }
 
     async fn read_focus(&self, scope: &Scope, focus: &[String]) -> Result<ToolOutput> {
@@ -281,8 +293,12 @@ impl Tool for SearchCodeTool {
             );
             return None;
         }
-        match self.search(question, &scope, None).await {
-            Ok(result) => Some((
+        match self.search_with_evidence(question, &scope, None).await {
+            Ok((0, _)) => {
+                tracing::info!(?scope, "the first code search found nothing; the agent will search itself");
+                None
+            }
+            Ok((_, result)) => Some((
                 json!({ "query": question, "repo": scope.repo, "version": scope.version }),
                 result,
             )),
