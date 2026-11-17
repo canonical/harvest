@@ -51,6 +51,7 @@ pub async fn tick(env: &CodeEnv, graph: &GraphState) -> Result<()> {
     index::refresh_due(env, graph).await?;
     super::previews::clones::reap(env).await?;
     super::previews::reap_expired(env).await?;
+    super::jobs::shell::sweep(env).await?;
     super::change_requests::refresh(env).await?;
     for id in sessions::idle_sessions(env).await? {
         sessions::close(env, &id, CloseReason::Idle).await?;

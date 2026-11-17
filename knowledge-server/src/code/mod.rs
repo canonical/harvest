@@ -6,6 +6,7 @@ pub mod freshness;
 pub mod handlers;
 pub mod images;
 pub mod index;
+pub mod jobs;
 pub mod keeper;
 pub mod overlay;
 pub mod previews;
