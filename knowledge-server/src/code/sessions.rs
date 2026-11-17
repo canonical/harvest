@@ -5,6 +5,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use harvest_db::Db;
+
 use super::chats;
 use super::images::{self, quote};
 use super::projects::{self, CodeProject};
@@ -12,6 +14,7 @@ use super::repo_git;
 use super::{short_id, CodeEnv, WORKSPACE};
 
 const IMAGE_WAIT: Duration = Duration::from_secs(40 * 60);
+use crate::access::repos::RepoScope;
 use crate::lxd::containers::{Command, Source};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +84,28 @@ pub async fn list_for(env: &CodeEnv, project_id: &str, user_id: &str) -> Result<
             json!({ "pid": project_id, "uid": user_id }),
         )
         .await?)
+}
+
+pub async fn list_for_user(db: &Db, scope: &RepoScope, user_id: &str) -> Result<Vec<Value>> {
+    let mut params = json!({ "uid": user_id });
+    scope.write_into(&mut params);
+    let sql = format!(
+        "SELECT s.id, s.project_id, r.name AS project_name, s.branch, s.base_branch, s.status,
+                s.close_reason, s.error, s.created_at, s.last_active_at,
+                CASE
+                    WHEN EXISTS (SELECT 1 FROM paused_turns t JOIN conversations c ON c.id = t.conv_id
+                                 WHERE c.code_session_id = s.id) THEN 'waiting'
+                    WHEN EXISTS (SELECT 1 FROM active_turns t JOIN conversations c ON c.id = t.conv_id
+                                 WHERE c.code_session_id = s.id) THEN 'working'
+                END AS activity
+         FROM code_sessions s
+         JOIN code_projects p ON p.id = s.project_id
+         JOIN repositories r ON r.id = p.repository_id
+         WHERE s.user_id = $uid AND {}
+         ORDER BY s.last_active_at DESC",
+        RepoScope::sql_condition("r.name"),
+    );
+    Ok(db.query(&sql, params).await?)
 }
 
 pub fn is_valid_branch(name: &str) -> bool {

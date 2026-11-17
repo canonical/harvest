@@ -82,6 +82,16 @@ pub async fn list_projects(
     Ok(Json(rows).into_response())
 }
 
+pub async fn list_sessions(
+    Extension(user): Extension<Claims>,
+    State(state): State<Arc<CodeState>>,
+) -> Reply {
+    let env = env(&state)?;
+    let scope = scope(env, &user).await;
+    let rows = sessions::list_for_user(&env.db, &scope, &user.sub).await.map_err(internal)?;
+    Ok(Json(rows).into_response())
+}
+
 #[derive(Deserialize)]
 pub struct OpenBody {
     pub url: String,

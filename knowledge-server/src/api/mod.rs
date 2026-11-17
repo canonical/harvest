@@ -599,6 +599,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
             .route("/code/jobs/:id", get(jobs::get))
             .route("/code/jobs/:id/stop", post(jobs::stop))
             .route("/code/projects/:id/sessions", post(code::open_session))
+            .route("/code/sessions", get(code::list_sessions))
             .route(
                 "/code/sessions/:id",
                 get(code::get_session).delete(code::close_session),
