@@ -149,6 +149,7 @@ for name, cfg in sorted(providers.items(), key=sort_key):
     expose_to_ui = str(cfg.get("expose-to-ui", "true")).strip().lower() not in ("false", "0", "no", "")
     display_name = cfg.get("display-name", "")
     models       = [m.strip() for m in str(cfg.get("models", "")).split(",") if m.strip()]
+    caching      = str(cfg.get("enable-prompt-caching", "")).strip().lower()
 
     print("")
     print("[[llm]]")
@@ -162,6 +163,8 @@ for name, cfg in sorted(providers.items(), key=sort_key):
     print("priority     = %s" % priority)
     if provider == "openai-compatible" and base_url:
         print("base_url     = \"%s\"" % base_url)
+    if provider == "openai-compatible" and caching in ("true", "false"):
+        print("enable_prompt_caching = %s" % caching)
     print("id           = \"%s\"" % name)
     print("expose_to_ui = %s" % ("true" if expose_to_ui else "false"))
     if display_name:

@@ -154,6 +154,8 @@ struct LlmProviderUpsertArgs {
     expose_to_ui: Option<bool>,
     #[arg(long)]
     enabled: Option<bool>,
+    #[arg(long)]
+    enable_prompt_caching: Option<bool>,
     #[command(flatten)]
     apply: ApplyArgs,
 }
@@ -187,6 +189,8 @@ struct LlmProviderUpdateArgs {
     expose_to_ui: Option<bool>,
     #[arg(long)]
     enabled: Option<bool>,
+    #[arg(long)]
+    enable_prompt_caching: Option<bool>,
     #[command(flatten)]
     apply: ApplyArgs,
 }
@@ -829,10 +833,28 @@ struct LlmProviderConfig {
     expose_to_ui: bool,
     #[serde(default = "default_true")]
     enabled: bool,
+    #[serde(rename = "enable-prompt-caching", default, deserialize_with = "optional_flag")]
+    prompt_caching: Option<bool>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn optional_flag<'de, D>(deserializer: D) -> std::result::Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(match value {
+        Some(serde_json::Value::Bool(flag)) => Some(flag),
+        Some(serde_json::Value::String(text)) => match text.trim().to_lowercase().as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
 #[derive(Serialize)]
@@ -1936,6 +1958,7 @@ fn run_llm_provider_add(args: LlmProviderUpsertArgs) -> Result<()> {
         models: args.models.unwrap_or_default(),
         expose_to_ui: args.expose_to_ui.unwrap_or(true),
         enabled: args.enabled.unwrap_or(true),
+        prompt_caching: args.enable_prompt_caching,
     };
     providers.insert(id.clone(), cfg.clone());
     validate_llm_providers(&providers)?;
@@ -1987,6 +2010,9 @@ fn run_llm_provider_update(args: LlmProviderUpdateArgs) -> Result<()> {
     }
     if let Some(expose) = args.expose_to_ui {
         cfg.expose_to_ui = expose;
+    }
+    if let Some(caching) = args.enable_prompt_caching {
+        cfg.prompt_caching = Some(caching);
     }
     if let Some(enabled) = args.enabled {
         cfg.enabled = enabled;
@@ -2765,6 +2791,10 @@ fn llm_provider_to_settings(id: &str, cfg: &LlmProviderConfig) -> Vec<(String, S
             cfg.expose_to_ui.to_string(),
         ),
         (format!("llm.{id}.enabled"), cfg.enabled.to_string()),
+        (
+            format!("llm.{id}.enable-prompt-caching"),
+            cfg.prompt_caching.map(|flag| flag.to_string()).unwrap_or_default(),
+        ),
     ]
 }
 
@@ -2782,6 +2812,7 @@ fn llm_provider_clear_settings(id: &str) -> Vec<(String, String)> {
         (format!("llm.{id}.models"), String::new()),
         (format!("llm.{id}.expose-to-ui"), String::new()),
         (format!("llm.{id}.enabled"), String::new()),
+        (format!("llm.{id}.enable-prompt-caching"), String::new()),
     ]
 }
 

@@ -919,7 +919,7 @@ pub enum LlmProviderConfig {
         #[serde(default)]
         pricing: Option<PricingConfig>,
         #[serde(default)]
-        enable_prompt_caching: bool,
+        enable_prompt_caching: Option<bool>,
         #[serde(default)]
         max_concurrency: usize,
         #[serde(default)]
@@ -1097,13 +1097,13 @@ impl LlmProviderConfig {
         }
     }
 
-    pub fn enable_prompt_caching(&self) -> bool {
+    pub fn prompt_caching(&self) -> Option<bool> {
         match self {
             Self::OpenAiCompat {
                 enable_prompt_caching,
                 ..
             } => *enable_prompt_caching,
-            _ => false,
+            _ => None,
         }
     }
 
@@ -1940,7 +1940,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_compat_enable_prompt_caching_defaults_to_false() {
+    fn openai_compat_prompt_caching_is_unset_by_default() {
         let toml = minimal_config(
             r#"
             [[llm]]
@@ -1951,7 +1951,7 @@ mod tests {
         "#,
         );
         let cfg = parse_config(&toml);
-        assert!(!cfg.llm[0].enable_prompt_caching());
+        assert_eq!(cfg.llm[0].prompt_caching(), None);
     }
 
     #[test]
@@ -1967,7 +1967,7 @@ mod tests {
         "#,
         );
         let cfg = parse_config(&toml);
-        assert!(cfg.llm[0].enable_prompt_caching());
+        assert_eq!(cfg.llm[0].prompt_caching(), Some(true));
     }
 
     #[test]

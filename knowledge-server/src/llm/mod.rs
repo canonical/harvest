@@ -468,7 +468,7 @@ fn build_bare_provider(
                 *max_retries,
                 meta,
             )
-            .with_prompt_caching(config.enable_prompt_caching()),
+            .with_prompt_caching(openai_compat::PromptCaching::from_setting(config.prompt_caching())),
         ),
         LlmProviderConfig::Mock {
             model, behaviour, ..
@@ -947,7 +947,7 @@ mod tests {
             models: None,
             user_provided_key: false,
             pricing: None,
-            enable_prompt_caching: false,
+            enable_prompt_caching: Some(false),
             max_concurrency: 0,
             context_window: None,
         }];
@@ -969,7 +969,7 @@ mod tests {
             models: None,
             user_provided_key: false,
             pricing: None,
-            enable_prompt_caching: true,
+            enable_prompt_caching: Some(true),
             max_concurrency: 0,
             context_window: None,
         }];

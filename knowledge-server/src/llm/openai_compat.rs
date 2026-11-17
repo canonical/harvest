@@ -24,7 +24,33 @@ pub struct OpenAiCompatProvider {
     client: Client,
     max_retries: u32,
     meta: ProviderMeta,
-    enable_prompt_caching: bool,
+    prompt_caching: PromptCaching,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PromptCaching {
+    #[default]
+    ForClaudeModels,
+    Always,
+    Never,
+}
+
+impl PromptCaching {
+    pub fn from_setting(setting: Option<bool>) -> Self {
+        match setting {
+            Some(true) => Self::Always,
+            Some(false) => Self::Never,
+            None => Self::ForClaudeModels,
+        }
+    }
+
+    pub fn applies_to(self, model: &str) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+            Self::ForClaudeModels => model.to_lowercase().contains("claude"),
+        }
+    }
 }
 
 impl OpenAiCompatProvider {
@@ -47,17 +73,17 @@ impl OpenAiCompatProvider {
             client,
             max_retries,
             meta,
-            enable_prompt_caching: false,
+            prompt_caching: PromptCaching::default(),
         }
     }
 
-    pub fn with_prompt_caching(mut self, enabled: bool) -> Self {
-        self.enable_prompt_caching = enabled;
+    pub fn with_prompt_caching(mut self, prompt_caching: PromptCaching) -> Self {
+        self.prompt_caching = prompt_caching;
         self
     }
 
-    pub fn prompt_caching_enabled(&self) -> bool {
-        self.enable_prompt_caching
+    pub fn caches_prompts_for(&self, model: &str) -> bool {
+        self.prompt_caching.applies_to(model)
     }
 }
 
@@ -128,12 +154,13 @@ impl LlmProvider for OpenAiCompatProvider {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<LlmResponse> {
+        let model = model.unwrap_or(&self.model);
         let body = build_body(
-            model.unwrap_or(&self.model),
+            model,
             messages,
             tools,
             false,
-            self.enable_prompt_caching,
+            self.caches_prompts_for(model),
             None,
         );
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
@@ -347,12 +374,13 @@ impl OpenAiCompatProvider {
         tools: &[ToolDefinition],
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
+        let model = model.unwrap_or(&self.model);
         let body = build_body(
-            model.unwrap_or(&self.model),
+            model,
             messages,
             tools,
             true,
-            self.enable_prompt_caching,
+            self.caches_prompts_for(model),
             None,
         );
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
@@ -1394,22 +1422,8 @@ mod tests {
         assert_eq!(last[0]["cache_control"]["type"], "ephemeral");
     }
 
-    #[test]
-    fn prompt_caching_disabled_by_default() {
-        let p = OpenAiCompatProvider::new(
-            "http://x".into(),
-            "k".into(),
-            "m".into(),
-            30,
-            0,
-            ProviderMeta::new("a"),
-        );
-        assert!(!p.prompt_caching_enabled());
-    }
-
-    #[test]
-    fn with_prompt_caching_enables_it() {
-        let p = OpenAiCompatProvider::new(
+    fn provider() -> OpenAiCompatProvider {
+        OpenAiCompatProvider::new(
             "http://x".into(),
             "k".into(),
             "m".into(),
@@ -1417,7 +1431,20 @@ mod tests {
             0,
             ProviderMeta::new("a"),
         )
-        .with_prompt_caching(true);
-        assert!(p.prompt_caching_enabled());
+    }
+
+    #[test]
+    fn prompt_caching_defaults_to_claude_models_only() {
+        let p = provider();
+        assert!(p.caches_prompts_for("anthropic/claude-sonnet-5.5"));
+        assert!(!p.caches_prompts_for("openai/gpt-5.3-codex"));
+    }
+
+    #[test]
+    fn an_explicit_setting_overrides_the_model_check() {
+        let always = provider().with_prompt_caching(PromptCaching::from_setting(Some(true)));
+        let never = provider().with_prompt_caching(PromptCaching::from_setting(Some(false)));
+        assert!(always.caches_prompts_for("openai/gpt-5.3-codex"));
+        assert!(!never.caches_prompts_for("anthropic/claude-sonnet-5.5"));
     }
 }
