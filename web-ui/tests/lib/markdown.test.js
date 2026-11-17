@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { renderMarkdown, buildFileUrl, buildCitationIndex, substituteCitations, parseCitations, withoutOpenBracket } from '../../src/lib/markdown.js';
+import { renderMarkdown, renderUntrustedMarkdown, buildFileUrl, buildCitationIndex, substituteCitations, parseCitations, withoutOpenBracket } from '../../src/lib/markdown.js';
 
 describe('substituteCitations', () => {
   const sources = [{ repo: 'acme/repo', version: 'main', file: 'src/lib.rs', line: 42 }];
@@ -163,5 +163,17 @@ describe('citations in an answer that is still streaming', () => {
   it('drops a citation that has not been closed yet', () => {
     expect(withoutOpenBracket('Helpers. [repo:main:src/utils/')).toBe('Helpers. ');
     expect(withoutOpenBracket('Done [repo:main:a.py:1].')).toBe('Done [repo:main:a.py:1].');
+  });
+});
+
+describe('renderUntrustedMarkdown', () => {
+  it('renders markdown', () => {
+    expect(renderUntrustedMarkdown('# Title\n\n**bold**')).toContain('<strong>bold</strong>');
+  });
+
+  it('drops scripts and event handlers from embedded html', () => {
+    const html = renderUntrustedMarkdown('<script>alert(1)</script><img src="x.png" onerror="alert(2)"><a href="javascript:alert(3)">x</a>');
+    expect(html).not.toMatch(/<script|onerror|javascript:/);
+    expect(html).toContain('<img src="x.png">');
   });
 });

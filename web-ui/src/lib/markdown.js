@@ -1,4 +1,5 @@
 import { marked } from 'marked';
+import DOMPurify from 'dompurify';
 import { markedHighlight } from 'marked-highlight';
 import hljs from 'highlight.js';
 import { escapeHtml as esc } from './utils.js';
@@ -93,6 +94,10 @@ export function substituteCitations(text, repoUrlMap = {}, citationIndex = {}) {
 
 export function renderMarkdown(text, repoUrlMap = {}, citationIndex = {}) {
   return marked.parse(substituteCitations(text, repoUrlMap, citationIndex), { async: false });
+}
+
+export function renderUntrustedMarkdown(text) {
+  return DOMPurify.sanitize(marked.parse(text, { async: false }));
 }
 
 export function buildFileUrl(repoUrl, version, file, line = null, endLine = null) {
