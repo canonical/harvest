@@ -34,7 +34,7 @@ pub async fn versions(
     let repository = repository_for(env, &user, &name).await?;
     let versions = catalog::versions(&env.db, &repository).await.map_err(internal)?;
     let default = catalog::default_version(&repository, &versions).map(|version| version.name.clone());
-    Ok(Json(json!({ "versions": versions, "default": default })).into_response())
+    Ok(Json(json!({ "url": repository.url, "versions": versions, "default": default })).into_response())
 }
 
 pub async fn tree(
