@@ -25,7 +25,7 @@ describe('ModeNavigation', () => {
 
   it('lists only the pages of the current mode', async () => {
     const chat = await navigation(MODE.CHAT);
-    expect(chat.findAll('.p-side-navigation__label').map(l => l.text())).toEqual(['Chat', 'Artifacts', 'Skills']);
+    expect(chat.findAll('.p-side-navigation__label').map(l => l.text())).toEqual(['Chat', 'Artifacts', 'Skills', 'Knowledge']);
     const deploy = await navigation(MODE.DEPLOY);
     expect(deploy.findAll('.p-side-navigation__label').map(l => l.text())).toContain('Agents');
   });
@@ -43,6 +43,13 @@ describe('modes', () => {
     for (const mode of [MODE.CHAT, MODE.CODE]) {
       expect(pagesFor(mode).some(p => p.icon === 'agents')).toBe(false);
     }
+  });
+
+  it('offers knowledge in chat and deploy but not in code', () => {
+    const offersKnowledge = (mode) => pagesFor(mode).some((page) => page.label === 'Knowledge');
+    expect(offersKnowledge(MODE.CHAT)).toBe(true);
+    expect(offersKnowledge(MODE.DEPLOY)).toBe(true);
+    expect(offersKnowledge(MODE.CODE)).toBe(false);
   });
 
   it('uses projects only in deploy mode', () => {

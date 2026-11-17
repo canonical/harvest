@@ -15,10 +15,10 @@ const PAGES = Object.freeze({
     { to: '/chat', label: 'Chat', icon: 'chat', exact: true },
     { to: '/chat/artifacts', label: 'Artifacts', icon: 'artifacts' },
     { to: '/chat/skills', label: 'Skills', icon: 'skills' },
+    { to: '/chat/knowledge', label: 'Knowledge', icon: 'knowledge' },
   ],
   [MODE.CODE]: [
     { to: '/code', label: 'Sessions', icon: 'code', exact: true },
-    { to: '/code/repositories', label: 'Knowledge', icon: 'artifacts' },
   ],
   [MODE.DEPLOY]: [
     { to: '/deploy/chat', label: 'Chat', icon: 'chat' },
@@ -27,6 +27,7 @@ const PAGES = Object.freeze({
     { to: '/deploy/artifacts', label: 'Artifacts', icon: 'artifacts' },
     { to: '/deploy/agents', label: 'Agents', icon: 'agents' },
     { to: '/deploy/skills', label: 'Skills', icon: 'skills' },
+    { to: '/deploy/knowledge', label: 'Knowledge', icon: 'knowledge' },
     { to: '/deploy/templates', label: 'Product templates', icon: 'templates' },
     { to: '/deploy/settings', label: 'Project settings', icon: 'members' },
   ],

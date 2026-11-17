@@ -16,11 +16,11 @@ const routes = [
   { path: '/chat',           component: ChatWorkspaceView, meta: { mode: 'chat', stableAcrossProjects: true, requiresApiKey: true } },
   { path: '/chat/artifacts', component: ArtifactsView,     meta: { mode: 'chat', directEntry: true } },
   { path: '/chat/skills',    component: SkillsView,        meta: { mode: 'chat', directEntry: true } },
+  { path: '/chat/knowledge', component: () => import('../views/KnowledgeView.vue'), meta: { mode: 'chat', directEntry: true } },
 
   { path: '/code',           component: () => import('../views/CodeSessionsView.vue'), meta: { mode: 'code', directEntry: true } },
   { path: '/code/projects/:id', component: () => import('../views/CodeProjectView.vue'), props: true, meta: { mode: 'code', directEntry: true } },
   { path: '/code/sessions/:id', component: () => import('../views/CodeSessionView.vue'), props: true, meta: { mode: 'code', directEntry: true } },
-  { path: '/code/repositories', component: () => import('../views/RepositoriesView.vue'), meta: { mode: 'code', directEntry: true } },
 
   { path: '/deploy',                   redirect: '/deploy/chat' },
   { path: '/deploy/chat',              component: ChatWorkspaceView, meta: { mode: 'deploy', requiresProject: true, stableAcrossProjects: true, requiresApiKey: true } },
@@ -30,6 +30,7 @@ const routes = [
   { path: '/deploy/agents/:agentId/console', component: AgentConsoleView, meta: { mode: 'deploy', requiresProject: true } },
   { path: '/deploy/artifacts',         component: ArtifactsView, meta: { mode: 'deploy', requiresProject: true, directEntry: true } },
   { path: '/deploy/skills',            component: SkillsView,    meta: { mode: 'deploy', requiresProject: true, directEntry: true } },
+  { path: '/deploy/knowledge',         component: () => import('../views/KnowledgeView.vue'), meta: { mode: 'deploy', directEntry: true } },
   { path: '/deploy/settings',          component: () => import('../views/ProjectSettingsView.vue'), meta: { mode: 'deploy', requiresProject: true, directEntry: true } },
   { path: '/deploy/templates',         component: () => import('../views/ProductTemplatesView.vue'), meta: { mode: 'deploy', directEntry: true } },
 
@@ -45,7 +46,7 @@ const routes = [
   { path: '/agents/:agentId/console', redirect: (to) => `/deploy/agents/${to.params.agentId}/console` },
   { path: '/artifacts',         redirect: '/deploy/artifacts' },
   { path: '/skills',            redirect: '/deploy/skills' },
-  { path: '/repositories',      redirect: '/code/repositories' },
+  { path: '/repositories',      redirect: '/chat/knowledge' },
   { path: '/product-templates', redirect: '/deploy/templates' },
   { path: '/:pathMatch(.*)*',   redirect: '/chat' },
 ];

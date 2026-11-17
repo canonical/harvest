@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia } from 'pinia';
-import RepositoriesView from '../../src/views/RepositoriesView.vue';
+import KnowledgeView from '../../src/views/KnowledgeView.vue';
 
 vi.mock('cytoscape', () => {
   const mockCy = vi.fn(() => ({
@@ -51,12 +51,12 @@ function mockFetch(reposData = REPOS, graphData = GRAPH_DATA) {
   });
 }
 
-describe('RepositoriesView', () => {
+describe('KnowledgeView', () => {
   beforeEach(() => { vi.restoreAllMocks(); });
 
   it('renders repo select and version select', async () => {
     mockFetch();
-    const w = mount(RepositoriesView, { global: { plugins: [createPinia()] } });
+    const w = mount(KnowledgeView, { global: { plugins: [createPinia()] } });
     await flushPromises();
     const selects = w.findAll('select');
     expect(selects.length).toBeGreaterThanOrEqual(2);
@@ -64,14 +64,14 @@ describe('RepositoriesView', () => {
 
   it('populates repo options', async () => {
     mockFetch();
-    const w = mount(RepositoriesView, { global: { plugins: [createPinia()] } });
+    const w = mount(KnowledgeView, { global: { plugins: [createPinia()] } });
     await flushPromises();
     expect(w.text()).toContain('myrepo');
   });
 
   it('version select is disabled before repo is chosen', async () => {
     mockFetch();
-    const w = mount(RepositoriesView, { global: { plugins: [createPinia()] } });
+    const w = mount(KnowledgeView, { global: { plugins: [createPinia()] } });
     await flushPromises();
     const selects = w.findAll('select');
     expect(selects[1].attributes('disabled')).toBeDefined();
@@ -79,7 +79,7 @@ describe('RepositoriesView', () => {
 
   it('enables version select after repo chosen', async () => {
     mockFetch();
-    const w = mount(RepositoriesView, { global: { plugins: [createPinia()] } });
+    const w = mount(KnowledgeView, { global: { plugins: [createPinia()] } });
     await flushPromises();
     await w.findAll('select')[0].setValue('myrepo');
     await w.findAll('select')[0].trigger('change');
@@ -89,14 +89,14 @@ describe('RepositoriesView', () => {
 
   it('shows graph search input', async () => {
     mockFetch();
-    const w = mount(RepositoriesView, { global: { plugins: [createPinia()] } });
+    const w = mount(KnowledgeView, { global: { plugins: [createPinia()] } });
     await flushPromises();
     expect(w.find('input[type="search"], .graph-search').exists()).toBe(true);
   });
 
   it('shows cytoscape container element', async () => {
     mockFetch();
-    const w = mount(RepositoriesView, { global: { plugins: [createPinia()] } });
+    const w = mount(KnowledgeView, { global: { plugins: [createPinia()] } });
     await flushPromises();
     expect(w.find('#cy, .cy-container').exists()).toBe(true);
   });
