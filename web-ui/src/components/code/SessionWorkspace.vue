@@ -21,6 +21,7 @@ const props = defineProps({
 const workspace = useSessionWorkspace(props.sessionId, { content: SessionTab, tabMenu: SessionTabMenu });
 const error = ref('');
 provideLayoutWorkspace(workspace);
+defineExpose({ showJobs: () => workspace.showJobs() });
 
 watch(() => props.details, (details) => workspace.setLists(details));
 

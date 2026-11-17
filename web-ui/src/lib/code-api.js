@@ -21,6 +21,11 @@ export const listCodeProjects = () => codeFetch('/code/projects');
 export const openCodeProject = (url) => codeFetch('/code/projects', send('POST', { url }));
 export const getCodeProject = (id) => codeFetch(`/code/projects/${id}`);
 export const saveSetupScript = (id, script) => codeFetch(`/code/projects/${id}/setup`, send('PUT', { script }));
+export const saveProjectChecks = (id, checks) => codeFetch(`/code/projects/${id}/checks`, send('PUT', { checks }));
+export const listSessionJobs = (id) => codeFetch(`/code/sessions/${id}/jobs`);
+export const runSessionChecks = (id) => codeFetch(`/code/sessions/${id}/checks`, { method: 'POST' });
+export const getJob = (id) => codeFetch(`/code/jobs/${id}`);
+export const stopJob = (id) => codeFetch(`/code/jobs/${id}/stop`, { method: 'POST' });
 export const openCodeSession = (projectId, branch, baseBranch) =>
   codeFetch(`/code/projects/${projectId}/sessions`, send('POST', { branch, base_branch: baseBranch }));
 export const getCodeSession = (id) => codeFetch(`/code/sessions/${id}`);

@@ -8,6 +8,7 @@
           <span class="session-status__dot" aria-hidden="true" />
           <span :class="{ 'u-off-screen': session.status === 'active' }">{{ statusLabel }}</span>
         </span>
+        <SessionChecksBadge v-if="isOpen(session)" :session-id="id" @open="workspaceView?.showJobs()" />
         <a v-if="changeRequest" :href="changeRequest.url" target="_blank" rel="noopener" class="p-chip session-change-request">
           <span class="p-chip__lead">{{ changeRequestName(changeRequest.platform) }}</span>
           <span class="p-chip__value">{{ changeRequest.state }} ↗</span>
@@ -40,7 +41,7 @@
       <pre v-if="showLog" class="code-log">{{ session.error }}</pre>
     </div>
 
-    <SessionWorkspace v-if="details" :key="id" :session-id="id" :details="details" />
+    <SessionWorkspace v-if="details" ref="workspaceView" :key="id" :session-id="id" :details="details" />
 
     <ProposeChangeModal
       v-if="proposing && session"
@@ -56,6 +57,7 @@
 <script setup>
 import { ref, computed, watch, onUnmounted } from 'vue';
 import SessionWorkspace from '../components/code/SessionWorkspace.vue';
+import SessionChecksBadge from '../components/code/SessionChecksBadge.vue';
 import ProposeChangeModal from '../components/code/ProposeChangeModal.vue';
 import MenuButton from '../components/ui/MenuButton.vue';
 import { confirm } from '../composables/useConfirm.js';
@@ -74,6 +76,7 @@ const details = ref(null);
 const error = ref('');
 const changeRequest = ref(null);
 const proposing = ref(false);
+const workspaceView = ref(null);
 const showLog = ref(false);
 let timer = null;
 

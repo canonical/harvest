@@ -5,7 +5,7 @@ import {
 
 describe('session tabs', () => {
   it('offers chat, changes and preview tabs in that order', () => {
-    expect(SESSION_TAB_KINDS.map(k => k.kind)).toEqual(['chat', 'changes', 'preview']);
+    expect(SESSION_TAB_KINDS.map(k => k.kind)).toEqual(['chat', 'changes', 'preview', 'jobs']);
   });
 
   it('opens a new session on its first chat', () => {

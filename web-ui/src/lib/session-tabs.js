@@ -4,6 +4,7 @@ export const SESSION_TAB_KINDS = Object.freeze([
   { kind: 'chat', label: 'Chat', icon: 'chat' },
   { kind: 'changes', label: 'Changes', icon: 'changes' },
   { kind: 'preview', label: 'Preview', icon: 'preview' },
+  { kind: 'jobs', label: 'Jobs', icon: 'jobs' },
 ]);
 
 function chatFields(chat) {
@@ -16,6 +17,10 @@ export function chatTab(chat) {
 
 export function changesTab() {
   return createTab({ kind: 'changes', title: 'Changes' });
+}
+
+export function jobsTab() {
+  return createTab({ kind: 'jobs', title: 'Jobs' });
 }
 
 export function previewTab(preview) {
@@ -38,6 +43,7 @@ export function initialTree(chats) {
 
 export function tabTitle(tab, { chats = [], previews = [] } = {}) {
   if (tab.kind === 'changes') return 'Changes';
+  if (tab.kind === 'jobs') return 'Jobs';
   if (tab.kind === 'preview') return previewLabel(previews.find(p => p.id === tab.previewId));
   return chats.find(c => c.id === tab.conversationId)?.title ?? 'Chat';
 }

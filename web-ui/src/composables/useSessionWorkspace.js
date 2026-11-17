@@ -2,7 +2,7 @@ import { computed, reactive, ref, markRaw, watch } from 'vue';
 import { createLayoutOperations } from '../lib/layout-workspace.js';
 import { allTabIds, findTab } from '../lib/pane-layout.js';
 import {
-  SESSION_TAB_KINDS, chatTab, changesTab, previewTab, emptySessionTab, initialTree, tabTitle,
+  SESSION_TAB_KINDS, chatTab, changesTab, jobsTab, previewTab, emptySessionTab, initialTree, tabTitle,
 } from '../lib/session-tabs.js';
 import {
   createSessionChat, deleteSessionChat, getSessionLayout, saveSessionLayout,
@@ -94,6 +94,12 @@ export function useSessionWorkspace(sessionId, { content, tabMenu }) {
     return tab.kind === 'chat' || tab.kind === 'preview';
   }
 
+  function showJobs() {
+    const existing = findTabOfKind(tree.value.root, 'jobs');
+    if (existing) operations.setActiveTab(existing.paneId, existing.tabId);
+    else operations.openTab(firstLeafId(tree.value.root), jobsTab());
+  }
+
   async function askAgent(paneId, text) {
     const tab = chatTab(await newChat());
     setChatDraft(chatInstanceKey(tab), text);
@@ -148,6 +154,7 @@ export function useSessionWorkspace(sessionId, { content, tabMenu }) {
   async function createTab(kind) {
     if (kind === 'chat') return chatTab(await newChat());
     if (kind === 'changes') return changesTab();
+    if (kind === 'jobs') return jobsTab();
     return previewTab(previews.value[0] ?? null);
   }
 
@@ -166,6 +173,7 @@ export function useSessionWorkspace(sessionId, { content, tabMenu }) {
     hasTabMenu,
     activityOf,
     askAgent,
+    showJobs,
     renameChat,
     titleOf: (tab) => tabTitle(tab, { chats: chats.value, previews: previews.value }),
     createTab,
@@ -180,4 +188,20 @@ export function useSessionWorkspace(sessionId, { content, tabMenu }) {
     deletePreview,
     shareWith,
   });
+}
+
+function firstLeafId(node) {
+  return node.type === 'leaf' ? node.id : firstLeafId(node.children[0]);
+}
+
+function findTabOfKind(node, kind) {
+  if (node.type === 'leaf') {
+    const tab = node.tabs.find(t => t.kind === kind);
+    return tab ? { paneId: node.id, tabId: tab.tabId } : null;
+  }
+  for (const child of node.children) {
+    const found = findTabOfKind(child, kind);
+    if (found) return found;
+  }
+  return null;
 }
