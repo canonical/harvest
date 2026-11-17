@@ -17,6 +17,7 @@ pub mod project_facts;
 pub mod projects;
 pub mod repo_git;
 pub mod sessions;
+pub mod verification;
 pub mod workspace;
 pub mod workspace_search;
 

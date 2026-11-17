@@ -15,10 +15,11 @@ pub struct CodeProject {
     pub visibility: String,
     pub default_branch: Option<String>,
     pub setup_script: Option<String>,
+    pub checks: Option<String>,
     pub created_by: Option<String>,
 }
 
-const SELECT: &str = "SELECT p.id, r.name, r.url, r.visibility, r.default_branch, p.setup_script, p.created_by
+const SELECT: &str = "SELECT p.id, r.name, r.url, r.visibility, r.default_branch, p.setup_script, p.checks, p.created_by
     FROM code_projects p JOIN repositories r ON r.id = p.repository_id";
 
 fn from_row(row: &Value) -> CodeProject {
@@ -30,6 +31,7 @@ fn from_row(row: &Value) -> CodeProject {
         visibility: text("visibility").unwrap_or_else(|| "public".into()),
         default_branch: text("default_branch"),
         setup_script: text("setup_script"),
+        checks: text("checks"),
         created_by: text("created_by"),
     }
 }
@@ -86,6 +88,15 @@ pub async fn set_setup_script(db: &Db, id: &str, script: Option<&str>) -> Result
     db.execute(
         "UPDATE code_projects SET setup_script = $script WHERE id = $id",
         json!({ "id": id, "script": script.map(str::trim).filter(|s| !s.is_empty()) }),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn set_checks(db: &Db, id: &str, checks: Option<&str>) -> Result<()> {
+    db.execute(
+        "UPDATE code_projects SET checks = $checks WHERE id = $id",
+        json!({ "id": id, "checks": checks.map(str::trim).filter(|s| !s.is_empty()) }),
     )
     .await?;
     Ok(())
