@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 use super::projects::CodeProject;
 use super::repo_git;
+use super::preparation;
 use super::{short_id, CodeEnv, WORKSPACE};
 use crate::lxd::containers::{Command, Source};
 
@@ -161,11 +162,11 @@ async fn build_in(env: &CodeEnv, project: &CodeProject, builder: &str) -> Result
     );
     expect_success(env.lxd.run(builder, Command::shell(&unpack)).await?, "unpacking the repository")?;
 
-    let script = setup_script(env, project, builder).await?;
+    let setup = setup_for(env, project, builder).await?;
     let mut log = String::new();
-    if let Some(script) = &script {
+    if let Some(setup) = &setup {
         env.lxd
-            .push_file(builder, "/tmp/harvest-setup.sh", script.as_bytes().to_vec(), 0o700)
+            .push_file(builder, "/tmp/harvest-setup.sh", setup.script().as_bytes().to_vec(), 0o700)
             .await?;
         let output = env
             .lxd
@@ -175,7 +176,7 @@ async fn build_in(env: &CodeEnv, project: &CodeProject, builder: &str) -> Result
             )
             .await?;
         log = tail(&format!("{}{}", output.stdout, output.stderr), LOG_TAIL_CHARS);
-        if !output.succeeded() {
+        if !output.succeeded() && setup.is_required() {
             bail!("the setup script failed with exit code {}:\n{log}", output.exit_code);
         }
     }
@@ -189,15 +190,36 @@ async fn build_in(env: &CodeEnv, project: &CodeProject, builder: &str) -> Result
     })
 }
 
-async fn setup_script(env: &CodeEnv, project: &CodeProject, container: &str) -> Result<Option<String>> {
+enum Setup {
+    Repository(String),
+    Project(String),
+    Derived(String),
+}
+
+impl Setup {
+    fn script(&self) -> &str {
+        match self {
+            Self::Repository(script) | Self::Project(script) | Self::Derived(script) => script,
+        }
+    }
+
+    fn is_required(&self) -> bool {
+        !matches!(self, Self::Derived(_))
+    }
+}
+
+async fn setup_for(env: &CodeEnv, project: &CodeProject, container: &str) -> Result<Option<Setup>> {
     let from_repo = env
         .lxd
         .run(container, Command::shell(&format!("cat {REPO_SETUP_FILE}")).in_dir(WORKSPACE))
         .await?;
     if from_repo.succeeded() && !from_repo.stdout.trim().is_empty() {
-        return Ok(Some(from_repo.stdout));
+        return Ok(Some(Setup::Repository(from_repo.stdout)));
     }
-    Ok(project.setup_script.clone().filter(|s| !s.trim().is_empty()))
+    if let Some(script) = project.setup_script.clone().filter(|s| !s.trim().is_empty()) {
+        return Ok(Some(Setup::Project(script)));
+    }
+    Ok(preparation::script_for(env, container).await?.map(Setup::Derived))
 }
 
 fn expect_success(output: crate::lxd::containers::ExecOutput, what: &str) -> Result<()> {

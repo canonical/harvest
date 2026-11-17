@@ -176,6 +176,7 @@ async fn start(env: &CodeEnv, project: &CodeProject, id: &str) -> Result<()> {
             json!({ "id": id }),
         )
         .await?;
+    super::preparation::spawn_for_session(env, id);
     Ok(())
 }
 
