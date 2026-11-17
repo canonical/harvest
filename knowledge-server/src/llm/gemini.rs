@@ -9,7 +9,7 @@ use super::{
     retry,
     types::{
         ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role,
-        StreamEvent, ToolCall, ToolDefinition, Usage,
+        InclusivePromptUsage, StreamEvent, ToolCall, ToolDefinition, Usage,
     },
     LlmProvider,
 };
@@ -459,10 +459,7 @@ async fn process_stream_event(
     }
 
     if let Some(u) = event.get("usageMetadata") {
-        usage.input_tokens = u["promptTokenCount"].as_u64().unwrap_or(0);
-        usage.output_tokens = u["candidatesTokenCount"].as_u64().unwrap_or(0);
-        usage.cache_read_tokens = u["cachedContentTokenCount"].as_u64().unwrap_or(0);
-        usage.reasoning_tokens = u["thoughtsTokenCount"].as_u64().unwrap_or(0);
+        *usage = gemini_usage(u);
     }
 
     let candidate = &event["candidates"][0];
@@ -592,13 +589,20 @@ fn usage_from_gemini(json: &Value) -> Usage {
     if u.is_null() {
         return Usage::default();
     }
-    Usage {
-        input_tokens: u["promptTokenCount"].as_u64().unwrap_or(0),
-        output_tokens: u["candidatesTokenCount"].as_u64().unwrap_or(0),
-        cache_read_tokens: u["cachedContentTokenCount"].as_u64().unwrap_or(0),
-        cache_creation_tokens: 0,
-        reasoning_tokens: u["thoughtsTokenCount"].as_u64().unwrap_or(0),
+    gemini_usage(u)
+}
+
+fn gemini_usage(u: &Value) -> Usage {
+    let count = |key: &str| u[key].as_u64().unwrap_or(0);
+    let thoughts = count("thoughtsTokenCount");
+    InclusivePromptUsage {
+        prompt_tokens: count("promptTokenCount"),
+        cached_tokens: count("cachedContentTokenCount"),
+        cache_write_tokens: 0,
+        completion_tokens: count("candidatesTokenCount") + thoughts,
+        reasoning_tokens: thoughts,
     }
+    .into_usage()
 }
 
 fn parse_gemini_response(json: Value) -> Result<LlmResponse> {
@@ -1054,7 +1058,7 @@ mod tests {
         });
         match parse_gemini_response(json).unwrap() {
             LlmResponse::Message { usage, .. } => {
-                assert_eq!(usage.input_tokens, 500);
+                assert_eq!(usage.input_tokens, 450);
                 assert_eq!(usage.output_tokens, 120);
                 assert_eq!(usage.cache_read_tokens, 50);
                 assert_eq!(usage.reasoning_tokens, 30);

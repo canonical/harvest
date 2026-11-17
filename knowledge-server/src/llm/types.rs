@@ -20,6 +20,53 @@ impl Usage {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InclusivePromptUsage {
+    pub prompt_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+}
+
+impl InclusivePromptUsage {
+    pub fn into_usage(self) -> Usage {
+        let cached = self.cached_tokens + self.cache_write_tokens;
+        Usage {
+            input_tokens: self.prompt_tokens.saturating_sub(cached),
+            output_tokens: self.completion_tokens.saturating_sub(self.reasoning_tokens),
+            cache_read_tokens: self.cached_tokens,
+            cache_creation_tokens: self.cache_write_tokens,
+            reasoning_tokens: self.reasoning_tokens,
+        }
+    }
+}
+
+impl Usage {
+    pub fn saturating_sub(&self, other: &Usage) -> Usage {
+        Usage {
+            input_tokens: self.input_tokens.saturating_sub(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_sub(other.output_tokens),
+            cache_read_tokens: self.cache_read_tokens.saturating_sub(other.cache_read_tokens),
+            cache_creation_tokens: self
+                .cache_creation_tokens
+                .saturating_sub(other.cache_creation_tokens),
+            reasoning_tokens: self.reasoning_tokens.saturating_sub(other.reasoning_tokens),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.total_tokens() == 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CompletedCall {
+    pub provider: UsedProvider,
+    pub usage: Usage,
+    pub duration_ms: u64,
+}
+
 impl std::ops::Add for Usage {
     type Output = Usage;
     fn add(self, rhs: Usage) -> Usage {

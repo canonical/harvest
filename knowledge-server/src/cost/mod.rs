@@ -1,3 +1,5 @@
+mod rates;
+
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -6,10 +8,11 @@ use std::sync::Arc;
 
 use crate::config::LlmProviderConfig;
 use crate::llm::pricing::{format_cost, price, ModelPricing};
-use crate::llm::types::{Usage, UsedProvider};
+use crate::llm::types::{CompletedCall, Usage, UsedProvider};
+use rates::default_pricing_for;
 use harvest_db::Db;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CostScope {
     Chat,
@@ -58,147 +61,6 @@ pub struct LlmCallRecord {
     pub llm_call_count: usize,
     pub succeeded: bool,
     pub created_at: String,
-}
-
-fn default_pricing_for(kind: &str, model: &str) -> Option<ModelPricing> {
-    let m = model.to_lowercase();
-    let k = kind.to_lowercase();
-    if k.contains("anthropic") || m.contains("claude") {
-        if m.contains("sonnet-4") || m.contains("sonnet-4-6") || m.contains("claude-sonnet-4") {
-            return Some(ModelPricing {
-                input_per_1k: 3000,
-                cache_read_per_1k: 300,
-                cache_creation_per_1k: 3750,
-                output_per_1k: 15000,
-                reasoning_per_1k: 0,
-            });
-        }
-        if m.contains("opus") {
-            return Some(ModelPricing {
-                input_per_1k: 15000,
-                cache_read_per_1k: 1500,
-                cache_creation_per_1k: 18750,
-                output_per_1k: 75000,
-                reasoning_per_1k: 0,
-            });
-        }
-        if m.contains("haiku") {
-            return Some(ModelPricing {
-                input_per_1k: 100,
-                cache_read_per_1k: 10,
-                cache_creation_per_1k: 125,
-                output_per_1k: 500,
-                reasoning_per_1k: 0,
-            });
-        }
-        return Some(ModelPricing {
-            input_per_1k: 3000,
-            cache_read_per_1k: 300,
-            cache_creation_per_1k: 3750,
-            output_per_1k: 15000,
-            reasoning_per_1k: 0,
-        });
-    }
-    if k.contains("gemini") || m.contains("gemini") {
-        if m.contains("2.5-pro") || m.contains("3") {
-            return Some(ModelPricing {
-                input_per_1k: 1250,
-                cache_read_per_1k: 312,
-                cache_creation_per_1k: 0,
-                output_per_1k: 5000,
-                reasoning_per_1k: 5000,
-            });
-        }
-        if m.contains("flash") {
-            return Some(ModelPricing {
-                input_per_1k: 300,
-                cache_read_per_1k: 75,
-                cache_creation_per_1k: 0,
-                output_per_1k: 2500,
-                reasoning_per_1k: 2500,
-            });
-        }
-        return Some(ModelPricing {
-            input_per_1k: 1250,
-            cache_read_per_1k: 312,
-            cache_creation_per_1k: 0,
-            output_per_1k: 5000,
-            reasoning_per_1k: 5000,
-        });
-    }
-    if k.contains("openai") || m.contains("gpt") {
-        if m.contains("gpt-4o") {
-            return Some(ModelPricing {
-                input_per_1k: 2500,
-                cache_read_per_1k: 1250,
-                cache_creation_per_1k: 0,
-                output_per_1k: 10000,
-                reasoning_per_1k: 10000,
-            });
-        }
-        if m.contains("gpt-4") {
-            return Some(ModelPricing {
-                input_per_1k: 30000,
-                cache_read_per_1k: 1500,
-                cache_creation_per_1k: 0,
-                output_per_1k: 60000,
-                reasoning_per_1k: 0,
-            });
-        }
-        if m.contains("o1") || m.contains("o3") || m.contains("o4") {
-            return Some(ModelPricing {
-                input_per_1k: 15000,
-                cache_read_per_1k: 7500,
-                cache_creation_per_1k: 0,
-                output_per_1k: 60000,
-                reasoning_per_1k: 60000,
-            });
-        }
-    }
-    if m.contains("kimi") || m.contains("k3") {
-        return Some(ModelPricing {
-            input_per_1k: 600,
-            cache_read_per_1k: 60,
-            cache_creation_per_1k: 0,
-            output_per_1k: 2200,
-            reasoning_per_1k: 0,
-        });
-    }
-    if m.contains("deepseek") {
-        return Some(ModelPricing {
-            input_per_1k: 270,
-            cache_read_per_1k: 27,
-            cache_creation_per_1k: 0,
-            output_per_1k: 1100,
-            reasoning_per_1k: 0,
-        });
-    }
-    if m.contains("llama") || m.contains("mistral") || m.contains("ministral") {
-        return Some(ModelPricing {
-            input_per_1k: 200,
-            cache_read_per_1k: 20,
-            cache_creation_per_1k: 0,
-            output_per_1k: 600,
-            reasoning_per_1k: 0,
-        });
-    }
-    if m.contains("jev") || m.contains("kev") || m.contains("systemone") || m.contains("system-one")
-    {
-        return Some(ModelPricing {
-            input_per_1k: 42,
-            cache_read_per_1k: 0,
-            cache_creation_per_1k: 0,
-            output_per_1k: 0,
-            reasoning_per_1k: 0,
-        });
-    }
-    Some(ModelPricing {
-        input_per_1k: 1000,
-        cache_read_per_1k: 100,
-        cache_creation_per_1k: 0,
-        output_per_1k: 3000,
-        reasoning_per_1k: 0,
-    })
 }
 
 #[derive(Clone, Default)]

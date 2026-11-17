@@ -10,7 +10,7 @@ use super::{
     retry,
     types::{
         ContentPart, LlmResponse, Message, MessageContent, ModelInfo, ProviderMeta, Role,
-        StreamEvent, ToolCall, ToolDefinition, Usage,
+        InclusivePromptUsage, StreamEvent, ToolCall, ToolDefinition, Usage,
     },
     LlmProvider,
 };
@@ -253,7 +253,7 @@ struct ToolCallAccum {
     args_buf: String,
 }
 
-fn apply_usage_delta(usage: &mut Usage, u: &Value) {
+fn apply_usage_delta(usage: &mut InclusivePromptUsage, u: &Value) {
     if u.is_null() {
         return;
     }
@@ -262,11 +262,15 @@ fn apply_usage_delta(usage: &mut Usage, u: &Value) {
             *current = (*current).max(v);
         }
     };
-    keep_max(&mut usage.input_tokens, u["prompt_tokens"].as_u64());
-    keep_max(&mut usage.output_tokens, u["completion_tokens"].as_u64());
+    keep_max(&mut usage.prompt_tokens, u["prompt_tokens"].as_u64());
+    keep_max(&mut usage.completion_tokens, u["completion_tokens"].as_u64());
     keep_max(
-        &mut usage.cache_read_tokens,
+        &mut usage.cached_tokens,
         u["prompt_tokens_details"]["cached_tokens"].as_u64(),
+    );
+    keep_max(
+        &mut usage.cache_write_tokens,
+        u["prompt_tokens_details"]["cache_write_tokens"].as_u64(),
     );
     keep_max(
         &mut usage.reasoning_tokens,
@@ -278,7 +282,7 @@ async fn process_stream_event(
     event: &Value,
     tool_calls: &mut HashMap<usize, ToolCallAccum>,
     stop_reason: &mut Option<String>,
-    usage: &mut Usage,
+    usage: &mut InclusivePromptUsage,
     tx: &mpsc::Sender<StreamEvent>,
 ) {
     apply_usage_delta(usage, &event["usage"]);
@@ -377,7 +381,7 @@ impl OpenAiCompatProvider {
         let mut buffer = String::new();
         let mut tool_calls: HashMap<usize, ToolCallAccum> = HashMap::new();
         let mut stop_reason: Option<String> = None;
-        let mut usage = Usage::default();
+        let mut usage = InclusivePromptUsage::default();
 
         'outer: while let Some(chunk) = byte_stream.next().await {
             let bytes = chunk?;
@@ -431,7 +435,7 @@ impl OpenAiCompatProvider {
         let _ = tx
             .send(StreamEvent::Done {
                 stop_reason: resolved_stop_reason,
-                usage,
+                usage: usage.into_usage(),
             })
             .await;
 
@@ -531,9 +535,9 @@ fn to_openai_function(tool: &ToolDefinition) -> Value {
 }
 
 fn usage_from_openai(json: &Value) -> Usage {
-    let mut usage = Usage::default();
+    let mut usage = InclusivePromptUsage::default();
     apply_usage_delta(&mut usage, &json["usage"]);
-    usage
+    usage.into_usage()
 }
 
 fn parse_openai_response(json: Value) -> Result<LlmResponse> {
@@ -795,8 +799,8 @@ mod tests {
                 _ => None,
             })
             .expect("expected Done event with usage");
-        assert_eq!(usage.input_tokens, 100);
-        assert_eq!(usage.output_tokens, 20);
+        assert_eq!(usage.input_tokens, 90);
+        assert_eq!(usage.output_tokens, 15);
         assert_eq!(usage.cache_read_tokens, 10);
         assert_eq!(usage.reasoning_tokens, 5);
     }
@@ -836,7 +840,7 @@ mod tests {
 
     #[test]
     fn apply_usage_delta_keeps_max_when_chunks_repeat() {
-        let mut usage = Usage::default();
+        let mut usage = InclusivePromptUsage::default();
         apply_usage_delta(
             &mut usage,
             &json!({
@@ -849,9 +853,24 @@ mod tests {
             &mut usage,
             &json!({ "prompt_tokens": 0, "completion_tokens": 0 }),
         );
-        assert_eq!(usage.input_tokens, 1200);
-        assert_eq!(usage.output_tokens, 80);
-        assert_eq!(usage.cache_read_tokens, 900);
+        assert_eq!(usage.prompt_tokens, 1200);
+        assert_eq!(usage.completion_tokens, 80);
+        assert_eq!(usage.cached_tokens, 900);
+    }
+
+    #[test]
+    fn cached_and_written_tokens_are_not_counted_as_fresh_input() {
+        let usage = usage_from_openai(&json!({
+            "usage": {
+                "prompt_tokens": 82_788,
+                "completion_tokens": 1_758,
+                "prompt_tokens_details": { "cached_tokens": 68_265, "cache_write_tokens": 4_000 }
+            }
+        }));
+        assert_eq!(usage.input_tokens, 10_523);
+        assert_eq!(usage.cache_read_tokens, 68_265);
+        assert_eq!(usage.cache_creation_tokens, 4_000);
+        assert_eq!(usage.output_tokens, 1_758);
     }
 
     #[test]
@@ -884,8 +903,8 @@ mod tests {
         });
         match parse_openai_response(json).unwrap() {
             LlmResponse::Message { usage, .. } => {
-                assert_eq!(usage.input_tokens, 300);
-                assert_eq!(usage.output_tokens, 80);
+                assert_eq!(usage.input_tokens, 260);
+                assert_eq!(usage.output_tokens, 65);
                 assert_eq!(usage.cache_read_tokens, 40);
                 assert_eq!(usage.reasoning_tokens, 15);
             }
