@@ -6,16 +6,22 @@ use serde_json::{json, Value};
 
 use super::images::{quote, tail};
 use super::workspace_search::{self, Search};
-use super::{change_requests, previews, projects, sessions, CodeEnv, WORKSPACE};
+use super::job_tools::JobTool;
+use super::jobs::shell::{self, Spec};
+use super::jobs::Kind;
+use super::{change_requests, installs, learned_setup, page_check, previews, projects, sessions, CodeEnv, WORKSPACE};
 use crate::agent::tool::Tool;
 use crate::llm::types::ToolDefinition;
-use crate::lxd::containers::Command;
+use crate::lxd::containers::{Command, ExecOutput};
 use crate::toolsets::{Toolset, TurnContext};
 
 const OUTPUT_CHARS: usize = 12_000;
 const READ_MAX_LINES: usize = 400;
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 const MAX_TIMEOUT_SECS: u64 = 1_800;
+const BROWSER_INSTALL_SECS: u64 = 900;
+const PAGE_CHECK_SECS: u64 = 120;
+const JOB_LABEL_CHARS: usize = 60;
 
 pub fn workspace_path(path: &str) -> Result<String> {
     let path = path.trim();
@@ -60,10 +66,11 @@ enum Operation {
     Changes,
     SaveSetup,
     Preview,
+    CheckPage,
     Propose,
 }
 
-const OPERATIONS: [Operation; 10] = [
+const OPERATIONS: [Operation; 11] = [
     Operation::Run,
     Operation::Read,
     Operation::Search,
@@ -73,6 +80,7 @@ const OPERATIONS: [Operation; 10] = [
     Operation::Changes,
     Operation::SaveSetup,
     Operation::Preview,
+    Operation::CheckPage,
     Operation::Propose,
 ];
 
@@ -81,14 +89,43 @@ impl Operation {
         let (name, description, parameters) = match self {
             Self::Run => (
                 "run_command",
-                "Run a shell command in the session's container, from the repository root. Use it to build, run tests, install packages and inspect the repository with git.",
+                "Run a shell command in the session's container, from the repository root. Use it to build, run tests, install packages and inspect the repository with git. Set background to true for long commands such as full test suites, builds or installs: it returns a job id at once, you keep working, and the result is reported when it finishes or through job_output and wait_job.",
                 json!({
                     "type": "object",
                     "properties": {
                         "command": { "type": "string" },
-                        "timeout_seconds": { "type": "integer", "description": "Defaults to 300, at most 1800" }
+                        "timeout_seconds": { "type": "integer", "description": "Defaults to 300, at most 1800; ignored for background commands" },
+                        "background": { "type": "boolean", "description": "Run as a background job" }
                     },
                     "required": ["command"]
+                }),
+            ),
+            Self::CheckPage => (
+                "check_page",
+                "Open a page of a web app running in this container in a headless browser, optionally click, fill and press keys first, and report the page title, its visible text, console errors and failed requests. Use it to verify user interface changes the tests cannot reach. The app must already be running, for example started by configure_preview. The first check installs a browser, which takes a minute or two.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "port": { "type": "integer", "description": "Port the app listens on in this container" },
+                        "path": { "type": "string", "description": "Path and query to open, default /" },
+                        "steps": {
+                            "type": "array",
+                            "description": "Actions run in order before reading the page",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "action": { "type": "string", "enum": ["click", "fill", "press", "wait"] },
+                                    "selector": { "type": "string", "description": "Playwright selector, e.g. #title or text=Undo" },
+                                    "value": { "type": "string", "description": "Text for fill" },
+                                    "key": { "type": "string", "description": "Key for press, e.g. Enter or Control+Z" },
+                                    "ms": { "type": "integer", "description": "Milliseconds for wait" }
+                                },
+                                "required": ["action"]
+                            }
+                        },
+                        "wait_ms": { "type": "integer", "description": "Extra wait before reading, default 1000" }
+                    },
+                    "required": ["port"]
                 }),
             ),
             Self::Read => (
@@ -211,20 +248,52 @@ impl WorkspaceTool {
     }
 
     async fn shell(&self, container: &str, script: &str, timeout: Duration) -> Result<String> {
-        let output = self
-            .env
+        Ok(describe_output(&self.exec(container, script, timeout).await?))
+    }
+
+    async fn exec(&self, container: &str, script: &str, timeout: Duration) -> Result<ExecOutput> {
+        self.env
             .lxd
             .run(container, Command::shell(script).in_dir(WORKSPACE).timeout(timeout))
-            .await?;
-        let mut text = format!("exit code {}\n", output.exit_code);
-        if !output.stdout.is_empty() {
-            text.push_str(&tail(&output.stdout, OUTPUT_CHARS));
-        }
-        if !output.stderr.is_empty() {
-            text.push_str("\n--- stderr ---\n");
-            text.push_str(&tail(&output.stderr, OUTPUT_CHARS / 2));
+            .await
+    }
+
+    async fn run_command(&self, container: &str, script: &str, timeout: Duration) -> Result<String> {
+        let output = self.exec(container, script, timeout).await?;
+        let mut text = describe_output(&output);
+        if output.succeeded() && installs::installs_packages(script) {
+            learned_setup::record(&self.env, &self.session_id, script).await?;
+            text.push_str(installs::SETUP_REMINDER);
         }
         Ok(text)
+    }
+
+    async fn run_in_background(&self, command: &str) -> Result<String> {
+        let job = shell::start(
+            &self.env,
+            Spec {
+                session_id: &self.session_id,
+                chat_id: Some(&self.chat_id),
+                kind: Kind::Command,
+                label: &job_label(command),
+                script: command,
+            },
+        )
+        .await?;
+        Ok(format!(
+            "Started background job {}. Keep working; its result is reported when it finishes, or call job_output or wait_job with this id.",
+            job.id
+        ))
+    }
+
+    async fn check_page(&self, container: &str, params: &Value) -> Result<String> {
+        let request = page_check::Request::from_params(params)?;
+        let install = self.exec(container, &page_check::install_script(), Duration::from_secs(BROWSER_INSTALL_SECS)).await?;
+        if !install.succeeded() {
+            bail!("could not install the browser: {}", tail(&format!("{}{}", install.stdout, install.stderr), 2_000));
+        }
+        let output = self.exec(container, &page_check::run_script(&request), Duration::from_secs(PAGE_CHECK_SECS)).await?;
+        page_check::describe(&output.stdout).map_err(|e| anyhow::anyhow!("{e}\n{}", tail(&output.stderr, 2_000)))
     }
 
     async fn configure_preview(&self, container: &str, params: &Value) -> Result<String> {
@@ -279,6 +348,7 @@ impl WorkspaceTool {
         let container = self.container().await?;
         match self.operation {
             Operation::Preview => return self.configure_preview(&container, params).await,
+            Operation::CheckPage => return self.check_page(&container, params).await,
             Operation::Search => return self.search(&container, params).await,
             Operation::Propose => {
                 let request =
@@ -289,12 +359,15 @@ impl WorkspaceTool {
         }
         let lxd = &self.env.lxd;
         match self.operation {
+            Operation::Run if params["background"].as_bool() == Some(true) => {
+                self.run_in_background(text("command")).await
+            }
             Operation::Run => {
                 let secs = params["timeout_seconds"]
                     .as_u64()
                     .unwrap_or(DEFAULT_TIMEOUT_SECS)
                     .clamp(1, MAX_TIMEOUT_SECS);
-                self.shell(&container, text("command"), Duration::from_secs(secs)).await
+                self.run_command(&container, text("command"), Duration::from_secs(secs)).await
             }
             Operation::Read => {
                 let bytes = lxd.pull_file(&container, &workspace_path(text("path"))?).await?;
@@ -336,8 +409,30 @@ impl WorkspaceTool {
                 );
                 self.shell(&container, &script, Duration::from_secs(60)).await
             }
-            Operation::SaveSetup | Operation::Preview | Operation::Propose | Operation::Search => unreachable!(),
+            Operation::SaveSetup | Operation::Preview | Operation::CheckPage | Operation::Propose | Operation::Search => unreachable!(),
         }
+    }
+}
+
+fn describe_output(output: &ExecOutput) -> String {
+    let mut text = format!("exit code {}\n", output.exit_code);
+    if !output.stdout.is_empty() {
+        text.push_str(&tail(&output.stdout, OUTPUT_CHARS));
+    }
+    if !output.stderr.is_empty() {
+        text.push_str("\n--- stderr ---\n");
+        text.push_str(&tail(&output.stderr, OUTPUT_CHARS / 2));
+    }
+    text
+}
+
+fn job_label(command: &str) -> String {
+    let first_line = command.lines().next().unwrap_or_default().trim();
+    let label: String = first_line.chars().take(JOB_LABEL_CHARS).collect();
+    if label.len() < first_line.len() || command.lines().count() > 1 {
+        format!("{label}…")
+    } else {
+        label
     }
 }
 
@@ -382,6 +477,7 @@ impl Toolset for WorkspaceToolset {
                     operation: *operation,
                 }) as Box<dyn Tool>
             })
+            .chain(JobTool::all(&self.env, session_id))
             .collect()
     }
 }
@@ -418,5 +514,12 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), OPERATIONS.len());
+    }
+
+    #[test]
+    fn job_labels_show_the_start_of_the_command() {
+        assert_eq!(job_label("npm test"), "npm test");
+        assert_eq!(job_label("pytest -q\nruff check ."), "pytest -q…");
+        assert_eq!(job_label(&"x".repeat(80)).chars().count(), JOB_LABEL_CHARS + 1);
     }
 }

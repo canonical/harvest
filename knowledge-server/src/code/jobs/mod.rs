@@ -1,3 +1,4 @@
+pub mod reporting;
 pub mod shell;
 pub mod store;
 

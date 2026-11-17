@@ -83,6 +83,8 @@ export function describeToolCall(name, input = {}, { hostname } = {}) {
         : `Comparing ${sym} across versions`;
     }
     case 'run_sql': return 'Querying the code graph';
+    case 'check_page':
+      return `Checking the page at ${input.path ?? '/'}`;
     case 'run_command': {
       const cmd = typeof input.command === 'string'
         ? (input.command.length > 28 ? input.command.slice(0, 28).trimEnd() + '…' : input.command)

@@ -1060,4 +1060,10 @@ start ready.
 
 To show the work in a preview, prepare first and start second: install dependencies and build with run_command, then \
 call configure_preview with a start_command that only starts the app. When configure_preview fails, follow its \
-advice and call it again.";
+advice and call it again. To verify a user interface change, open the running app with check_page, with steps that \
+reproduce what a user would do, and read its text and console errors instead of assuming the page works.
+
+Run long commands, such as full test suites, builds and installs, with run_command and background set to true, keep \
+working while they run, and collect their results with wait_job. After each turn that changes files, Harvest runs the \
+repository's checks; after each turn that adds commits, a separate reviewer reads the change. Their results appear at \
+the start of your next turn: fix real problems they report.";
