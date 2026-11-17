@@ -48,12 +48,18 @@ describe('MultiSelect', () => {
     expect(w.emitted('update:modelValue')).toEqual([[['p1', 'p2']], [[]]]);
   });
 
-  it('selects every option or clears the selection', async () => {
+  it('clears the selection', async () => {
     const w = multiSelect({ modelValue: ['p2'] });
-    const [selectAll, clear] = w.findAll('.multi-select__actions button');
-    await selectAll.trigger('click');
-    await clear.trigger('click');
-    expect(w.emitted('update:modelValue')).toEqual([[['p1', 'p2', 'p3']], [[]]]);
+    const buttons = w.findAll('.multi-select__actions button');
+    expect(buttons.map((button) => button.text())).toEqual(['Clear']);
+    await buttons[0].trigger('click');
+    expect(w.emitted('update:modelValue')).toEqual([[[]]]);
+    await w.setProps({ modelValue: [] });
+    expect(document.activeElement).toBe(w.find('.p-checkbox__input').element);
+  });
+
+  it('offers nothing to clear when no option is selected', () => {
+    expect(multiSelect().find('.multi-select__actions').exists()).toBe(false);
   });
 
   it('closes on Escape and returns focus to the toggle', async () => {

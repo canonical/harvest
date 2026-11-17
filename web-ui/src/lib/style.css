@@ -10269,7 +10269,7 @@ button.activity-line__row:hover .activity-line__steps {
 .multi-select__option .p-checkbox__label { margin: 0; }
 .multi-select__hint { margin-left: .5rem; font-size: .8125rem; color: var(--text-muted); white-space: nowrap; }
 .multi-select__empty { margin: 0; padding: .5rem 1rem; color: var(--text-muted); }
-.multi-select__actions { display: flex; justify-content: space-between; padding: .5rem; }
+.multi-select__actions { display: flex; justify-content: flex-end; padding: .5rem; }
 .multi-select__actions .p-button--base { margin: 0; }
 .code-filters__project { margin: -.25rem 0 1rem; font-size: .875rem; }
 .settings-page.code-sessions-page { max-width: none; margin: 0; padding: 1.5rem 2rem; }

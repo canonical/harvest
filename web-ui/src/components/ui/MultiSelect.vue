@@ -34,9 +34,8 @@
         </label>
         <p v-if="!visibleOptions.length" class="multi-select__empty">No {{ noun }} match.</p>
       </fieldset>
-      <div class="p-contextual-menu__group multi-select__actions">
-        <button type="button" class="p-button--base is-small" @click="emit('update:modelValue', options.map((option) => option.value))">Select all</button>
-        <button type="button" class="p-button--base is-small" :disabled="!modelValue.length" @click="emit('update:modelValue', [])">Clear</button>
+      <div v-if="modelValue.length" class="p-contextual-menu__group multi-select__actions">
+        <button type="button" class="p-button--base is-small" @click="clear">Clear</button>
       </div>
     </div>
   </div>
@@ -70,7 +69,13 @@ const visibleOptions = computed(() => matchingOptions(props.options, search.valu
 const summary = computed(() => selectionSummary(props.modelValue, props.options, { none: props.none, noun: props.noun }));
 
 function inputs() {
-  return [...root.value.querySelectorAll('.multi-select__dropdown input, .multi-select__actions button:not([disabled])')];
+  return [...root.value.querySelectorAll('.multi-select__dropdown input, .multi-select__actions button')];
+}
+
+async function clear() {
+  emit('update:modelValue', []);
+  await nextTick();
+  inputs()[0]?.focus();
 }
 
 function close({ refocus }) {
