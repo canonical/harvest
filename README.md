@@ -210,7 +210,8 @@ sudo journalctl -u snap.harvest.ui -f
 
 ## Documentation
 
-- Snap installation and operations: [`documentation/snap.md`](documentation/snap.md)
+- User and operator documentation: [`documentation/README.md`](documentation/README.md)
+- Snap installation and operations: [`documentation/how-to/install-from-snap.md`](documentation/how-to/install-from-snap.md)
 - Architecture: [`documentation/developer/architecture.md`](documentation/developer/architecture.md)
 - Server internals: [`documentation/developer/server.md`](documentation/developer/server.md)
 - Harvester internals: [`documentation/developer/harvester.md`](documentation/developer/harvester.md)
