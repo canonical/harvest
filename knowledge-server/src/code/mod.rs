@@ -1,4 +1,5 @@
 pub mod briefing;
+pub mod browse;
 pub mod change_requests;
 pub mod chat_handlers;
 pub mod chats;
@@ -29,6 +30,7 @@ pub mod working_set;
 pub mod workspace_search;
 pub mod workspace_state;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,6 +55,7 @@ pub struct CodeSettings {
     pub preview_lifetime: Duration,
     pub working_set_chars: usize,
     pub review_changes: bool,
+    pub mirror_dir: PathBuf,
 }
 
 impl From<&CodeConfig> for CodeSettings {
@@ -68,6 +71,10 @@ impl From<&CodeConfig> for CodeSettings {
             preview_lifetime: Duration::from_secs(config.preview_ttl_hours * HOUR),
             working_set_chars: config.working_set_chars,
             review_changes: config.review_changes,
+            mirror_dir: config
+                .mirror_dir
+                .clone()
+                .unwrap_or_else(|| std::env::temp_dir().join("harvest-mirrors")),
         }
     }
 }
@@ -79,6 +86,7 @@ pub struct CodeEnv {
     pub credentials: Option<Arc<CredentialStore>>,
     pub settings: CodeSettings,
     pub drift: Arc<freshness::DriftCache>,
+    pub mirrors: Arc<browse::Mirrors>,
 }
 
 impl CodeEnv {

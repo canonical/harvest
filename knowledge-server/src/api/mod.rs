@@ -585,6 +585,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         query: Arc::clone(&query_state),
     });
     let code_router = {
+        use crate::code::browse::handlers as browse;
         use crate::code::chat_handlers as chat;
         use crate::code::handlers as code;
         use crate::code::job_handlers as jobs;
@@ -600,6 +601,10 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
             .route("/code/jobs/:id/stop", post(jobs::stop))
             .route("/code/projects/:id/sessions", post(code::open_session))
             .route("/code/sessions", get(code::list_sessions))
+            .route("/code/repositories/:name/versions", get(browse::versions))
+            .route("/code/repositories/:name/tree", get(browse::tree))
+            .route("/code/repositories/:name/file", get(browse::file))
+            .route("/code/repositories/:name/raw", get(browse::raw))
             .route(
                 "/code/sessions/:id",
                 get(code::get_session).delete(code::close_session),

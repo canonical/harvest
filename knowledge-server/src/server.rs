@@ -542,12 +542,16 @@ pub async fn start(config: Config) -> Result<RunningServer> {
         collocate.clone().map(Arc::new),
     );
 
-    let code = lxd.clone().map(|lxd| crate::code::CodeEnv {
-        db: Arc::clone(&db),
-        lxd,
-        credentials: credentials.clone(),
-        settings: crate::code::CodeSettings::from(&config.code),
-        drift: Default::default(),
+    let code = lxd.clone().map(|lxd| {
+        let settings = crate::code::CodeSettings::from(&config.code);
+        crate::code::CodeEnv {
+            db: Arc::clone(&db),
+            lxd,
+            credentials: credentials.clone(),
+            mirrors: Arc::new(crate::code::browse::Mirrors::new(settings.mirror_dir.clone())),
+            settings,
+            drift: Default::default(),
+        }
     });
 
     let toolbox = Arc::new(crate::toolsets::build_toolbox(

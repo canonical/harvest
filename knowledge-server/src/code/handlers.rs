@@ -46,7 +46,7 @@ pub(crate) fn env(state: &CodeState) -> Result<&CodeEnv, Response> {
     })
 }
 
-async fn scope(env: &CodeEnv, user: &Claims) -> RepoScope {
+pub(crate) async fn scope(env: &CodeEnv, user: &Claims) -> RepoScope {
     RepoAccess::new(&env.db)
         .scope_for(&user.sub)
         .await
