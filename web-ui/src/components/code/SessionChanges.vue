@@ -9,9 +9,16 @@
     <div class="session-tab__body session-tab__body--scroll">
       <p v-if="error" class="u-text--muted">{{ error }}</p>
       <template v-else-if="changes">
-        <ul v-if="changes.commits.length" class="code-commits">
-          <li v-for="commit in changes.commits" :key="commit"><code>{{ commit }}</code></li>
-        </ul>
+        <select
+          v-if="changes.commits.length"
+          v-model="selectedCommit"
+          class="changes-commit-picker"
+          aria-label="Show changes from"
+          @change="load"
+        >
+          <option value="">All changes against the base branch</option>
+          <option v-for="commit in changes.commits" :key="commit" :value="hashOf(commit)">{{ commit }}</option>
+        </select>
         <p v-if="!files.length" class="u-text--muted">No changes yet.</p>
         <details v-for="(file, index) in files" :key="file.path" class="diff-file-block" :open="index < OPEN_FILES">
           <summary>
@@ -42,14 +49,29 @@ const workspace = useLayoutWorkspace();
 const changes = ref(null);
 const error = ref('');
 const loading = ref(false);
+const selectedCommit = ref('');
 const files = computed(() => diffFiles(changes.value?.diff ?? ''));
-const summary = computed(() => (changes.value ? diffSummary(changes.value.commits, files.value) : 'Changes against the base branch'));
+const shownCommits = computed(() => {
+  const commits = changes.value?.commits ?? [];
+  return selectedCommit.value ? commits.filter(c => hashOf(c) === selectedCommit.value) : commits;
+});
+const summary = computed(() => (changes.value ? diffSummary(shownCommits.value, files.value) : 'Changes against the base branch'));
+
+function hashOf(commitLine) {
+  return commitLine.split(' ')[0];
+}
 
 async function load() {
   loading.value = true;
   error.value = '';
   try {
-    changes.value = await getSessionChanges(workspace.sessionId);
+    const next = await getSessionChanges(workspace.sessionId, selectedCommit.value || null);
+    if (selectedCommit.value && !next.commits.some(c => hashOf(c) === selectedCommit.value)) {
+      selectedCommit.value = '';
+      changes.value = await getSessionChanges(workspace.sessionId);
+      return;
+    }
+    changes.value = next;
   } catch (e) {
     error.value = e.message;
   } finally {

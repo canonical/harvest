@@ -10256,7 +10256,6 @@ button.activity-line__row:hover .activity-line__steps {
 .code-session__title .p-label { margin: 0; }
 .code-session__actions { display: flex; gap: .75rem; align-items: center; }
 .code-session__actions button { margin: 0; }
-.code-commits { list-style: none; margin: 0 0 1rem; padding: 0; }
 .code-diff { line-height: 1.4; }
 .code-diff .diff-add { color: #0e8420; }
 .code-diff .diff-del { color: #c7162b; }
@@ -10416,12 +10415,13 @@ button.activity-line__row:hover .activity-line__steps {
 .share-link__row { display: flex; gap: .5rem; }
 .share-link__row input, .share-link__row button { margin: 0; }
 .changes-summary { flex: 1; font-size: .875rem; color: var(--text-muted); }
-.diff-file-block { flex-shrink: 0; border: 1px solid var(--border-color); margin-bottom: .5rem; }
+.diff-file-block { flex-shrink: 0; min-width: 0; overflow: hidden; border: 1px solid var(--border-color); margin-bottom: .5rem; }
 .diff-file-block > summary { display: flex; justify-content: space-between; gap: 1rem; padding: .375rem .75rem; cursor: pointer; background: var(--bg-surface-hover); font-size: .875rem; }
 .diff-file-block__path { font-family: var(--font-mono, monospace); overflow-wrap: anywhere; }
 .diff-file-block__stats .diff-add { color: #0e8420; }
 .diff-file-block__stats .diff-del { color: #c7162b; }
-.diff-file-block .code-diff { margin: 0; border-radius: 0; max-height: none; }
+.diff-file-block .code-diff { margin: 0; border-radius: 0; max-height: none; overflow-x: auto; }
+.changes-commit-picker { margin: 0 0 .75rem; max-width: 100%; font-family: var(--font-mono, monospace); font-size: .8125rem; }
 .container-setup > summary { display: flex; align-items: baseline; gap: .75rem; cursor: pointer; list-style-position: inside; }
 .container-setup__title { font-size: 1.1rem; font-weight: 500; }
 .container-setup__status { font-size: .875rem; color: var(--text-muted); }

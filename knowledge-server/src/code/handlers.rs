@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
@@ -272,10 +272,16 @@ pub async fn close_session(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+#[derive(Deserialize)]
+pub struct ChangesQuery {
+    pub commit: Option<String>,
+}
+
 pub async fn session_changes(
     Extension(user): Extension<Claims>,
     State(state): State<Arc<CodeState>>,
     Path(id): Path<String>,
+    Query(query): Query<ChangesQuery>,
 ) -> Reply {
     let env = env(&state)?;
     let session = session_for(env, &user, &id).await?;
@@ -283,16 +289,31 @@ pub async fn session_changes(
         .await
         .map_err(|e| failure(StatusCode::CONFLICT, e.to_string()))?;
     let base = images::quote(&format!("refs/remotes/origin/{}", session.base_branch));
-    let diff = sessions::run_checked(env, &container, &format!(
+    let script = match query.commit.as_deref() {
+        Some(commit) => commit_diff_script(commit)
+            .ok_or_else(|| failure(StatusCode::BAD_REQUEST, "commit must be a commit hash"))?,
+        None => format!(
             "index=$(mktemp) && cp .git/index \"$index\" && GIT_INDEX_FILE=\"$index\" git add -N . && \
              GIT_INDEX_FILE=\"$index\" git diff {base}; status=$?; rm -f \"$index\"; exit $status"
-        ))
+        ),
+    };
+    let diff = sessions::run_checked(env, &container, &script)
         .await
         .map_err(|e| failure(StatusCode::BAD_GATEWAY, e.to_string()))?;
     let commits = sessions::run_checked(env, &container, &format!("git log --oneline {base}..HEAD"))
         .await
         .unwrap_or_default();
-    Ok(Json(json!({ "diff": diff, "commits": commits.lines().collect::<Vec<_>>() })).into_response())
+    Ok(Json(json!({
+        "diff": diff,
+        "commits": commits.lines().collect::<Vec<_>>(),
+        "commit": query.commit,
+    }))
+    .into_response())
+}
+
+pub fn commit_diff_script(commit: &str) -> Option<String> {
+    let valid = (4..=40).contains(&commit.len()) && commit.chars().all(|c| c.is_ascii_hexdigit());
+    valid.then(|| format!("git show --format= {commit}"))
 }
 
 #[derive(Deserialize)]
@@ -338,4 +359,17 @@ pub async fn session_query_stream(
     sessions::touch(env, &id).await.map_err(internal)?;
     let space = Space::code_session(&session.id, &user.sub);
     Ok(stream_turn(user, Arc::clone(&state.query), headers, request, space).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_commit_hashes_reach_the_shell() {
+        assert_eq!(commit_diff_script("0be3747").as_deref(), Some("git show --format= 0be3747"));
+        assert_eq!(commit_diff_script("abc"), None);
+        assert_eq!(commit_diff_script("0be3747; rm -rf /"), None);
+        assert_eq!(commit_diff_script("HEAD~1"), None);
+    }
 }
