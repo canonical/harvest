@@ -17,7 +17,7 @@ const routes = [
   { path: '/chat/artifacts', component: ArtifactsView,     meta: { mode: 'chat', directEntry: true } },
   { path: '/chat/skills',    component: SkillsView,        meta: { mode: 'chat', directEntry: true } },
 
-  { path: '/code',           component: () => import('../views/CodeProjectsView.vue'), meta: { mode: 'code', directEntry: true } },
+  { path: '/code',           component: () => import('../views/CodeSessionsView.vue'), meta: { mode: 'code', directEntry: true } },
   { path: '/code/projects/:id', component: () => import('../views/CodeProjectView.vue'), props: true, meta: { mode: 'code', directEntry: true } },
   { path: '/code/sessions/:id', component: () => import('../views/CodeSessionView.vue'), props: true, meta: { mode: 'code', directEntry: true } },
   { path: '/code/repositories', component: () => import('../views/RepositoriesView.vue'), meta: { mode: 'code', directEntry: true } },

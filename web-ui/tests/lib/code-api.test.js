@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { openCodeSession, closeCodeSession, isOpen, suggestBranch, proposeChange, changeRequestName, indexSummary } from '../../src/lib/code-api.js';
+import { listCodeSessions, openCodeSession, closeCodeSession, isOpen, suggestBranch, proposeChange, changeRequestName, indexSummary } from '../../src/lib/code-api.js';
 import { classifyDiffLines } from '../../src/lib/diff-lines.js';
 
 function respond(status, body) {
@@ -16,6 +16,12 @@ describe('code api', () => {
     const [url, options] = fetch.mock.calls[0];
     expect(url).toBe('/code/projects/p1/sessions');
     expect(JSON.parse(options.body)).toEqual({ branch: 'feat/x', base_branch: 'main' });
+  });
+
+  it('lists the sessions of the signed-in user', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockReturnValue(respond(200, [{ id: 's1' }]));
+    expect(await listCodeSessions()).toEqual([{ id: 's1' }]);
+    expect(fetch.mock.calls[0][0]).toBe('/code/sessions');
   });
 
   it('surfaces the server error message', async () => {

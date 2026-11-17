@@ -18,6 +18,7 @@ async function codeFetch(url, options = {}) {
 const send = (method, body) => ({ method, body: JSON.stringify(body) });
 
 export const listCodeProjects = () => codeFetch('/code/projects');
+export const listCodeSessions = () => codeFetch('/code/sessions');
 export const openCodeProject = (url) => codeFetch('/code/projects', send('POST', { url }));
 export const getCodeProject = (id) => codeFetch(`/code/projects/${id}`);
 export const saveSetupScript = (id, script) => codeFetch(`/code/projects/${id}/setup`, send('PUT', { script }));
