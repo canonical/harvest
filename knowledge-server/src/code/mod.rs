@@ -23,6 +23,7 @@ pub mod repo_git;
 pub mod sessions;
 pub mod verification;
 pub mod workspace;
+pub mod working_set;
 pub mod workspace_search;
 
 use std::sync::Arc;
@@ -47,6 +48,7 @@ pub struct CodeSettings {
     pub reindex_every: Duration,
     pub preview_origin: Option<previews::origin::PreviewOrigin>,
     pub preview_lifetime: Duration,
+    pub working_set_chars: usize,
 }
 
 impl From<&CodeConfig> for CodeSettings {
@@ -60,6 +62,7 @@ impl From<&CodeConfig> for CodeSettings {
             reindex_every: Duration::from_secs(config.reindex_hours * HOUR),
             preview_origin: previews::origin::PreviewOrigin::from_config(config),
             preview_lifetime: Duration::from_secs(config.preview_ttl_hours * HOUR),
+            working_set_chars: config.working_set_chars,
         }
     }
 }

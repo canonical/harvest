@@ -667,6 +667,7 @@ pub struct CodeConfig {
     pub preview_domain: Option<String>,
     pub preview_scheme: String,
     pub preview_ttl_hours: u64,
+    pub working_set_chars: usize,
 }
 
 impl Default for CodeConfig {
@@ -680,6 +681,7 @@ impl Default for CodeConfig {
             preview_domain: None,
             preview_scheme: "https".into(),
             preview_ttl_hours: 24,
+            working_set_chars: 24_000,
         }
     }
 }

@@ -57,6 +57,19 @@ pub async fn of_session(env: &CodeEnv, session_id: &str) -> Result<Option<Indexe
     of_project(&env.db, &project).await
 }
 
+pub async fn file_count(db: &Db, indexed: &IndexedVersion) -> Result<i64> {
+    let rows = db
+        .query(
+            "SELECT count(*) AS files FROM files f
+             JOIN versions v ON v.id = f.version_id
+             JOIN repositories r ON r.id = v.repository_id
+             WHERE r.name = $repo AND v.tag = $version",
+            json!({ "repo": indexed.repo, "version": indexed.version }),
+        )
+        .await?;
+    Ok(rows.first().and_then(|row| row["files"].as_i64()).unwrap_or(0))
+}
+
 pub fn needs_reindex(indexed: &IndexedVersion, remote_commit: &str) -> bool {
     indexed.commit.as_deref() != Some(remote_commit)
 }
