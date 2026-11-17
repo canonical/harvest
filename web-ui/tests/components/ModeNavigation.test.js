@@ -52,6 +52,10 @@ describe('modes', () => {
     expect(offersKnowledge(MODE.CODE)).toBe(false);
   });
 
+  it('offers sessions and code repositories in code mode', () => {
+    expect(pagesFor(MODE.CODE).map((page) => page.label)).toEqual(['Sessions', 'Code repositories']);
+  });
+
   it('uses projects only in deploy mode', () => {
     expect(usesProjects(MODE.DEPLOY)).toBe(true);
     expect(usesProjects(MODE.CHAT)).toBe(false);

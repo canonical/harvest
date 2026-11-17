@@ -19,6 +19,7 @@ const PAGES = Object.freeze({
   ],
   [MODE.CODE]: [
     { to: '/code', label: 'Sessions', icon: 'code', exact: true },
+    { to: '/code/repositories', label: 'Code repositories', icon: 'repository' },
   ],
   [MODE.DEPLOY]: [
     { to: '/deploy/chat', label: 'Chat', icon: 'chat' },
