@@ -2125,6 +2125,11 @@ button.activity-line__row:hover .activity-line__steps {
   position: relative;
 }
 
+.llm-picker__trigger-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .llm-picker__trigger {
   align-items: center;
   background: var(--bg-surface);

@@ -4,8 +4,9 @@
       type="button"
       class="llm-picker__trigger"
       :aria-expanded="open"
+      :title="triggerLabel"
       @click="toggle"
-    ><span class="llm-picker__trigger-icon" aria-hidden="true">+</span>{{ triggerLabel }}</button>
+    ><span class="llm-picker__trigger-icon" aria-hidden="true">+</span><span class="llm-picker__trigger-label">{{ shortLabel }}</span></button>
 
     <div v-if="open" class="llm-picker__panel" role="listbox">
       <input
@@ -70,6 +71,8 @@ const filteredEntries = computed(() => {
     || e.modelId.toLowerCase().includes(q)
   );
 });
+
+const shortLabel = computed(() => triggerLabel.value.split('/').pop());
 
 const triggerLabel = computed(() => {
   const match = entries.value.find(e =>
