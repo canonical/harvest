@@ -10416,7 +10416,7 @@ button.activity-line__row:hover .activity-line__steps {
 .share-link__row { display: flex; gap: .5rem; }
 .share-link__row input, .share-link__row button { margin: 0; }
 .changes-summary { flex: 1; font-size: .875rem; color: var(--text-muted); }
-.diff-file-block { border: 1px solid var(--border-color); margin-bottom: .5rem; }
+.diff-file-block { flex-shrink: 0; border: 1px solid var(--border-color); margin-bottom: .5rem; }
 .diff-file-block > summary { display: flex; justify-content: space-between; gap: 1rem; padding: .375rem .75rem; cursor: pointer; background: var(--bg-surface-hover); font-size: .875rem; }
 .diff-file-block__path { font-family: var(--font-mono, monospace); overflow-wrap: anywhere; }
 .diff-file-block__stats .diff-add { color: #0e8420; }
