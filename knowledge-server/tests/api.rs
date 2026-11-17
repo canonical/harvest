@@ -109,6 +109,7 @@ fn query_app(agent: Arc<Agent>) -> Router {
         toolbox: Arc::new(knowledge_server::toolsets::Toolbox::default()),
         admission: knowledge_server::turns::admission::TurnAdmission::unlimited(),
         code: None,
+        turn_hooks: None,
     });
     Router::new()
         .route("/query", post(handle_query))
@@ -453,6 +454,7 @@ fn query_app_with_db(agent: Arc<Agent>, db: Arc<Db>) -> Router {
         toolbox: Arc::new(knowledge_server::toolsets::Toolbox::default()),
         admission: knowledge_server::turns::admission::TurnAdmission::unlimited(),
         code: None,
+        turn_hooks: None,
     });
     let query_router = Router::new()
         .route("/query/stream", post(handle_query_stream))

@@ -1,3 +1,4 @@
+use crate::api::turn_hooks::FinishedTurn;
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::{
@@ -206,6 +207,7 @@ pub async fn stream_turn(
 
     let (tx, rx) = mpsc::channel::<AgentEvent>(64);
     let user_llm = resolve_user_llm(&qs.llm, &qs.llm_configs, &qs.user_key_store, &user.sub).await;
+    let hook_space = space.clone();
     let agent = qs
         .agent_in(space, &user.sub, req.conversation_id.as_deref(), user_llm)
         .await;
@@ -225,6 +227,10 @@ pub async fn stream_turn(
         let _permit = permit;
         let context = load_context_if_needed(&qs_ctx, &user_id, conv_id.as_deref()).await;
         let history = context.history();
+        let snapshot = match &qs_ctx.turn_hooks {
+            Some(hooks) => hooks.before(&hook_space).await,
+            None => None,
+        };
         let (agent_tx, mut agent_rx) = mpsc::channel::<AgentEvent>(64);
         let query_for_agent = query.clone();
         let history_for_agent = history.clone();
@@ -348,6 +354,17 @@ pub async fn stream_turn(
                 )
                 .await;
                 spawn_summary_refresh(Arc::clone(db), Arc::clone(&agent), cid.clone());
+                if let Some(hooks) = qs_ctx.turn_hooks.clone() {
+                    let finished = FinishedTurn {
+                        space: hook_space.clone(),
+                        user_id: user_id.clone(),
+                        conversation_id: cid.clone(),
+                        request: query.clone(),
+                        snapshot: snapshot.clone(),
+                    };
+                    let query_state = Arc::clone(&qs_ctx);
+                    tokio::spawn(async move { hooks.after(query_state, finished).await });
+                }
 
                 let msg_count = context.message_count + 2;
                 let db_t = Arc::clone(db);

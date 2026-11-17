@@ -8,6 +8,7 @@ pub mod llm;
 pub mod query;
 pub mod repositories;
 pub mod tool_description;
+pub mod turn_hooks;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -19,6 +20,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
+use crate::agent::roles::Role;
 use crate::agent::{deployment_tools, graph_tools, prompt, tool, Agent};
 use crate::artifacts::handlers::{self as artifact_handlers, ArtifactState};
 use crate::auth::api_keys::ApiKeyStore;
@@ -107,19 +109,24 @@ pub struct QueryState {
     pub toolbox: Arc<Toolbox>,
     pub admission: Arc<crate::turns::admission::TurnAdmission>,
     pub code: Option<crate::code::CodeEnv>,
+    pub turn_hooks: Option<Arc<dyn turn_hooks::TurnHooks>>,
 }
 
 impl QueryState {
-    async fn briefing_for(&self, space: &crate::modes::Space) -> Option<crate::code::briefing::Briefing> {
+    async fn briefing_for(
+        &self,
+        space: &Space,
+        conversation_id: &str,
+        reader: crate::code::briefing::Reader,
+    ) -> Option<crate::code::briefing::Briefing> {
         if space.mode() != crate::modes::Mode::Code {
             return None;
         }
         Some(match (&self.code, space.code_session_id()) {
-            (Some(env), Some(session_id)) => crate::code::briefing::for_session(env, session_id).await,
-            _ => crate::code::briefing::Briefing {
-                appendix: prompt::CODE_SESSION_GUIDE.to_string(),
-                focus: None,
-            },
+            (Some(env), Some(session_id)) => {
+                crate::code::briefing::for_session(env, session_id, conversation_id, reader).await
+            }
+            _ => crate::code::briefing::Briefing::without_session(),
         })
     }
 
@@ -130,22 +137,64 @@ impl QueryState {
         conversation_id: Option<&str>,
         llm: Arc<dyn LlmProvider>,
     ) -> Arc<Agent> {
-        let conversation_id = conversation_id.unwrap_or_default();
-        let briefing = self.briefing_for(&space).await;
+        self.build_agent(space, user_id, conversation_id.unwrap_or_default(), llm, None)
+            .await
+    }
+
+    pub async fn agent_for_role(
+        &self,
+        space: Space,
+        user_id: &str,
+        conversation_id: &str,
+        llm: Arc<dyn LlmProvider>,
+        role: &'static Role,
+    ) -> Arc<Agent> {
+        self.build_agent(space, user_id, conversation_id, llm, Some(role)).await
+    }
+
+    async fn build_agent(
+        &self,
+        space: Space,
+        user_id: &str,
+        conversation_id: &str,
+        llm: Arc<dyn LlmProvider>,
+        role: Option<&'static Role>,
+    ) -> Arc<Agent> {
+        let reader = match role {
+            Some(_) => crate::code::briefing::Reader::Reviewer,
+            None => crate::code::briefing::Reader::Author,
+        };
+        let briefing = self.briefing_for(&space, conversation_id, reader).await;
         let turn = match &self.db {
             Some(db) => TurnContext::load(db, user_id, space, conversation_id, llm).await,
             None => TurnContext::unrestricted(user_id, space, conversation_id, llm),
         }
         .focused_on(briefing.as_ref().and_then(|b| b.focus.clone()));
+        let tools: Vec<_> = self
+            .toolbox
+            .tools(&turn)
+            .into_iter()
+            .filter(|tool| role.is_none_or(|r| r.allows(&tool.definition().name)))
+            .collect();
+        let tools = match (&self.code, turn.space.code_session_id(), role) {
+            (Some(env), Some(session_id), None) => {
+                crate::code::jobs::reporting::JobReports::wrap(tools, env, session_id, conversation_id)
+            }
+            _ => tools,
+        };
+        let appendix = briefing.as_ref().map(|b| match role {
+            Some(role) => b.appendix_for(role.instructions),
+            None => b.appendix(),
+        });
         let agent = Agent::new(
             Arc::clone(&turn.llm),
-            self.toolbox.tools(&turn),
-            self.max_iterations,
+            tools,
+            role.map_or(self.max_iterations, |r| r.max_iterations),
         )
         .with_system_one(self.system_one.clone())
         .with_compaction(self.compaction_threshold_chars, self.compaction_keep_last)
-        .with_parallel_research(true)
-        .with_prompt_appendix(briefing.as_ref().map(|b| b.appendix.as_str()));
+        .with_parallel_research(role.is_none() && briefing.as_ref().is_none_or(|b| b.parallel_research))
+        .with_prompt_appendix(appendix.as_deref());
         Arc::new(match self.thresholds {
             Some(t) => t.apply(agent),
             None => agent,
@@ -441,6 +490,10 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         toolbox: Arc::clone(&state.agent_builder.toolbox),
         admission: Arc::clone(&state.admission),
         code: state.code.clone(),
+        turn_hooks: state
+            .code
+            .clone()
+            .map(|env| Arc::new(turn_hooks::CodeTurnHooks { env }) as Arc<dyn turn_hooks::TurnHooks>),
     });
     let agent_router = Router::new()
         .route("/query", post(query::handle_query))

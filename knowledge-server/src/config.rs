@@ -668,6 +668,7 @@ pub struct CodeConfig {
     pub preview_scheme: String,
     pub preview_ttl_hours: u64,
     pub working_set_chars: usize,
+    pub review_changes: bool,
 }
 
 impl Default for CodeConfig {
@@ -682,6 +683,7 @@ impl Default for CodeConfig {
             preview_scheme: "https".into(),
             preview_ttl_hours: 24,
             working_set_chars: 24_000,
+            review_changes: true,
         }
     }
 }

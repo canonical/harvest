@@ -20,11 +20,13 @@ pub mod process;
 pub mod project_facts;
 pub mod projects;
 pub mod repo_git;
+pub mod review;
 pub mod sessions;
 pub mod verification;
 pub mod workspace;
 pub mod working_set;
 pub mod workspace_search;
+pub mod workspace_state;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,6 +51,7 @@ pub struct CodeSettings {
     pub preview_origin: Option<previews::origin::PreviewOrigin>,
     pub preview_lifetime: Duration,
     pub working_set_chars: usize,
+    pub review_changes: bool,
 }
 
 impl From<&CodeConfig> for CodeSettings {
@@ -63,6 +66,7 @@ impl From<&CodeConfig> for CodeSettings {
             preview_origin: previews::origin::PreviewOrigin::from_config(config),
             preview_lifetime: Duration::from_secs(config.preview_ttl_hours * HOUR),
             working_set_chars: config.working_set_chars,
+            review_changes: config.review_changes,
         }
     }
 }
