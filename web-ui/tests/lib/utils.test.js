@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatDuration } from '../../src/lib/utils.js';
+import { formatDuration, relativeTime } from '../../src/lib/utils.js';
 
 describe('formatDuration', () => {
   it('shows one decimal place under 10 seconds', () => {
@@ -25,5 +25,20 @@ describe('formatDuration', () => {
 
   it('clamps negative durations to zero', () => {
     expect(formatDuration(-500)).toBe('0.0s');
+  });
+});
+
+describe('relativeTime', () => {
+  const now = Date.parse('2026-11-17T12:00:00Z');
+
+  it('shows the largest whole unit since the moment', () => {
+    expect(relativeTime('2026-11-17T11:59:30Z', now)).toBe('just now');
+    expect(relativeTime('2026-11-17T11:45:00Z', now)).toBe('15m ago');
+    expect(relativeTime('2026-11-17T09:00:00Z', now)).toBe('3h ago');
+    expect(relativeTime('2026-11-15T12:00:00Z', now)).toBe('2d ago');
+  });
+
+  it('shows a dash when there is no moment', () => {
+    expect(relativeTime(null, now)).toBe('—');
   });
 });

@@ -16,6 +16,15 @@ export function initials(name) {
     : (parts[0]?.[0] ?? '?').toUpperCase();
 }
 
+export function relativeTime(iso, now = Date.now()) {
+  if (!iso) return '—';
+  const s = Math.floor((now - new Date(iso).getTime()) / 1000);
+  if (s < 60)    return 'just now';
+  if (s < 3600)  return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
 export function formatDuration(ms) {
   const totalSeconds = Math.max(0, ms ?? 0) / 1000;
   if (totalSeconds < 60) return `${totalSeconds.toFixed(totalSeconds < 10 ? 1 : 0)}s`;
