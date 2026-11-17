@@ -3,7 +3,7 @@
     <p v-if="error" class="code-error" role="alert">{{ error }}</p>
     <template v-if="project">
       <div class="settings-header">
-        <router-link to="/code" class="code-back">Code</router-link>
+        <router-link :to="{ path: '/code', query: { project: id } }" class="code-back">Sessions</router-link>
         <h1>{{ project.name }}</h1>
         <p class="u-text--muted">{{ project.url }}</p>
         <span class="p-chip project-index" :title="`Code graph: ${indexText}`">
@@ -17,18 +17,7 @@
           <h2>Start a session</h2>
           <p class="settings-section__description">Each session gets its own container and branch. Opening a branch you already work on brings you back to that session.</p>
         </div>
-        <form class="code-session-form" @submit.prevent="start">
-          <label for="code-branch">Branch</label>
-          <input id="code-branch" v-model="branch" type="text" list="code-branches" placeholder="harvest/my-change" />
-          <datalist id="code-branches">
-            <option v-for="name in branches" :key="name" :value="name" />
-          </datalist>
-          <label for="code-base">From</label>
-          <select id="code-base" v-model="baseBranch">
-            <option v-for="name in baseChoices" :key="name" :value="name">{{ name }}</option>
-          </select>
-          <button class="p-button--positive is-dense" type="submit" :disabled="!branch.trim() || starting">{{ starting ? 'Starting…' : 'Start' }}</button>
-        </form>
+        <SessionBranchForm :key="id" :project-id="id" :branches="branches" :default-branch="project.default_branch ?? ''" />
       </section>
 
       <section class="settings-section">
@@ -79,33 +68,24 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue';
-import { useRouter } from 'vue-router';
-import { getCodeProject, indexSummary, openCodeSession, saveSetupScript } from '../lib/code-api.js';
+import { getCodeProject, indexSummary, saveSetupScript } from '../lib/code-api.js';
+import SessionBranchForm from '../components/code/SessionBranchForm.vue';
 import ProjectChecksSettings from '../components/code/ProjectChecksSettings.vue';
 import { showToast } from '../composables/useToasts.js';
 
 const props = defineProps({ id: { type: String, required: true } });
-const router = useRouter();
 
 const project = ref(null);
 const branches = ref([]);
 const sessions = ref([]);
 const image = ref(null);
 const index = ref(null);
-const branch = ref('');
-const baseBranch = ref('');
 const setupScript = ref('');
 const learnedSetup = ref([]);
-const starting = ref(false);
 const saving = ref(false);
 const showLog = ref(false);
 const error = ref('');
 
-const baseChoices = computed(() => {
-  const names = new Set(branches.value);
-  if (project.value?.default_branch) names.add(project.value.default_branch);
-  return [...names];
-});
 const indexText = computed(() => indexSummary(index.value));
 const setupChanged = computed(() => setupScript.value !== (project.value?.setup_script ?? ''));
 const imageStatus = computed(() => ({
@@ -125,22 +105,8 @@ async function load() {
     index.value = data.index;
     setupScript.value = data.project.setup_script ?? '';
     learnedSetup.value = data.learned_setup ?? [];
-    baseBranch.value = data.project.default_branch ?? branches.value[0] ?? '';
   } catch (e) {
     error.value = e.message;
-  }
-}
-
-async function start() {
-  starting.value = true;
-  error.value = '';
-  try {
-    const session = await openCodeSession(props.id, branch.value.trim(), baseBranch.value);
-    router.push(`/code/sessions/${session.id}`);
-  } catch (e) {
-    error.value = e.message;
-  } finally {
-    starting.value = false;
   }
 }
 
