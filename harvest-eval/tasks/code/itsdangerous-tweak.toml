@@ -1,0 +1,37 @@
+name = "itsdangerous-tweak"
+kind = "tweak"
+repository = "https://github.com/pallets/itsdangerous"
+base = "main"
+prompts = [
+  "When a timestamped signature is too old, make the SignatureExpired message read \"Signature expired: it is <age> seconds old, the limit is <max_age> seconds\" instead of the current wording. Commit when done.",
+]
+
+[acceptance]
+prepare = [
+  "python3 -m venv /tmp/bench-venv || (apt-get update -qq && apt-get install -y -qq python3-venv && python3 -m venv /tmp/bench-venv)",
+  "/tmp/bench-venv/bin/pip install -q -e . pytest freezegun",
+]
+command = "/tmp/bench-venv/bin/pytest -q tests/test_bench_acceptance.py"
+
+[acceptance.files]
+"tests/test_bench_acceptance.py" = '''
+import pytest
+from freezegun import freeze_time
+from itsdangerous import SignatureExpired, TimestampSigner
+
+
+def test_expired_message_names_age_and_limit():
+    with freeze_time("2024-01-01 00:00:00"):
+        signed = TimestampSigner("k").sign("v")
+    with freeze_time("2024-01-01 00:00:15"):
+        with pytest.raises(SignatureExpired) as info:
+            TimestampSigner("k").unsign(signed, max_age=10)
+    assert str(info.value) == "Signature expired: it is 15 seconds old, the limit is 10 seconds"
+'''
+
+[checks]
+prepare = [
+  "python3 -m venv /tmp/bench-venv || (apt-get update -qq && apt-get install -y -qq python3-venv && python3 -m venv /tmp/bench-venv)",
+  "/tmp/bench-venv/bin/pip install -q ruff",
+]
+commands = ["/tmp/bench-venv/bin/ruff format --check src tests", "/tmp/bench-venv/bin/ruff check src tests"]

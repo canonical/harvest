@@ -1,4 +1,5 @@
 pub mod calibrate;
+pub mod code_bench;
 pub mod distill;
 pub mod extract;
 pub mod gold;

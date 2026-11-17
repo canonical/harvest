@@ -1,0 +1,48 @@
+name = "itsdangerous-timedelta-feature"
+kind = "feature"
+repository = "https://github.com/pallets/itsdangerous"
+base = "main"
+prompts = [
+  "Make max_age accept a datetime.timedelta as well as a number of seconds, everywhere it is accepted today. Keep the current behaviour for ints and floats. Add tests, update the docs and the changelog, run the full test suite, and commit.",
+]
+
+[acceptance]
+prepare = [
+  "python3 -m venv /tmp/bench-venv || (apt-get update -qq && apt-get install -y -qq python3-venv && python3 -m venv /tmp/bench-venv)",
+  "/tmp/bench-venv/bin/pip install -q -e . pytest freezegun",
+]
+command = "/tmp/bench-venv/bin/pytest -q tests"
+
+[acceptance.files]
+"tests/test_bench_acceptance.py" = '''
+from datetime import timedelta
+
+import pytest
+from freezegun import freeze_time
+from itsdangerous import SignatureExpired, TimestampSigner, URLSafeTimedSerializer
+
+
+def test_signer_accepts_a_timedelta():
+    with freeze_time("2024-01-01 00:00:00"):
+        signed = TimestampSigner("k").sign("v")
+    with freeze_time("2024-01-01 00:00:10"):
+        assert TimestampSigner("k").unsign(signed, max_age=timedelta(seconds=10)) == b"v"
+    with freeze_time("2024-01-01 00:00:11"):
+        with pytest.raises(SignatureExpired):
+            TimestampSigner("k").unsign(signed, max_age=timedelta(seconds=10))
+
+
+def test_serializer_accepts_a_timedelta():
+    serializer = URLSafeTimedSerializer("k")
+    with freeze_time("2024-01-01 00:00:00"):
+        token = serializer.dumps({"a": 1})
+    with freeze_time("2024-01-01 00:01:00"):
+        assert serializer.loads(token, max_age=timedelta(minutes=1)) == {"a": 1}
+'''
+
+[checks]
+prepare = [
+  "python3 -m venv /tmp/bench-venv || (apt-get update -qq && apt-get install -y -qq python3-venv && python3 -m venv /tmp/bench-venv)",
+  "/tmp/bench-venv/bin/pip install -q ruff",
+]
+commands = ["/tmp/bench-venv/bin/ruff format --check src tests", "/tmp/bench-venv/bin/ruff check src tests"]

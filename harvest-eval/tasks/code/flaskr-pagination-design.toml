@@ -1,0 +1,41 @@
+name = "flaskr-pagination-design"
+kind = "design"
+repository = "https://github.com/pallets/flask"
+base = "main"
+prompts = [
+  "In examples/tutorial (the flaskr blog), I want the index page paginated: 10 posts per page, newest first, with Previous and Next links and the page in the URL (?page=2). Design it first, following clean code principles: where the logic lives, how invalid pages behave, and how you will test it. Give me a short plan. Do not write code yet.",
+  "The plan looks good. Implement it, with tests, and commit when done.",
+]
+
+[acceptance]
+prepare = [
+  "python3 -m venv /tmp/bench-venv || (apt-get update -qq && apt-get install -y -qq python3-venv && python3 -m venv /tmp/bench-venv)",
+  "/tmp/bench-venv/bin/pip install -q -e . -e examples/tutorial pytest",
+]
+command = "cd examples/tutorial && /tmp/bench-venv/bin/pytest -q tests"
+
+[acceptance.files]
+"examples/tutorial/tests/test_bench_acceptance.py" = '''
+from flaskr.db import get_db
+
+
+def add_posts(app, count):
+    with app.app_context():
+        db = get_db()
+        for i in range(count):
+            db.execute(
+                "INSERT INTO post (title, body, author_id, created) VALUES (?, ?, 1, ?)",
+                (f"bench post {i:02d}", "body", f"2024-01-01 00:{i:02d}:00"),
+            )
+        db.commit()
+
+
+def test_the_index_shows_ten_posts_per_page(client, app):
+    add_posts(app, 14)
+    first = client.get("/").data.decode()
+    second = client.get("/?page=2").data.decode()
+    assert first.count('<article class="post">') == 10
+    assert second.count('<article class="post">') == 5
+    assert "bench post 13" in first
+    assert "bench post 00" in second
+'''

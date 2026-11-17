@@ -151,6 +151,24 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    CodeBench {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        server: String,
+        #[arg(long, env = "HARVEST_TOKEN")]
+        token: String,
+        #[arg(long, default_value = "harvest-eval/tasks/code")]
+        tasks: PathBuf,
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long, default_value_t = 3)]
+        runs: usize,
+        #[arg(long)]
+        keep_sessions: bool,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 struct Env {
@@ -553,6 +571,30 @@ async fn main() -> Result<()> {
                 score.accept,
                 score.reject
             );
+        }
+        Command::CodeBench {
+            config,
+            server,
+            token,
+            tasks,
+            task,
+            runs,
+            keep_sessions,
+            out,
+        } => {
+            let report = harvest_eval::code_bench::run(harvest_eval::code_bench::Options {
+                config: &config,
+                server: &server,
+                token: &token,
+                tasks: &tasks,
+                only: task.as_deref(),
+                runs,
+                keep_sessions,
+            })
+            .await?;
+            if let Some(out) = out {
+                std::fs::write(&out, serde_json::to_string_pretty(&report)?)?;
+            }
         }
         Command::TrainReranker {
             connection,

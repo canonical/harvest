@@ -1,0 +1,47 @@
+name = "itsdangerous-rotation-bug"
+kind = "bug"
+repository = "https://github.com/pallets/itsdangerous"
+base = "main"
+setup = [
+  """python3 - <<'PY'
+p = "src/itsdangerous/signer.py"
+s = open(p).read()
+old = "for secret_key in reversed(self.secret_keys):"
+assert old in s
+s = s.replace(old, "for secret_key in self.secret_keys[-1:]:")
+open(p, "w").write(s)
+PY""",
+  "git -c user.name='Sam Rivera' -c user.email=sam@example.com commit -qam 'Only verify signatures with the active key'",
+]
+prompts = [
+  "After we rotated our secret key (we appended the new key to the list of secret keys), every token signed before the rotation is rejected as invalid. Find out why, fix it, add a regression test, run the tests and commit.",
+]
+
+[acceptance]
+prepare = [
+  "python3 -m venv /tmp/bench-venv || (apt-get update -qq && apt-get install -y -qq python3-venv && python3 -m venv /tmp/bench-venv)",
+  "/tmp/bench-venv/bin/pip install -q -e . pytest freezegun",
+]
+command = "/tmp/bench-venv/bin/pytest -q tests"
+
+[acceptance.files]
+"tests/test_bench_acceptance.py" = '''
+from itsdangerous import Signer
+
+
+def test_tokens_signed_before_a_rotation_still_verify():
+    signed = Signer("old").sign("v")
+    assert Signer(["old", "new"]).unsign(signed) == b"v"
+
+
+def test_the_newest_key_signs():
+    signed = Signer(["old", "new"]).sign("v")
+    assert Signer("new").unsign(signed) == b"v"
+'''
+
+[checks]
+prepare = [
+  "python3 -m venv /tmp/bench-venv || (apt-get update -qq && apt-get install -y -qq python3-venv && python3 -m venv /tmp/bench-venv)",
+  "/tmp/bench-venv/bin/pip install -q ruff",
+]
+commands = ["/tmp/bench-venv/bin/ruff format --check src tests", "/tmp/bench-venv/bin/ruff check src tests"]
