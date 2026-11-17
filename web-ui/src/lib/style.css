@@ -671,6 +671,7 @@ html, body {
   flex: 1;
   min-height: 0;
   display: flex;
+  flex-direction: column;
 }
 
 .messages {
@@ -5050,7 +5051,8 @@ button.activity-line__row:hover .activity-line__steps {
 .input-area .p-search-box .p-search-box__input {
   padding-right: 6rem;
   resize: none;
-  overflow-y: hidden;
+  max-height: min(40vh, 14rem);
+  overflow-y: auto;
 }
 
 .input-area .p-search-box {
@@ -7848,11 +7850,9 @@ button.activity-line__row:hover .activity-line__steps {
 }
 
 .jump-latest-btn {
-  position: absolute;
-  bottom: 1rem;
-  left: 50%;
-  transform: translateX(-50%);
-  margin: 0;
+  align-self: center;
+  flex-shrink: 0;
+  margin: 0.35rem 0;
   padding: 0.4rem 0.9rem;
   border: 1px solid var(--border-color);
   border-radius: 2px;
