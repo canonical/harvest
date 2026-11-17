@@ -38,6 +38,10 @@ impl RepoScope {
         matches!(self, Self::All)
     }
 
+    pub fn sql_condition(column: &str) -> String {
+        format!("(${SCOPE_ALL_PARAM}::bool OR {column} = ANY(${SCOPE_REPOS_PARAM}::text[]))")
+    }
+
     pub fn write_into(&self, params: &mut Value) {
         let Some(object) = params.as_object_mut() else {
             return;
@@ -214,6 +218,14 @@ mod tests {
         assert!(scope.allows("cinder"));
         assert!(!scope.allows("secret"));
         assert!(RepoScope::All.allows("secret"));
+    }
+
+    #[test]
+    fn the_sql_condition_reads_the_params_the_scope_writes() {
+        assert_eq!(
+            RepoScope::sql_condition("r.name"),
+            "($_scope_all::bool OR r.name = ANY($_scope_repos::text[]))"
+        );
     }
 
     #[test]

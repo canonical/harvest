@@ -63,25 +63,27 @@ pub async fn ensure(db: &Db, repo: &str, default_branch: Option<&str>, created_b
 }
 
 pub async fn list(db: &Db, scope: &RepoScope, user_id: &str) -> Result<Vec<Value>> {
-    let (all, repos) = match scope {
-        RepoScope::All => (true, Vec::new()),
-        RepoScope::Only(names) => (false, names.iter().cloned().collect()),
-    };
-    Ok(db
-        .query(
-            "SELECT p.id, r.name, r.url, r.visibility, r.default_branch, p.last_used_at,
-                    i.status AS image_status,
-                    (SELECT count(*) FROM code_sessions s
-                     WHERE s.project_id = p.id AND s.user_id = $uid AND s.status IN ('starting', 'active'))
-                        AS open_sessions
-             FROM code_projects p
-             JOIN repositories r ON r.id = p.repository_id
-             LEFT JOIN code_images i ON i.project_id = p.id
-             WHERE $all::bool OR r.name = ANY($repos::text[])
-             ORDER BY p.last_used_at DESC",
-            json!({ "uid": user_id, "all": all, "repos": repos }),
-        )
-        .await?)
+    let mut params = json!({ "uid": user_id });
+    scope.write_into(&mut params);
+    let sql = format!(
+        "SELECT p.id, r.name, r.url, r.visibility, r.default_branch,
+                GREATEST(p.last_used_at, mine.last_active_at) AS last_used_at,
+                i.status AS image_status,
+                coalesce(mine.open_sessions, 0) AS open_sessions
+         FROM code_projects p
+         JOIN repositories r ON r.id = p.repository_id
+         LEFT JOIN code_images i ON i.project_id = p.id
+         LEFT JOIN LATERAL (
+             SELECT max(s.last_active_at) AS last_active_at,
+                    count(*) FILTER (WHERE s.status IN ('starting', 'active')) AS open_sessions
+             FROM code_sessions s
+             WHERE s.project_id = p.id AND s.user_id = $uid
+         ) mine ON true
+         WHERE {}
+         ORDER BY GREATEST(p.last_used_at, mine.last_active_at) DESC",
+        RepoScope::sql_condition("r.name"),
+    );
+    Ok(db.query(&sql, params).await?)
 }
 
 pub async fn set_setup_script(db: &Db, id: &str, script: Option<&str>) -> Result<()> {
