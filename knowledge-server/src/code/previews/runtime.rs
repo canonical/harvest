@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 
-use super::super::images::{quote, tail};
+use super::super::images::tail;
+use super::super::process::Process;
 use super::super::{CodeEnv, WORKSPACE};
 use super::diagnosis::{self, Facts};
 use super::Preview;
@@ -13,48 +14,16 @@ const POLL: Duration = Duration::from_secs(2);
 const LOG_CHARS: usize = 4_000;
 const LOOPBACK: &str = "127.0.0.1";
 
-pub struct Files {
-    log: String,
-    pid: String,
-}
-
-impl Files {
-    pub fn of(preview_id: &str) -> Self {
-        Self {
-            log: quote(&format!("/tmp/harvest-preview-{preview_id}.log")),
-            pid: quote(&format!("/tmp/harvest-preview-{preview_id}.pid")),
-        }
-    }
+pub fn process_of(preview_id: &str) -> Process {
+    Process::named(&format!("preview-{preview_id}"))
 }
 
 pub fn port_probe(host: &str, port: u16) -> String {
     format!("timeout 1 bash -c 'exec 3<>/dev/tcp/{host}/{port}'")
 }
 
-pub fn start_script(files: &Files, port: u16, command: &str) -> String {
-    format!(
-        "HOST=0.0.0.0 PORT={port} setsid nohup bash -lc {command} > {log} 2>&1 < /dev/null & echo $! > {pid}",
-        command = quote(command),
-        log = files.log,
-        pid = files.pid,
-    )
-}
-
-pub fn stop_script(files: &Files) -> String {
-    format!(
-        "pid=$(cat {pid} 2>/dev/null) || exit 0; kill -TERM -- -\"$pid\" 2>/dev/null; \
-         for i in 1 2 3 4 5; do kill -0 -- -\"$pid\" 2>/dev/null || break; sleep 1; done; \
-         kill -KILL -- -\"$pid\" 2>/dev/null; rm -f {pid}; exit 0",
-        pid = files.pid,
-    )
-}
-
-pub fn running_probe(files: &Files) -> String {
-    format!("kill -0 \"$(cat {} 2>/dev/null)\" 2>/dev/null", files.pid)
-}
-
 pub async fn stop(env: &CodeEnv, container: &str, preview_id: &str) -> Result<()> {
-    let script = stop_script(&Files::of(preview_id));
+    let script = process_of(preview_id).stop_script();
     env.lxd
         .run(container, Command::shell(&script).timeout(Duration::from_secs(15)))
         .await?;
@@ -62,13 +31,13 @@ pub async fn stop(env: &CodeEnv, container: &str, preview_id: &str) -> Result<()
 }
 
 pub async fn log(env: &CodeEnv, container: &str, preview_id: &str) -> Result<String> {
-    read_log(env, container, &Files::of(preview_id)).await
+    read_log(env, container, &process_of(preview_id)).await
 }
 
-async fn read_log(env: &CodeEnv, container: &str, files: &Files) -> Result<String> {
+async fn read_log(env: &CodeEnv, container: &str, process: &Process) -> Result<String> {
     let output = env
         .lxd
-        .run(container, Command::shell(&format!("tail -c {LOG_CHARS} {} 2>/dev/null", files.log)))
+        .run(container, Command::shell(&process.log_script(LOG_CHARS)))
         .await?;
     Ok(tail(&output.stdout, LOG_CHARS))
 }
@@ -97,9 +66,9 @@ pub async fn address(env: &CodeEnv, container: &str, preview: &Preview) -> Resul
 }
 
 async fn start(env: &CodeEnv, container: &str, ip: &str, port: u16, preview: &Preview) -> Result<()> {
-    let files = Files::of(&preview.id);
+    let process = process_of(&preview.id);
     if listening(env, container, LOOPBACK, port).await? {
-        bail!(failure(env, container, &files, port).await);
+        bail!(failure(env, container, &process, port).await);
     }
     let Some(command) = &preview.start_command else {
         bail!("nothing listens on port {port} and the preview has no start command");
@@ -107,7 +76,9 @@ async fn start(env: &CodeEnv, container: &str, ip: &str, port: u16, preview: &Pr
     env.lxd
         .run(
             container,
-            Command::shell(&start_script(&files, port, command)).in_dir(WORKSPACE).timeout(Duration::from_secs(15)),
+            Command::shell(&process.start_script(command, &app_environment(port)))
+                .in_dir(WORKSPACE)
+                .timeout(Duration::from_secs(15)),
         )
         .await?;
     let deadline = tokio::time::Instant::now() + START_WAIT;
@@ -116,16 +87,20 @@ async fn start(env: &CodeEnv, container: &str, ip: &str, port: u16, preview: &Pr
         if listening(env, container, ip, port).await? {
             return Ok(());
         }
-        if !succeeds(env, container, &running_probe(&files)).await? {
+        if !succeeds(env, container, &process.running_probe()).await? {
             break;
         }
     }
-    bail!(failure(env, container, &files, port).await)
+    bail!(failure(env, container, &process, port).await)
 }
 
-async fn failure(env: &CodeEnv, container: &str, files: &Files, port: u16) -> String {
-    let log = read_log(env, container, files).await.unwrap_or_default();
-    let running = succeeds(env, container, &running_probe(files)).await.unwrap_or(false);
+fn app_environment(port: u16) -> [(&'static str, String); 2] {
+    [("HOST", "0.0.0.0".into()), ("PORT", port.to_string())]
+}
+
+async fn failure(env: &CodeEnv, container: &str, process: &Process, port: u16) -> String {
+    let log = read_log(env, container, process).await.unwrap_or_default();
+    let running = succeeds(env, container, &process.running_probe()).await.unwrap_or(false);
     let local_only = listening(env, container, LOOPBACK, port).await.unwrap_or(false);
     let facts = Facts { log: &log, running, local_only };
     diagnosis::diagnose(&facts).report(port, START_WAIT.as_secs(), &log)
@@ -136,21 +111,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_preview_keeps_its_own_log_and_pid_files() {
-        let files = Files::of("abc");
-        let script = start_script(&files, 5173, "npm run dev");
-        assert!(script.starts_with("HOST=0.0.0.0 PORT=5173 setsid nohup bash -lc 'npm run dev'"));
-        assert!(script.contains("> '/tmp/harvest-preview-abc.log' 2>&1"));
-        assert!(script.ends_with("& echo $! > '/tmp/harvest-preview-abc.pid'"));
-        assert!(running_probe(&Files::of("xyz")).contains("/tmp/harvest-preview-xyz.pid"));
-    }
-
-    #[test]
-    fn stopping_ends_the_whole_process_group_of_one_preview() {
-        let stop = stop_script(&Files::of("abc"));
-        assert!(stop.starts_with("pid=$(cat '/tmp/harvest-preview-abc.pid' 2>/dev/null) || exit 0;"));
-        assert!(stop.contains("kill -TERM -- -\"$pid\""));
-        assert!(stop.ends_with("exit 0"));
+    fn previews_run_as_supervised_processes_with_their_port() {
+        let script = process_of("abc").start_script("npm run dev", &app_environment(5173));
+        assert!(script.contains("HOST='0.0.0.0' PORT='5173' setsid nohup"));
+        assert!(script.contains("/tmp/harvest-preview-abc.log"));
     }
 
     #[test]

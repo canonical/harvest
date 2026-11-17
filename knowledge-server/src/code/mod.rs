@@ -9,6 +9,7 @@ pub mod index;
 pub mod keeper;
 pub mod overlay;
 pub mod previews;
+pub mod process;
 pub mod projects;
 pub mod repo_git;
 pub mod sessions;
