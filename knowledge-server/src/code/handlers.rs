@@ -11,7 +11,7 @@ use serde_json::json;
 
 use super::projects::{self, CodeProject};
 use super::sessions::{self, CloseReason, Session};
-use super::{change_requests, chats, images, index, previews, CodeEnv};
+use super::{change_requests, chats, images, index, learned_setup, previews, CodeEnv};
 use crate::access::repos::{check_remote, RepoAccess, RepoScope};
 use crate::api::query::{stream_turn, QueryRequest};
 use crate::api::repositories::{start_ingestion, IngestionSource};
@@ -53,7 +53,7 @@ async fn scope(env: &CodeEnv, user: &Claims) -> RepoScope {
         .unwrap_or_else(|_| RepoScope::only(Vec::<String>::new()))
 }
 
-async fn project_for(env: &CodeEnv, user: &Claims, id: &str) -> Result<CodeProject, Response> {
+pub(crate) async fn project_for(env: &CodeEnv, user: &Claims, id: &str) -> Result<CodeProject, Response> {
     let project = projects::get(&env.db, id)
         .await
         .map_err(internal)?
@@ -186,6 +186,7 @@ pub async fn get_project(
         "image": image.map(|i| json!({ "status": i.status, "base_commit": i.base_commit, "log": image_log })),
         "sessions": sessions,
         "index": index,
+        "learned_setup": learned_setup::list(env, &id).await.map_err(internal)?,
     }))
     .into_response())
 }
@@ -207,6 +208,7 @@ pub async fn set_setup(
         .await
         .map_err(internal)?;
     projects::touch(&env.db, &id).await.map_err(internal)?;
+    learned_setup::forget(env, &id).await.map_err(internal)?;
     Ok(Json(json!({ "ok": true })).into_response())
 }
 

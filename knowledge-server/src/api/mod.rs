@@ -587,11 +587,17 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
     let code_router = {
         use crate::code::chat_handlers as chat;
         use crate::code::handlers as code;
+        use crate::code::job_handlers as jobs;
         use crate::code::previews::owner;
         Router::new()
             .route("/code/projects", get(code::list_projects).post(code::open_project))
             .route("/code/projects/:id", get(code::get_project))
             .route("/code/projects/:id/setup", put(code::set_setup))
+            .route("/code/projects/:id/checks", put(jobs::set_checks))
+            .route("/code/sessions/:id/jobs", get(jobs::list))
+            .route("/code/sessions/:id/checks", post(jobs::run_checks))
+            .route("/code/jobs/:id", get(jobs::get))
+            .route("/code/jobs/:id/stop", post(jobs::stop))
             .route("/code/projects/:id/sessions", post(code::open_session))
             .route(
                 "/code/sessions/:id",

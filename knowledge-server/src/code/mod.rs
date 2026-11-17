@@ -9,6 +9,7 @@ pub mod images;
 pub mod index;
 pub mod page_check;
 pub mod installs;
+pub mod job_handlers;
 pub mod job_tools;
 pub mod jobs;
 pub mod learned_setup;
