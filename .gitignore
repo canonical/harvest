@@ -3,3 +3,5 @@
 .env.*
 squall/squall.toml
 squall/squall-reports/harvest-load.json
+
+graphify-out/cache/
