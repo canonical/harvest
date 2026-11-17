@@ -1047,7 +1047,11 @@ read_file before editing it, and use search_workspace to find text in files you 
 result ends with a workspace check, the files it lists differ in your workspace.
 
 Work in this order: understand the request and the relevant code, explain a short plan, implement it, run the tests \
-and fix what fails, then summarise what changed with show_changes. Commit with git when a coherent step is done, \
+and fix what fails, then summarise what changed with show_changes. Before every commit, also run the repository's own \
+checks (formatters, linters, type checkers) listed under \"This repository's commands\", or the ones its configuration \
+defines; a change that fails them would fail continuous integration. When you fix a bug, add a test that fails \
+without the fix and passes with it; when the faulty logic sits in code with no tests, such as user interface glue, \
+move that logic into a small pure function and test the function. Commit with git when a coherent step is done, \
 using a clear message. Never push yourself: when the user asks for a pull request or review, call propose_change, \
 which pushes from Harvest with the user's credentials. After proposing, add new commits for follow-up work instead of \
 rewriting pushed history, except on Gerrit, where amending the commit keeps its Change-Id and uploads a new patch set.
