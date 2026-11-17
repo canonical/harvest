@@ -54,7 +54,7 @@
           <span class="container-setup__title">Container setup</span>
           <span class="container-setup__status" :class="`container-setup__status--${image?.status ?? 'none'}`">{{ imageStatus }}</span>
         </summary>
-        <p class="settings-section__description">Runs from the repository root when Harvest prepares containers. A <code>.harvest/setup.sh</code> in the repository takes precedence. Leave it empty and the agent drafts one during your first session.</p>
+        <p class="settings-section__description">Runs from the repository root when Harvest prepares containers. A <code>.harvest/setup.sh</code> in the repository takes precedence. Leave it empty and Harvest installs what the repository's files call for, such as Python packages, npm dependencies or a Rust or Go toolchain.</p>
         <div v-if="image?.status === 'failed' && image.log" class="p-notification--negative">
           <div class="p-notification__content">
             <p class="p-notification__message">The last setup failed.</p>
@@ -64,9 +64,15 @@
           </div>
           <pre v-if="showLog" class="code-log">{{ image.log }}</pre>
         </div>
+        <div v-if="learnedSetup.length" class="learned-setup">
+          <p class="learned-setup__title">Commands that installed packages in your sessions</p>
+          <pre class="code-log">{{ learnedSetup.join('\n') }}</pre>
+          <button class="p-button--base is-dense" type="button" @click="adoptLearned">Add them to the setup script</button>
+        </div>
         <textarea v-model="setupScript" class="code-setup" rows="8" spellcheck="false" aria-label="Setup script" placeholder="apt-get install -y …&#10;npm ci" />
         <button class="p-button--positive is-dense" type="button" :disabled="!setupChanged || saving" @click="saveSetup">{{ saving ? 'Saving…' : 'Save' }}</button>
       </details>
+      <ProjectChecksSettings :project-id="id" :checks="project.checks ?? ''" />
     </template>
   </div>
 </template>
@@ -75,6 +81,7 @@
 import { ref, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { getCodeProject, indexSummary, openCodeSession, saveSetupScript } from '../lib/code-api.js';
+import ProjectChecksSettings from '../components/code/ProjectChecksSettings.vue';
 import { showToast } from '../composables/useToasts.js';
 
 const props = defineProps({ id: { type: String, required: true } });
@@ -88,6 +95,7 @@ const index = ref(null);
 const branch = ref('');
 const baseBranch = ref('');
 const setupScript = ref('');
+const learnedSetup = ref([]);
 const starting = ref(false);
 const saving = ref(false);
 const showLog = ref(false);
@@ -116,6 +124,7 @@ async function load() {
     image.value = data.image;
     index.value = data.index;
     setupScript.value = data.project.setup_script ?? '';
+    learnedSetup.value = data.learned_setup ?? [];
     baseBranch.value = data.project.default_branch ?? branches.value[0] ?? '';
   } catch (e) {
     error.value = e.message;
@@ -135,12 +144,18 @@ async function start() {
   }
 }
 
+function adoptLearned() {
+  const current = setupScript.value.trimEnd();
+  setupScript.value = [current, ...learnedSetup.value].filter(Boolean).join('\n');
+}
+
 async function saveSetup() {
   saving.value = true;
   try {
     await saveSetupScript(props.id, setupScript.value);
     project.value = { ...project.value, setup_script: setupScript.value.trim() || null };
     setupScript.value = project.value.setup_script ?? '';
+    learnedSetup.value = [];
     showToast({ message: 'Setup script saved; new containers will use it' });
   } catch (e) {
     error.value = e.message;
