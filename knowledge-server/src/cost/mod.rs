@@ -221,6 +221,79 @@ pub fn build_turn_record(
     })
 }
 
+pub struct RecordIds<'a> {
+    pub turn_id: &'a str,
+    pub user_id: &'a str,
+    pub project_id: Option<&'a str>,
+    pub conversation_id: Option<&'a str>,
+    pub deployment_id: Option<&'a str>,
+    pub proposal_id: Option<&'a str>,
+    pub artifact_id: Option<&'a str>,
+}
+
+pub struct TurnUsage<'a> {
+    pub provider_used: Option<&'a UsedProvider>,
+    pub usage: &'a Usage,
+    pub llm_call_count: usize,
+    pub duration_ms: u64,
+    pub calls: &'a [CompletedCall],
+}
+
+pub fn build_turn_records(
+    scope: CostScope,
+    ids: &RecordIds<'_>,
+    turn: &TurnUsage<'_>,
+    pricing: &PricingTable,
+) -> Vec<LlmCallRecord> {
+    let mut records: Vec<LlmCallRecord> = turn
+        .calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| {
+            build_record(
+                scope,
+                ids.turn_id,
+                ids.user_id,
+                &call.provider,
+                call.usage.clone(),
+                pricing,
+                call.duration_ms,
+                Some(index),
+                true,
+                ids.project_id,
+                ids.conversation_id,
+                ids.deployment_id,
+                ids.proposal_id,
+                ids.artifact_id,
+            )
+        })
+        .collect();
+    let recorded = turn
+        .calls
+        .iter()
+        .fold(Usage::default(), |sum, call| sum + call.usage.clone());
+    let remainder = turn.usage.saturating_sub(&recorded);
+    let unrecorded_calls = turn.llm_call_count.saturating_sub(turn.calls.len());
+    if unrecorded_calls > 0 || !remainder.is_empty() {
+        records.extend(build_turn_record(
+            scope,
+            ids.turn_id,
+            ids.user_id,
+            turn.provider_used,
+            &remainder,
+            unrecorded_calls.max(1),
+            pricing,
+            if turn.calls.is_empty() { turn.duration_ms } else { 0 },
+            ids.project_id,
+            ids.conversation_id,
+            ids.deployment_id,
+            ids.proposal_id,
+            ids.artifact_id,
+        ));
+    }
+    records
+}
+
 pub async fn record_llm_call(db: &Db, record: &LlmCallRecord) -> Result<()> {
     let params = json!({
         "id": record.id,
@@ -291,24 +364,29 @@ pub async fn record_deployment_turn(
     usage: &Usage,
     llm_call_count: usize,
     duration_ms: u64,
+    calls: &[CompletedCall],
 ) {
-    if let Some(record) = build_turn_record(
+    let records = build_turn_records(
         scope,
-        turn_id,
-        user_id,
-        provider_used,
-        usage,
-        llm_call_count,
+        &RecordIds {
+            turn_id,
+            user_id,
+            project_id: Some(project_id),
+            conversation_id: None,
+            deployment_id: Some(deployment_id),
+            proposal_id,
+            artifact_id,
+        },
+        &TurnUsage {
+            provider_used,
+            usage,
+            llm_call_count,
+            duration_ms,
+            calls,
+        },
         pricing,
-        duration_ms,
-        Some(project_id),
-        None,
-        Some(deployment_id),
-        proposal_id,
-        artifact_id,
-    ) {
-        let _ = record_llm_call(db, &record).await;
-    }
+    );
+    let _ = record_llm_calls(db, &records).await;
 }
 
 const COST_COLUMNS: &str = "COALESCE(sum(cost_microusd), 0)::bigint AS total_cost,
@@ -700,6 +778,89 @@ mod tests {
         assert_eq!(s.total_calls, 3);
         assert_eq!(s.total_input_tokens, 100);
         assert_eq!(s.total_cache_read_tokens, 10);
+    }
+
+    fn sonnet() -> UsedProvider {
+        UsedProvider {
+            provider_id: "openrouter".into(),
+            kind: "openai-compatible".into(),
+            model: "anthropic/claude-sonnet-5.5".into(),
+        }
+    }
+
+    fn tokens(input: u64, output: u64) -> Usage {
+        Usage {
+            input_tokens: input,
+            output_tokens: output,
+            ..Default::default()
+        }
+    }
+
+    fn ids() -> RecordIds<'static> {
+        RecordIds {
+            turn_id: "t",
+            user_id: "u",
+            project_id: None,
+            conversation_id: Some("c"),
+            deployment_id: None,
+            proposal_id: None,
+            artifact_id: None,
+        }
+    }
+
+    #[test]
+    fn a_turn_is_recorded_as_one_row_per_model_call() {
+        let calls = vec![
+            CompletedCall { provider: sonnet(), usage: tokens(1_000, 100), duration_ms: 3 },
+            CompletedCall { provider: sonnet(), usage: tokens(2_000, 200), duration_ms: 4 },
+        ];
+        let total = tokens(3_000, 300);
+        let provider = sonnet();
+        let turn = TurnUsage { provider_used: Some(&provider), usage: &total, llm_call_count: 2, duration_ms: 9, calls: &calls };
+        let records = build_turn_records(CostScope::Chat, &ids(), &turn, &PricingTable::default());
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].iteration_index, Some(1));
+        assert_eq!(records[1].usage, tokens(2_000, 200));
+        assert!(records.iter().all(|r| r.llm_call_count == 1));
+    }
+
+    #[test]
+    fn usage_without_a_call_record_lands_in_one_remainder_row() {
+        let calls = vec![CompletedCall { provider: sonnet(), usage: tokens(1_000, 100), duration_ms: 3 }];
+        let total = tokens(1_500, 150);
+        let provider = sonnet();
+        let turn = TurnUsage { provider_used: Some(&provider), usage: &total, llm_call_count: 2, duration_ms: 9, calls: &calls };
+        let records = build_turn_records(CostScope::Chat, &ids(), &turn, &PricingTable::default());
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].usage, tokens(500, 50));
+        assert_eq!(records[1].iteration_index, None);
+        let summed = records.iter().fold(Usage::default(), |sum, r| sum + r.usage.clone());
+        assert_eq!(summed, total);
+    }
+
+    #[test]
+    fn a_turn_without_call_events_keeps_a_single_turn_row() {
+        let total = tokens(1_500, 150);
+        let provider = sonnet();
+        let turn = TurnUsage { provider_used: Some(&provider), usage: &total, llm_call_count: 3, duration_ms: 9, calls: &[] };
+        let records = build_turn_records(CostScope::Chat, &ids(), &turn, &PricingTable::default());
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].llm_call_count, 3);
+        assert_eq!(records[0].duration_ms, 9);
+    }
+
+    #[test]
+    fn cached_sonnet_tokens_cost_what_the_provider_bills() {
+        let usage = crate::llm::types::InclusivePromptUsage {
+            prompt_tokens: 82_788,
+            cached_tokens: 68_265,
+            cache_write_tokens: 0,
+            completion_tokens: 1_758,
+            reasoning_tokens: 0,
+        }
+        .into_usage();
+        let cost = PricingTable::default().price_call(&usage, "openai-compatible", "anthropic/claude-sonnet-5.5");
+        assert_eq!(cost, (14_523 * 2_000 + 68_265 * 100 + 1_758 * 10_000) / 1_000);
     }
 
     #[test]

@@ -341,10 +341,13 @@ async fn answer_chat(
         vec![],
         None,
         None,
-        response.provider_used.as_ref(),
-        response.duration_ms,
-        &response.usage,
-        response.llm_call_count,
+        &crate::cost::TurnUsage {
+            provider_used: response.provider_used.as_ref(),
+            usage: &response.usage,
+            llm_call_count: response.llm_call_count,
+            duration_ms: response.duration_ms,
+            calls: &[],
+        },
         &turn_id,
         &state.qs.pricing,
     )

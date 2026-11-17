@@ -121,10 +121,13 @@ async fn answer_query(user: Claims, qs: Arc<QueryState>, req: QueryRequest) -> R
                     vec![],
                     None,
                     None,
-                    response.provider_used.as_ref(),
-                    response.duration_ms,
-                    &response.usage,
-                    response.llm_call_count,
+                    &crate::cost::TurnUsage {
+                        provider_used: response.provider_used.as_ref(),
+                        usage: &response.usage,
+                        llm_call_count: response.llm_call_count,
+                        duration_ms: response.duration_ms,
+                        calls: &[],
+                    },
                     &turn_id,
                     &qs.pricing,
                 )
@@ -242,9 +245,11 @@ pub async fn stream_turn(
         let mut chain_builder = ChainBuilder::new();
         let mut pending_question: Option<Value> = None;
         let mut pending_confirm_action: Option<Value> = None;
+        let mut calls = Vec::new();
 
         while let Some(event) = agent_rx.recv().await {
             match &event {
+                AgentEvent::LlmCall(call) => calls.push(call.clone()),
                 AgentEvent::TextDelta { text } => chain_builder.text_delta(text),
                 AgentEvent::ThinkingDelta { text } => chain_builder.thinking_delta(text),
                 AgentEvent::Thinking { text } => chain_builder.thinking(text),
@@ -331,10 +336,13 @@ pub async fn stream_turn(
                     chain,
                     pending_question.clone(),
                     pending_confirm_action.clone(),
-                    provider_used.as_ref(),
-                    *duration_ms,
-                    usage,
-                    *llm_call_count,
+                    &crate::cost::TurnUsage {
+                        provider_used: provider_used.as_ref(),
+                        usage,
+                        llm_call_count: *llm_call_count,
+                        duration_ms: *duration_ms,
+                        calls: &calls,
+                    },
                     &turn_id,
                     &qs_ctx.pricing,
                 )
@@ -360,7 +368,7 @@ pub async fn stream_turn(
                 });
             }
 
-            if !matches!(event, AgentEvent::Enumeration { .. }) {
+            if !matches!(event, AgentEvent::Enumeration { .. } | AgentEvent::LlmCall(_)) {
                 let _ = tx.send(event).await;
             }
         }

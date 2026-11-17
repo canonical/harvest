@@ -17,7 +17,7 @@ use crate::agent::{
 use crate::conversations::store::{self, ConversationContext, Guard, Owner};
 use crate::conversations::summary::refresh as refresh_summary;
 use crate::conversations::title_generation::maybe_regenerate_title;
-use crate::llm::types::{Message, ProviderSelection, Usage, UsedProvider};
+use crate::llm::types::{CompletedCall, Message, ProviderSelection, Usage, UsedProvider};
 use crate::turns::metrics::{Stage, TURNS};
 use tracing::Instrument as _;
 
@@ -262,34 +262,6 @@ fn provider_json(provider_used: &UsedProvider) -> Value {
     })
 }
 
-async fn record_turn_cost(
-    db: &Db,
-    project_id: &str,
-    conv_id: &str,
-    turn: &TurnOutcome<'_>,
-    turn_id: &str,
-    user_id: &str,
-    pricing: &crate::cost::PricingTable,
-) {
-    if let Some(record) = crate::cost::build_turn_record(
-        crate::cost::CostScope::Chat,
-        turn_id,
-        user_id,
-        turn.provider_used,
-        turn.usage,
-        turn.llm_call_count,
-        pricing,
-        turn.duration_ms,
-        Some(project_id),
-        Some(conv_id),
-        None,
-        None,
-        None,
-    ) {
-        let _ = crate::cost::record_llm_call(db, &record).await;
-    }
-}
-
 struct TurnOutcome<'a> {
     answer: &'a str,
     sources: &'a [Source],
@@ -300,14 +272,37 @@ struct TurnOutcome<'a> {
     duration_ms: u64,
     usage: &'a Usage,
     llm_call_count: usize,
+    calls: Vec<CompletedCall>,
 }
 
 impl TurnOutcome<'_> {
-    fn cost_microusd(&self, pricing: &crate::cost::PricingTable) -> i64 {
-        pricing.price_call(
-            self.usage,
-            self.provider_used.map(|p| p.kind.as_str()).unwrap_or(""),
-            self.provider_used.map(|p| p.model.as_str()).unwrap_or(""),
+    fn cost_records(
+        &self,
+        project_id: &str,
+        conv_id: &str,
+        turn_id: &str,
+        user_id: &str,
+        pricing: &crate::cost::PricingTable,
+    ) -> Vec<crate::cost::LlmCallRecord> {
+        crate::cost::build_turn_records(
+            crate::cost::CostScope::Chat,
+            &crate::cost::RecordIds {
+                turn_id,
+                user_id,
+                project_id: Some(project_id),
+                conversation_id: Some(conv_id),
+                deployment_id: None,
+                proposal_id: None,
+                artifact_id: None,
+            },
+            &crate::cost::TurnUsage {
+                provider_used: self.provider_used,
+                usage: self.usage,
+                llm_call_count: self.llm_call_count,
+                duration_ms: self.duration_ms,
+                calls: &self.calls,
+            },
+            pricing,
         )
     }
 }
@@ -326,7 +321,8 @@ async fn save_project_turn(
     user_id: &str,
     pricing: &crate::cost::PricingTable,
 ) {
-    let cost_microusd = turn.cost_microusd(pricing);
+    let records = turn.cost_records(project_id, conv_id, turn_id, user_id, pricing);
+    let cost_microusd: i64 = records.iter().map(|r| r.cost_microusd).sum();
     let (chain, enumerations) = crate::agent::chain::split_enumerations(turn.chain.clone());
     let mut assistant_message = json!({
         "role": "assistant",
@@ -369,7 +365,7 @@ async fn save_project_turn(
     {
         tracing::error!(error = %e, conv_id, "failed to save the turn");
     }
-    record_turn_cost(db, project_id, conv_id, &turn, turn_id, user_id, pricing).await;
+    let _ = crate::cost::record_llm_calls(db, &records).await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -383,7 +379,8 @@ async fn update_last_assistant_turn(
     user_id: &str,
     pricing: &crate::cost::PricingTable,
 ) {
-    let cost_microusd = turn.cost_microusd(pricing);
+    let records = turn.cost_records(project_id, conv_id, turn_id, user_id, pricing);
+    let cost_microusd: i64 = records.iter().map(|r| r.cost_microusd).sum();
     let edited = store::update_last(
         db,
         Owner::Project(project_id),
@@ -418,7 +415,7 @@ async fn update_last_assistant_turn(
     if let Err(e) = edited {
         tracing::error!(error = %e, conv_id, "failed to update the continued turn");
     }
-    record_turn_cost(db, project_id, conv_id, &turn, turn_id, user_id, pricing).await;
+    let _ = crate::cost::record_llm_calls(db, &records).await;
 }
 
 pub(super) enum TurnPersist {
@@ -453,8 +450,13 @@ pub(super) async fn drive_turn(
     let mut confirmation_requested = false;
     let mut released = false;
     let mut answered = false;
+    let mut calls: Vec<CompletedCall> = Vec::new();
 
     while let Some(event) = agent_rx.recv().await {
+        if let AgentEvent::LlmCall(call) = event {
+            calls.push(call);
+            continue;
+        }
         if matches!(event, AgentEvent::ConfirmAction { .. }) {
             confirmation_requested = true;
         }
@@ -565,6 +567,7 @@ pub(super) async fn drive_turn(
                 duration_ms: *duration_ms,
                 usage,
                 llm_call_count: *llm_call_count,
+                calls: std::mem::take(&mut calls),
             };
             let persisting = std::time::Instant::now();
             match &persist {
@@ -793,6 +796,6 @@ fn turn_event_json(
         AgentEvent::TitleUpdated { title } => Some(json!({
             "type": "title_updated", "conv_id": conv_id, "title": title,
         })),
-        AgentEvent::Enumeration { .. } => None,
+        AgentEvent::Enumeration { .. } | AgentEvent::LlmCall(_) => None,
     }
 }

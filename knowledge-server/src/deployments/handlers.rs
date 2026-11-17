@@ -785,6 +785,9 @@ fn spawn_progress_relay(
 
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
+            if matches!(event, AgentEvent::LlmCall(_)) {
+                continue;
+            }
             let mut value = serde_json::to_value(&event).unwrap_or_else(|_| json!({}));
             value["deployment_id"] = json!(deployment_id);
             live.broadcast(&project_id, value.to_string());
@@ -1224,6 +1227,7 @@ pub async fn generate_design(
         &response.usage,
         response.llm_call_count,
         response.duration_ms,
+        &[],
     )
     .await;
 
@@ -1381,7 +1385,12 @@ pub async fn generate_design_stream(
                 .query_streaming(&prompt, &[], &[], None, agent_tx)
                 .await;
         });
+        let mut calls = Vec::new();
         while let Some(event) = agent_rx.recv().await {
+            if let AgentEvent::LlmCall(call) = event {
+                calls.push(call);
+                continue;
+            }
             if let AgentEvent::Done {
                 answer,
                 provider_used,
@@ -1424,6 +1433,7 @@ pub async fn generate_design_stream(
                     usage,
                     *llm_call_count,
                     *duration_ms,
+                    &calls,
                 )
                 .await;
             }
@@ -1731,7 +1741,12 @@ pub async fn propose_design_change_stream(
                 .query_streaming(&prompt, &[], &[], None, agent_tx)
                 .await;
         });
+        let mut calls = Vec::new();
         while let Some(event) = agent_rx.recv().await {
+            if let AgentEvent::LlmCall(call) = event {
+                calls.push(call);
+                continue;
+            }
             if let AgentEvent::Done {
                 provider_used,
                 duration_ms,
@@ -1755,6 +1770,7 @@ pub async fn propose_design_change_stream(
                     usage,
                     *llm_call_count,
                     *duration_ms,
+                    &calls,
                 )
                 .await;
             }
@@ -1929,6 +1945,7 @@ pub async fn generate_provision(
         &response.usage,
         response.llm_call_count,
         response.duration_ms,
+        &[],
     )
     .await;
 
@@ -1957,7 +1974,12 @@ pub async fn generate_provision_stream(
                 .query_streaming(&prompt, &[], &[], None, agent_tx)
                 .await;
         });
+        let mut calls = Vec::new();
         while let Some(event) = agent_rx.recv().await {
+            if let AgentEvent::LlmCall(call) = event {
+                calls.push(call);
+                continue;
+            }
             if let AgentEvent::Done {
                 provider_used,
                 duration_ms,
@@ -1981,6 +2003,7 @@ pub async fn generate_provision_stream(
                     usage,
                     *llm_call_count,
                     *duration_ms,
+                    &calls,
                 )
                 .await;
             }
@@ -2152,6 +2175,7 @@ pub async fn propose_provision_change(
         &response.usage,
         response.llm_call_count,
         response.duration_ms,
+        &[],
     )
     .await;
 
@@ -2193,7 +2217,12 @@ pub async fn propose_provision_change_stream(
                 .query_streaming(&prompt, &[], &[], None, agent_tx)
                 .await;
         });
+        let mut calls = Vec::new();
         while let Some(event) = agent_rx.recv().await {
+            if let AgentEvent::LlmCall(call) = event {
+                calls.push(call);
+                continue;
+            }
             if let AgentEvent::Done {
                 provider_used,
                 duration_ms,
@@ -2217,6 +2246,7 @@ pub async fn propose_provision_change_stream(
                     usage,
                     *llm_call_count,
                     *duration_ms,
+                    &calls,
                 )
                 .await;
             }

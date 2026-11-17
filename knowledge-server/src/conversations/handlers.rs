@@ -92,10 +92,7 @@ pub async fn append_user_turn(
     chain: Vec<Value>,
     question: Option<Value>,
     confirm_action: Option<Value>,
-    provider_used: Option<&UsedProvider>,
-    duration_ms: u64,
-    usage: &Usage,
-    llm_call_count: usize,
+    turn: &crate::cost::TurnUsage<'_>,
     turn_id: &str,
     pricing: &crate::cost::PricingTable,
 ) -> anyhow::Result<()> {
@@ -106,11 +103,21 @@ pub async fn append_user_turn(
         user_text.to_string()
     };
 
-    let cost_microusd = pricing.price_call(
-        usage,
-        provider_used.map(|p| p.kind.as_str()).unwrap_or(""),
-        provider_used.map(|p| p.model.as_str()).unwrap_or(""),
+    let records = crate::cost::build_turn_records(
+        crate::cost::CostScope::Chat,
+        &crate::cost::RecordIds {
+            turn_id,
+            user_id,
+            project_id: None,
+            conversation_id: Some(conv_id),
+            deployment_id: None,
+            proposal_id: None,
+            artifact_id: None,
+        },
+        turn,
+        pricing,
     );
+    let cost_microusd = records.iter().map(|r| r.cost_microusd).sum();
 
     let messages = [
         json!({
@@ -128,10 +135,10 @@ pub async fn append_user_turn(
             chain,
             question,
             confirm_action,
-            provider_used,
-            duration_ms,
-            usage,
-            llm_call_count,
+            turn.provider_used,
+            turn.duration_ms,
+            turn.usage,
+            turn.llm_call_count,
             cost_microusd,
         ),
     ];
@@ -147,23 +154,7 @@ pub async fn append_user_turn(
     )
     .await?;
 
-    if let Some(record) = crate::cost::build_turn_record(
-        crate::cost::CostScope::Chat,
-        turn_id,
-        user_id,
-        provider_used,
-        usage,
-        llm_call_count,
-        pricing,
-        duration_ms,
-        None,
-        Some(conv_id),
-        None,
-        None,
-        None,
-    ) {
-        let _ = crate::cost::record_llm_call(db, &record).await;
-    }
+    crate::cost::record_llm_calls(db, &records).await?;
     Ok(())
 }
 

@@ -26,8 +26,8 @@ use tokio::sync::Semaphore;
 use crate::llm::{
     system_one::{ModelTier, SystemOneClient},
     types::{
-        ContentPart, LlmResponse, Message, MessageContent, ProviderSelection, Role, StreamEvent,
-        ToolCall, ToolDefinition, Usage, UsedProvider,
+        CompletedCall, ContentPart, LlmResponse, Message, MessageContent, ProviderSelection, Role,
+        StreamEvent, ToolCall, ToolDefinition, Usage, UsedProvider,
     },
     LlmProvider,
 };
@@ -187,6 +187,7 @@ pub enum AgentEvent {
         preview: String,
         view: Option<serde_json::Value>,
     },
+    LlmCall(CompletedCall),
     Done {
         answer: String,
         sources: Vec<Source>,
@@ -1425,6 +1426,7 @@ impl Agent {
             }
 
             let permit = self.llm_concurrency.clone().acquire_owned().await;
+            let call_started = Instant::now();
             let stream_handle = tokio::spawn(async move {
                 let _permit = permit;
                 llm.chat_stream_routed(
@@ -1439,6 +1441,7 @@ impl Agent {
             let mut text_buf = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut stop_reason = String::new();
+            let mut call_usage = Usage::default();
 
             while let Some(ev) = stream_rx.recv().await {
                 match ev {
@@ -1459,7 +1462,8 @@ impl Agent {
                         usage,
                     } => {
                         stop_reason = sr;
-                        total_usage += usage;
+                        total_usage += usage.clone();
+                        call_usage = usage;
                         llm_call_count += 1;
                     }
                 }
@@ -1467,6 +1471,13 @@ impl Agent {
 
             let stream_error: Option<String> = match stream_handle.await {
                 Ok(Ok(used)) => {
+                    let _ = event_sender
+                        .send(AgentEvent::LlmCall(CompletedCall {
+                            provider: used.clone(),
+                            usage: std::mem::take(&mut call_usage),
+                            duration_ms: call_started.elapsed().as_millis() as u64,
+                        }))
+                        .await;
                     last_provider_used = Some(used);
                     None
                 }
