@@ -63,6 +63,7 @@ fn segments(command: &str) -> impl Iterator<Item = &str> {
 fn changes_data(segment: &str) -> bool {
     segment
         .split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && !matches!(c, ':' | '-' | '_')))
         .map(str::to_ascii_lowercase)
         .any(|word| DATA_CHANGING_WORDS.contains(&word.as_str()))
 }
@@ -92,6 +93,13 @@ mod tests {
             [SetupStep::ChangesData("python manage.py migrate".into())]
         );
         assert_eq!(setup_steps_in("bin/rails db:seed && bin/rails server").len(), 1);
+    }
+
+    #[test]
+    fn grouping_and_quotes_do_not_hide_a_data_step() {
+        let command = "cd examples/tutorial && ([ -f instance/flaskr.sqlite ] || flask --app flaskr init-db) && flask run";
+        assert_eq!(setup_steps_in(command), [SetupStep::ChangesData("flask --app flaskr init-db)".into())]);
+        assert_eq!(setup_steps_in("sh -c 'python manage.py migrate'").len(), 1);
     }
 
     #[test]
