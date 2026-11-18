@@ -38,21 +38,13 @@
         </ul>
       </section>
 
-      <details class="settings-section container-setup" :open="image?.status === 'failed'">
+      <details class="settings-section container-setup" :open="notices.length > 0">
         <summary>
           <span class="container-setup__title">Container setup</span>
-          <span class="container-setup__status" :class="`container-setup__status--${image?.status ?? 'none'}`">{{ imageStatus }}</span>
+          <span class="container-setup__status" :class="`container-setup__status--${image?.status ?? 'none'}`">{{ imageStatusLabel(image) }}</span>
         </summary>
-        <p class="settings-section__description">Runs from the repository root when Harvest prepares containers. A <code>.harvest/setup.sh</code> in the repository takes precedence. Leave it empty and Harvest installs what the repository's files call for, such as Python packages, npm dependencies or a Rust or Go toolchain.</p>
-        <div v-if="image?.status === 'failed' && image.log" class="p-notification--negative">
-          <div class="p-notification__content">
-            <p class="p-notification__message">The last setup failed.</p>
-          </div>
-          <div class="p-notification__actions">
-            <button class="p-button--base is-dense u-no-margin--bottom" type="button" @click="showLog = !showLog">{{ showLog ? 'Hide log' : 'Show log' }}</button>
-          </div>
-          <pre v-if="showLog" class="code-log">{{ image.log }}</pre>
-        </div>
+        <p class="settings-section__description">Harvest first installs what the repository's files call for, such as Python packages, npm dependencies or the Rust toolchain the repository pins. This script then runs from the repository root, unless the repository has its own <code>.harvest/setup.sh</code>.</p>
+        <ImageNotice v-for="notice in notices" :key="notice.title" :notice="notice" />
         <div v-if="learnedSetup.length" class="learned-setup">
           <p class="learned-setup__title">Commands that installed packages in your sessions</p>
           <pre class="code-log">{{ learnedSetup.join('\n') }}</pre>
@@ -71,6 +63,8 @@ import { ref, computed, watch } from 'vue';
 import { getCodeProject, indexSummary, saveSetupScript } from '../lib/code-api.js';
 import SessionBranchForm from '../components/code/SessionBranchForm.vue';
 import ProjectChecksSettings from '../components/code/ProjectChecksSettings.vue';
+import ImageNotice from '../components/code/ImageNotice.vue';
+import { imageNotices, imageStatusLabel } from '../lib/code-images.js';
 import { showToast } from '../composables/useToasts.js';
 
 const props = defineProps({ id: { type: String, required: true } });
@@ -83,16 +77,11 @@ const index = ref(null);
 const setupScript = ref('');
 const learnedSetup = ref([]);
 const saving = ref(false);
-const showLog = ref(false);
 const error = ref('');
 
 const indexText = computed(() => indexSummary(index.value));
 const setupChanged = computed(() => setupScript.value !== (project.value?.setup_script ?? ''));
-const imageStatus = computed(() => ({
-  ready: 'Ready',
-  building: 'Being prepared…',
-  failed: 'Setup failed',
-}[image.value?.status] ?? 'Not prepared yet'));
+const notices = computed(() => imageNotices(image.value));
 
 async function load() {
   error.value = '';
