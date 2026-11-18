@@ -49,7 +49,7 @@ pub struct ClusterNode {
     internal_url: Option<String>,
     heartbeat_interval: Duration,
     node_timeout: Duration,
-    draining: AtomicBool,
+    draining: watch::Sender<bool>,
     withdrawn: AtomicBool,
     recently_alive: Mutex<Option<(Instant, Vec<String>)>>,
     membership: Arc<dyn Membership>,
@@ -76,7 +76,7 @@ impl ClusterNode {
             internal_url: identity.internal_url,
             heartbeat_interval: Duration::from_millis(config.heartbeat_interval_ms.max(10)),
             node_timeout: Duration::from_millis(config.node_timeout_ms.max(20)),
-            draining: AtomicBool::new(false),
+            draining: watch::channel(false).0,
             withdrawn: AtomicBool::new(false),
             recently_alive: Mutex::new(None),
             membership,
@@ -112,7 +112,11 @@ impl ClusterNode {
     }
 
     pub fn is_draining(&self) -> bool {
-        self.draining.load(Ordering::SeqCst)
+        *self.draining.borrow()
+    }
+
+    pub fn watch_draining(&self) -> watch::Receiver<bool> {
+        self.draining.subscribe()
     }
 
     pub fn membership_health(&self) -> MembershipHealth {
@@ -228,12 +232,12 @@ impl ClusterNode {
     }
 
     pub async fn set_draining(&self) -> Result<()> {
-        self.draining.store(true, Ordering::SeqCst);
+        self.draining.send_replace(true);
         self.heartbeat().await
     }
 
     pub async fn restore(&self) -> Result<()> {
-        self.draining.store(false, Ordering::SeqCst);
+        self.draining.send_replace(false);
         self.heartbeat().await
     }
 
