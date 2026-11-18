@@ -2506,6 +2506,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "webpki-roots 0.26.11",
  "zip",
 ]
 

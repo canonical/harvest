@@ -1,5 +1,7 @@
+pub mod console;
 pub mod containers;
 pub mod identity;
+mod sockets;
 
 use anyhow::{bail, Context, Result};
 use reqwest::{Client, StatusCode};
@@ -155,6 +157,7 @@ pub struct CreateInstance {
 
 pub struct LxdClient {
     http: Client,
+    sockets: tokio_tungstenite::Connector,
     base_url: String,
     project: String,
     image_alias: String,
@@ -204,9 +207,11 @@ impl LxdClient {
 
     pub fn from_identity(cert_pem: &str, key_pem: &str, cfg: &LxdConfig) -> Result<Self> {
         let http = build_http_client(cert_pem, key_pem, cfg.ca_cert.as_deref(), cfg.insecure)?;
+        let sockets = sockets::connector(cert_pem, key_pem, cfg.ca_cert.as_deref(), cfg.insecure)?;
 
         Ok(Self {
             http,
+            sockets,
             base_url: cfg.endpoint.trim_end_matches('/').to_string(),
             project: cfg.project.clone(),
             image_alias: cfg.image_alias.clone(),
@@ -219,6 +224,7 @@ impl LxdClient {
     fn test_client(base_url: &str) -> Self {
         Self {
             http: Client::new(),
+            sockets: tokio_tungstenite::Connector::Plain,
             base_url: base_url.trim_end_matches('/').to_string(),
             project: "default".into(),
             image_alias: "24.04".into(),
