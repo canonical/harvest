@@ -1,5 +1,5 @@
 <template>
-  <div class="session-terminal">
+  <div class="session-tab session-terminal">
     <div v-if="notice" :class="`p-notification--${notice.tone} session-terminal__notice`">
       <div class="p-notification__content">
         <p class="p-notification__message">{{ notice.message }}</p>

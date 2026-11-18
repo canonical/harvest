@@ -10314,7 +10314,7 @@ button.activity-line__row:hover .activity-line__steps {
   .code-sessions__time { min-width: 0; }
 }
 .code-session { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.session-terminal { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg-code); }
+.session-terminal { position: relative; background: var(--bg-code); }
 .session-terminal__notice { margin: .5rem; }
 .session-terminal__error { margin: .5rem; }
 .terminal-view { position: relative; display: flex; flex: 1; flex-direction: column; min-height: 0; }
