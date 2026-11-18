@@ -7,6 +7,17 @@ use serde_json::{json, Value};
 
 use super::LxdClient;
 
+fn instance_names_from(listing: &Value) -> Vec<String> {
+    listing["metadata"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|url| url.split('?').next()?.rsplit('/').next())
+        .map(String::from)
+        .collect()
+}
+
 pub enum Source<'a> {
     Base,
     Image(&'a str),
@@ -55,6 +66,24 @@ impl<'a> Command<'a> {
 }
 
 impl LxdClient {
+    pub async fn is_reachable(&self) -> bool {
+        let response = self.http.get(self.url("/1.0")).send().await;
+        response.is_ok_and(|response| response.status().is_success())
+    }
+
+    pub async fn instance_names(&self) -> Result<Vec<String>> {
+        let body: Value = self
+            .http
+            .get(self.url(&format!("/1.0/instances?{}", self.project_qs())))
+            .send()
+            .await
+            .context("listing LXD instances")?
+            .json()
+            .await
+            .context("parsing LXD instances")?;
+        Ok(instance_names_from(&body))
+    }
+
     fn source_json(&self, source: &Source<'_>) -> Value {
         match source {
             Source::Base => json!({
@@ -274,5 +303,17 @@ impl LxdClient {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_names_come_from_the_listed_urls() {
+        let listing = json!({ "metadata": ["/1.0/instances/hcb-a-b?project=default", "/1.0/instances/hcp-c"] });
+        assert_eq!(instance_names_from(&listing), ["hcb-a-b", "hcp-c"]);
+        assert!(instance_names_from(&json!({ "metadata": null })).is_empty());
     }
 }
