@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 use super::claim::BuildClaim;
 use super::{quote, setup, tail};
 use crate::code::projects::CodeProject;
-use crate::code::{repo_git, CodeEnv, WORKSPACE};
+use crate::code::{repo_git, terminals, CodeEnv, WORKSPACE};
 use crate::lxd::containers::{Command, ExecOutput, Source};
 
 const PACKAGE_INDEX_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -31,6 +31,8 @@ pub async fn build_in(env: &CodeEnv, project: &CodeProject, claim: &BuildClaim) 
     env.lxd.wait_for_ipv4(&builder, NETWORK_TIMEOUT).await?;
     let refresh = Command::shell("apt-get update -q").timeout(PACKAGE_INDEX_TIMEOUT);
     expect_success(env.lxd.run(&builder, refresh).await?, "refreshing the package index")?;
+    let terminals = Command::shell(&terminals::tmux::prepare_script()).timeout(PACKAGE_INDEX_TIMEOUT);
+    expect_success(env.lxd.run(&builder, terminals).await?, "preparing terminals")?;
     env.lxd.push_file(&builder, "/tmp/repo.tgz", archive, 0o600).await?;
     expect_success(env.lxd.run(&builder, Command::shell(&unpack_script(project, &branch))).await?, "unpacking the repository")?;
 
