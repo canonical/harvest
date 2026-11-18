@@ -16,6 +16,8 @@ const MARKER_FILES: &[&str] = &[
     "requirements-dev.txt",
     ".pre-commit-config.yaml",
     "Cargo.toml",
+    "rust-toolchain.toml",
+    "rust-toolchain",
     "go.mod",
     "Makefile",
 ];

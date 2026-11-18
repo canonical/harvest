@@ -3,10 +3,12 @@ use serde_json::Value;
 use super::images::quote;
 use super::project_facts::{Probe, ProjectFacts};
 
-const PRELUDE: &str = "set -e
+const PRELUDE: &str = "set -eo pipefail
 export DEBIAN_FRONTEND=noninteractive PIP_BREAK_SYSTEM_PACKAGES=1 PIP_IGNORE_INSTALLED=1 PIP_ROOT_USER_ACTION=ignore PIP_DISABLE_PIP_VERSION_CHECK=1
 apt_ready=
 install_packages() { if [ -z \"$apt_ready\" ]; then apt-get update -qq; apt_ready=1; fi; apt-get install -y -qq \"$@\" >/dev/null; }";
+const PIP_SETTINGS: &str = "printf '[global]\\nbreak-system-packages = true\\nroot-user-action = ignore\\ndisable-pip-version-check = true\\n' > /etc/pip.conf";
+const RUSTUP_INSTALLER: &str = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal";
 const PYTHON_TOOLS: &[&str] = &["pytest", "ruff", "mypy", "pre-commit"];
 const PYTHON_EXTRAS: &[&str] = &["test", "tests", "testing", "dev"];
 const PYTHON_GROUPS: &[&str] = &["test", "tests", "testing", "typing", "lint", "dev", "pre-commit"];
@@ -36,6 +38,10 @@ fn ensure_command(command: &str, packages: &str) -> String {
     format!("command -v {command} >/dev/null 2>&1 || install_packages {packages}")
 }
 
+fn ensure_python_module(module: &str, packages: &str) -> String {
+    format!("python3 -c 'import {module}' >/dev/null 2>&1 || install_packages {packages}")
+}
+
 fn uses(facts: &ProjectFacts, tool: &str) -> bool {
     facts
         .tests
@@ -63,7 +69,11 @@ impl Toolchain for Python {
         if pyproject.is_none() && requirements.is_empty() && !installable {
             return Vec::new();
         }
-        let mut steps = vec![ensure_command("pip3", "python3-pip python3-venv")];
+        let mut steps = vec![
+            ensure_command("pip3", "python3-pip"),
+            ensure_python_module("ensurepip", "python3-venv"),
+            PIP_SETTINGS.to_string(),
+        ];
         let tools: Vec<&str> = PYTHON_TOOLS.iter().copied().filter(|tool| uses(facts, tool)).collect();
         if !tools.is_empty() {
             steps.push(format!("pip3 install -q {}", tools.join(" ")));
@@ -161,8 +171,60 @@ impl Toolchain for Rust {
         if !probe.files.contains_key("Cargo.toml") {
             return Vec::new();
         }
-        vec![ensure_command("cargo", "cargo"), "cargo fetch".into()]
+        match pinned_rust(probe) {
+            Some(pin) => vec![
+                ensure_command("curl", "curl ca-certificates"),
+                pin.install_command(),
+                "ln -sf \"$HOME\"/.cargo/bin/* /usr/local/bin/".into(),
+                "cargo fetch".into(),
+            ],
+            None => vec![ensure_command("cargo", "cargo"), "cargo fetch".into()],
+        }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RustPin {
+    pub channel: String,
+    pub components: Vec<String>,
+}
+
+impl RustPin {
+    fn install_command(&self) -> String {
+        let components: String = self.components.iter().map(|c| format!(" --component {c}")).collect();
+        format!("{RUSTUP_INSTALLER} --default-toolchain {}{components}", self.channel)
+    }
+}
+
+pub fn pinned_rust(probe: &Probe) -> Option<RustPin> {
+    let text = probe
+        .files
+        .get("rust-toolchain.toml")
+        .or_else(|| probe.files.get("rust-toolchain"))?;
+    let pin = match text.parse::<toml::Table>() {
+        Ok(table) => pin_from_toml(&table)?,
+        Err(_) => RustPin { channel: text.trim().to_string(), components: Vec::new() },
+    };
+    let words_are_safe = std::iter::once(&pin.channel).chain(&pin.components).all(|word| is_safe_word(word));
+    words_are_safe.then_some(pin)
+}
+
+fn pin_from_toml(table: &toml::Table) -> Option<RustPin> {
+    let toolchain = table.get("toolchain")?.as_table()?;
+    let channel = toolchain.get("channel")?.as_str()?.to_string();
+    let components = toolchain
+        .get("components")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .map(String::from)
+        .collect();
+    Some(RustPin { channel, components })
+}
+
+fn is_safe_word(word: &str) -> bool {
+    !word.is_empty() && word.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
 pub struct Go;
@@ -234,9 +296,11 @@ docs = ["sphinx"]
 testpaths = ["tests"]
 "#;
         let script = script_for(&[("pyproject.toml", pyproject), (".pre-commit-config.yaml", "repos: []")]).unwrap();
-        assert!(script.starts_with("set -e\nexport DEBIAN_FRONTEND=noninteractive"));
+        assert!(script.starts_with("set -eo pipefail\nexport DEBIAN_FRONTEND=noninteractive"));
         assert!(script.contains("PIP_IGNORE_INSTALLED=1"));
-        assert!(script.contains("command -v pip3 >/dev/null 2>&1 || install_packages python3-pip python3-venv"));
+        assert!(script.contains("command -v pip3 >/dev/null 2>&1 || install_packages python3-pip\n"));
+        assert!(script.contains("python3 -c 'import ensurepip' >/dev/null 2>&1 || install_packages python3-venv"));
+        assert!(script.contains("break-system-packages = true"));
         assert!(script.contains("pip3 install -q pytest pre-commit"));
         assert!(script.contains("pip3 install -q -e '.[dev]'"));
         assert!(script.contains("pip3 install -q 'freezegun' 'mypy' 'pytest'"));
@@ -267,6 +331,28 @@ testpaths = ["tests"]
         let script = script_for(&[("package.json", r#"{"scripts": {"test": "node --test"}}"#)]).unwrap();
         assert!(script.contains("install_packages nodejs npm"));
         assert!(!script.contains("npm install --"));
+    }
+
+    #[test]
+    fn a_pinned_rust_toolchain_is_installed_with_rustup() {
+        let toolchain = "[toolchain]\nchannel = \"1.99.1\"\ncomponents = [\"clippy\", \"rustfmt\"]\nprofile = \"minimal\"\n";
+        let script = script_for(&[("Cargo.toml", "[package]"), ("rust-toolchain.toml", toolchain)]).unwrap();
+        assert!(script.contains("sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.99.1 --component clippy --component rustfmt"));
+        assert!(script.contains("ln -sf \"$HOME\"/.cargo/bin/* /usr/local/bin/"));
+        assert!(!script.contains("install_packages cargo"));
+    }
+
+    #[test]
+    fn a_legacy_toolchain_file_names_only_the_channel() {
+        let pin = pinned_rust(&probe(&[("rust-toolchain", "nightly-2026-01-01\n")])).unwrap();
+        assert_eq!(pin, RustPin { channel: "nightly-2026-01-01".into(), components: Vec::new() });
+    }
+
+    #[test]
+    fn a_toolchain_file_cannot_inject_shell_words() {
+        assert_eq!(pinned_rust(&probe(&[("rust-toolchain", "stable; rm -rf /")])), None);
+        let toolchain = "[toolchain]\nchannel = \"stable\"\ncomponents = [\"clippy && curl evil\"]\n";
+        assert_eq!(pinned_rust(&probe(&[("rust-toolchain.toml", toolchain)])), None);
     }
 
     #[test]
