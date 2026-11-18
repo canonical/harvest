@@ -68,7 +68,7 @@ pub async fn list(db: &Db, scope: &RepoScope, user_id: &str) -> Result<Vec<Value
     let sql = format!(
         "SELECT p.id, r.name, r.url, r.visibility, r.default_branch,
                 GREATEST(p.last_used_at, mine.last_active_at) AS last_used_at,
-                i.status AS image_status,
+                CASE WHEN i.status = 'ready' THEN 'ready' ELSE i.attempt_status END AS image_status,
                 coalesce(mine.open_sessions, 0) AS open_sessions
          FROM code_projects p
          JOIN repositories r ON r.id = p.repository_id

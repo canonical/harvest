@@ -183,17 +183,10 @@ pub async fn get_project(
     let image = images::current(env, &id).await.map_err(internal)?;
     let sessions = sessions::list_for(env, &id, &user.sub).await.map_err(internal)?;
     let index = index::of_project(&env.db, &project).await.map_err(internal)?;
-    let image_log = env
-        .db
-        .query("SELECT log FROM code_images WHERE project_id = $pid", json!({ "pid": id }))
-        .await
-        .map_err(internal)?
-        .first()
-        .and_then(|r| r["log"].as_str().map(String::from));
     Ok(Json(json!({
         "project": project,
         "branches": listing.branches,
-        "image": image.map(|i| json!({ "status": i.status, "base_commit": i.base_commit, "log": image_log })),
+        "image": image.map(|image| image.summary()),
         "sessions": sessions,
         "index": index,
         "learned_setup": learned_setup::list(env, &id).await.map_err(internal)?,

@@ -1,29 +1,31 @@
+mod builder;
+mod claim;
+mod failure;
+mod setup;
+mod state;
+
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use serde_json::{json, Value};
 
 use super::projects::CodeProject;
-use super::repo_git;
-use super::preparation;
-use super::{short_id, CodeEnv, WORKSPACE};
-use crate::lxd::containers::{Command, Source};
+use super::CodeEnv;
+
+pub use failure::BuildFailure;
+pub use state::{need, Attempt, Image, ImageNeed, ReadyImage};
 
 pub const REPO_SETUP_FILE: &str = ".harvest/setup.sh";
-const SETUP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
-const LOG_TAIL_CHARS: usize = 8_000;
-const STALE_BUILD_SECS: u64 = SETUP_TIMEOUT.as_secs() + 15 * 60;
-const PACKAGE_INDEX_TIMEOUT: Duration = Duration::from_secs(5 * 60);
-const RECIPE_VERSION: u32 = 2;
+const RECIPE_VERSION: u32 = 3;
+const BUILDER_PREFIX: &str = "hcb-";
 
-pub fn alias_for(project_id: &str) -> String {
-    format!("harvest-code-{}", short_id(project_id))
-}
-
-fn builder_for(project_id: &str) -> String {
-    format!("hcb-{}", short_id(project_id))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildOutcome {
+    Built,
+    AlreadyBuilding,
 }
 
 pub fn setup_hash(script: Option<&str>) -> String {
@@ -42,191 +44,102 @@ pub fn tail(text: &str, max: usize) -> String {
     text.chars().skip(count.saturating_sub(max)).collect()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Image {
-    pub alias: String,
-    pub status: String,
-    pub base_commit: Option<String>,
-    pub setup_hash: String,
-    pub stale: bool,
-}
-
-impl Image {
-    pub fn is_building(&self) -> bool {
-        self.status == "building" && !self.stale
-    }
-}
-
 pub async fn current(env: &CodeEnv, project_id: &str) -> Result<Option<Image>> {
     let rows = env
         .db
         .query(
-            "SELECT alias, status, base_commit, setup_hash,
-                    built_at < now() - make_interval(secs => $stale::float8) AS stale
+            "SELECT status, alias, base_commit, setup_hash, log, setup_warning,
+                    attempt_status, attempt_failure, attempt_hash, attempt_log,
+                    extract(epoch FROM now() - attempted_at)::float8 AS attempt_age
              FROM code_images WHERE project_id = $pid",
-            json!({ "pid": project_id, "stale": STALE_BUILD_SECS as f64 }),
+            json!({ "pid": project_id }),
         )
         .await?;
-    Ok(rows.first().map(|row: &Value| Image {
-        alias: row["alias"].as_str().unwrap_or_default().to_string(),
-        status: row["status"].as_str().unwrap_or_default().to_string(),
-        base_commit: row["base_commit"].as_str().map(String::from),
-        setup_hash: row["setup_hash"].as_str().unwrap_or_default().to_string(),
-        stale: row["stale"].as_bool().unwrap_or(false),
-    }))
+    Ok(rows.first().map(image_from_row))
 }
 
-async fn record(env: &CodeEnv, project_id: &str, status: &str, fields: Value) -> Result<()> {
-    let mut params = json!({ "pid": project_id, "alias": alias_for(project_id), "status": status });
-    if let (Some(target), Some(source)) = (params.as_object_mut(), fields.as_object()) {
-        target.extend(source.clone());
-    }
-    for key in ["base_commit", "setup_hash", "log"] {
-        params.as_object_mut().unwrap().entry(key).or_insert(Value::Null);
-    }
-    env.db
-        .execute(
-            "INSERT INTO code_images (project_id, alias, status, base_commit, setup_hash, log, built_at)
-             VALUES ($pid, $alias, $status, $base_commit, COALESCE($setup_hash, ''), COALESCE($log, ''), now())
-             ON CONFLICT (project_id) DO UPDATE SET
-                 status = EXCLUDED.status,
-                 base_commit = COALESCE(EXCLUDED.base_commit, code_images.base_commit),
-                 setup_hash = CASE WHEN $setup_hash::text IS NULL THEN code_images.setup_hash ELSE EXCLUDED.setup_hash END,
-                 log = EXCLUDED.log,
-                 built_at = now()",
-            params,
-        )
-        .await?;
-    Ok(())
-}
-
-pub async fn build(env: &CodeEnv, project: &CodeProject) -> Result<()> {
-    record(env, &project.id, "building", json!({})).await?;
-    let builder = builder_for(&project.id);
-    let _ = env.lxd.delete_instance(&builder).await;
-    let outcome = build_in(env, project, &builder).await;
-    let _ = env.lxd.delete_instance(&builder).await;
-    match outcome {
-        Ok(built) => {
-            record(
-                env,
-                &project.id,
-                "ready",
-                json!({ "base_commit": built.base_commit, "setup_hash": built.setup_hash, "log": built.log }),
-            )
-            .await
-        }
-        Err(e) => {
-            tracing::warn!(project = %project.name, error = %e, "code image build failed");
-            let fields = json!({
-                "log": tail(&e.to_string(), LOG_TAIL_CHARS),
-                "setup_hash": setup_hash(project.setup_script.as_deref()),
-            });
-            record(env, &project.id, "failed", fields).await?;
-            Err(e)
-        }
-    }
-}
-
-struct Built {
-    base_commit: String,
-    setup_hash: String,
-    log: String,
-}
-
-async fn build_in(env: &CodeEnv, project: &CodeProject, builder: &str) -> Result<Built> {
-    let owner = project.created_by.clone().unwrap_or_default();
-    let credentials = env.git_credentials(&owner, &project.url).await;
-    let clone = repo_git::local_clone(&project.name, &project.url, credentials).await?;
-    let branch = project.default_branch.clone().unwrap_or_else(|| "main".into());
-    let base_commit = repo_git::remote_commit(&clone, &branch)?;
-    let archive = {
-        let clone = clone.clone();
-        tokio::task::spawn_blocking(move || repo_git::archive(&clone)).await??
+fn image_from_row(row: &Value) -> Image {
+    let text = |key: &str| row[key].as_str().map(String::from);
+    let ready = (row["status"].as_str() == Some("ready")).then(|| ReadyImage {
+        alias: text("alias").unwrap_or_default(),
+        base_commit: text("base_commit"),
+        setup_hash: text("setup_hash").unwrap_or_default(),
+    });
+    let age = Duration::from_secs_f64(row["attempt_age"].as_f64().unwrap_or_default().max(0.0));
+    let attempt = match row["attempt_status"].as_str() {
+        Some("building") => Some(Attempt::Building { age }),
+        Some("failed") => Some(Attempt::Failed {
+            failure: row["attempt_failure"]
+                .as_str()
+                .and_then(BuildFailure::parse)
+                .unwrap_or(BuildFailure::Infrastructure),
+            setup_hash: text("attempt_hash").unwrap_or_default(),
+            age,
+        }),
+        _ => None,
     };
+    Image {
+        ready,
+        attempt,
+        log: text("log").unwrap_or_default(),
+        attempt_log: text("attempt_log").unwrap_or_default(),
+        setup_warning: text("setup_warning"),
+    }
+}
 
-    env.lxd.launch(builder, Source::Base, &[("project", &project.id)]).await?;
-    env.lxd.wait_for_ipv4(builder, Duration::from_secs(90)).await?;
-    expect_success(
-        env.lxd
-            .run(builder, Command::shell("apt-get update -q").timeout(PACKAGE_INDEX_TIMEOUT))
-            .await?,
-        "refreshing the package index",
-    )?;
-    env.lxd.push_file(builder, "/tmp/repo.tgz", archive, 0o600).await?;
-    let unpack = format!(
-        "mkdir -p {WORKSPACE} && tar --no-same-owner -xzf /tmp/repo.tgz -C {WORKSPACE} && rm /tmp/repo.tgz && \
-         cd {WORKSPACE} && git checkout -q -B {branch} origin/{branch} && git remote set-url origin {url}",
-        branch = quote(&branch),
-        url = quote(&project.url),
-    );
-    expect_success(env.lxd.run(builder, Command::shell(&unpack)).await?, "unpacking the repository")?;
-
-    let setup = setup_for(env, project, builder).await?;
-    let mut log = String::new();
-    if let Some(setup) = &setup {
-        env.lxd
-            .push_file(builder, "/tmp/harvest-setup.sh", setup.script().as_bytes().to_vec(), 0o700)
-            .await?;
-        let output = env
-            .lxd
-            .run(
-                builder,
-                Command::shell("bash /tmp/harvest-setup.sh").in_dir(WORKSPACE).timeout(SETUP_TIMEOUT),
-            )
-            .await?;
-        log = tail(&format!("{}{}", output.stdout, output.stderr), LOG_TAIL_CHARS);
-        if !output.succeeded() && setup.is_required() {
-            bail!("the setup script failed with exit code {}:\n{log}", output.exit_code);
+pub async fn build(env: &CodeEnv, project: &CodeProject) -> Result<BuildOutcome> {
+    let hash = setup_hash(project.setup_script.as_deref());
+    let Some(claim) = claim::try_claim(&env.db, &project.id, &hash).await? else {
+        return Ok(BuildOutcome::AlreadyBuilding);
+    };
+    let built = builder::build_in(env, project, &claim).await;
+    if let Err(error) = env.lxd.delete_instance(&claim.builder_name()).await {
+        tracing::warn!(project = %project.name, error = format!("{error:#}"), "could not remove the image builder");
+    }
+    match built {
+        Ok(built) => {
+            let completion = claim::Completion {
+                base_commit: &built.base_commit,
+                log: &built.log,
+                setup_warning: built.setup_warning.as_deref(),
+            };
+            if let Some(previous) = claim::complete(&env.db, &claim, completion).await? {
+                remove_image(env, &previous).await;
+            }
+            Ok(BuildOutcome::Built)
+        }
+        Err(error) => {
+            let failure = BuildFailure::of(&error);
+            tracing::warn!(project = %project.name, failure = failure.as_str(), error = format!("{error:#}"), "code image build failed");
+            claim::fail(&env.db, &claim, failure, &tail(&format!("{error:#}"), 8_000)).await?;
+            Err(error)
         }
     }
-
-    env.lxd.stop_instance(builder).await?;
-    env.lxd.publish(builder, &alias_for(&project.id)).await?;
-    Ok(Built {
-        base_commit,
-        setup_hash: setup_hash(project.setup_script.as_deref()),
-        log,
-    })
 }
 
-enum Setup {
-    Repository(String),
-    Project(String),
-    Derived(String),
+async fn remove_image(env: &CodeEnv, alias: &str) {
+    if let Err(error) = env.lxd.delete_image_alias(alias).await {
+        tracing::warn!(alias, error = format!("{error:#}"), "could not remove a replaced code image");
+    }
 }
 
-impl Setup {
-    fn script(&self) -> &str {
-        match self {
-            Self::Repository(script) | Self::Project(script) | Self::Derived(script) => script,
+pub async fn sweep_builders(env: &CodeEnv) -> Result<()> {
+    let active: HashSet<String> = claim::active_builders(&env.db).await?.into_iter().collect();
+    let instances = env.lxd.instance_names().await?;
+    for builder in abandoned_builders(&instances, &active) {
+        if let Err(error) = env.lxd.delete_instance(&builder).await {
+            tracing::warn!(builder, error = format!("{error:#}"), "could not remove an abandoned image builder");
         }
-    }
-
-    fn is_required(&self) -> bool {
-        !matches!(self, Self::Derived(_))
-    }
-}
-
-async fn setup_for(env: &CodeEnv, project: &CodeProject, container: &str) -> Result<Option<Setup>> {
-    let from_repo = env
-        .lxd
-        .run(container, Command::shell(&format!("cat {REPO_SETUP_FILE}")).in_dir(WORKSPACE))
-        .await?;
-    if from_repo.succeeded() && !from_repo.stdout.trim().is_empty() {
-        return Ok(Some(Setup::Repository(from_repo.stdout)));
-    }
-    if let Some(script) = project.setup_script.clone().filter(|s| !s.trim().is_empty()) {
-        return Ok(Some(Setup::Project(script)));
-    }
-    Ok(preparation::script_for(env, container).await?.map(Setup::Derived))
-}
-
-fn expect_success(output: crate::lxd::containers::ExecOutput, what: &str) -> Result<()> {
-    if !output.succeeded() {
-        bail!("{what} failed: {}", tail(&format!("{}{}", output.stdout, output.stderr), 2_000));
     }
     Ok(())
+}
+
+fn abandoned_builders(instances: &[String], active: &HashSet<String>) -> Vec<String> {
+    instances
+        .iter()
+        .filter(|name| name.starts_with(BUILDER_PREFIX) && !active.contains(*name))
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -244,5 +157,30 @@ mod tests {
         assert_eq!(setup_hash(Some("make\n")), setup_hash(Some("make")));
         assert_ne!(setup_hash(Some("make")), setup_hash(Some("make test")));
         assert_eq!(setup_hash(None), setup_hash(Some("")));
+    }
+
+    #[test]
+    fn only_builders_without_a_live_attempt_are_swept() {
+        let instances: Vec<String> = ["hcb-aaaa-1111", "hcb-bbbb", "hcp-aaaa-xyz", "hcb-cccc-2222"].map(String::from).into();
+        let active: HashSet<String> = ["hcb-cccc-2222".to_string()].into();
+        assert_eq!(abandoned_builders(&instances, &active), ["hcb-aaaa-1111", "hcb-bbbb"]);
+    }
+
+    #[test]
+    fn a_stored_row_becomes_a_typed_image() {
+        let row = json!({
+            "status": "ready", "alias": "harvest-code-a-b", "base_commit": "abc", "setup_hash": "h",
+            "log": "ok", "setup_warning": null, "attempt_status": "failed",
+            "attempt_failure": "lxd_unavailable", "attempt_hash": "h2", "attempt_log": "refused", "attempt_age": 30.0
+        });
+        let image = image_from_row(&row);
+        assert_eq!(image.ready.as_ref().unwrap().alias, "harvest-code-a-b");
+        assert_eq!(
+            image.attempt,
+            Some(Attempt::Failed { failure: BuildFailure::LxdUnavailable, setup_hash: "h2".into(), age: Duration::from_secs(30) })
+        );
+        let unbuilt = image_from_row(&json!({ "status": "none", "attempt_status": null }));
+        assert_eq!(unbuilt.ready, None);
+        assert_eq!(unbuilt.attempt, None);
     }
 }

@@ -159,7 +159,7 @@ pub async fn open(
         async move {
             if let Err(e) = start(&env, &project, &id).await {
                 tracing::warn!(session = %id, error = %e, "code session failed to start");
-                let _ = fail(&env, &id, &e.to_string()).await;
+                let _ = fail(&env, &id, &format!("{e:#}")).await;
             }
         }
     };
@@ -251,16 +251,20 @@ async fn launch_from_image(env: &CodeEnv, project: &CodeProject) -> Result<Claim
     })
 }
 
-async fn ready_image(env: &CodeEnv, project: &CodeProject) -> Result<images::Image> {
+async fn ready_image(env: &CodeEnv, project: &CodeProject) -> Result<images::ReadyImage> {
     let deadline = tokio::time::Instant::now() + IMAGE_WAIT;
     loop {
-        match images::current(env, &project.id).await? {
-            Some(image) if image.status == "ready" => return Ok(image),
-            Some(image) if image.is_building() && tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+        let image = images::current(env, &project.id).await?;
+        if let Some(ready) = image.as_ref().and_then(|image| image.ready.clone()) {
+            return Ok(ready);
+        }
+        let someone_is_building = image.as_ref().is_some_and(images::Image::is_building)
+            || images::build(env, project).await? == images::BuildOutcome::AlreadyBuilding;
+        if someone_is_building {
+            if tokio::time::Instant::now() >= deadline {
+                bail!("the project's containers are still being prepared");
             }
-            Some(image) if image.is_building() => bail!("the project's containers are still being prepared"),
-            _ => images::build(env, project).await?,
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     }
 }

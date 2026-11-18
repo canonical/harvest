@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::json;
 
-use super::images;
+use super::images::{self, ImageNeed, ReadyImage};
 use super::index;
 use super::projects;
 use super::sessions::{self, container_name, CloseReason};
@@ -16,23 +16,12 @@ use crate::lxd::containers::Source;
 const EVERY: Duration = Duration::from_secs(30);
 const LEASE_KEY: &str = "code-keeper";
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum ImageNeed {
-    Keep,
-    Build,
-}
-
-pub fn image_need(image: Option<&images::Image>, setting_hash: &str) -> ImageNeed {
-    match image {
-        None => ImageNeed::Build,
-        Some(image) if image.is_building() => ImageNeed::Keep,
-        Some(image) if image.stale => ImageNeed::Build,
-        Some(image) if image.setup_hash != setting_hash => ImageNeed::Build,
-        Some(_) => ImageNeed::Keep,
-    }
-}
-
 pub async fn tick(env: &CodeEnv, graph: &GraphState) -> Result<()> {
+    if !env.lxd.is_reachable().await {
+        tracing::debug!("LXD is not reachable yet; the code keeper waits");
+        return Ok(());
+    }
+    images::sweep_builders(env).await?;
     let warm_for = env.settings.warm_for.as_secs_f64();
     let warm = env
         .db
@@ -44,7 +33,7 @@ pub async fn tick(env: &CodeEnv, graph: &GraphState) -> Result<()> {
     for row in &warm {
         let id = row["id"].as_str().unwrap_or_default();
         if let Err(e) = keep_warm(env, id).await {
-            tracing::warn!(project = id, error = %e, "could not keep a code project warm");
+            tracing::warn!(project = id, error = %format!("{e:#}"), "could not keep a code project warm");
         }
     }
     cool_down(env, warm_for).await?;
@@ -65,10 +54,10 @@ async fn keep_warm(env: &CodeEnv, project_id: &str) -> Result<()> {
     };
     let image = images::current(env, project_id).await?;
     let hash = images::setup_hash(project.setup_script.as_deref());
-    if image_need(image.as_ref(), &hash) == ImageNeed::Build {
+    if images::need(image.as_ref(), &hash) == ImageNeed::Build {
         images::build(env, &project).await?;
     }
-    let Some(image) = images::current(env, project_id).await?.filter(|i| i.status == "ready") else {
+    let Some(image) = images::current(env, project_id).await?.and_then(|image| image.ready) else {
         return Ok(());
     };
     let pooled = env
@@ -86,7 +75,7 @@ async fn keep_warm(env: &CodeEnv, project_id: &str) -> Result<()> {
     Ok(())
 }
 
-async fn add_to_pool(env: &CodeEnv, project_id: &str, image: &images::Image) -> Result<()> {
+async fn add_to_pool(env: &CodeEnv, project_id: &str, image: &ReadyImage) -> Result<()> {
     let name = container_name("hcp", project_id);
     env.db
         .execute(
@@ -156,39 +145,4 @@ pub fn spawn(leases: Arc<dyn Leases>, env: CodeEnv, graph: Arc<GraphState>) {
             }
         }
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn image(status: &str, hash: &str) -> images::Image {
-        images::Image {
-            alias: "a".into(),
-            status: status.into(),
-            base_commit: None,
-            setup_hash: hash.into(),
-            stale: false,
-        }
-    }
-
-    #[test]
-    fn an_image_is_built_when_missing_or_when_its_setup_changed() {
-        assert_eq!(image_need(None, "h"), ImageNeed::Build);
-        assert_eq!(image_need(Some(&image("ready", "h")), "h"), ImageNeed::Keep);
-        assert_eq!(image_need(Some(&image("ready", "old")), "h"), ImageNeed::Build);
-        assert_eq!(image_need(Some(&image("building", "old")), "h"), ImageNeed::Keep);
-    }
-
-    #[test]
-    fn a_build_left_behind_by_a_restart_is_built_again() {
-        let stale = images::Image { stale: true, ..image("building", "h") };
-        assert_eq!(image_need(Some(&stale), "h"), ImageNeed::Build);
-    }
-
-    #[test]
-    fn a_failed_image_waits_for_a_new_setup_script_before_retrying() {
-        assert_eq!(image_need(Some(&image("failed", "h")), "h"), ImageNeed::Keep);
-        assert_eq!(image_need(Some(&image("failed", "h")), "fixed"), ImageNeed::Build);
-    }
 }
