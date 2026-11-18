@@ -1,26 +1,19 @@
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
-use harvest_db::Db;
-use knowledge_server::lxd::containers::Command;
-use knowledge_server::lxd::LxdClient;
-use serde_json::json;
+use anyhow::{bail, Result};
 
 use super::client::Harvest;
 use super::report::RunResult;
 use super::task::{acceptance_script, checks_script, Task};
+use crate::session_containers::SessionContainers;
 
-const WORKSPACE: &str = "/workspace";
-const SETUP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const ACCEPTANCE_DIR: &str = "/tmp/harvest-bench-acceptance";
 const CHECKS_DIR: &str = "/tmp/harvest-bench-checks";
 const TEST_PATH_MARKERS: &[&str] = &["test", "spec"];
 
 pub struct Bench {
     pub harvest: Harvest,
-    pub lxd: LxdClient,
-    pub db: Arc<Db>,
+    pub containers: SessionContainers,
     pub keep_sessions: bool,
 }
 
@@ -54,11 +47,11 @@ impl Bench {
     }
 
     async fn exercise(&self, task: &Task, session: &str, result: &mut RunResult) -> Result<()> {
-        let container = self.container(session).await?;
+        let container = self.containers.of_session(session).await?;
         for command in &task.setup {
-            let output = self.exec(&container, command).await?;
-            if !output.0 {
-                bail!("setup command failed: {command}\n{}", output.1);
+            let ran = self.containers.run(&container, command).await?;
+            if !ran.succeeded {
+                bail!("setup command failed: {command}\n{}", ran.output);
             }
         }
         let chat = self.harvest.new_chat(session).await?;
@@ -66,35 +59,17 @@ impl Bench {
             result.turns.push(self.harvest.send(session, &chat, prompt).await?);
         }
         if let Some(acceptance) = &task.acceptance {
-            result.acceptance = Some(self.exec(&container, &acceptance_script(acceptance, ACCEPTANCE_DIR)).await?.0);
+            result.acceptance = Some(self.containers.run(&container, &acceptance_script(acceptance, ACCEPTANCE_DIR)).await?.succeeded);
         }
         if let Some(checks) = &task.checks {
-            result.checks = Some(self.exec(&container, &checks_script(checks, CHECKS_DIR)).await?.0);
+            result.checks = Some(self.containers.run(&container, &checks_script(checks, CHECKS_DIR)).await?.succeeded);
         }
         let numstat = self
-            .exec(&container, &format!("git diff --numstat origin/{} --", task.base))
+            .containers
+            .run(&container, &format!("git diff --numstat origin/{} --", task.base))
             .await?;
-        result.test_lines_added = test_lines_added(&numstat.1);
+        result.test_lines_added = test_lines_added(&numstat.output);
         Ok(())
-    }
-
-    async fn container(&self, session: &str) -> Result<String> {
-        let rows = self
-            .db
-            .query("SELECT container FROM code_sessions WHERE id = $id", json!({ "id": session }))
-            .await?;
-        rows.first()
-            .and_then(|row| row["container"].as_str())
-            .map(String::from)
-            .context("the session has no container")
-    }
-
-    async fn exec(&self, container: &str, script: &str) -> Result<(bool, String)> {
-        let output = self
-            .lxd
-            .run(container, Command::shell(script).in_dir(WORKSPACE).timeout(SETUP_TIMEOUT))
-            .await?;
-        Ok((output.succeeded(), format!("{}{}", output.stdout, output.stderr)))
     }
 }
 

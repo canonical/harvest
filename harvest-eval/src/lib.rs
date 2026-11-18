@@ -7,4 +7,6 @@ pub mod judge;
 pub mod metrics;
 pub mod report;
 pub mod run;
+pub mod session_containers;
 pub mod synth;
+pub mod toml_dir;

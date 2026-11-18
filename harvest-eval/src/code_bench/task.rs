@@ -51,15 +51,8 @@ impl Task {
 }
 
 pub fn load_dir(dir: &Path, only: Option<&str>) -> Result<Vec<Task>> {
-    let mut paths: Vec<_> = std::fs::read_dir(dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
-        .collect();
-    paths.sort();
     let mut tasks = Vec::new();
-    for path in paths {
-        let text = std::fs::read_to_string(&path)?;
+    for (path, text) in crate::toml_dir::read(dir)? {
         let task = Task::parse(&text).with_context(|| format!("parsing {}", path.display()))?;
         if only.is_none_or(|name| name == task.name) {
             tasks.push(task);

@@ -4,15 +4,14 @@ pub mod runner;
 pub mod task;
 
 use std::path::Path;
-use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use harvest_db::Db;
-use knowledge_server::config::Config;
+use anyhow::Result;
 
 use client::Harvest;
 use report::{summarize, table, RunResult, TaskSummary};
 use runner::Bench;
+
+use crate::session_containers::SessionContainers;
 
 pub struct Options<'a> {
     pub config: &'a Path,
@@ -32,16 +31,9 @@ pub struct Report {
 
 pub async fn run(options: Options<'_>) -> Result<Report> {
     let tasks = task::load_dir(options.tasks, options.only)?;
-    let config = Config::from_file(options.config)?;
-    let db = Arc::new(Db::connect(&config.database.url).await?);
-    let lxd_config = config.lxd.as_ref().context("the server configuration has no [lxd] section")?;
-    let lxd = knowledge_server::lxd::resolve_client(lxd_config, &db)
-        .await?
-        .context("Harvest has no trusted LXD identity yet")?;
     let bench = Bench {
         harvest: Harvest::new(options.server, options.token)?,
-        lxd,
-        db,
+        containers: SessionContainers::from_config(options.config).await?,
         keep_sessions: options.keep_sessions,
     };
     let mut runs = Vec::new();
