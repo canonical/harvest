@@ -28,7 +28,10 @@ Scenarios, each recorded in `~/.cache/harvest-ha-lab/report.json`:
    API traffic through HAProxy sees no failed request.
 6. Rolling restart of every node with `SIGTERM`: no failed request.
 7. PostgreSQL primary failover: no Harvest node restarts, traffic resumes on its own.
-8. With `HA_BACKEND=quorium` only, `SIGKILL` of the raft leader: the survivors elect a
+8. With an LXD trust token in the lab environment (`provision.sh` creates one): a terminal opened
+   through HAProxy keeps its shell when the node serving it drains (`SIGTERM`) and when the next
+   node serving it is killed (`SIGKILL`); it reconnects at once after a drain and within 15 s after a kill.
+9. With `HA_BACKEND=quorium` only, `SIGKILL` of the raft leader: the survivors elect a
    successor within 10 s, chat and API traffic see no failed request, and the killed node
    rejoins as the third voter.
 

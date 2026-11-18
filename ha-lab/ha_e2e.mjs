@@ -20,9 +20,10 @@ const CLUSTER_SECRET = 'lab-cluster-secret';
 const internalUrl = i => `http://${env.HOST_IP}:${19080 + i}`;
 const LB = `http://${env.LB_IP}`;
 const LB_WS = `ws://${env.LB_IP}`;
-const API_PATHS = ['/admin', '/agent', '/agents', '/artifacts', '/auth', '/chat-layouts', '/conversations', '/docs', '/graph',
-  '/groups', '/health', '/llm', '/machines', '/metrics', '/projects', '/query', '/repositories', '/skills', '/templates',
-  '/tool-description', '/version'];
+const API_PATHS = ['/admin', '/agent', '/agents', '/artifacts', '/auth', '/chat-layouts', '/code', '/conversations', '/docs',
+  '/graph', '/groups', '/health', '/llm', '/machines', '/me', '/metrics', '/previews', '/projects', '/query', '/repositories',
+  '/skills', '/templates', '/tool-description', '/version'];
+const TERMINAL_REPOSITORY = 'https://github.com/Thinking-Dragon/harvest-code-demo-kanban-application';
 
 const results = [];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -136,7 +137,8 @@ ${quoriumSettings(i)}
 [auth]
 jwt_secret = "lab-jwt-secret-that-is-long-enough-for-hs256"
 allow_local_login = true
-
+public_url = "${LB}"
+${codeSettings()}
 [agent]
 max_iterations = 3
 
@@ -147,6 +149,20 @@ api_key = "mock"
 model = "mock"
 id = "mock"
 max_retries = 0
+`;
+}
+
+function codeSettings() {
+  if (!env.LXD_TRUST_TOKEN) return '';
+  return `
+[lxd]
+endpoint = "https://127.0.0.1:8443"
+trust_token = "${env.LXD_TRUST_TOKEN}"
+insecure = true
+
+[code]
+pool_size = 0
+mirror_dir = "${path.join(LAB, 'mirrors')}"
 `;
 }
 
@@ -345,6 +361,73 @@ class FakeAgent {
   stop() { this.stopped = true; this.stream?.close(); this.console?.close(); }
 }
 
+class TerminalClient {
+  constructor(token, sessionId, terminalId) {
+    this.url = `${LB_WS}/code/sessions/${sessionId}/terminals/${terminalId}/socket?cols=100&rows=30`;
+    this.headers = { origin: LB, authorization: `Bearer ${token}` };
+    this.output = '';
+    this.moved = false;
+    this.stopped = false;
+    this.reconnections = [];
+  }
+
+  connect() {
+    return new Promise((resolve, reject) => {
+      const socket = new WebSocket(this.url, { headers: this.headers });
+      let opened = false;
+      socket.on('open', () => { opened = true; this.socket = socket; resolve(); });
+      socket.on('message', (data, isBinary) => {
+        if (isBinary) this.output += data.toString();
+        else if (JSON.parse(String(data)).type === 'reconnect') this.moved = true;
+      });
+      socket.on('error', () => { if (!opened) reject(new Error('terminal socket refused')); });
+      socket.on('close', () => { if (opened && !this.stopped) this.reconnect(); });
+    });
+  }
+
+  async reconnect() {
+    const droppedAt = Date.now();
+    const moved = this.moved;
+    this.moved = false;
+    for (let attempt = 0; !this.stopped; attempt += 1) {
+      if (!moved || attempt > 0) await sleep(Math.min(500 * 2 ** attempt, 4000));
+      try {
+        await this.connect();
+        this.reconnections.push({ moved, ms: Date.now() - droppedAt });
+        return;
+      } catch {}
+    }
+  }
+
+  send(line) {
+    this.socket.send(Buffer.from(`${line}\r`), { binary: true });
+  }
+
+  stop() {
+    this.stopped = true;
+    this.socket?.close();
+  }
+}
+
+function attachedCount(i) {
+  const log = fs.readFileSync(path.join(LAB, 'nodes', `node-${i}.log`), 'utf8');
+  return (log.match(/terminal attached/g) ?? []).length;
+}
+
+function servingNode(before) {
+  return [0, 1, 2].find(i => attachedCount(i) > before[i]);
+}
+
+function readInContainer(container, file) {
+  return execFileSync('bash', ['-c', `lxc exec ${container} --mode=non-interactive -- cat ${file} </dev/null 2>/dev/null | cat`], { encoding: 'utf8' }).trim();
+}
+
+async function shellPid(client, container, file) {
+  client.send(`echo $$ > ${file}`);
+  await waitFor(async () => readInContainer(container, file).length > 0, 20000, `${file} in the terminal container`);
+  return readInContainer(container, file);
+}
+
 async function chat(session, projectId, convId, query) {
   return (await session.json('POST', `/projects/${projectId}/query/stream`, { query, conversation_id: convId })).status;
 }
@@ -485,6 +568,45 @@ async function main() {
     await waitNodeReady(leader);
     await waitFor(async () => (await clusterStatus(leader))?.membership?.voters === 3, 60000, 'three voters again');
     await sleep(11000);
+  }
+
+  if (env.LXD_TRUST_TOKEN) {
+    const project = (await admin.json('POST', '/code/projects', { url: TERMINAL_REPOSITORY })).data;
+    await waitFor(async () => (await admin.json('GET', `/code/projects/${project.id}`)).data?.image?.status === 'ready', 900000, 'terminal project image');
+    const session = (await admin.json('POST', `/code/projects/${project.id}/sessions`, { branch: `lab/terminal-${Date.now()}`, base_branch: 'main' })).data;
+    await waitFor(async () => (await admin.json('GET', `/code/sessions/${session.id}`)).data?.session?.status === 'active', 600000, 'terminal session');
+    const container = psql(`SELECT container FROM code_sessions WHERE id = '${session.id}'`);
+    const terminal = (await admin.json('POST', `/code/sessions/${session.id}/terminals`)).data.terminal;
+    const before = [0, 1, 2].map(attachedCount);
+    const client = new TerminalClient(admin.token, session.id, terminal.id);
+    await client.connect();
+    const firstPid = await shellPid(client, container, '/tmp/lab-pid-0');
+
+    const drained = servingNode(before);
+    const drainedBefore = [0, 1, 2].map(attachedCount);
+    nodes[drained].child.kill('SIGTERM');
+    await waitFor(async () => client.reconnections.length >= 1, 30000, 'terminal reconnect after a drain');
+    const afterDrain = await shellPid(client, container, '/tmp/lab-pid-1');
+    const afterDrainNode = servingNode(drainedBefore);
+    await waitFor(async () => nodes[drained].exited, 90000, `node ${drained} exit`);
+    startNode(drained, llmUrl);
+    await waitNodeReady(drained);
+
+    const killedBefore = [0, 1, 2].map(attachedCount);
+    nodes[afterDrainNode].child.kill('SIGKILL');
+    await waitFor(async () => client.reconnections.length >= 2, 60000, 'terminal reconnect after a kill');
+    const afterKill = await shellPid(client, container, '/tmp/lab-pid-2');
+    const afterKillNode = servingNode(killedBefore);
+    startNode(afterDrainNode, llmUrl);
+    await waitNodeReady(afterDrainNode);
+    client.stop();
+    await admin.json('DELETE', `/code/sessions/${session.id}`);
+
+    const [drainReconnect, killReconnect] = client.reconnections;
+    record('a terminal keeps its shell when the node serving it drains or dies',
+      firstPid === afterDrain && firstPid === afterKill && drainReconnect.moved && drainReconnect.ms < 5000 && killReconnect.ms < 15000
+        && afterDrainNode !== drained && afterKillNode !== afterDrainNode,
+      { shell_pids: [firstPid, afterDrain, afterKill], nodes: [drained, afterDrainNode, afterKillNode], reconnections: client.reconnections });
   }
 
   {
