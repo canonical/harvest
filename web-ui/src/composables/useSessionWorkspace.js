@@ -2,11 +2,12 @@ import { computed, reactive, ref, markRaw, watch } from 'vue';
 import { createLayoutOperations } from '../lib/layout-workspace.js';
 import { allTabIds, findTab } from '../lib/pane-layout.js';
 import {
-  SESSION_TAB_KINDS, chatTab, changesTab, jobsTab, previewTab, emptySessionTab, initialTree, tabTitle,
+  SESSION_TAB_KINDS, chatTab, changesTab, jobsTab, previewTab, terminalTab, emptySessionTab, initialTree, tabTitle,
 } from '../lib/session-tabs.js';
 import {
   createSessionChat, deleteSessionChat, getSessionLayout, saveSessionLayout,
   createSessionPreview, deleteSessionPreview, listSessionPreviews, renameSessionChat,
+  createSessionTerminal, endSessionTerminal, listSessionTerminals,
 } from '../lib/code-api.js';
 import { sharePreview } from '../lib/preview-api.js';
 import { showToast } from './useToasts.js';
@@ -25,6 +26,8 @@ export function useSessionWorkspace(sessionId, { content, tabMenu }) {
   const tree = ref(null);
   const chats = ref([]);
   const previews = ref([]);
+  const terminals = ref([]);
+  const liveTitles = reactive(new Map());
   const sessionStatus = ref(null);
   let saveTimer = null;
 
@@ -60,6 +63,7 @@ export function useSessionWorkspace(sessionId, { content, tabMenu }) {
 
   async function load(data) {
     setLists(data);
+    await refreshTerminals().catch(() => {});
     const stored = await getSessionLayout(sessionId).catch(() => null);
     if (stored?.layout?.root) {
       tree.value = stored.layout;
@@ -94,7 +98,26 @@ export function useSessionWorkspace(sessionId, { content, tabMenu }) {
   }
 
   function hasTabMenu(tab) {
-    return tab.kind === 'chat' || tab.kind === 'preview';
+    return tab.kind === 'chat' || tab.kind === 'preview' || tab.kind === 'terminal';
+  }
+
+  async function refreshTerminals() {
+    terminals.value = (await listSessionTerminals(sessionId)).terminals ?? [];
+  }
+
+  async function newTerminal() {
+    const { terminal } = await createSessionTerminal(sessionId);
+    terminals.value = [...terminals.value, terminal];
+    return terminal;
+  }
+
+  async function endTerminal(terminalId) {
+    await endSessionTerminal(sessionId, terminalId);
+    terminals.value = terminals.value.filter(t => t.id !== terminalId);
+  }
+
+  function setLiveTitle(tabId, title) {
+    liveTitles.set(tabId, title);
   }
 
   function showJobs() {
@@ -158,6 +181,7 @@ export function useSessionWorkspace(sessionId, { content, tabMenu }) {
     if (kind === 'chat') return chatTab(await newChat());
     if (kind === 'changes') return changesTab();
     if (kind === 'jobs') return jobsTab();
+    if (kind === 'terminal') return terminalTab(await newTerminal());
     return previewTab(previews.value[0] ?? null);
   }
 
@@ -179,7 +203,7 @@ export function useSessionWorkspace(sessionId, { content, tabMenu }) {
     askAgent,
     showJobs,
     renameChat,
-    titleOf: (tab) => tabTitle(tab, { chats: chats.value, previews: previews.value }),
+    titleOf: (tab) => tabTitle(tab, { chats: chats.value, previews: previews.value, terminals: terminals.value, liveTitles }),
     createTab,
     ...operations,
     load,
@@ -191,6 +215,11 @@ export function useSessionWorkspace(sessionId, { content, tabMenu }) {
     createPreview,
     deletePreview,
     shareWith,
+    terminals,
+    refreshTerminals,
+    newTerminal,
+    endTerminal,
+    setLiveTitle,
   });
 }
 

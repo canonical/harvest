@@ -19,6 +19,16 @@ export function chatMenuItems(chats, currentId, filter = '') {
   return items;
 }
 
+export function terminalMenuItems(terminals, currentId) {
+  const items = terminals.map(t => ({ id: t.id, label: t.title, checked: t.id === currentId }));
+  if (items.length) items.push({ id: 'terminals-divider', divider: true });
+  items.push({ id: 'new-terminal', label: 'New terminal', icon: 'terminal' });
+  if (terminals.some(t => t.id === currentId)) {
+    items.push({ id: 'end-terminal', label: 'End this terminal', action: 'end-terminal', danger: true });
+  }
+  return items;
+}
+
 export function previewMenuItems(previews, currentId, now = Date.now()) {
   const items = previews.map(p => ({
     id: p.id,

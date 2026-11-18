@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { listCodeSessions, listRepositoryTree, getRepositoryFile, repositoryRawUrl, listRepositoryVersions, openCodeSession, closeCodeSession, isOpen, suggestBranch, proposeChange, changeRequestName, indexSummary } from '../../src/lib/code-api.js';
+import { terminalSocketUrl, listCodeSessions, listRepositoryTree, getRepositoryFile, repositoryRawUrl, listRepositoryVersions, openCodeSession, closeCodeSession, isOpen, suggestBranch, proposeChange, changeRequestName, indexSummary } from '../../src/lib/code-api.js';
 import { classifyDiffLines } from '../../src/lib/diff-lines.js';
 
 function respond(status, body) {
@@ -35,6 +35,13 @@ describe('code api', () => {
       '/code/repositories/flask/file?version=2.0%2Fx&path=src%2Fa+b.py',
     ]);
     expect(repositoryRawUrl('flask', 'main', 'logo.png')).toBe('/code/repositories/flask/raw?version=main&path=logo.png');
+  });
+
+  it('opens terminal sockets on the same host with the matching scheme', () => {
+    expect(terminalSocketUrl('s1', 't1', { cols: 80, rows: 24 }, { protocol: 'http:', host: '10.0.0.1' }))
+      .toBe('ws://10.0.0.1/code/sessions/s1/terminals/t1/socket?cols=80&rows=24');
+    expect(terminalSocketUrl('s1', 't1', { cols: 120, rows: 40 }, { protocol: 'https:', host: 'harvest.example.com' }))
+      .toBe('wss://harvest.example.com/code/sessions/s1/terminals/t1/socket?cols=120&rows=40');
   });
 
   it('surfaces the server error message', async () => {

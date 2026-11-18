@@ -10314,6 +10314,14 @@ button.activity-line__row:hover .activity-line__steps {
   .code-sessions__time { min-width: 0; }
 }
 .code-session { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.session-terminal { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--bg-code); }
+.session-terminal__notice { margin: .5rem; }
+.session-terminal__error { margin: .5rem; }
+.terminal-view { position: relative; display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.terminal-view__host { flex: 1; min-height: 0; padding: .25rem 0 0 .5rem; }
+.terminal-view__search { position: absolute; top: .5rem; right: 1rem; z-index: 5; display: flex; gap: .25rem; padding: .25rem; background: var(--bg-surface); border: 1px solid var(--border-color); box-shadow: 0 1px 4px rgba(0, 0, 0, .2); }
+.terminal-view__search input { width: 14rem; margin: 0; }
+.terminal-view__search .p-button--base { margin: 0; }
 .repo-list__search { width: 100%; margin-bottom: 1rem; }
 .repo-list { list-style: none; margin: 0; padding: 0; }
 .repo-list__item { display: flex; align-items: center; gap: .75rem; padding: .625rem .75rem; border-bottom: 1px solid var(--border-color); color: inherit; text-decoration: none; }

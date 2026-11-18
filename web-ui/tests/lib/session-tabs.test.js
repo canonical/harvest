@@ -1,11 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import {
-  SESSION_TAB_KINDS, chatTab, changesTab, previewTab, previewLabel, initialTree, tabTitle, expiresIn, emptySessionTab,
+  SESSION_TAB_KINDS, chatTab, changesTab, previewTab, previewLabel, initialTree, tabTitle, expiresIn, emptySessionTab, terminalTab,
 } from '../../src/lib/session-tabs.js';
 
 describe('session tabs', () => {
-  it('offers chat, changes and preview tabs in that order', () => {
-    expect(SESSION_TAB_KINDS.map(k => k.kind)).toEqual(['chat', 'changes', 'preview', 'jobs']);
+  it('offers chat, changes, preview, jobs and terminal tabs in that order', () => {
+    expect(SESSION_TAB_KINDS.map(k => k.kind)).toEqual(['chat', 'changes', 'preview', 'jobs', 'terminal']);
+  });
+
+  it('names a terminal tab after its terminal and what runs in it', () => {
+    const tab = { ...terminalTab({ id: 't1', title: 'Terminal 2' }), tabId: 'tab-1' };
+    expect(tab).toMatchObject({ kind: 'terminal', terminalId: 't1', title: 'Terminal 2' });
+    const terminals = [{ id: 't1', title: 'Terminal 2' }];
+    expect(tabTitle(tab, { terminals })).toBe('Terminal 2');
+    expect(tabTitle(tab, { terminals, liveTitles: new Map([['tab-1', 'vim']]) })).toBe('Terminal 2 · vim');
+    expect(tabTitle({ kind: 'terminal', terminalId: 'gone', tabId: 'x' }, { terminals })).toBe('Terminal');
   });
 
   it('opens a new session on its first chat', () => {

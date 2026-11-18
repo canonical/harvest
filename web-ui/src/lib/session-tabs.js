@@ -5,6 +5,7 @@ export const SESSION_TAB_KINDS = Object.freeze([
   { kind: 'changes', label: 'Changes', icon: 'changes' },
   { kind: 'preview', label: 'Preview', icon: 'preview' },
   { kind: 'jobs', label: 'Jobs', icon: 'jobs' },
+  { kind: 'terminal', label: 'Terminal', icon: 'terminal' },
 ]);
 
 function chatFields(chat) {
@@ -21,6 +22,15 @@ export function changesTab() {
 
 export function jobsTab() {
   return createTab({ kind: 'jobs', title: 'Jobs' });
+}
+
+export function terminalTab(terminal) {
+  return createTab({ kind: 'terminal', terminalId: terminal?.id ?? null, title: terminal?.title ?? 'Terminal' });
+}
+
+export function terminalLabel(terminal, liveTitle = '') {
+  const name = terminal?.title ?? 'Terminal';
+  return liveTitle ? `${name} · ${liveTitle}` : name;
 }
 
 export function previewTab(preview) {
@@ -41,7 +51,8 @@ export function initialTree(chats) {
   return createTree(chatFields(chats[0]));
 }
 
-export function tabTitle(tab, { chats = [], previews = [] } = {}) {
+export function tabTitle(tab, { chats = [], previews = [], terminals = [], liveTitles = new Map() } = {}) {
+  if (tab.kind === 'terminal') return terminalLabel(terminals.find(t => t.id === tab.terminalId), liveTitles.get(tab.tabId));
   if (tab.kind === 'changes') return 'Changes';
   if (tab.kind === 'jobs') return 'Jobs';
   if (tab.kind === 'preview') return previewLabel(previews.find(p => p.id === tab.previewId));

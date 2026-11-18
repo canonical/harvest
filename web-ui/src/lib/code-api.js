@@ -53,6 +53,13 @@ export const keepPreview = (previewId) => codeFetch(`/code/previews/${previewId}
 export const getSessionLayout = (id) => codeFetch(`/code/sessions/${id}/layout`);
 export const saveSessionLayout = (id, layout) => codeFetch(`/code/sessions/${id}/layout`, send('PUT', { layout }));
 export const listSessionPreviews = (id) => codeFetch(`/code/sessions/${id}/previews`);
+export const listSessionTerminals = (id) => codeFetch(`/code/sessions/${id}/terminals`);
+export const createSessionTerminal = (id) => codeFetch(`/code/sessions/${id}/terminals`, { method: 'POST' });
+export const endSessionTerminal = (id, terminalId) => codeFetch(`/code/sessions/${id}/terminals/${terminalId}`, { method: 'DELETE' });
+export function terminalSocketUrl(id, terminalId, { cols, rows }, location = window.location) {
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${scheme}://${location.host}/code/sessions/${id}/terminals/${terminalId}/socket?cols=${cols}&rows=${rows}`;
+}
 export const createSessionPreview = (id, preview) => codeFetch(`/code/sessions/${id}/previews`, send('POST', preview));
 export const deleteSessionPreview = (previewId) => codeFetch(`/code/previews/${previewId}`, { method: 'DELETE' });
 export const proposeChange = (id, title, description) =>
