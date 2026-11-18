@@ -32,17 +32,25 @@ pub struct PreviewState {
     pub jwt_secret: Arc<String>,
     pub passes: Arc<Passes>,
     pub origin: Option<PreviewOrigin>,
+    pub harvest_origin: String,
     pub http: reqwest::Client,
 }
 
 impl PreviewState {
-    pub fn new(env: Option<CodeEnv>, jwt_secret: Arc<String>, passes: Arc<Passes>, origin: Option<PreviewOrigin>) -> Self {
+    pub fn new(
+        env: Option<CodeEnv>,
+        jwt_secret: Arc<String>,
+        passes: Arc<Passes>,
+        origin: Option<PreviewOrigin>,
+        harvest_url: &str,
+    ) -> Self {
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(120))
             .build()
             .unwrap_or_default();
-        Self { env, jwt_secret, passes, origin, http }
+        let harvest_origin = super::framing::origin_of(harvest_url);
+        Self { env, jwt_secret, passes, origin, harvest_origin, http }
     }
 }
 
@@ -136,6 +144,7 @@ pub async fn info(
         "error": error,
         "web_enabled": state.origin.is_some(),
         "framable": state.origin.as_ref().is_some_and(PreviewOrigin::is_secure),
+        "harvest_origin": state.harvest_origin,
     })))
 }
 

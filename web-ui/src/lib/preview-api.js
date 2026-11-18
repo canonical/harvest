@@ -30,6 +30,10 @@ export const execPreview = (id, command) => previewFetch(`/previews/${id}/exec`,
 export const sharePreview = (previewId, audience) =>
   previewFetch(`/code/previews/${previewId}/share`, { method: 'PUT', body: JSON.stringify({ audience }) });
 
+export function canFrameHere(info, origin = window.location.origin) {
+  return !info?.harvest_origin || info.harvest_origin === origin;
+}
+
 export function shareUrl(id, origin = window.location.origin) {
   return `${origin}/#/preview/${id}`;
 }

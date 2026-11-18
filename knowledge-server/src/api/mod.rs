@@ -645,6 +645,7 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
                 Arc::clone(&jwt_secret),
                 Arc::clone(&preview_passes),
                 preview_origin.clone(),
+                &server_url,
             )))
     };
 

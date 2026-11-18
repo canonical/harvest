@@ -51,6 +51,15 @@
             sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-same-origin"
           />
         </div>
+        <div v-else-if="info.web_enabled && info.framable" class="p-notification--caution">
+          <div class="p-notification__content">
+            <h5 class="p-notification__title">The app cannot be shown inside this page</h5>
+            <p class="p-notification__message">Previews appear inside Harvest only when it is opened at <a :href="info.harvest_origin">{{ info.harvest_origin }}</a>. The app still opens in its own tab.</p>
+          </div>
+          <div class="p-notification__actions">
+            <button class="p-button is-dense u-no-margin--bottom" type="button" :disabled="opening" @click="openApp">{{ opening ? 'Opening…' : 'Open the app' }}</button>
+          </div>
+        </div>
         <div v-else-if="info.web_enabled" class="preview-panel__web">
           <p>The app runs at its own address, exactly as it does locally.</p>
           <button class="p-button--positive" type="button" :disabled="opening" @click="openApp">{{ opening ? 'Opening…' : 'Open the app' }}</button>
@@ -69,7 +78,7 @@ import SegmentMark from '../chat/SegmentMark.vue';
 import MenuButton from '../ui/MenuButton.vue';
 import ApiRunner from './ApiRunner.vue';
 import CliRunner from './CliRunner.vue';
-import { enterPreview, getPreview, resetPreview } from '../../lib/preview-api.js';
+import { canFrameHere, enterPreview, getPreview, resetPreview } from '../../lib/preview-api.js';
 import { splitFailure } from '../../lib/preview-failure.js';
 import { showToast } from '../../composables/useToasts.js';
 
@@ -96,7 +105,7 @@ const frameUrl = ref('');
 let timer = null;
 
 const isWeb = computed(() => info.value?.kind === 'web');
-const framed = computed(() => isWeb.value && info.value?.web_enabled && info.value?.framable);
+const framed = computed(() => isWeb.value && info.value?.web_enabled && info.value?.framable && canFrameHere(info.value));
 const widthLabel = computed(() => WIDTHS.find(w => w.id === width.value).label);
 const widthItems = computed(() => WIDTHS.map(w => ({ ...w, checked: w.id === width.value })));
 const failureSummary = computed(() => splitFailure(failure.value).summary);

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { parseHeaderLines, shareUrl, sharePreview, enterPreview, AUDIENCES } from '../../src/lib/preview-api.js';
+import { canFrameHere, parseHeaderLines, shareUrl, sharePreview, enterPreview, AUDIENCES } from '../../src/lib/preview-api.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -43,5 +43,13 @@ describe('preview api', () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ url: 'u' }) });
     await enterPreview('p1', '/admin');
     expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ to: '/admin' });
+  });
+});
+
+describe('canFrameHere', () => {
+  it('frames the app only where Harvest expects to be opened', () => {
+    expect(canFrameHere({ harvest_origin: 'http://10.164.219.10' }, 'http://10.164.219.10')).toBe(true);
+    expect(canFrameHere({ harvest_origin: 'http://10.164.219.10' }, 'http://127.0.0.1')).toBe(false);
+    expect(canFrameHere({}, 'http://127.0.0.1')).toBe(true);
   });
 });
