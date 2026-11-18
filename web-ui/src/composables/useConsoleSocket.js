@@ -2,9 +2,11 @@ export function useConsoleSocket() {
   let socket = null;
   const encoder = new TextEncoder();
 
-  function connect(url, { onData, onControl, onClose } = {}) {
+  function connect(url, { onOpen, onData, onControl, onClose } = {}) {
+    close();
     socket = new WebSocket(url);
     socket.binaryType = 'arraybuffer';
+    socket.onopen = () => onOpen?.();
 
     socket.onmessage = (event) => {
       if (typeof event.data === 'string') {
@@ -34,7 +36,12 @@ export function useConsoleSocket() {
   }
 
   function close() {
-    socket?.close();
+    if (socket) {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onclose = null;
+      socket.close();
+    }
     socket = null;
   }
 

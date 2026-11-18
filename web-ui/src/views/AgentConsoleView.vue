@@ -146,6 +146,7 @@ import {
   listPortForwards, createPortForward, updatePortForward, deletePortForward,
 } from '../lib/api.js';
 import { useConsoleSocket } from '../composables/useConsoleSocket.js';
+import { TERMINAL_FONT, terminalTheme } from '../lib/terminal-theme.js';
 
 const STATUS_POLL_MS = 3000;
 
@@ -183,14 +184,6 @@ let statusPollTimer    = null;
 let shouldAutoConnect  = true;
 let unmounted          = false;
 const socket = useConsoleSocket();
-
-function terminalTheme() {
-  const styles = getComputedStyle(document.documentElement);
-  return {
-    background: styles.getPropertyValue('--bg-code').trim() || '#0d0d0d',
-    foreground: '#f0f0f0',
-  };
-}
 
 function writeNotice(text, color = '90') {
   terminal.write(`\r\n\x1b[${color}m[${text}]\x1b[0m\r\n`);
@@ -230,7 +223,7 @@ function startConsole() {
 async function initTerminal() {
   terminal = new Terminal({
     convertEol: true,
-    fontFamily: "'Ubuntu Mono', 'Courier New', monospace",
+    fontFamily: TERMINAL_FONT,
     fontSize: 13,
     theme: terminalTheme(),
   });

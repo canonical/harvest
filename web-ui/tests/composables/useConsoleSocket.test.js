@@ -91,13 +91,34 @@ describe('useConsoleSocket', () => {
     expect(received).toHaveLength(0);
   });
 
-  it('close() closes the socket and fires onClose', () => {
+  it('close() closes the socket without reporting it as dropped', () => {
     let closed = false;
     const { connect, close } = useConsoleSocket();
     connect('ws://example/console', { onClose: () => { closed = true; } });
 
     close();
 
-    expect(closed).toBe(true);
+    expect(closed).toBe(false);
+    expect(FakeWebSocket.instances[0].readyState).toBe(FakeWebSocket.CLOSED);
+  });
+});
+
+describe('closing on purpose', () => {
+  it('does not report the close or the previous socket after reconnecting', () => {
+    const closes = [];
+    const { connect, close } = useConsoleSocket();
+    connect('ws://first', { onClose: () => closes.push('first') });
+    connect('ws://second', { onClose: () => closes.push('second') });
+    close();
+    expect(closes).toEqual([]);
+    expect(FakeWebSocket.instances.map((s) => s.readyState)).toEqual([FakeWebSocket.CLOSED, FakeWebSocket.CLOSED]);
+  });
+
+  it('reports when the server closes the socket', () => {
+    const closes = [];
+    const { connect } = useConsoleSocket();
+    connect('ws://server', { onClose: () => closes.push('server') });
+    FakeWebSocket.instances[0].onclose();
+    expect(closes).toEqual(['server']);
   });
 });
