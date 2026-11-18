@@ -152,6 +152,15 @@ pub async fn active_attempts(db: &Db) -> Result<Vec<ActiveAttempt>> {
         .collect())
 }
 
+pub async fn project_short_ids(db: &Db) -> Result<std::collections::HashSet<String>> {
+    let rows = db.query("SELECT id FROM code_projects", json!({})).await?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .map(|id| short_id(id).to_string())
+        .collect())
+}
+
 pub async fn abandon(db: &Db, attempt: &ActiveAttempt) -> Result<()> {
     db.execute(
         "UPDATE code_images SET attempt_status = 'failed', attempt_failure = $failure, attempt_log = $log

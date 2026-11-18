@@ -133,7 +133,8 @@ pub async fn sweep_builders(env: &CodeEnv) -> Result<()> {
         claim::abandon(&env.db, attempt).await?;
     }
     let active: HashSet<String> = attempts.iter().map(claim::ActiveAttempt::builder_name).collect();
-    for builder in abandoned_builders(&instances, &active) {
+    let own_projects = claim::project_short_ids(&env.db).await?;
+    for builder in abandoned_builders(&instances, &active, &own_projects) {
         if let Err(error) = env.lxd.delete_instance(&builder).await {
             tracing::warn!(builder, error = format!("{error:#}"), "could not remove an abandoned image builder");
         }
@@ -148,12 +149,17 @@ fn orphaned_attempts<'a>(attempts: &'a [claim::ActiveAttempt], instances: &HashS
         .collect()
 }
 
-fn abandoned_builders(instances: &[String], active: &HashSet<String>) -> Vec<String> {
+fn abandoned_builders(instances: &[String], active: &HashSet<String>, own_projects: &HashSet<String>) -> Vec<String> {
     instances
         .iter()
-        .filter(|name| name.starts_with(BUILDER_PREFIX) && !active.contains(*name))
+        .filter(|name| builder_project(name).is_some_and(|project| own_projects.contains(project)))
+        .filter(|name| !active.contains(*name))
         .cloned()
         .collect()
+}
+
+fn builder_project(name: &str) -> Option<&str> {
+    name.strip_prefix(BUILDER_PREFIX)?.split('-').next()
 }
 
 #[cfg(test)]
@@ -174,10 +180,12 @@ mod tests {
     }
 
     #[test]
-    fn only_builders_without_a_live_attempt_are_swept() {
-        let instances: Vec<String> = ["hcb-aaaa-1111", "hcb-bbbb", "hcp-aaaa-xyz", "hcb-cccc-2222"].map(String::from).into();
+    fn only_this_deployments_builders_without_a_live_attempt_are_swept() {
+        let instances: Vec<String> =
+            ["hcb-aaaa-1111", "hcb-bbbb", "hcp-aaaa-xyz", "hcb-cccc-2222", "hcb-ffff-3333"].map(String::from).into();
         let active: HashSet<String> = ["hcb-cccc-2222".to_string()].into();
-        assert_eq!(abandoned_builders(&instances, &active), ["hcb-aaaa-1111", "hcb-bbbb"]);
+        let own_projects: HashSet<String> = ["aaaa", "bbbb", "cccc"].map(String::from).into();
+        assert_eq!(abandoned_builders(&instances, &active, &own_projects), ["hcb-aaaa-1111", "hcb-bbbb"]);
     }
 
     #[test]
