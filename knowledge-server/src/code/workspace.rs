@@ -15,6 +15,8 @@ use crate::llm::types::ToolDefinition;
 use crate::lxd::containers::{Command, ExecOutput};
 use crate::toolsets::{Toolset, TurnContext};
 
+const BROKEN_PIPE_EXIT: i64 = 141;
+const BROKEN_PIPE_NOTE: &str = "A command in the pipeline stopped reading its input early, as head does; the commands before it usually succeeded.\n";
 const OUTPUT_CHARS: usize = 12_000;
 const READ_MAX_LINES: usize = 400;
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
@@ -193,7 +195,7 @@ impl Operation {
             ),
             Self::SaveSetup => (
                 "save_setup_script",
-                "Save the shell script that installs this repository's dependencies, once it has worked in this container. Harvest runs it when preparing new containers for the project, unless the repository has its own .harvest/setup.sh.",
+                "Save the shell script that installs this repository's dependencies, once it has worked in this container. Harvest runs it after its automatic toolchain setup when preparing new containers for every user of the project, unless the repository has its own .harvest/setup.sh.",
                 json!({
                     "type": "object",
                     "properties": { "script": { "type": "string" } },
@@ -259,7 +261,7 @@ impl WorkspaceTool {
     }
 
     async fn run_command(&self, container: &str, script: &str, timeout: Duration) -> Result<String> {
-        let output = self.exec(container, script, timeout).await?;
+        let output = self.exec(container, &reporting_pipeline_failures(script), timeout).await?;
         let mut text = describe_output(&output);
         if output.succeeded() && installs::installs_packages(script) {
             learned_setup::record(&self.env, &self.session_id, script).await?;
@@ -276,7 +278,7 @@ impl WorkspaceTool {
                 chat_id: Some(&self.chat_id),
                 kind: Kind::Command,
                 label: &job_label(command),
-                script: command,
+                script: &reporting_pipeline_failures(command),
             },
         )
         .await?;
@@ -301,6 +303,13 @@ impl WorkspaceTool {
             .as_str()
             .and_then(previews::Kind::parse)
             .ok_or_else(|| anyhow::anyhow!("kind must be web, api or cli"))?;
+        let setup_steps = params["start_command"]
+            .as_str()
+            .map(previews::start_command::setup_steps_in)
+            .unwrap_or_default();
+        if !setup_steps.is_empty() {
+            return Ok(previews::start_command::explain(&setup_steps));
+        }
         let settings = previews::Settings {
             kind,
             port: params["port"].as_u64().and_then(|p| u16::try_from(p).ok()),
@@ -414,8 +423,15 @@ impl WorkspaceTool {
     }
 }
 
+fn reporting_pipeline_failures(script: &str) -> String {
+    format!("set -o pipefail\n{script}")
+}
+
 fn describe_output(output: &ExecOutput) -> String {
     let mut text = format!("exit code {}\n", output.exit_code);
+    if output.exit_code == BROKEN_PIPE_EXIT {
+        text.push_str(BROKEN_PIPE_NOTE);
+    }
     if !output.stdout.is_empty() {
         text.push_str(&tail(&output.stdout, OUTPUT_CHARS));
     }
@@ -484,6 +500,21 @@ impl Toolset for WorkspaceToolset {
 
 #[cfg(test)]
 mod tests {
+    use crate::lxd::containers::ExecOutput;
+
+    #[test]
+    fn agent_commands_report_a_failure_anywhere_in_a_pipeline() {
+        assert_eq!(reporting_pipeline_failures("pip install -e . | tail -3"), "set -o pipefail\npip install -e . | tail -3");
+    }
+
+    #[test]
+    fn an_early_closed_pipe_is_explained() {
+        let output = ExecOutput { exit_code: 141, stdout: "first lines".into(), stderr: String::new() };
+        assert!(describe_output(&output).starts_with("exit code 141\nA command in the pipeline stopped reading its input early"));
+        let ordinary = ExecOutput { exit_code: 1, ..ExecOutput::default() };
+        assert_eq!(describe_output(&ordinary), "exit code 1\n");
+    }
+
     use super::*;
 
     #[test]
