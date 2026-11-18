@@ -60,6 +60,7 @@ async fn keep_warm(env: &CodeEnv, project_id: &str) -> Result<()> {
     let Some(image) = images::current(env, project_id).await?.and_then(|image| image.ready) else {
         return Ok(());
     };
+    retire_outdated_pool(env, project_id, &image).await?;
     let pooled = env
         .db
         .query(
@@ -79,9 +80,9 @@ async fn add_to_pool(env: &CodeEnv, project_id: &str, image: &ReadyImage) -> Res
     let name = container_name("hcp", project_id);
     env.db
         .execute(
-            "INSERT INTO code_containers (name, project_id, role, state, base_commit)
-             VALUES ($name, $pid, 'pool', 'building', $base)",
-            json!({ "name": name, "pid": project_id, "base": image.base_commit }),
+            "INSERT INTO code_containers (name, project_id, role, state, base_commit, image_alias)
+             VALUES ($name, $pid, 'pool', 'building', $base, $alias)",
+            json!({ "name": name, "pid": project_id, "base": image.base_commit, "alias": image.alias }),
         )
         .await?;
     let launched = env
@@ -106,6 +107,25 @@ async fn add_to_pool(env: &CodeEnv, project_id: &str, image: &ReadyImage) -> Res
             Err(e)
         }
     }
+}
+
+async fn retire_outdated_pool(env: &CodeEnv, project_id: &str, image: &ReadyImage) -> Result<()> {
+    let outdated = env
+        .db
+        .query(
+            "DELETE FROM code_containers
+             WHERE project_id = $pid AND role = 'pool' AND state = 'ready' AND image_alias IS DISTINCT FROM $alias
+             RETURNING name",
+            json!({ "pid": project_id, "alias": image.alias }),
+        )
+        .await?;
+    for row in &outdated {
+        let name = row["name"].as_str().unwrap_or_default();
+        if let Err(error) = env.lxd.delete_instance(name).await {
+            tracing::warn!(container = name, error = %format!("{error:#}"), "could not remove an outdated pool container");
+        }
+    }
+    Ok(())
 }
 
 async fn cool_down(env: &CodeEnv, warm_for: f64) -> Result<()> {
