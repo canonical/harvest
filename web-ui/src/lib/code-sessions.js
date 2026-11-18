@@ -12,6 +12,41 @@ export function sessionState(session) {
   return session.status in SESSION_STATES ? session.status : 'closed';
 }
 
+const CHAT_UNAVAILABLE = {
+  starting: 'The session is still starting…',
+  failed: 'This session could not start, so it cannot run anything.',
+  closed: 'This session has ended. Open a new session to keep working.',
+};
+
+export function chatUnavailableReason(status) {
+  return CHAT_UNAVAILABLE[status] ?? '';
+}
+
+const STILL_PREPARING = /still being prepared/i;
+const SERVICE_UNREACHABLE = /error sending request|connection refused|operation timed out|lxd is not reachable/i;
+
+export function failureAdvice(error = '') {
+  if (STILL_PREPARING.test(error)) {
+    return {
+      title: "The project's containers are still being prepared",
+      message: 'Open a new session in a few minutes.',
+      suggestsSetup: false,
+    };
+  }
+  if (SERVICE_UNREACHABLE.test(error)) {
+    return {
+      title: 'Harvest could not reach its container service',
+      message: 'This is usually temporary, for example right after the server restarts. Open a new session in a minute.',
+      suggestsSetup: false,
+    };
+  }
+  return {
+    title: 'The session could not start',
+    message: "Open a new session to try again. If it fails the same way, check the project's container setup.",
+    suggestsSetup: true,
+  };
+}
+
 export function filterSessions(sessions, { projectIds = [], includeClosed = false } = {}) {
   const chosen = new Set(projectIds);
   return sessions.filter(

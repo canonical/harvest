@@ -10,6 +10,7 @@ import {
 } from '../lib/code-api.js';
 import { sharePreview } from '../lib/preview-api.js';
 import { showToast } from './useToasts.js';
+import { chatUnavailableReason } from '../lib/code-sessions.js';
 import { disposeChatInstance, peekChatInstance, setChatDraft, tabActivity } from './useChatInstance.js';
 
 const SAVE_DELAY_MS = 800;
@@ -24,6 +25,7 @@ export function useSessionWorkspace(sessionId, { content, tabMenu }) {
   const tree = ref(null);
   const chats = ref([]);
   const previews = ref([]);
+  const sessionStatus = ref(null);
   let saveTimer = null;
 
   function save() {
@@ -53,6 +55,7 @@ export function useSessionWorkspace(sessionId, { content, tabMenu }) {
   function setLists(data) {
     chats.value = data.chats ?? [];
     previews.value = data.previews ?? [];
+    sessionStatus.value = data.session?.status ?? null;
   }
 
   async function load(data) {
@@ -164,6 +167,7 @@ export function useSessionWorkspace(sessionId, { content, tabMenu }) {
     tree,
     chats,
     previews,
+    chatUnavailableReason: computed(() => chatUnavailableReason(sessionStatus.value)),
     tabKinds: SESSION_TAB_KINDS,
     content: markRaw(content),
     tabMenu: markRaw(tabMenu),

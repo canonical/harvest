@@ -62,7 +62,7 @@
                 ref="inputEl"
                 v-model="query"
                 class="p-search-box__input"
-                :placeholder="readOnly ? 'You can read this project but not chat in it' : 'Ask anything…'"
+                :placeholder="readOnly ? 'You can read this project but not chat in it' : unavailableReason || 'Ask anything…'"
                 rows="1"
                 :disabled="inputDisabled"
                 @keydown.enter.exact.prevent="sendQuery"
@@ -195,6 +195,7 @@ const props = defineProps({
   conversationId: { type: String, default: null },
   projectId:      { type: String, default: null },
   codeSessionId:  { type: String, default: null },
+  unavailableReason: { type: String, default: '' },
 });
 
 const emit = defineEmits(['update:conversationId', 'title-updated']);
@@ -230,7 +231,7 @@ let   projectEs      = null;
 const pendingAttachments = computed(() => chat.pendingAttachments);
 
 const inputDisabled = computed(() =>
-  chat.loading || remoteLocked.value || readOnly.value
+  chat.loading || remoteLocked.value || readOnly.value || Boolean(props.unavailableReason)
 );
 
 const presenceOthers = computed(() => {

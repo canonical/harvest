@@ -6,6 +6,7 @@
         :tab-id="instanceKey"
         :conversation-id="chat.id"
         :code-session-id="workspace.sessionId"
+        :unavailable-reason="workspace.chatUnavailableReason"
         @title-updated="renameLocally"
       />
     </div>

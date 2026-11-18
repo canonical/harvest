@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   SESSION_STATES,
+  chatUnavailableReason,
+  failureAdvice,
   sessionState,
   filterSessions,
   repositoryChoices,
@@ -94,5 +96,28 @@ describe('repository choices', () => {
     expect(searchChoices(choices, ' ZET ').map((choice) => choice.name)).toEqual(['zeta']);
     expect(searchChoices(choices, 'x/al').map((choice) => choice.name)).toEqual(['alpha']);
     expect(searchChoices(choices, '')).toBe(choices);
+  });
+});
+
+describe('session availability', () => {
+  it('lets people chat only in an active session', () => {
+    expect(chatUnavailableReason('active')).toBe('');
+    expect(chatUnavailableReason('failed')).toContain('could not start');
+    expect(chatUnavailableReason('closed')).toContain('has ended');
+  });
+
+  it('advises waiting when the containers are still being prepared', () => {
+    expect(failureAdvice("the project's containers are still being prepared")).toMatchObject({ suggestsSetup: false });
+  });
+
+  it('advises waiting when the container service was unreachable', () => {
+    const advice = failureAdvice('creating LXD container: error sending request for url (https://127.0.0.1:8443/1.0/instances)');
+    expect(advice.title).toContain('could not reach');
+    expect(advice.suggestsSetup).toBe(false);
+  });
+
+  it('points to the container setup for other failures', () => {
+    expect(failureAdvice('the setup script failed with exit code 1')).toMatchObject({ suggestsSetup: true });
+    expect(failureAdvice()).toMatchObject({ title: 'The session could not start' });
   });
 });

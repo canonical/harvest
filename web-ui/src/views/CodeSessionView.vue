@@ -32,10 +32,11 @@
     </div>
     <div v-if="session?.status === 'failed' && session.error" class="p-notification--negative session-notice">
       <div class="p-notification__content">
-        <h5 class="p-notification__title">The session could not start</h5>
-        <p class="p-notification__message">Open a new session to try again.</p>
+        <h5 class="p-notification__title">{{ advice.title }}</h5>
+        <p class="p-notification__message">{{ advice.message }}</p>
       </div>
       <div class="p-notification__actions">
+        <router-link v-if="advice.suggestsSetup && session.project_id" :to="`/code/projects/${session.project_id}`" class="p-button--base is-dense u-no-margin--bottom">Container setup</router-link>
         <button class="p-button--base is-dense u-no-margin--bottom" type="button" @click="showLog = !showLog">{{ showLog ? 'Hide log' : 'Show log' }}</button>
       </div>
       <pre v-if="showLog" class="code-log">{{ session.error }}</pre>
@@ -63,6 +64,7 @@ import MenuButton from '../components/ui/MenuButton.vue';
 import { confirm } from '../composables/useConfirm.js';
 import { showToast } from '../composables/useToasts.js';
 import { getCodeSession, closeCodeSession, isOpen, changeRequestName } from '../lib/code-api.js';
+import { failureAdvice } from '../lib/code-sessions.js';
 
 const props = defineProps({ id: { type: String, required: true } });
 
@@ -81,6 +83,7 @@ const showLog = ref(false);
 let timer = null;
 
 const statusLabel = computed(() => STATUS_LABELS[session.value?.status] ?? session.value?.status);
+const advice = computed(() => failureAdvice(session.value?.error ?? ''));
 
 function stopPolling() {
   clearTimeout(timer);
@@ -94,7 +97,7 @@ async function load() {
     session.value = data.session;
     project.value = data.project;
     changeRequest.value = data.change_request;
-    details.value = { chats: data.chats, previews: data.previews };
+    details.value = { chats: data.chats, previews: data.previews, session: data.session };
     if (data.session.status === 'starting') timer = setTimeout(load, POLL_MS);
   } catch (e) {
     error.value = e.message;
