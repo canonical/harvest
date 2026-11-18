@@ -73,6 +73,9 @@ def test_haproxy_routes_api_paths_to_servers_and_the_rest_to_the_ui(juju: jubila
     assert status == 200 and b"<div id=\"app\">" in body
     status, body = get(juju, "/version")
     assert json.loads(body)["schema_version"] == json.loads(body)["binary_schema"]
+    for path in ["/code/sessions", "/previews/0123456789abcdef0123456789abcdef", "/me/llm-keys"]:
+        status, body = get(juju, path)
+        assert status in (401, 404) and body.lstrip().startswith(b"{"), f"{path} did not reach a server unit"
 
 
 def test_every_server_unit_is_registered_in_the_cluster(juju: jubilant.Juju):
