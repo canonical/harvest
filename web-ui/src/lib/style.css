@@ -17,6 +17,7 @@
   --text-muted:           #6b6b6b;
   --text-code-inline:     #B53C0F;
   --text-code:            #f0f0f0;
+  --text-code-error:      #ff8a80;
   --text-source-chip:     #333333;
   --text-label:           #666666;
 
@@ -70,6 +71,7 @@
   --text-muted:           #777777;
   --text-code-inline:     #f4784a;
   --text-code:            #d4d4d4;
+  --text-code-error:      #f08080;
   --text-source-chip:     #cccccc;
   --text-label:           #999999;
 
@@ -142,6 +144,7 @@
     --text-muted:           #777777;
     --text-code-inline:     #f4784a;
     --text-code:            #d4d4d4;
+    --text-code-error:      #f08080;
     --text-source-chip:     #cccccc;
     --text-label:           #999999;
 
@@ -10400,9 +10403,9 @@ button.activity-line__row:hover .activity-line__steps {
 .preview-runner__line input { flex: 1; margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .preview-runner__line .p-button--positive { margin: 0; }
 .preview-terminal { background: var(--bg-code); color: var(--text-code); border-radius: 4px; padding: .75rem; min-height: 16rem; max-height: 60vh; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .8125rem; }
-.preview-terminal pre { margin: 0 0 .5rem; padding: 0; background: none; white-space: pre-wrap; }
+.preview-terminal pre { margin: 0 0 .5rem; padding: 0; background: none; color: inherit; white-space: pre-wrap; }
 .preview-terminal__command { font-weight: 600; }
-.preview-terminal__exit { color: var(--error-text); margin-bottom: .5rem; }
+.preview-terminal__exit { color: var(--text-code-error); margin-bottom: .5rem; }
 .preview-page { display: flex; flex-direction: column; min-height: 100vh; padding: 1rem; gap: .75rem; background: var(--bg-page); color: var(--text-primary); }
 .preview-page__header { display: flex; gap: .75rem; align-items: baseline; flex-wrap: wrap; }
 
