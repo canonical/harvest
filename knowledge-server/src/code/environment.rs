@@ -4,10 +4,11 @@ use super::images::quote;
 use super::project_facts::{Probe, ProjectFacts};
 
 const PRELUDE: &str = "set -eo pipefail
-export DEBIAN_FRONTEND=noninteractive PIP_BREAK_SYSTEM_PACKAGES=1 PIP_IGNORE_INSTALLED=1 PIP_ROOT_USER_ACTION=ignore PIP_DISABLE_PIP_VERSION_CHECK=1
+export DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 UV_LINK_MODE=copy PIP_BREAK_SYSTEM_PACKAGES=1 PIP_IGNORE_INSTALLED=1 PIP_ROOT_USER_ACTION=ignore PIP_DISABLE_PIP_VERSION_CHECK=1
 apt_ready=
 install_packages() { if [ -z \"$apt_ready\" ]; then apt-get update -qq; apt_ready=1; fi; apt-get install -y -qq \"$@\" >/dev/null; }";
 const PIP_SETTINGS: &str = "printf '[global]\\nbreak-system-packages = true\\nroot-user-action = ignore\\ndisable-pip-version-check = true\\n' > /etc/pip.conf";
+const UV_SETTINGS: &str = "echo 'export UV_LINK_MODE=copy' > /etc/profile.d/harvest-uv.sh";
 const RUSTUP_INSTALLER: &str = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal";
 const PYTHON_TOOLS: &[&str] = &["pytest", "ruff", "mypy", "pre-commit"];
 const PYTHON_EXTRAS: &[&str] = &["test", "tests", "testing", "dev"];
@@ -73,6 +74,7 @@ impl Toolchain for Python {
             ensure_command("pip3", "python3-pip"),
             ensure_python_module("ensurepip", "python3-venv"),
             PIP_SETTINGS.to_string(),
+            UV_SETTINGS.to_string(),
         ];
         let tools: Vec<&str> = PYTHON_TOOLS.iter().copied().filter(|tool| uses(facts, tool)).collect();
         if !tools.is_empty() {
@@ -301,6 +303,8 @@ testpaths = ["tests"]
         assert!(script.contains("command -v pip3 >/dev/null 2>&1 || install_packages python3-pip\n"));
         assert!(script.contains("python3 -c 'import ensurepip' >/dev/null 2>&1 || install_packages python3-venv"));
         assert!(script.contains("break-system-packages = true"));
+        assert!(script.contains("UV_LINK_MODE=copy PIP_BREAK_SYSTEM_PACKAGES=1"));
+        assert!(script.contains("echo 'export UV_LINK_MODE=copy' > /etc/profile.d/harvest-uv.sh"));
         assert!(script.contains("pip3 install -q pytest pre-commit"));
         assert!(script.contains("pip3 install -q -e '.[dev]'"));
         assert!(script.contains("pip3 install -q 'freezegun' 'mypy' 'pytest'"));

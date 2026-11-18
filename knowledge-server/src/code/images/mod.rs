@@ -19,7 +19,7 @@ pub use failure::BuildFailure;
 pub use state::{need, Attempt, Image, ImageNeed, ReadyImage};
 
 pub const REPO_SETUP_FILE: &str = ".harvest/setup.sh";
-const RECIPE_VERSION: u32 = 3;
+const RECIPE_VERSION: u32 = 4;
 const BUILDER_PREFIX: &str = "hcb-";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
