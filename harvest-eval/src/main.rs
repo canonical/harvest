@@ -169,6 +169,22 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    PreviewCheck {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        server: String,
+        #[arg(long, env = "HARVEST_TOKEN")]
+        token: String,
+        #[arg(long, default_value = "harvest-eval/tasks/preview")]
+        scenarios: PathBuf,
+        #[arg(long)]
+        scenario: Option<String>,
+        #[arg(long)]
+        keep_sessions: bool,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 struct Env {
@@ -594,6 +610,31 @@ async fn main() -> Result<()> {
             .await?;
             if let Some(out) = out {
                 std::fs::write(&out, serde_json::to_string_pretty(&report)?)?;
+            }
+        }
+        Command::PreviewCheck {
+            config,
+            server,
+            token,
+            scenarios,
+            scenario,
+            keep_sessions,
+            out,
+        } => {
+            let outcomes = harvest_eval::preview_check::run(harvest_eval::preview_check::Options {
+                config: &config,
+                server: &server,
+                token: &token,
+                scenarios: &scenarios,
+                only: scenario.as_deref(),
+                keep_sessions,
+            })
+            .await?;
+            if let Some(out) = out {
+                std::fs::write(&out, serde_json::to_string_pretty(&outcomes)?)?;
+            }
+            if outcomes.iter().any(|outcome| !outcome.passed) {
+                std::process::exit(1);
             }
         }
         Command::TrainReranker {

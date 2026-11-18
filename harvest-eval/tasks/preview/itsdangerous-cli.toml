@@ -1,0 +1,9 @@
+name = "itsdangerous-cli"
+repository = "https://github.com/pallets/itsdangerous"
+
+[preview]
+kind = "cli"
+
+[expect]
+command = "python3 -c \"import itsdangerous; print(itsdangerous.URLSafeSerializer('key').loads(itsdangerous.URLSafeSerializer('key').dumps('signed')))\""
+contains = "signed"

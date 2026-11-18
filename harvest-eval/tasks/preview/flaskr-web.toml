@@ -1,0 +1,15 @@
+name = "flaskr-web"
+repository = "https://github.com/pallets/flask"
+prepare = [
+  "pip install -q -e examples/tutorial",
+  "cd examples/tutorial && flask --app flaskr init-db",
+]
+
+[preview]
+kind = "web"
+port = 5000
+start_command = "cd examples/tutorial && flask --app flaskr run --host 0.0.0.0 --port $PORT"
+
+[expect]
+path = "/auth/login"
+contains = "Log In"

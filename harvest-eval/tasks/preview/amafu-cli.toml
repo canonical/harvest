@@ -1,0 +1,9 @@
+name = "amafu-cli"
+repository = "https://github.com/canonical/amafu"
+
+[preview]
+kind = "cli"
+
+[expect]
+command = "cargo --version"
+contains = "1.99.1"

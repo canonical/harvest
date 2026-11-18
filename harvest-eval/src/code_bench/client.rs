@@ -60,7 +60,7 @@ impl Harvest {
             let project = self.call(Method::GET, &format!("/code/projects/{project_id}"), None).await?;
             match project["image"]["status"].as_str() {
                 Some("ready") => return Ok(()),
-                Some("failed") => bail!("the project's container setup failed: {}", project["image"]["log"]),
+                Some("failed") => bail!("the project's containers could not be prepared: {}", project["image"]["attempt"]["log"]),
                 _ if started.elapsed() > IMAGE_WAIT => bail!("the project's image was not ready in time"),
                 _ => tokio::time::sleep(POLL).await,
             }
@@ -117,6 +117,24 @@ impl Harvest {
             }
         }
         bail!("the stream ended without an answer")
+    }
+
+    pub async fn create_preview(&self, session_id: &str, settings: Value) -> Result<String> {
+        let created = self
+            .call(Method::POST, &format!("/code/sessions/{session_id}/previews"), Some(settings))
+            .await?;
+        id_of(&created["preview"])
+    }
+
+    pub async fn restart_preview(&self, preview_id: &str) -> Result<()> {
+        self.call(Method::POST, &format!("/code/previews/{preview_id}/restart"), None)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn run_in_preview(&self, preview_id: &str, command: &str) -> Result<Value> {
+        self.call(Method::POST, &format!("/previews/{preview_id}/exec"), Some(json!({ "command": command })))
+            .await
     }
 
     pub async fn end_session(&self, session_id: &str) -> Result<()> {
