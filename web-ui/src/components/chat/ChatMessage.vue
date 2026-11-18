@@ -72,6 +72,7 @@
 
             <div v-else-if="item.type === 'confirm_action'" class="message__confirm" role="group" :aria-label="item.description">
               <p class="message__confirm-text">{{ item.description }}</p>
+              <pre v-if="item.input?.script" class="code-log">{{ item.input.script }}</pre>
 
               <ProvisionSteps v-if="item.steps.length" :steps="item.steps" />
 

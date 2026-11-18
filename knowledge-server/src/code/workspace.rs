@@ -87,6 +87,10 @@ const OPERATIONS: [Operation; 11] = [
 ];
 
 impl Operation {
+    fn changes_the_project(self) -> bool {
+        matches!(self, Self::SaveSetup)
+    }
+
     fn definition(self) -> ToolDefinition {
         let (name, description, parameters) = match self {
             Self::Run => (
@@ -195,7 +199,7 @@ impl Operation {
             ),
             Self::SaveSetup => (
                 "save_setup_script",
-                "Save the shell script that installs this repository's dependencies, once it has worked in this container. Harvest runs it after its automatic toolchain setup when preparing new containers for every user of the project, unless the repository has its own .harvest/setup.sh.",
+                "Save the shell script that installs this repository's dependencies, once it has worked in this container. Harvest runs it after its automatic toolchain setup when preparing new containers for every user of the project, unless the repository has its own .harvest/setup.sh. The user confirms the script before it is saved.",
                 json!({
                     "type": "object",
                     "properties": { "script": { "type": "string" } },
@@ -472,6 +476,10 @@ impl Tool for WorkspaceTool {
     fn reads_code(&self) -> bool {
         matches!(self.operation, Operation::Read)
     }
+
+    fn requires_confirmation(&self) -> bool {
+        self.operation.changes_the_project()
+    }
 }
 
 pub struct WorkspaceToolset {
@@ -513,6 +521,13 @@ mod tests {
         assert!(describe_output(&output).starts_with("exit code 141\nA command in the pipeline stopped reading its input early"));
         let ordinary = ExecOutput { exit_code: 1, ..ExecOutput::default() };
         assert_eq!(describe_output(&ordinary), "exit code 1\n");
+    }
+
+    #[test]
+    fn only_saving_the_setup_script_waits_for_the_user() {
+        let asking: Vec<bool> = OPERATIONS.iter().map(|operation| operation.changes_the_project()).collect();
+        assert_eq!(asking.iter().filter(|asks| **asks).count(), 1);
+        assert!(Operation::SaveSetup.changes_the_project());
     }
 
     use super::*;

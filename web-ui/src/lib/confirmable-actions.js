@@ -1,13 +1,14 @@
 import {
   provisionLxdAgent, deleteAgent, createPortForward, updatePortForward, deletePortForward, runTerraformArtifact,
 } from './api.js';
+import { getCodeSession, saveSetupScript } from './code-api.js';
 import { initialProvisionSteps, applyProvisionEvent, isProvisionDone, isProvisionError } from './lxd-provision.js';
 
 function findConfirmAction(threadStore, id) {
   return threadStore.messages.at(-1)?.chain?.find(c => c.type === 'confirm_action' && c.id === id);
 }
 
-export async function runConfirmableAction(projectId, action, threadStore) {
+export async function runConfirmableAction({ projectId, codeSessionId }, action, threadStore) {
   if (action.name === 'create_lxd_agent') {
     threadStore.updateConfirmActionItem(action.id, { status: 'running', steps: initialProvisionSteps() });
     try {
@@ -82,6 +83,15 @@ export async function runConfirmableAction(projectId, action, threadStore) {
       });
     } catch (e) {
       threadStore.updateConfirmActionItem(action.id, { status: 'error', resultText: e.message || `Failed to run terraform ${tfAction}` });
+    }
+  } else if (action.name === 'save_setup_script') {
+    threadStore.updateConfirmActionItem(action.id, { status: 'running' });
+    try {
+      const { session } = await getCodeSession(codeSessionId);
+      await saveSetupScript(session.project_id, action.input.script);
+      threadStore.updateConfirmActionItem(action.id, { status: 'done', resultText: 'Saved. New containers for this project will run this script.' });
+    } catch (e) {
+      threadStore.updateConfirmActionItem(action.id, { status: 'error', resultText: e.message || 'Failed to save the setup script' });
     }
   }
 }

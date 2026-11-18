@@ -3,6 +3,7 @@ import { runConfirmableAction } from '../../src/lib/confirmable-actions.js';
 import {
   provisionLxdAgent, deleteAgent, createPortForward, updatePortForward, deletePortForward, runTerraformArtifact,
 } from '../../src/lib/api.js';
+import { getCodeSession, saveSetupScript } from '../../src/lib/code-api.js';
 
 vi.mock('../../src/lib/api.js', () => ({
   provisionLxdAgent:    vi.fn(),
@@ -11,6 +12,11 @@ vi.mock('../../src/lib/api.js', () => ({
   updatePortForward:    vi.fn(),
   deletePortForward:    vi.fn(),
   runTerraformArtifact: vi.fn(),
+}));
+
+vi.mock('../../src/lib/code-api.js', () => ({
+  getCodeSession:  vi.fn(),
+  saveSetupScript: vi.fn(),
 }));
 
 function makeThreadStore(action) {
@@ -39,7 +45,7 @@ describe('runConfirmableAction', () => {
     });
     const action = { id: 'a1', name: 'create_lxd_agent', input: { name: 'runner', flavor: 'small' } };
     const store = makeThreadStore(action);
-    await runConfirmableAction('proj1', action, store);
+    await runConfirmableAction({ projectId: 'proj1' }, action, store);
 
     expect(provisionLxdAgent).toHaveBeenCalledWith('proj1', { name: 'runner', description: '', flavor: 'small' }, expect.any(Function));
     expect(store.get('a1').status).toBe('done');
@@ -52,7 +58,7 @@ describe('runConfirmableAction', () => {
     });
     const action = { id: 'a1', name: 'create_lxd_agent', input: { name: 'runner', flavor: 'small' } };
     const store = makeThreadStore(action);
-    await runConfirmableAction('proj1', action, store);
+    await runConfirmableAction({ projectId: 'proj1' }, action, store);
 
     expect(store.get('a1').status).toBe('error');
     expect(store.get('a1').resultText).toBe('boom');
@@ -62,7 +68,7 @@ describe('runConfirmableAction', () => {
     deleteAgent.mockResolvedValue();
     const action = { id: 'a1', name: 'delete_agent', input: { agent_id: 'abc' } };
     const store = makeThreadStore(action);
-    await runConfirmableAction('proj1', action, store);
+    await runConfirmableAction({ projectId: 'proj1' }, action, store);
 
     expect(deleteAgent).toHaveBeenCalledWith('proj1', 'abc');
     expect(store.get('a1').status).toBe('done');
@@ -72,7 +78,7 @@ describe('runConfirmableAction', () => {
     deleteAgent.mockRejectedValue(new Error('nope'));
     const action = { id: 'a1', name: 'delete_agent', input: { agent_id: 'abc' } };
     const store = makeThreadStore(action);
-    await runConfirmableAction('proj1', action, store);
+    await runConfirmableAction({ projectId: 'proj1' }, action, store);
 
     expect(store.get('a1').status).toBe('error');
     expect(store.get('a1').resultText).toBe('nope');
@@ -82,7 +88,7 @@ describe('runConfirmableAction', () => {
     createPortForward.mockResolvedValue();
     const action = { id: 'a1', name: 'create_port_forward', input: { agent_id: 'ag1', port: 8080, route_name: 'app' } };
     const store = makeThreadStore(action);
-    await runConfirmableAction('proj1', action, store);
+    await runConfirmableAction({ projectId: 'proj1' }, action, store);
 
     expect(createPortForward).toHaveBeenCalledWith('proj1', 'ag1', { port: 8080, routeName: 'app' });
     expect(store.get('a1').status).toBe('done');
@@ -92,7 +98,7 @@ describe('runConfirmableAction', () => {
     updatePortForward.mockResolvedValue();
     const action = { id: 'a1', name: 'update_port_forward', input: { agent_id: 'ag1', forward_id: 'f1', port: 9090, route_name: 'app2' } };
     const store = makeThreadStore(action);
-    await runConfirmableAction('proj1', action, store);
+    await runConfirmableAction({ projectId: 'proj1' }, action, store);
 
     expect(updatePortForward).toHaveBeenCalledWith('proj1', 'ag1', 'f1', { port: 9090, routeName: 'app2' });
     expect(store.get('a1').status).toBe('done');
@@ -102,7 +108,7 @@ describe('runConfirmableAction', () => {
     deletePortForward.mockResolvedValue();
     const action = { id: 'a1', name: 'delete_port_forward', input: { agent_id: 'ag1', forward_id: 'f1' } };
     const store = makeThreadStore(action);
-    await runConfirmableAction('proj1', action, store);
+    await runConfirmableAction({ projectId: 'proj1' }, action, store);
 
     expect(deletePortForward).toHaveBeenCalledWith('proj1', 'ag1', 'f1');
     expect(store.get('a1').status).toBe('done');
@@ -112,7 +118,7 @@ describe('runConfirmableAction', () => {
     runTerraformArtifact.mockResolvedValue({ stdout: 'applied', stderr: '', exit_code: 0 });
     const action = { id: 'a1', name: 'run_terraform_apply', input: { agent_id: 'ag1', artifact_id: 'art1', timeout_secs: 600 } };
     const store = makeThreadStore(action);
-    await runConfirmableAction('proj1', action, store);
+    await runConfirmableAction({ projectId: 'proj1' }, action, store);
 
     expect(runTerraformArtifact).toHaveBeenCalledWith('proj1', 'ag1', 'art1', 'apply', 600);
     expect(store.get('a1').status).toBe('done');
@@ -123,7 +129,7 @@ describe('runConfirmableAction', () => {
     runTerraformArtifact.mockResolvedValue({ stdout: '', stderr: 'no such resource', exit_code: 1 });
     const action = { id: 'a1', name: 'run_terraform_destroy', input: { agent_id: 'ag1', artifact_id: 'art1' } };
     const store = makeThreadStore(action);
-    await runConfirmableAction('proj1', action, store);
+    await runConfirmableAction({ projectId: 'proj1' }, action, store);
 
     expect(runTerraformArtifact).toHaveBeenCalledWith('proj1', 'ag1', 'art1', 'destroy', undefined);
     expect(store.get('a1').status).toBe('error');
@@ -134,7 +140,7 @@ describe('runConfirmableAction', () => {
     runTerraformArtifact.mockRejectedValue(new Error('agent disconnected'));
     const action = { id: 'a1', name: 'run_terraform_apply', input: { agent_id: 'ag1', artifact_id: 'art1' } };
     const store = makeThreadStore(action);
-    await runConfirmableAction('proj1', action, store);
+    await runConfirmableAction({ projectId: 'proj1' }, action, store);
 
     expect(store.get('a1').status).toBe('error');
     expect(store.get('a1').resultText).toBe('agent disconnected');
@@ -143,8 +149,27 @@ describe('runConfirmableAction', () => {
   it('an unknown action name does nothing', async () => {
     const action = { id: 'a1', name: 'some_unhandled_tool', input: {} };
     const store = makeThreadStore(action);
-    await runConfirmableAction('proj1', action, store);
+    await runConfirmableAction({ projectId: 'proj1' }, action, store);
 
     expect(store.updateConfirmActionItem).not.toHaveBeenCalled();
+  });
+
+  it('confirming save_setup_script saves it on the project of the code session', async () => {
+    getCodeSession.mockResolvedValue({ session: { id: 's1', project_id: 'code-project' } });
+    saveSetupScript.mockResolvedValue(null);
+    const action = { id: 'a9', name: 'save_setup_script', input: { script: 'make deps' } };
+    const store = makeThreadStore(action);
+    await runConfirmableAction({ projectId: null, codeSessionId: 's1' }, action, store);
+    expect(getCodeSession).toHaveBeenCalledWith('s1');
+    expect(saveSetupScript).toHaveBeenCalledWith('code-project', 'make deps');
+    expect(store.get('a9').status).toBe('done');
+  });
+
+  it('a failed save is reported on the action', async () => {
+    getCodeSession.mockRejectedValue(new Error('the session no longer exists'));
+    const action = { id: 'a10', name: 'save_setup_script', input: { script: 'make deps' } };
+    const store = makeThreadStore(action);
+    await runConfirmableAction({ codeSessionId: 's1' }, action, store);
+    expect(store.get('a10')).toMatchObject({ status: 'error', resultText: 'the session no longer exists' });
   });
 });

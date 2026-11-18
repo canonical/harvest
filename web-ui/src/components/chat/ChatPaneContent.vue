@@ -581,7 +581,7 @@ async function submitResolvedResults(items) {
 }
 
 async function runConfirmableAction(action) {
-  await runConfirmableActionShared(props.projectId, action, chat);
+  await runConfirmableActionShared({ projectId: props.projectId, codeSessionId: props.codeSessionId }, action, chat);
 }
 
 async function handleConfirmAction(id) {

@@ -1,4 +1,4 @@
-pub const SETUP_REMINDER: &str = "\n\nThis command installed packages. Once the project builds and its tests run, call save_setup_script with the commands that prepared it, so new sessions and previews start ready.";
+pub const SETUP_REMINDER: &str = "\n\nThis command installed packages. Once the project builds and its tests run, offer to save the commands that prepared it with save_setup_script: it changes the setup of every container of this project, so the user is asked to confirm it.";
 
 const INSTALLERS: &[&[&str]] = &[
     &["apt-get", "install"],
