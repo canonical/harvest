@@ -24,6 +24,7 @@ pub mod projects;
 pub mod repo_git;
 pub mod review;
 pub mod sessions;
+pub mod terminals;
 pub mod verification;
 pub mod workspace;
 pub mod working_set;
