@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use serde_json::json;
 use uuid::Uuid;
@@ -7,6 +9,8 @@ use harvest_db::Db;
 use super::failure::BuildFailure;
 use super::state::STALE_BUILD;
 use crate::code::short_id;
+
+const ABANDONED_LOG: &str = "The build stopped before it finished, for example because the server restarted.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildClaim {
@@ -115,10 +119,24 @@ pub async fn fail(db: &Db, claim: &BuildClaim, failure: BuildFailure, log: &str)
     Ok(())
 }
 
-pub async fn active_builders(db: &Db) -> Result<Vec<String>> {
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveAttempt {
+    pub project_id: String,
+    pub attempt_id: String,
+    pub age: Duration,
+}
+
+impl ActiveAttempt {
+    pub fn builder_name(&self) -> String {
+        builder_name(&self.project_id, &self.attempt_id)
+    }
+}
+
+pub async fn active_attempts(db: &Db) -> Result<Vec<ActiveAttempt>> {
     let rows = db
         .query(
-            "SELECT project_id, attempt_id FROM code_images
+            "SELECT project_id, attempt_id, extract(epoch FROM now() - attempted_at)::float8 AS age
+             FROM code_images
              WHERE attempt_status = 'building'
                AND attempted_at >= now() - make_interval(secs => $stale::float8)",
             json!({ "stale": STALE_BUILD.as_secs_f64() }),
@@ -126,13 +144,27 @@ pub async fn active_builders(db: &Db) -> Result<Vec<String>> {
         .await?;
     Ok(rows
         .iter()
-        .map(|row| {
-            builder_name(
-                row["project_id"].as_str().unwrap_or_default(),
-                row["attempt_id"].as_str().unwrap_or_default(),
-            )
+        .map(|row| ActiveAttempt {
+            project_id: row["project_id"].as_str().unwrap_or_default().to_string(),
+            attempt_id: row["attempt_id"].as_str().unwrap_or_default().to_string(),
+            age: Duration::from_secs_f64(row["age"].as_f64().unwrap_or_default().max(0.0)),
         })
         .collect())
+}
+
+pub async fn abandon(db: &Db, attempt: &ActiveAttempt) -> Result<()> {
+    db.execute(
+        "UPDATE code_images SET attempt_status = 'failed', attempt_failure = $failure, attempt_log = $log
+         WHERE project_id = $pid AND attempt_id = $attempt AND attempt_status = 'building'",
+        json!({
+            "pid": attempt.project_id,
+            "attempt": attempt.attempt_id,
+            "failure": BuildFailure::Infrastructure.as_str(),
+            "log": ABANDONED_LOG,
+        }),
+    )
+    .await?;
+    Ok(())
 }
 
 fn replaced_alias(previous: &str, current: &str) -> Option<String> {

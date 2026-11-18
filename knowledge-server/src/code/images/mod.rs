@@ -21,6 +21,7 @@ pub use state::{need, Attempt, Image, ImageNeed, ReadyImage};
 pub const REPO_SETUP_FILE: &str = ".harvest/setup.sh";
 const RECIPE_VERSION: u32 = 4;
 const BUILDER_PREFIX: &str = "hcb-";
+const ORPHAN_AFTER: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildOutcome {
@@ -124,14 +125,27 @@ async fn remove_image(env: &CodeEnv, alias: &str) {
 }
 
 pub async fn sweep_builders(env: &CodeEnv) -> Result<()> {
-    let active: HashSet<String> = claim::active_builders(&env.db).await?.into_iter().collect();
+    let attempts = claim::active_attempts(&env.db).await?;
     let instances = env.lxd.instance_names().await?;
+    let existing: HashSet<String> = instances.iter().cloned().collect();
+    for attempt in orphaned_attempts(&attempts, &existing) {
+        tracing::warn!(project = attempt.project_id, "an image build stopped before it finished; it will be retried");
+        claim::abandon(&env.db, attempt).await?;
+    }
+    let active: HashSet<String> = attempts.iter().map(claim::ActiveAttempt::builder_name).collect();
     for builder in abandoned_builders(&instances, &active) {
         if let Err(error) = env.lxd.delete_instance(&builder).await {
             tracing::warn!(builder, error = format!("{error:#}"), "could not remove an abandoned image builder");
         }
     }
     Ok(())
+}
+
+fn orphaned_attempts<'a>(attempts: &'a [claim::ActiveAttempt], instances: &HashSet<String>) -> Vec<&'a claim::ActiveAttempt> {
+    attempts
+        .iter()
+        .filter(|attempt| attempt.age >= ORPHAN_AFTER && !instances.contains(&attempt.builder_name()))
+        .collect()
 }
 
 fn abandoned_builders(instances: &[String], active: &HashSet<String>) -> Vec<String> {
@@ -164,6 +178,19 @@ mod tests {
         let instances: Vec<String> = ["hcb-aaaa-1111", "hcb-bbbb", "hcp-aaaa-xyz", "hcb-cccc-2222"].map(String::from).into();
         let active: HashSet<String> = ["hcb-cccc-2222".to_string()].into();
         assert_eq!(abandoned_builders(&instances, &active), ["hcb-aaaa-1111", "hcb-bbbb"]);
+    }
+
+    #[test]
+    fn an_old_attempt_without_its_builder_is_orphaned() {
+        let attempt = |attempt_id: &str, minutes: u64| claim::ActiveAttempt {
+            project_id: "154f6dcf-b6e3".into(),
+            attempt_id: attempt_id.into(),
+            age: Duration::from_secs(minutes * 60),
+        };
+        let attempts = [attempt("aaaaaaaa", 30), attempt("bbbbbbbb", 30), attempt("cccccccc", 2)];
+        let instances: HashSet<String> = ["hcb-154f6dcf-bbbbbbbb".to_string()].into();
+        let orphaned: Vec<&str> = orphaned_attempts(&attempts, &instances).iter().map(|a| a.attempt_id.as_str()).collect();
+        assert_eq!(orphaned, ["aaaaaaaa"]);
     }
 
     #[test]
