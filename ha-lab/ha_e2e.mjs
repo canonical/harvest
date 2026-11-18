@@ -481,7 +481,7 @@ async function main() {
     watchers.forEach(w => w.stop());
   }
 
-  const installToken = psql(`SELECT install_token FROM projects WHERE id = '${pid}'`);
+  const installToken = psql(`SELECT install_token FROM deploy_projects WHERE id = '${pid}'`);
   const agent = new FakeAgent(installToken);
   await agent.start();
   const agentId = psql(`SELECT id FROM machines WHERE project_id = '${pid}' LIMIT 1`);
