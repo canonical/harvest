@@ -68,8 +68,6 @@ if ! lxc exec "$PG_B" -- test -f /var/lib/postgresql/16/main/standby.signal; the
   lxc exec "$PG_B" -- systemctl start postgresql@16-main
 fi
 
-LXD_TRUST_TOKEN="$(lxc config trust add --name "harvest-ha-lab-$(date +%s)" --quiet 2>/dev/null || true)"
-
 cat > "$LAB/env" <<ENV
 HOST_IP=$HOST_IP
 PG_A_IP=$A_IP
@@ -77,6 +75,6 @@ PG_B_IP=$B_IP
 LB_IP=$LB_IP
 DB_URL=postgres://harvest:$DB_PASSWORD@$A_IP:5432,$B_IP:5432/harvest?target_session_attrs=read-write&sslmode=require&connect_timeout=3
 CA_FILE=$LAB/certs/ca.pem
-LXD_TRUST_TOKEN=$LXD_TRUST_TOKEN
+LXD_LAB=1
 ENV
 echo "provisioned: primary $A_IP, replica $B_IP, load balancer $LB_IP, nodes on $HOST_IP"

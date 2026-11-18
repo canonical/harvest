@@ -24,6 +24,7 @@ const API_PATHS = ['/admin', '/agent', '/agents', '/artifacts', '/auth', '/chat-
   '/graph', '/groups', '/health', '/llm', '/machines', '/me', '/metrics', '/previews', '/projects', '/query', '/repositories',
   '/skills', '/templates', '/tool-description', '/version'];
 const TERMINAL_REPOSITORY = 'https://github.com/Thinking-Dragon/harvest-code-demo-kanban-application';
+const LAB_TRUST_PREFIX = 'harvest-ha-lab-';
 
 const results = [];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -152,12 +153,28 @@ max_retries = 0
 `;
 }
 
+function lxcText(...args) {
+  const quoted = args.map(arg => `'${arg.replace(/'/g, `'\\''`)}'`).join(' ');
+  return execFileSync('bash', ['-c', `set -o pipefail; lxc ${quoted} </dev/null | cat`], { encoding: 'utf8' }).trim();
+}
+
+function freshLxdTrustToken() {
+  if (!env.LXD_LAB) return null;
+  const entries = lxcText('config', 'trust', 'list', '--format', 'csv').split('\n');
+  for (const entry of entries.filter(line => line.split(',')[1]?.startsWith(LAB_TRUST_PREFIX))) {
+    lxcText('config', 'trust', 'remove', entry.split(',')[3]);
+  }
+  return lxcText('config', 'trust', 'add', '--name', `${LAB_TRUST_PREFIX}${Date.now()}`, '--quiet');
+}
+
+const LXD_TRUST_TOKEN = freshLxdTrustToken();
+
 function codeSettings() {
-  if (!env.LXD_TRUST_TOKEN) return '';
+  if (!LXD_TRUST_TOKEN) return '';
   return `
 [lxd]
 endpoint = "https://127.0.0.1:8443"
-trust_token = "${env.LXD_TRUST_TOKEN}"
+trust_token = "${LXD_TRUST_TOKEN}"
 insecure = true
 
 [code]
@@ -172,7 +189,9 @@ function startNode(i, llmUrl) {
   const configPath = path.join(dir, `node-${i}.toml`);
   fs.writeFileSync(configPath, nodeConfig(i, llmUrl));
   const out = fs.openSync(path.join(dir, `node-${i}.log`), 'a');
-  const child = spawn(SERVER_BIN, ['--config', configPath], { stdio: ['ignore', out, out], env: { ...process.env, RUST_LOG: 'info' } });
+  const tmp = path.join(LAB, 'tmp');
+  fs.mkdirSync(tmp, { recursive: true });
+  const child = spawn(SERVER_BIN, ['--config', configPath], { stdio: ['ignore', out, out], env: { ...process.env, RUST_LOG: 'info', TMPDIR: tmp } });
   nodes[i] = { child, base: `http://${env.HOST_IP}:${18080 + i}`, exited: false };
   child.on('exit', () => { nodes[i].exited = true; });
   return nodes[i];
@@ -419,7 +438,11 @@ function servingNode(before) {
 }
 
 function readInContainer(container, file) {
-  return execFileSync('bash', ['-c', `lxc exec ${container} --mode=non-interactive -- cat ${file} </dev/null 2>/dev/null | cat`], { encoding: 'utf8' }).trim();
+  try {
+    return lxcText('exec', container, '--mode=non-interactive', '--', 'cat', file);
+  } catch {
+    return '';
+  }
 }
 
 async function shellPid(client, container, file) {
@@ -570,7 +593,7 @@ async function main() {
     await sleep(11000);
   }
 
-  if (env.LXD_TRUST_TOKEN) {
+  if (LXD_TRUST_TOKEN) {
     const project = (await admin.json('POST', '/code/projects', { url: TERMINAL_REPOSITORY })).data;
     await waitFor(async () => (await admin.json('GET', `/code/projects/${project.id}`)).data?.image?.status === 'ready', 900000, 'terminal project image');
     const session = (await admin.json('POST', `/code/projects/${project.id}/sessions`, { branch: `lab/terminal-${Date.now()}`, base_branch: 'main' })).data;
