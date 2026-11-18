@@ -24,6 +24,8 @@ pub struct CodeState {
     pub env: Option<CodeEnv>,
     pub graph: Arc<GraphState>,
     pub query: Arc<QueryState>,
+    pub node: Arc<crate::cluster::node::ClusterNode>,
+    pub public_origin: String,
 }
 
 pub(crate) type Reply = Result<Response, Response>;

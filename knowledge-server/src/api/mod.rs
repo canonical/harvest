@@ -5,6 +5,7 @@ pub mod external_chat;
 pub mod graph;
 pub mod health;
 pub mod llm;
+pub mod origin;
 pub mod query;
 pub mod repositories;
 pub mod tool_description;
@@ -583,12 +584,15 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
         env: state.code.clone(),
         graph: Arc::clone(&graph_state),
         query: Arc::clone(&query_state),
+        node: Arc::clone(state.live.node()),
+        public_origin: crate::code::previews::framing::origin_of(&server_url),
     });
     let code_router = {
         use crate::code::browse::handlers as browse;
         use crate::code::chat_handlers as chat;
         use crate::code::handlers as code;
         use crate::code::job_handlers as jobs;
+        use crate::code::terminals::handlers as terminals;
         use crate::code::previews::owner;
         Router::new()
             .route("/code/projects", get(code::list_projects).post(code::open_project))
@@ -601,6 +605,9 @@ pub async fn router(state: AppState, cache: Arc<GraphCache>, server_url: String)
             .route("/code/jobs/:id/stop", post(jobs::stop))
             .route("/code/projects/:id/sessions", post(code::open_session))
             .route("/code/sessions", get(code::list_sessions))
+            .route("/code/sessions/:id/terminals", get(terminals::list).post(terminals::create))
+            .route("/code/sessions/:id/terminals/:terminal", patch(terminals::rename).delete(terminals::end))
+            .route("/code/sessions/:id/terminals/:terminal/socket", get(terminals::socket))
             .route("/code/repositories/:name/versions", get(browse::versions))
             .route("/code/repositories/:name/tree", get(browse::tree))
             .route("/code/repositories/:name/file", get(browse::file))
